@@ -26,10 +26,16 @@ test("ships the K-line training workbench instead of the starter", async () => {
   assert.match(workbench, /继续训练/);
   assert.match(workbench, /drawingsRestoreNonce/);
   assert.match(workbench, /session_created/);
+  assert.match(workbench, /decision_submitted/);
+  assert.match(workbench, /decisionSubmissions/);
+  assert.match(workbench, /事前决策记录/);
+  assert.match(workbench, /查看复盘/);
   assert.match(workbench, /orders_filled/);
   assert.match(workbench, /deleteSession/);
   assert.match(workbench, /dataSnapshotId/);
   assert.match(replayChart, /tradeLifecycle/);
+  assert.match(replayChart, /decisionSubmission/);
+  assert.match(replayChart, /syncDecisionMarkers/);
   assert.match(replayChart, /PersistedDrawing/);
   assert.match(replayChart, /getPersistedDrawings/);
   assert.match(replayChart, /style: "dashed"/);

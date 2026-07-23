@@ -106,6 +106,22 @@ button { color: inherit; }
 .chart-canvas { position: absolute; inset: 0; }
 .chart-loading { position: absolute; inset: 0; display: grid; place-items: center; color: var(--muted); font-size: 13px; }
 .replay-watermark { position: absolute; right: 20px; top: 16px; color: rgba(86, 234, 187, .4); font-size: 10px; letter-spacing: .16em; pointer-events: none; }
+.decision-chart-card {
+  position: absolute; left: 16px; top: 16px; z-index: 8; width: min(360px, calc(100% - 32px)); padding: 13px;
+  color: #dfe8e6; background: rgba(15, 24, 27, .96); border: 1px solid rgba(241, 200, 106, .35); border-radius: 10px;
+  box-shadow: 0 14px 40px rgba(0, 0, 0, .28); backdrop-filter: blur(12px);
+}
+.decision-chart-card-head { display: flex; justify-content: space-between; gap: 12px; align-items: flex-start; }
+.decision-chart-card-head > div { display: grid; gap: 3px; }
+.decision-chart-card-head span { color: #d4af5a; font-size: 9px; letter-spacing: .14em; }
+.decision-chart-card-head strong { font-size: 12px; }
+.decision-chart-card-head button { border: 0; background: transparent; color: var(--muted); cursor: pointer; font-size: 20px; line-height: 1; }
+.decision-chart-tags, .decision-history-tags { display: flex; flex-wrap: wrap; gap: 5px; margin-top: 10px; }
+.decision-chart-tags span, .decision-history-tags span { color: #e1c57f; background: rgba(241, 200, 106, .09); border: 1px solid rgba(241, 200, 106, .18); border-radius: 99px; padding: 4px 6px; font-size: 9px; }
+.decision-chart-levels { display: grid; grid-template-columns: repeat(3, 1fr); gap: 7px; margin-top: 10px; }
+.decision-chart-levels span { display: grid; gap: 2px; color: var(--faint); font-size: 9px; }
+.decision-chart-levels strong { color: #cbd6d4; font-size: 10px; }
+.decision-chart-card > p { margin: 10px 0 0; padding-top: 9px; border-top: 1px solid var(--line); color: #a8b7b4; font-size: 10px; line-height: 1.55; white-space: pre-wrap; }
 
 .replay-controls { min-height: 62px; padding: 8px 14px; display: grid; grid-template-columns: 170px minmax(120px, 1fr) auto auto; align-items: center; gap: 16px; border-top: 1px solid var(--line); border-bottom: 1px solid var(--line); background: #0e1719; }
 .progress-meta { display: flex; flex-direction: column; gap: 3px; font-size: 11px; color: var(--muted); }
@@ -177,6 +193,8 @@ button { color: inherit; }
 .discipline-card span { color: #6f9187; font-size: 10px; line-height: 1.4; }
 .commit-plan { margin-top: auto; width: 100%; border: 1px solid rgba(32, 201, 151, .28); background: var(--accent-soft); color: var(--accent-strong); border-radius: 9px; padding: 10px; display: inline-flex; align-items: center; justify-content: center; gap: 7px; cursor: pointer; font-weight: 650; }
 .commit-plan:hover { background: rgba(32, 201, 151, .2); }
+.submitted-plan-count { color: var(--faint); font-size: 9px; text-align: center; }
+.submitted-plan-count strong { color: #e1c57f; }
 
 .content-page { padding: 34px; min-height: calc(100vh - 64px); background: radial-gradient(circle at 80% 5%, rgba(32, 201, 151, .05), transparent 26%), var(--background); }
 .page-heading { display: flex; align-items: end; justify-content: space-between; margin-bottom: 28px; }
@@ -214,7 +232,11 @@ button { color: inherit; }
 .insight-card p { color: var(--muted); font-size: 12px; line-height: 1.7; }
 .evidence-row { display: flex; justify-content: space-between; gap: 12px; padding: 11px 0; border-top: 1px solid var(--line); color: var(--muted); font-size: 11px; }
 .evidence-row strong { color: #cbd6d4; }
+.review-note { padding-top: 12px; border-top: 1px solid var(--line); }
+.review-note > span { color: var(--muted); font-size: 11px; }
+.review-note > p { margin: 7px 0 0; color: #c7d3d0; white-space: pre-wrap; }
 .session-row { display: flex; justify-content: space-between; gap: 12px; padding: 14px 0; border-bottom: 1px solid var(--line); }
+.session-row.active { margin-inline: -10px; padding-inline: 10px; background: rgba(32, 201, 151, .05); border-radius: 8px; }
 .session-row > div { display: grid; gap: 4px; }
 .session-row strong { font-size: 12px; }
 .session-row span { color: var(--faint); font-size: 10px; }
@@ -224,12 +246,43 @@ button { color: inherit; }
 }
 .resume-session:hover { background: rgba(32, 201, 151, .2); }
 .session-actions { display: flex; align-items: center; gap: 6px; }
+.review-session {
+  align-self: center; display: inline-flex; align-items: center; gap: 5px; padding: 6px 9px; border-radius: 7px;
+  color: #e1c57f; background: rgba(241, 200, 106, .07); border: 1px solid rgba(241, 200, 106, .18); cursor: pointer; font-size: 10px;
+}
+.review-session:hover { background: rgba(241, 200, 106, .13); }
 .delete-session {
   align-self: center; display: inline-flex; align-items: center; gap: 5px; padding: 6px 9px; border-radius: 7px;
   color: #d88f8d; background: rgba(239, 106, 104, .07); border: 1px solid rgba(239, 106, 104, .18); cursor: pointer; font-size: 10px;
 }
 .delete-session:hover { color: #ff9a97; background: rgba(239, 106, 104, .14); }
 .empty-state { color: var(--faint); font-size: 12px; padding: 28px 0; line-height: 1.6; }
+.review-detail-grid { display: grid; grid-template-columns: 1.2fr .8fr; gap: 14px; margin-top: 14px; align-items: start; }
+.decision-history-card, .audit-timeline { background: var(--surface); border: 1px solid var(--line); border-radius: 12px; padding: 22px; }
+.decision-history-card > h2 { margin: 12px 0 16px; font-size: 18px; }
+.decision-history-list { display: grid; gap: 10px; }
+.decision-history-item { padding: 14px; border: 1px solid var(--line); border-radius: 10px; background: #0d1618; }
+.decision-history-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; }
+.decision-history-head > div { display: grid; gap: 3px; }
+.decision-history-head strong { font-size: 12px; }
+.decision-history-head span { color: var(--faint); font-size: 9px; }
+.decision-history-head b { color: var(--accent); font-size: 12px; font-family: var(--font-geist-mono), monospace; }
+.decision-history-levels { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-top: 10px; }
+.decision-history-levels span { display: grid; gap: 3px; padding: 8px; color: var(--faint); background: rgba(255, 255, 255, .018); border-radius: 7px; font-size: 9px; }
+.decision-history-levels strong { color: #cad5d3; font-size: 10px; }
+.decision-history-item > p { margin: 10px 0 0; padding-top: 9px; border-top: 1px solid var(--line); color: #a9b7b4; font-size: 11px; line-height: 1.6; white-space: pre-wrap; }
+.audit-timeline { padding: 0; overflow: hidden; }
+.audit-timeline summary { padding: 18px 20px; display: flex; align-items: center; justify-content: space-between; gap: 14px; cursor: pointer; list-style: none; }
+.audit-timeline summary::-webkit-details-marker { display: none; }
+.audit-timeline summary > span { display: grid; gap: 8px; }
+.audit-timeline summary strong { font-size: 14px; }
+.audit-timeline summary small { color: var(--faint); font-size: 9px; }
+.audit-event-list { max-height: 540px; overflow: auto; border-top: 1px solid var(--line); }
+.audit-event { display: grid; grid-template-columns: 34px 1fr; gap: 8px; padding: 11px 20px; border-bottom: 1px solid rgba(186, 209, 205, .06); }
+.audit-event > span { color: var(--faint); font-size: 9px; font-family: var(--font-geist-mono), monospace; }
+.audit-event > div { display: grid; gap: 3px; }
+.audit-event strong { color: #c6d2cf; font-size: 10px; }
+.audit-event small { color: var(--faint); font-size: 9px; }
 
 @media (max-width: 1180px) {
   .replay-layout { grid-template-columns: minmax(0, 1fr) 270px; }
@@ -257,7 +310,7 @@ button { color: inherit; }
   .speed-control { display: none; }
   .content-page { padding: 22px 14px; }
   .database-summary, .review-grid { grid-template-columns: repeat(2, 1fr); }
-  .review-columns { grid-template-columns: 1fr; }
+  .review-columns, .review-detail-grid { grid-template-columns: 1fr; }
 }
 
 @media (max-width: 600px) {
@@ -281,4 +334,7 @@ button { color: inherit; }
   .page-heading { align-items: flex-start; gap: 16px; }
   .database-summary { grid-template-columns: repeat(2, 1fr); }
   .review-grid { grid-template-columns: 1fr; }
+  .session-row { align-items: flex-start; }
+  .session-actions { flex-wrap: wrap; justify-content: flex-end; }
+  .decision-chart-levels { grid-template-columns: 1fr; }
 }

@@ -30,11 +30,22 @@ export type TradeMarker = {
   hovered?: boolean;
 };
 
+export type DecisionMarker = {
+  id: string;
+  timestamp: number;
+  price: number;
+  label: string;
+  hovered?: boolean;
+};
+
 type TradeOverlayData = TradeMarker;
+type DecisionOverlayData = DecisionMarker & { onSelect?: (id: string) => void };
 
 const USER_DRAWING_GROUP = "user-drawings";
 const TRADE_MARKER_GROUP = "trade-markers";
+const DECISION_MARKER_GROUP = "decision-markers";
 let tradeOverlayRegistered = false;
+let decisionOverlayRegistered = false;
 
 function ensureTradeOverlay(registerOverlay: (template: OverlayTemplate<TradeOverlayData>) => void) {
   if (tradeOverlayRegistered) return;
@@ -144,6 +155,74 @@ function ensureTradeOverlay(registerOverlay: (template: OverlayTemplate<TradeOve
   tradeOverlayRegistered = true;
 }
 
+function ensureDecisionOverlay(registerOverlay: (template: OverlayTemplate<DecisionOverlayData>) => void) {
+  if (decisionOverlayRegistered) return;
+  registerOverlay({
+    name: "decisionSubmission",
+    totalStep: 2,
+    needDefaultPointFigure: false,
+    needDefaultXAxisFigure: false,
+    needDefaultYAxisFigure: false,
+    createPointFigures: ({ overlay, coordinates }) => {
+      const decision = overlay.extendData;
+      const point = coordinates[0];
+      if (!decision || !point) return [];
+      const alpha = decision.hovered ? "ff" : "82";
+      const pointAlpha = decision.hovered ? "ff" : "9a";
+      return [
+        {
+          type: "circle",
+          attrs: { x: point.x, y: point.y, r: 4 },
+          styles: {
+            style: "stroke_fill",
+            color: "#0c1416",
+            borderColor: "#f1c86a" + pointAlpha,
+            borderSize: 2,
+          },
+          ignoreEvent: ["onDoubleClick", "onRightClick", "onPressedMoveStart", "onPressedMoving", "onPressedMoveEnd"],
+        },
+        {
+          type: "text",
+          attrs: {
+            x: point.x,
+            y: point.y - 14,
+            text: decision.label,
+            align: "center",
+            baseline: "bottom",
+          },
+          styles: {
+            color: "#181207" + alpha,
+            size: 10,
+            weight: 700,
+            backgroundColor: "#f1c86a" + alpha,
+            borderRadius: 4,
+            paddingLeft: 5,
+            paddingRight: 5,
+            paddingTop: 3,
+            paddingBottom: 3,
+          },
+          ignoreEvent: ["onDoubleClick", "onRightClick", "onPressedMoveStart", "onPressedMoving", "onPressedMoveEnd"],
+        },
+      ];
+    },
+    onClick: ({ overlay }) => {
+      const decision = overlay.extendData;
+      if (decision) decision.onSelect?.(decision.id);
+    },
+    onMouseEnter: ({ chart, overlay }) => {
+      const decision = overlay.extendData;
+      if (!decision || decision.hovered) return;
+      chart.overrideOverlay({ id: overlay.id, extendData: { ...decision, hovered: true } });
+    },
+    onMouseLeave: ({ chart, overlay }) => {
+      const decision = overlay.extendData;
+      if (!decision || !decision.hovered) return;
+      chart.overrideOverlay({ id: overlay.id, extendData: { ...decision, hovered: false } });
+    },
+  });
+  decisionOverlayRegistered = true;
+}
+
 function syncTradeMarkers(chart: Chart, tradeMarkers: TradeMarker[]) {
   chart.removeOverlay({ groupId: TRADE_MARKER_GROUP });
   tradeMarkers.forEach((trade) => {
@@ -158,6 +237,24 @@ function syncTradeMarkers(chart: Chart, tradeMarkers: TradeMarker[]) {
       extendData: trade,
       lock: true,
       zLevel: 30,
+    });
+  });
+}
+
+function syncDecisionMarkers(
+  chart: Chart,
+  decisionMarkers: DecisionMarker[],
+  onDecisionSelect: (id: string) => void,
+) {
+  chart.removeOverlay({ groupId: DECISION_MARKER_GROUP });
+  decisionMarkers.forEach((decision) => {
+    chart.createOverlay({
+      name: "decisionSubmission",
+      groupId: DECISION_MARKER_GROUP,
+      points: [{ timestamp: decision.timestamp, value: decision.price }],
+      extendData: { ...decision, onSelect: onDecisionSelect },
+      lock: true,
+      zLevel: 31,
     });
   });
 }
@@ -201,8 +298,10 @@ export function KLineReplayChart({
   drawingRequest,
   clearNonce,
   tradeMarkers,
+  decisionMarkers,
   drawings,
   drawingsRestoreNonce,
+  onDecisionSelect,
   onDrawingsChange,
 }: {
   bars: KLineData[];
@@ -213,15 +312,19 @@ export function KLineReplayChart({
   drawingRequest: DrawingRequest;
   clearNonce: number;
   tradeMarkers: TradeMarker[];
+  decisionMarkers: DecisionMarker[];
   drawings: PersistedDrawing[];
   drawingsRestoreNonce: number;
+  onDecisionSelect: (id: string) => void;
   onDrawingsChange: (drawings: PersistedDrawing[]) => void;
 }) {
   const containerRef = useRef<HTMLDivElement>(null);
   const chartRef = useRef<Chart | null>(null);
   const barsRef = useRef<KLineData[]>(bars);
   const tradeMarkersRef = useRef<TradeMarker[]>(tradeMarkers);
+  const decisionMarkersRef = useRef<DecisionMarker[]>(decisionMarkers);
   const drawingsRef = useRef<PersistedDrawing[]>(drawings);
+  const onDecisionSelectRef = useRef(onDecisionSelect);
   const onDrawingsChangeRef = useRef(onDrawingsChange);
   const suppressDrawingEventsRef = useRef(false);
 
@@ -264,6 +367,7 @@ export function KLineReplayChart({
     void import("klinecharts").then(({ dispose, init, registerOverlay }) => {
       if (cancelled || !containerRef.current) return;
       ensureTradeOverlay(registerOverlay);
+      ensureDecisionOverlay(registerOverlay);
       const nativeResizeObserver = window.ResizeObserver;
       let chart: Chart | null = null;
       try {
@@ -333,6 +437,7 @@ export function KLineReplayChart({
       });
       chart.createIndicator("VOL", false);
       syncTradeMarkers(chart, tradeMarkersRef.current);
+      syncDecisionMarkers(chart, decisionMarkersRef.current, (id) => onDecisionSelectRef.current(id));
       restoreDrawings(chart, drawingsRef.current);
 
       disposeChart = () => dispose(chart);
@@ -356,6 +461,7 @@ export function KLineReplayChart({
     requestAnimationFrame(() => {
       chart.scrollToRealTime();
       syncTradeMarkers(chart, tradeMarkersRef.current);
+      syncDecisionMarkers(chart, decisionMarkersRef.current, (id) => onDecisionSelectRef.current(id));
     });
   }, [bars, pricePrecision, symbol, timeframe, timezone]);
 
@@ -365,12 +471,23 @@ export function KLineReplayChart({
   }, [tradeMarkers]);
 
   useEffect(() => {
+    decisionMarkersRef.current = decisionMarkers;
+    if (chartRef.current) {
+      syncDecisionMarkers(chartRef.current, decisionMarkers, (id) => onDecisionSelectRef.current(id));
+    }
+  }, [decisionMarkers]);
+
+  useEffect(() => {
     drawingsRef.current = drawings;
   }, [drawings]);
 
   useEffect(() => {
     onDrawingsChangeRef.current = onDrawingsChange;
   }, [onDrawingsChange]);
+
+  useEffect(() => {
+    onDecisionSelectRef.current = onDecisionSelect;
+  }, [onDecisionSelect]);
 
   useEffect(() => {
     if (!drawingRequest || !chartRef.current) return;

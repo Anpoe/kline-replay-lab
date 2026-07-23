@@ -30,6 +30,7 @@ import type { KLineData } from "klinecharts";
 import { ChangeEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   KLineReplayChart,
+  type DecisionMarker,
   type PersistedDrawing,
   type TradeMarker,
 } from "./KLineReplayChart";
@@ -93,6 +94,14 @@ type Decision = {
   target: string;
   note: string;
 };
+type DecisionSubmission = {
+  id: string;
+  barTimestamp: number;
+  cursor: number;
+  referencePrice: number;
+  decision: Decision;
+  submittedAt: string;
+};
 type TrainingEvent = {
   id: string;
   sequence: number;
@@ -113,7 +122,7 @@ type SnapshotMeta = {
   createdAt: string;
 };
 type TrainingState = {
-  version: 2;
+  version: 3;
   cursor: number;
   cursorTimestamp?: number;
   dataSignature?: string;
@@ -124,6 +133,7 @@ type TrainingState = {
   pendingOrders: PendingOrder[];
   executions: Execution[];
   decision: Decision;
+  decisionSubmissions: DecisionSubmission[];
   orderQty: number;
   drawings: PersistedDrawing[];
   events: TrainingEvent[];
@@ -206,6 +216,31 @@ function createTrainingEvent(
   };
 }
 
+function decisionScore(decision: Decision) {
+  return [decision.marketState, decision.location, decision.stop, decision.target].filter(Boolean).length * 15
+    + Math.min(decision.reasons.length, 2) * 20;
+}
+
+function eventLabel(type: string) {
+  const labels: Record<string, string> = {
+    session_created: "开始训练",
+    session_restored: "恢复训练",
+    session_manually_saved: "手动保存",
+    decision_submitted: "提交事前决策",
+    decision_changed: "编辑决策草稿（旧版）",
+    replay_advanced: "推进K线",
+    replay_rewound: "回看上一根",
+    order_queued: "提交委托",
+    order_cancelled: "撤销委托",
+    orders_filled: "订单成交",
+    drawings_changed: "更新图表标记",
+    playback_toggled: "切换自动播放",
+    playback_speed_changed: "调整播放速度",
+    order_quantity_changed: "调整下单数量",
+  };
+  return labels[type] ?? type;
+}
+
 export function TrainingWorkbench() {
   const [view, setView] = useState<View>("replay");
   const [instrumentId, setInstrumentId] = useState("600519.SH");
@@ -226,6 +261,7 @@ export function TrainingWorkbench() {
   const [positions, setPositions] = useState<PositionLot[]>([]);
   const [pendingOrders, setPendingOrders] = useState<PendingOrder[]>([]);
   const [executions, setExecutions] = useState<Execution[]>([]);
+  const [decisionSubmissions, setDecisionSubmissions] = useState<DecisionSubmission[]>([]);
   const [orderQty, setOrderQty] = useState(100);
   const [orderPanelTab, setOrderPanelTab] = useState<"positions" | "pending" | "history">("positions");
   const [decision, setDecision] = useState<Decision>(defaultDecision);
@@ -239,6 +275,8 @@ export function TrainingWorkbench() {
   const [dataSnapshotId, setDataSnapshotId] = useState("");
   const [snapshotHash, setSnapshotHash] = useState("");
   const [events, setEvents] = useState<TrainingEvent[]>([]);
+  const [selectedDecisionId, setSelectedDecisionId] = useState("");
+  const [reviewedSession, setReviewedSession] = useState<{ session: TrainingSession; state: TrainingState } | null>(null);
   const [coverage, setCoverage] = useState<Coverage[]>([]);
   const [sessions, setSessions] = useState<TrainingSession[]>([]);
   const [importStatus, setImportStatus] = useState("");
@@ -275,14 +313,25 @@ export function TrainingWorkbench() {
       };
     }), [currentBar, positions]);
   const progress = bars.length > 1 ? (cursor / (bars.length - 1)) * 100 : 0;
-  const planScore = [decision.marketState, decision.location, decision.stop, decision.target].filter(Boolean).length * 15
-    + Math.min(decision.reasons.length, 2) * 20;
+  const planScore = decisionScore(decision);
+  const decisionMarkers = useMemo<DecisionMarker[]>(() => decisionSubmissions
+    .filter((submission) => !currentBar || submission.barTimestamp <= currentBar.timestamp)
+    .map((submission, index) => {
+      const submissionBar = bars[submission.cursor] ?? bars.find((bar) => bar.timestamp === submission.barTimestamp);
+      return {
+        id: submission.id,
+        timestamp: submission.barTimestamp,
+        price: submissionBar?.high ?? submission.referencePrice,
+        label: `计划 ${index + 1}`,
+      };
+    }), [bars, currentBar, decisionSubmissions]);
+  const selectedDecision = decisionSubmissions.find((submission) => submission.id === selectedDecisionId);
 
   const dataSignature = useMemo(() => bars.length
     ? `${bars.length}:${bars[0].timestamp}:${bars[bars.length - 1].timestamp}`
     : "", [bars]);
   const trainingState = useMemo<TrainingState>(() => ({
-    version: 2,
+    version: 3,
     cursor,
     cursorTimestamp: currentBar?.timestamp,
     dataSignature,
@@ -293,17 +342,27 @@ export function TrainingWorkbench() {
     pendingOrders,
     executions,
     decision,
+    decisionSubmissions,
     orderQty,
     drawings,
     events,
-  }), [cursor, currentBar?.timestamp, dataSignature, dataSnapshotId, decision, drawings, events, executions, orderQty, pendingOrders, positions, randomSeed, snapshotHash]);
+  }), [cursor, currentBar?.timestamp, dataSignature, dataSnapshotId, decision, decisionSubmissions, drawings, events, executions, orderQty, pendingOrders, positions, randomSeed, snapshotHash]);
+  const reviewState = reviewedSession?.state ?? trainingState;
+  const reviewClosedPositions = reviewState.positions.filter((position) => position.status === "closed");
+  const reviewRealizedPnl = reviewClosedPositions.reduce((sum, position) => sum + (position.realizedPnl ?? 0), 0);
+  const reviewLatestSubmission = reviewState.decisionSubmissions.at(-1);
+  const reviewDecision = reviewLatestSubmission?.decision ?? reviewState.decision;
+  const reviewPlanScore = decisionScore(reviewDecision);
+  const reviewTitle = reviewedSession
+    ? `${reviewedSession.session.instrumentId} · ${reviewedSession.session.timeframe}`
+    : `${instrumentId} · ${timeframe} · 当前训练`;
 
   const parseTrainingState = useCallback((value: unknown): TrainingState | null => {
     if (!value || typeof value !== "object") return null;
     const state = value as Partial<TrainingState>;
     if (!Number.isFinite(state.cursor) || !Array.isArray(state.positions) || !Array.isArray(state.pendingOrders)) return null;
     return {
-      version: 2,
+      version: 3,
       cursor: Number(state.cursor),
       cursorTimestamp: typeof state.cursorTimestamp === "number" ? state.cursorTimestamp : undefined,
       dataSignature: typeof state.dataSignature === "string" ? state.dataSignature : undefined,
@@ -314,6 +373,7 @@ export function TrainingWorkbench() {
       pendingOrders: state.pendingOrders,
       executions: Array.isArray(state.executions) ? state.executions : [],
       decision: state.decision && typeof state.decision === "object" ? { ...defaultDecision, ...state.decision } : defaultDecision,
+      decisionSubmissions: Array.isArray(state.decisionSubmissions) ? state.decisionSubmissions : [],
       orderQty: typeof state.orderQty === "number" && state.orderQty > 0 ? state.orderQty : 100,
       drawings: Array.isArray(state.drawings) ? state.drawings : [],
       events: Array.isArray(state.events) ? state.events : [],
@@ -418,6 +478,8 @@ export function TrainingWorkbench() {
         setPendingOrders(restoreRequest.state.pendingOrders);
         setExecutions(restoreRequest.state.executions);
         setDecision(restoreRequest.state.decision);
+        setDecisionSubmissions(restoreRequest.state.decisionSubmissions);
+        setSelectedDecisionId("");
         setOrderQty(restoreRequest.state.orderQty);
         setDrawings(restoreRequest.state.drawings);
         setDrawingsRestoreNonce(Date.now());
@@ -445,6 +507,8 @@ export function TrainingWorkbench() {
         setPendingOrders([]);
         setExecutions([]);
         setDecision(defaultDecision);
+        setDecisionSubmissions([]);
+        setSelectedDecisionId("");
         setOrderQty(100);
         setDrawings([]);
         setClearNonce(Date.now());
@@ -663,6 +727,8 @@ export function TrainingWorkbench() {
     setPendingOrders([]);
     setExecutions([]);
     setDecision(defaultDecision);
+    setDecisionSubmissions([]);
+    setSelectedDecisionId("");
     setOrderQty(100);
     setDrawings([]);
     setClearNonce(Date.now());
@@ -704,6 +770,7 @@ export function TrainingWorkbench() {
     try {
       const state = parseTrainingState(JSON.parse(session.stateJson));
       if (!state) throw new Error("invalid session");
+      setReviewedSession(null);
       queueRestore({ ...session, state });
     } catch {
       setImportStatus("这条训练记录不完整，暂时无法恢复。");
@@ -718,6 +785,7 @@ export function TrainingWorkbench() {
       return;
     }
     setSessions((items) => items.filter((item) => item.id !== session.id));
+    if (reviewedSession?.session.id === session.id) setReviewedSession(null);
     const localDraft = window.localStorage.getItem(LAST_DRAFT_KEY);
     if (localDraft) {
       try {
@@ -736,7 +804,42 @@ export function TrainingWorkbench() {
   const updateDecision = (field: keyof Decision, value: string | string[]) => {
     const nextDecision = { ...decision, [field]: value } as Decision;
     setDecision(nextDecision);
-    appendEvent("decision_changed", { field, value, decision: nextDecision });
+    setSaveState("决策草稿已更新");
+  };
+
+  const submitDecision = () => {
+    if (!currentBar) return;
+    const submission: DecisionSubmission = {
+      id: crypto.randomUUID(),
+      barTimestamp: currentBar.timestamp,
+      cursor,
+      referencePrice: currentBar.close,
+      decision: {
+        ...decision,
+        reasons: [...decision.reasons],
+      },
+      submittedAt: new Date().toISOString(),
+    };
+    setDecisionSubmissions((items) => [...items, submission]);
+    setSelectedDecisionId(submission.id);
+    appendEvent("decision_submitted", {
+      submissionId: submission.id,
+      cursor,
+      referencePrice: currentBar.close,
+      decision: submission.decision,
+    }, currentBar.timestamp);
+    setSaveState("决策已提交");
+    revealNext();
+  };
+
+  const inspectSession = (session: TrainingSession) => {
+    try {
+      const state = parseTrainingState(JSON.parse(session.stateJson));
+      if (!state) throw new Error("invalid session");
+      setReviewedSession({ session, state });
+    } catch {
+      setImportStatus("这条训练记录不完整，无法查看复盘。");
+    }
   };
 
   const handleDrawingsChange = (nextDrawings: PersistedDrawing[]) => {
@@ -899,10 +1002,34 @@ export function TrainingWorkbench() {
                       drawingRequest={drawingRequest}
                       clearNonce={clearNonce}
                       tradeMarkers={tradeMarkers}
+                      decisionMarkers={decisionMarkers}
                       drawings={drawings}
                       drawingsRestoreNonce={drawingsRestoreNonce}
+                      onDecisionSelect={setSelectedDecisionId}
                       onDrawingsChange={handleDrawingsChange}
                     />
+                  )}
+                  {selectedDecision && (
+                    <div className="decision-chart-card">
+                      <div className="decision-chart-card-head">
+                        <div>
+                          <span>已提交决策</span>
+                          <strong>{formatDate(selectedDecision.barTimestamp, timeframe)}</strong>
+                        </div>
+                        <button aria-label="关闭决策卡" onClick={() => setSelectedDecisionId("")}>×</button>
+                      </div>
+                      <div className="decision-chart-tags">
+                        <span>{selectedDecision.decision.marketState}</span>
+                        <span>{selectedDecision.decision.location}</span>
+                        {selectedDecision.decision.reasons.map((reason) => <span key={reason}>{reason}</span>)}
+                      </div>
+                      <div className="decision-chart-levels">
+                        <span>参考价 <strong>{selectedDecision.referencePrice.toFixed(instrument.pricePrecision)}</strong></span>
+                        <span>失效 <strong>{selectedDecision.decision.stop || "未填写"}</strong></span>
+                        <span>目标 <strong>{selectedDecision.decision.target || "未填写"}</strong></span>
+                      </div>
+                      <p>{selectedDecision.decision.note || "没有填写计划说明"}</p>
+                    </div>
                   )}
                   <div className="replay-watermark">REPLAY · 未来已隐藏</div>
                 </div>
@@ -1067,7 +1194,8 @@ export function TrainingWorkbench() {
                 <Sparkles size={18} />
                 <div><strong>{decision.reasons.length >= 2 ? "条件已成形" : "再找一个独立理由"}</strong><span>评分关注过程，不用结果倒推理由</span></div>
               </div>
-              <button className="commit-plan" onClick={() => { setSaveState("有未保存更改"); revealNext(); }}><ListChecks size={17} />提交决策并揭示下一根</button>
+              <div className="submitted-plan-count">已提交 <strong>{decisionSubmissions.length}</strong> 份计划 · 点击盘面“计划”标记可查看</div>
+              <button className="commit-plan" onClick={submitDecision}><ListChecks size={17} />提交决策并揭示下一根</button>
             </aside>
           </div>
         )}
@@ -1104,26 +1232,42 @@ export function TrainingWorkbench() {
 
         {view === "review" && (
           <section className="content-page review-page">
-            <div className="page-heading"><div><span>REVIEW</span><h1>训练复盘</h1><p>先看事实，再判断执行质量。</p></div></div>
+            <div className="page-heading">
+              <div><span>REVIEW</span><h1>训练复盘</h1><p>{reviewTitle} · 先看事前计划，再判断执行质量。</p></div>
+              {reviewedSession && <button className="ghost-button" onClick={() => setReviewedSession(null)}>返回当前训练</button>}
+            </div>
             <div className="review-grid">
               <div className="review-hero">
-                <span>本次已实现盈亏</span><strong className={realizedPnl >= 0 ? "up" : "down"}>{money(realizedPnl)}</strong><small>{closedPositions.length} 笔已平仓 · {executions.length} 笔成交 · 当前流程完整度 {planScore}%</small>
+                <span>本次已实现盈亏</span><strong className={reviewRealizedPnl >= 0 ? "up" : "down"}>{money(reviewRealizedPnl)}</strong><small>{reviewClosedPositions.length} 笔已平仓 · {reviewState.executions.length} 笔成交 · 最近计划完整度 {reviewPlanScore}%</small>
               </div>
-              <div className="metric-card"><span>胜率</span><strong>{closedPositions.length ? Math.round(closedPositions.filter((position) => (position.realizedPnl ?? 0) > 0).length / closedPositions.length * 100) : 0}%</strong><small>仅统计已平仓成交</small></div>
-              <div className="metric-card"><span>事前理由</span><strong>{decision.reasons.length}</strong><small>{decision.reasons.length >= 2 ? "达到最低要求" : "理由不足"}</small></div>
-              <div className="metric-card"><span>审计事件</span><strong>{events.length}</strong><small>{snapshotHash ? `快照 ${snapshotHash.slice(0, 8)}` : "旧训练待建立快照"}</small></div>
+              <div className="metric-card"><span>胜率</span><strong>{reviewClosedPositions.length ? Math.round(reviewClosedPositions.filter((position) => (position.realizedPnl ?? 0) > 0).length / reviewClosedPositions.length * 100) : 0}%</strong><small>仅统计已平仓成交</small></div>
+              <div className="metric-card"><span>已提交计划</span><strong>{reviewState.decisionSubmissions.length}</strong><small>每次提交均绑定原始K线</small></div>
+              <div className="metric-card"><span>成交记录</span><strong>{reviewState.executions.length}</strong><small>{reviewState.snapshotHash ? `快照 ${reviewState.snapshotHash.slice(0, 8)}` : "旧训练待建立快照"}</small></div>
             </div>
             <div className="review-columns">
-              <article className="insight-card"><div className="section-label">流程观察</div><h2>{planScore >= 80 ? "计划完整，可以进入样本积累" : "先补齐失效点和目标"}</h2><p>当前训练卡记录了市场状态、位置和 {decision.reasons.length} 个理由。系统不会因为单次盈利直接判断策略有效。</p><div className="evidence-row"><span>市场状态</span><strong>{decision.marketState}</strong></div><div className="evidence-row"><span>位置</span><strong>{decision.location}</strong></div><div className="evidence-row"><span>样本置信度</span><strong>低 · 继续收集</strong></div></article>
+              <article className="insight-card">
+                <div className="section-label">最近一份事前计划</div>
+                <h2>{reviewPlanScore >= 80 ? "计划完整，可以进入样本积累" : "先补齐失效点和目标"}</h2>
+                <p>{reviewLatestSubmission ? `提交于 ${formatDate(reviewLatestSubmission.barTimestamp, reviewedSession?.session.timeframe ?? timeframe)}` : "当前内容还是草稿，尚未形成正式提交记录。"}</p>
+                <div className="evidence-row"><span>市场状态</span><strong>{reviewDecision.marketState || "未填写"}</strong></div>
+                <div className="evidence-row"><span>位置</span><strong>{reviewDecision.location || "未填写"}</strong></div>
+                <div className="evidence-row"><span>交易理由</span><strong>{reviewDecision.reasons.join("、") || "未填写"}</strong></div>
+                <div className="evidence-row"><span>失效 / 止损</span><strong>{reviewDecision.stop || "未填写"}</strong></div>
+                <div className="evidence-row"><span>第一目标</span><strong>{reviewDecision.target || "未填写"}</strong></div>
+                <div className="review-note"><span>计划说明</span><p>{reviewDecision.note || "未填写"}</p></div>
+              </article>
               <article className="history-card">
                 <div className="section-label">可恢复训练</div>
                 {sessions.length ? sessions.map((session) => (
-                  <div className="session-row" key={session.id}>
+                  <div className={`session-row ${reviewedSession?.session.id === session.id ? "active" : ""}`} key={session.id}>
                     <div>
                       <strong>{session.instrumentId} · {session.timeframe}</strong>
                       <span>{new Date(session.updatedAt).toLocaleString("zh-CN")}</span>
                     </div>
                     <div className="session-actions">
+                      <button className="review-session" onClick={() => inspectSession(session)}>
+                        <BookOpenCheck size={13} />查看复盘
+                      </button>
                       <button className="resume-session" onClick={() => resumeSession(session)}>
                         <RotateCcw size={13} />继续训练
                       </button>
@@ -1134,6 +1278,53 @@ export function TrainingWorkbench() {
                   </div>
                 )) : <div className="empty-state">训练会自动保存；产生进度后会在这里显示“继续训练”。</div>}
               </article>
+            </div>
+            <div className="review-detail-grid">
+              <article className="decision-history-card">
+                <div className="section-label">事前决策记录</div>
+                <h2>{reviewState.decisionSubmissions.length ? `${reviewState.decisionSubmissions.length} 份已提交计划` : "还没有正式提交的计划"}</h2>
+                {reviewState.decisionSubmissions.length ? (
+                  <div className="decision-history-list">
+                    {[...reviewState.decisionSubmissions].reverse().map((submission, reverseIndex) => (
+                      <div className="decision-history-item" key={submission.id}>
+                        <div className="decision-history-head">
+                          <div>
+                            <strong>计划 {reviewState.decisionSubmissions.length - reverseIndex}</strong>
+                            <span>{formatDate(submission.barTimestamp, reviewedSession?.session.timeframe ?? timeframe)} · 参考价 {submission.referencePrice.toFixed(2)}</span>
+                          </div>
+                          <b>{decisionScore(submission.decision)}%</b>
+                        </div>
+                        <div className="decision-history-tags">
+                          <span>{submission.decision.marketState}</span>
+                          <span>{submission.decision.location}</span>
+                          {submission.decision.reasons.map((reason) => <span key={reason}>{reason}</span>)}
+                        </div>
+                        <div className="decision-history-levels">
+                          <span>失效 / 止损<strong>{submission.decision.stop || "未填写"}</strong></span>
+                          <span>第一目标<strong>{submission.decision.target || "未填写"}</strong></span>
+                        </div>
+                        <p>{submission.decision.note || "没有填写计划说明"}</p>
+                      </div>
+                    ))}
+                  </div>
+                ) : (
+                  <div className="empty-state">旧训练中的当前决策草稿仍显示在上方，但只有以后点击“提交决策”生成的内容才会冻结为独立记录。</div>
+                )}
+              </article>
+              <details className="audit-timeline">
+                <summary>
+                  <span><span className="section-label">操作时间线</span><strong>{reviewState.events.length} 条记录</strong></span>
+                  <small>用于追溯训练过程，点击展开</small>
+                </summary>
+                <div className="audit-event-list">
+                  {[...reviewState.events].reverse().slice(0, 80).map((event) => (
+                    <div className="audit-event" key={event.id}>
+                      <span>#{event.sequence}</span>
+                      <div><strong>{eventLabel(event.type)}</strong><small>{new Date(event.occurredAt).toLocaleString("zh-CN")}{event.barTimestamp ? ` · K线 ${formatDate(event.barTimestamp, reviewedSession?.session.timeframe ?? timeframe)}` : ""}</small></div>
+                    </div>
+                  ))}
+                </div>
+              </details>
             </div>
           </section>
         )}
