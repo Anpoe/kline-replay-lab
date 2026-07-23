@@ -1,6 +1,7 @@
 "use client";
 
 import {
+  Activity,
   BarChart3,
   BookOpenCheck,
   Brush,
@@ -60,8 +61,9 @@ import {
   type TrainingTask,
   type TrainingTaskDraft,
 } from "../lib/trainingTasks";
+import { summarizePerformance, type PerformanceRecord } from "../lib/performance";
 
-type View = "replay" | "database" | "review";
+type View = "replay" | "performance" | "database" | "review";
 type Instrument = {
   id: string;
   symbol: string;
@@ -219,6 +221,14 @@ type MistakeSource = {
 };
 type SettingsTab = "basic" | "training";
 type TaskSetupKind = "configured" | "random";
+type PerformanceFilters = {
+  instrumentId: string;
+  timeframe: string;
+  modeLabel: string;
+  status: "all" | "active" | "completed";
+  dateFrom: string;
+  dateTo: string;
+};
 type AppSettings = {
   defaultInstrumentId: string;
   defaultTimeframe: string;
@@ -236,6 +246,14 @@ type AppSettings = {
 
 const LAST_DRAFT_KEY = "kline-replay-lab:last-training";
 const APP_SETTINGS_KEY = "kline-replay-lab:settings";
+const defaultPerformanceFilters: PerformanceFilters = {
+  instrumentId: "all",
+  timeframe: "all",
+  modeLabel: "all",
+  status: "all",
+  dateFrom: "",
+  dateTo: "",
+};
 const defaultDecision: Decision = {
   marketState: "趋势",
   location: "回调位置",
@@ -276,6 +294,12 @@ const drawingTools = [
 
 function money(value: number) {
   return `${value >= 0 ? "+" : ""}${value.toFixed(2)}`;
+}
+
+function profitFactorLabel(value: number | null) {
+  if (value === null) return "—";
+  if (!Number.isFinite(value)) return "∞";
+  return value.toFixed(2);
 }
 
 function normalizeSettings(value: Partial<AppSettings>): AppSettings {
@@ -454,6 +478,8 @@ export function TrainingWorkbench() {
   const [reviewedSession, setReviewedSession] = useState<{ session: TrainingSession; state: TrainingState } | null>(null);
   const [coverage, setCoverage] = useState<Coverage[]>([]);
   const [sessions, setSessions] = useState<TrainingSession[]>([]);
+  const [performanceFilters, setPerformanceFilters] = useState<PerformanceFilters>(defaultPerformanceFilters);
+  const [selectedPerformanceSessionId, setSelectedPerformanceSessionId] = useState("");
   const [importStatus, setImportStatus] = useState("");
   const [startupReady, setStartupReady] = useState(false);
   const [trainingReady, setTrainingReady] = useState(false);
@@ -1221,11 +1247,12 @@ export function TrainingWorkbench() {
     revealNext();
   };
 
-  const inspectSession = (session: TrainingSession) => {
+  const inspectSession = (session: TrainingSession, openReview = false) => {
     try {
       const state = parseTrainingState(JSON.parse(session.stateJson));
       if (!state) throw new Error("invalid session");
       setReviewedSession({ session, state });
+      if (openReview) setView("review");
     } catch {
       setImportStatus("这条训练记录不完整，无法查看复盘。");
     }
@@ -1257,10 +1284,13 @@ export function TrainingWorkbench() {
       const state = parseTrainingState(JSON.parse(session.stateJson));
       if (!state) return [];
       const task = state.trainingTask;
+      const closedTradePnls = state.positions
+        .filter((position) => position.status === "closed")
+        .map((position) => position.realizedPnl ?? 0);
       const pnl = state.pnlSnapshot ?? {
-        realized: 0,
+        realized: closedTradePnls.reduce((sum, value) => sum + value, 0),
         floating: 0,
-        total: 0,
+        total: closedTradePnls.reduce((sum, value) => sum + value, 0),
         openPositions: state.positions.filter((position) => position.status === "open").length,
         closedPositions: state.positions.filter((position) => position.status === "closed").length,
       };
@@ -1281,11 +1311,63 @@ export function TrainingWorkbench() {
         rangeLabel: task
           ? `${formatDate(task.startTimestamp, session.timeframe)} → ${formatDate(task.endTimestamp, session.timeframe)}`
           : `保存于 K线 ${state.cursor + 1}`,
+        closedTradePnls,
+        planScores: state.decisionSubmissions.map((submission) => decisionScore(submission.decision)),
       }];
     } catch {
       return [];
     }
   }), [parseTrainingState, sessions]);
+
+  const performanceModeOptions = useMemo(
+    () => [...new Set(sessionSummaries.map((summary) => summary.modeLabel))],
+    [sessionSummaries],
+  );
+
+  const filteredSessionSummaries = useMemo(() => {
+    const dateFrom = performanceFilters.dateFrom
+      ? Date.parse(`${performanceFilters.dateFrom}T00:00:00`)
+      : Number.NEGATIVE_INFINITY;
+    const dateTo = performanceFilters.dateTo
+      ? Date.parse(`${performanceFilters.dateTo}T23:59:59.999`)
+      : Number.POSITIVE_INFINITY;
+    return sessionSummaries.filter((summary) => {
+      const updatedAt = Date.parse(summary.session.updatedAt);
+      return (
+        (performanceFilters.instrumentId === "all" || summary.session.instrumentId === performanceFilters.instrumentId)
+        && (performanceFilters.timeframe === "all" || summary.session.timeframe === performanceFilters.timeframe)
+        && (performanceFilters.modeLabel === "all" || summary.modeLabel === performanceFilters.modeLabel)
+        && (
+          performanceFilters.status === "all"
+          || (performanceFilters.status === "completed" ? summary.task?.status === "completed" : summary.task?.status !== "completed")
+        )
+        && updatedAt >= dateFrom
+        && updatedAt <= dateTo
+      );
+    });
+  }, [performanceFilters, sessionSummaries]);
+
+  const performanceRecord = useCallback((summary: typeof sessionSummaries[number]): PerformanceRecord => ({
+    totalPnl: summary.pnl.total,
+    realizedPnl: summary.pnl.realized,
+    floatingPnl: summary.pnl.floating,
+    status: summary.task?.status === "completed" ? "completed" : "active",
+    closedTradePnls: summary.closedTradePnls,
+    planScores: summary.planScores,
+    updatedAt: summary.session.updatedAt,
+  }), []);
+
+  const overallPerformance = useMemo(
+    () => summarizePerformance(sessionSummaries.map(performanceRecord)),
+    [performanceRecord, sessionSummaries],
+  );
+  const filteredPerformance = useMemo(
+    () => summarizePerformance(filteredSessionSummaries.map(performanceRecord)),
+    [filteredSessionSummaries, performanceRecord],
+  );
+  const selectedPerformanceSession = filteredSessionSummaries.find(
+    (summary) => summary.session.id === selectedPerformanceSessionId,
+  );
 
   const mistakeSources = useMemo<MistakeSource[]>(() => sessions.flatMap((session) => {
     try {
@@ -1497,7 +1579,7 @@ export function TrainingWorkbench() {
   useEffect(() => {
     const timer = window.setTimeout(() => {
       if (view === "database") loadCoverage();
-      if (view === "review") loadSessions();
+      if (view === "review" || view === "performance") loadSessions();
     }, 0);
     return () => window.clearTimeout(timer);
   }, [loadCoverage, loadSessions, view]);
@@ -1555,6 +1637,9 @@ export function TrainingWorkbench() {
         <nav aria-label="主导航">
           <button className={view === "replay" ? "active" : ""} onClick={() => setView("replay")}>
             <BarChart3 size={20} /><span>训练</span>
+          </button>
+          <button className={view === "performance" ? "active" : ""} onClick={() => setView("performance")}>
+            <Activity size={20} /><span>表现</span>
           </button>
           <button className={view === "database" ? "active" : ""} onClick={() => setView("database")}>
             <Database size={20} /><span>数据</span>
@@ -2191,6 +2276,181 @@ export function TrainingWorkbench() {
               <button className="commit-plan" disabled={trainingComplete} onClick={submitDecision}><ListChecks size={17} />{trainingComplete ? "训练已结束" : "提交决策并揭示下一根"}</button>
             </aside>
           </div>
+        )}
+
+        {view === "performance" && (
+          <section className="content-page performance-page">
+            <div className="page-heading">
+              <div>
+                <span>PERFORMANCE</span>
+                <h1>训练表现</h1>
+                <p>先看全部已保存训练的整体结果，再筛选一组训练比较表现。</p>
+              </div>
+            </div>
+
+            <div className="performance-section-head">
+              <div>
+                <span className="section-label">全部训练</span>
+                <h2>整体表现</h2>
+              </div>
+              <small>统计 {overallPerformance.sessions} 场已保存训练，未保存的临时训练不计入。</small>
+            </div>
+            <div className="performance-overview">
+              <div className="performance-hero">
+                <span>累计总盈亏</span>
+                <strong className={overallPerformance.totalPnl >= 0 ? "up" : "down"}>{money(overallPerformance.totalPnl)}</strong>
+                <small>已实现 {money(overallPerformance.realizedPnl)} · 浮动 {money(overallPerformance.floatingPnl)}</small>
+              </div>
+              <div className="performance-metric">
+                <span>训练场次</span>
+                <strong>{overallPerformance.sessions}</strong>
+                <small>{overallPerformance.completedSessions} 场完成 · 完成率 {overallPerformance.completionRate}%</small>
+              </div>
+              <div className="performance-metric">
+                <span>交易胜率</span>
+                <strong>{overallPerformance.winRate}%</strong>
+                <small>{overallPerformance.winningTrades} 胜 / {overallPerformance.losingTrades} 负 / {overallPerformance.flatTrades} 平</small>
+              </div>
+              <div className="performance-metric">
+                <span>平均每场</span>
+                <strong className={overallPerformance.averagePnl >= 0 ? "up" : "down"}>{money(overallPerformance.averagePnl)}</strong>
+                <small>最大回撤 {overallPerformance.maxDrawdown.toFixed(2)}</small>
+              </div>
+              <div className="performance-metric">
+                <span>Profit Factor</span>
+                <strong>{profitFactorLabel(overallPerformance.profitFactor)}</strong>
+                <small>总盈利 ÷ 总亏损</small>
+              </div>
+            </div>
+
+            <article className="performance-filter-card">
+              <div className="performance-section-head">
+                <div>
+                  <span className="section-label">TRAINING SET</span>
+                  <h2>筛选训练集</h2>
+                </div>
+                <button className="ghost-button" onClick={() => {
+                  setPerformanceFilters(defaultPerformanceFilters);
+                  setSelectedPerformanceSessionId("");
+                }}>清除筛选</button>
+              </div>
+              <div className="performance-filters">
+                <label>品种
+                  <select value={performanceFilters.instrumentId} onChange={(event) => setPerformanceFilters((filters) => ({ ...filters, instrumentId: event.target.value }))}>
+                    <option value="all">全部品种</option>
+                    {[...new Set(sessionSummaries.map((summary) => summary.session.instrumentId))].map((value) => <option key={value} value={value}>{value}</option>)}
+                  </select>
+                </label>
+                <label>周期
+                  <select value={performanceFilters.timeframe} onChange={(event) => setPerformanceFilters((filters) => ({ ...filters, timeframe: event.target.value }))}>
+                    <option value="all">全部周期</option>
+                    {timeframes.map((value) => <option key={value} value={value}>{value}</option>)}
+                  </select>
+                </label>
+                <label>训练模式
+                  <select value={performanceFilters.modeLabel} onChange={(event) => setPerformanceFilters((filters) => ({ ...filters, modeLabel: event.target.value }))}>
+                    <option value="all">全部模式</option>
+                    {performanceModeOptions.map((value) => <option key={value} value={value}>{value}</option>)}
+                  </select>
+                </label>
+                <label>状态
+                  <select value={performanceFilters.status} onChange={(event) => setPerformanceFilters((filters) => ({ ...filters, status: event.target.value as PerformanceFilters["status"] }))}>
+                    <option value="all">全部状态</option>
+                    <option value="completed">已完成</option>
+                    <option value="active">可继续</option>
+                  </select>
+                </label>
+                <label>保存日期从
+                  <input type="date" value={performanceFilters.dateFrom} onChange={(event) => setPerformanceFilters((filters) => ({ ...filters, dateFrom: event.target.value }))} />
+                </label>
+                <label>到
+                  <input type="date" value={performanceFilters.dateTo} onChange={(event) => setPerformanceFilters((filters) => ({ ...filters, dateTo: event.target.value }))} />
+                </label>
+              </div>
+            </article>
+
+            <div className="filtered-performance-head">
+              <div>
+                <span className="section-label">筛选结果</span>
+                <h2>{filteredPerformance.sessions} 场训练的组合表现</h2>
+              </div>
+              <small>指标会随上方筛选条件即时更新。</small>
+            </div>
+            <div className="filtered-performance-grid">
+              <div><span>组合总盈亏</span><strong className={filteredPerformance.totalPnl >= 0 ? "up" : "down"}>{money(filteredPerformance.totalPnl)}</strong></div>
+              <div><span>交易胜率</span><strong>{filteredPerformance.winRate}%</strong><small>{filteredPerformance.closedTrades} 笔已平仓</small></div>
+              <div><span>Profit Factor</span><strong>{profitFactorLabel(filteredPerformance.profitFactor)}</strong><small>总盈利 {filteredPerformance.grossProfit.toFixed(2)}</small></div>
+              <div><span>最大回撤</span><strong className="down">-{filteredPerformance.maxDrawdown.toFixed(2)}</strong><small>按训练保存顺序计算</small></div>
+              <div><span>计划完整度</span><strong>{filteredPerformance.averagePlanScore}%</strong><small>{filteredPerformance.planCount} 份正式计划</small></div>
+            </div>
+
+            <div className="performance-distribution">
+              <div className="performance-section-head">
+                <div><span className="section-label">交易结果</span><h2>胜负分布</h2></div>
+                <small>{filteredPerformance.closedTrades ? "仅统计已平仓交易" : "筛选范围内还没有已平仓交易"}</small>
+              </div>
+              <div className="distribution-track" aria-label="已平仓交易胜负分布">
+                <span className="wins" style={{ width: `${filteredPerformance.closedTrades ? filteredPerformance.winningTrades / filteredPerformance.closedTrades * 100 : 0}%` }} />
+                <span className="flats" style={{ width: `${filteredPerformance.closedTrades ? filteredPerformance.flatTrades / filteredPerformance.closedTrades * 100 : 0}%` }} />
+                <span className="losses" style={{ width: `${filteredPerformance.closedTrades ? filteredPerformance.losingTrades / filteredPerformance.closedTrades * 100 : 0}%` }} />
+              </div>
+              <div className="distribution-legend">
+                <span><i className="wins" />盈利 {filteredPerformance.winningTrades}</span>
+                <span><i className="flats" />持平 {filteredPerformance.flatTrades}</span>
+                <span><i className="losses" />亏损 {filteredPerformance.losingTrades}</span>
+              </div>
+            </div>
+
+            <article className="performance-sessions">
+              <div className="performance-section-head">
+                <div><span className="section-label">训练明细</span><h2>选择具体训练</h2></div>
+                <small>选中一场后，可以查看完整复盘或继续训练。</small>
+              </div>
+              {filteredSessionSummaries.length ? (
+                <div className="performance-session-list">
+                  <div className="performance-session-header">
+                    <span>训练</span><span>模式 / 区间</span><span>状态</span><span>总盈亏</span><span>保存时间</span>
+                  </div>
+                  {filteredSessionSummaries.map((summary) => (
+                    <button
+                      className={`performance-session-row ${selectedPerformanceSession?.session.id === summary.session.id ? "selected" : ""}`}
+                      key={summary.session.id}
+                      aria-pressed={selectedPerformanceSession?.session.id === summary.session.id}
+                      onClick={() => setSelectedPerformanceSessionId(summary.session.id)}
+                    >
+                      <span><strong>{summary.session.instrumentId}</strong><small>{summary.session.timeframe}</small></span>
+                      <span><strong>{summary.modeLabel}</strong><small>{summary.rangeLabel}</small></span>
+                      <span className={summary.task?.status === "completed" ? "session-status completed" : "session-status"}>{summary.task?.status === "completed" ? "已完成" : "可继续"}</span>
+                      <strong className={summary.pnl.total >= 0 ? "up" : "down"}>{money(summary.pnl.total)}</strong>
+                      <time>{new Date(summary.session.updatedAt).toLocaleString("zh-CN")}</time>
+                    </button>
+                  ))}
+                </div>
+              ) : (
+                <div className="empty-state">没有符合当前筛选条件的训练，可以清除筛选后重新选择。</div>
+              )}
+
+              {selectedPerformanceSession ? (
+                <div className="selected-performance-session">
+                  <div>
+                    <span>已选训练</span>
+                    <strong>{selectedPerformanceSession.session.instrumentId} · {selectedPerformanceSession.session.timeframe} · {selectedPerformanceSession.modeLabel}</strong>
+                    <small>{selectedPerformanceSession.rangeLabel} · 总盈亏 {money(selectedPerformanceSession.pnl.total)}</small>
+                  </div>
+                  <div>
+                    <button className="review-session" onClick={() => inspectSession(selectedPerformanceSession.session, true)}>
+                      <BookOpenCheck size={14} />查看复盘
+                    </button>
+                    <button className="resume-session" onClick={() => resumeSession(selectedPerformanceSession.session)}>
+                      <RotateCcw size={14} />继续训练
+                    </button>
+                  </div>
+                </div>
+              ) : filteredSessionSummaries.length ? (
+                <div className="performance-selection-hint">请先从上方训练明细中选择一场训练。</div>
+              ) : null}
+            </article>
+          </section>
         )}
 
         {view === "database" && (
