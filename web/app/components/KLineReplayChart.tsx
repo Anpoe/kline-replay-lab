@@ -301,6 +301,8 @@ export function KLineReplayChart({
   decisionMarkers,
   drawings,
   drawingsRestoreNonce,
+  hideDate,
+  hidePrice,
   onDecisionSelect,
   onDrawingsChange,
 }: {
@@ -315,6 +317,8 @@ export function KLineReplayChart({
   decisionMarkers: DecisionMarker[];
   drawings: PersistedDrawing[];
   drawingsRestoreNonce: number;
+  hideDate: boolean;
+  hidePrice: boolean;
   onDecisionSelect: (id: string) => void;
   onDrawingsChange: (drawings: PersistedDrawing[]) => void;
 }) {
@@ -393,6 +397,7 @@ export function KLineReplayChart({
               noChangeWickColor: "#9ca8ad",
             },
             priceMark: {
+              show: !hidePrice,
               high: { color: "#87979d" },
               low: { color: "#87979d" },
               last: {
@@ -401,26 +406,35 @@ export function KLineReplayChart({
                 noChangeColor: "#9ca8ad",
               },
             },
-            tooltip: { text: { color: "#aab6ba" } },
+            tooltip: {
+              showRule: hideDate || hidePrice ? "none" : "follow_cross",
+              text: { color: "#aab6ba" },
+            },
           },
           xAxis: {
             axisLine: { color: "rgba(133, 149, 158, 0.16)" },
             tickLine: { color: "rgba(133, 149, 158, 0.16)" },
-            tickText: { color: "#687a81", size: 11 },
+            tickText: { color: hideDate ? "rgba(0, 0, 0, 0)" : "#687a81", size: 11 },
           },
           yAxis: {
             axisLine: { color: "rgba(133, 149, 158, 0.16)" },
             tickLine: { color: "rgba(133, 149, 158, 0.16)" },
-            tickText: { color: "#687a81", size: 11 },
+            tickText: { color: hidePrice ? "rgba(0, 0, 0, 0)" : "#687a81", size: 11 },
           },
           crosshair: {
             horizontal: {
               line: { color: "rgba(227, 238, 235, 0.35)" },
-              text: { backgroundColor: "#263238", color: "#eff6f3" },
+              text: {
+                backgroundColor: hidePrice ? "rgba(0, 0, 0, 0)" : "#263238",
+                color: hidePrice ? "rgba(0, 0, 0, 0)" : "#eff6f3",
+              },
             },
             vertical: {
               line: { color: "rgba(227, 238, 235, 0.35)" },
-              text: { backgroundColor: "#263238", color: "#eff6f3" },
+              text: {
+                backgroundColor: hideDate ? "rgba(0, 0, 0, 0)" : "#263238",
+                color: hideDate ? "rgba(0, 0, 0, 0)" : "#eff6f3",
+              },
             },
           },
           },
@@ -448,7 +462,7 @@ export function KLineReplayChart({
       disposeChart?.();
       chartRef.current = null;
     };
-  }, [pricePrecision, restoreDrawings, symbol, timeframe, timezone]);
+  }, [hideDate, hidePrice, pricePrecision, restoreDrawings, symbol, timeframe, timezone]);
 
   useEffect(() => {
     barsRef.current = bars;

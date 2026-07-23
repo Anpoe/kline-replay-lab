@@ -4,10 +4,12 @@ import {
   BarChart3,
   BookOpenCheck,
   Brush,
+  CalendarRange,
   ChevronLeft,
   ChevronRight,
   CircleStop,
   Database,
+  EyeOff,
   FastForward,
   FileUp,
   Gauge,
@@ -25,6 +27,7 @@ import {
   Trash2,
   TrendingDown,
   TrendingUp,
+  X,
 } from "lucide-react";
 import type { KLineData } from "klinecharts";
 import { ChangeEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
@@ -46,6 +49,18 @@ import {
   type PriceBand,
   type RuleValidation,
 } from "../lib/marketRules";
+import {
+  advanceWithinTask,
+  createLegacyTrainingTask,
+  defaultTrainingTaskDraft,
+  finishTask,
+  resolveTrainingTask,
+  taskProgress,
+  trainingModeLabels,
+  type TrainingMode,
+  type TrainingTask,
+  type TrainingTaskDraft,
+} from "../lib/trainingTasks";
 
 type View = "replay" | "database" | "review";
 type Instrument = {
@@ -148,7 +163,7 @@ type SnapshotMeta = {
   createdAt: string;
 };
 type TrainingState = {
-  version: 4;
+  version: 5;
   cursor: number;
   cursorTimestamp?: number;
   dataSignature?: string;
@@ -165,6 +180,7 @@ type TrainingState = {
   drawings: PersistedDrawing[];
   events: TrainingEvent[];
   marketRules?: MarketRuleProfile;
+  trainingTask?: TrainingTask;
 };
 type TrainingSession = {
   id: string;
@@ -181,6 +197,19 @@ type RestoreRequest = {
   timeframe: string;
   state: TrainingState;
   updatedAt?: string;
+};
+type NewTaskRequest = {
+  instrumentId: string;
+  timeframe: string;
+  draft: TrainingTaskDraft;
+  snapshotId?: string;
+};
+type MistakeSource = {
+  session: TrainingSession;
+  state: TrainingState;
+  count: number;
+  targetCursor: number;
+  label: string;
 };
 
 const LAST_DRAFT_KEY = "kline-replay-lab:last-training";
@@ -217,15 +246,6 @@ function formatDate(timestamp: number, timeframe: string) {
   return timeframe === "5m" || timeframe === "1h"
     ? date.toLocaleString("zh-CN", { month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit" })
     : date.toLocaleDateString("zh-CN", { year: "numeric", month: "2-digit", day: "2-digit" });
-}
-
-function seededFraction(seed: string) {
-  let hash = 2166136261;
-  for (const character of seed) {
-    hash ^= character.charCodeAt(0);
-    hash = Math.imul(hash, 16777619);
-  }
-  return (hash >>> 0) / 4294967296;
 }
 
 function createTrainingEvent(
@@ -267,6 +287,8 @@ function eventLabel(type: string) {
     order_quantity_changed: "调整下单数量",
     order_rejected: "市场规则拒单",
     orders_rejected: "成交阶段拒单",
+    training_completed: "训练自动结束",
+    training_revealed: "解除盲测并继续观察",
   };
   return labels[type] ?? type;
 }
@@ -341,6 +363,12 @@ export function TrainingWorkbench() {
   const [dataSnapshotId, setDataSnapshotId] = useState("");
   const [snapshotHash, setSnapshotHash] = useState("");
   const [marketRules, setMarketRules] = useState<MarketRuleProfile>(CN_A_MAINBOARD_RULES_V1);
+  const [trainingTask, setTrainingTask] = useState<TrainingTask | null>(null);
+  const [showTaskSetup, setShowTaskSetup] = useState(false);
+  const [taskDraft, setTaskDraft] = useState<TrainingTaskDraft>(defaultTrainingTaskDraft);
+  const [setupInstrumentId, setSetupInstrumentId] = useState("600519.SH");
+  const [setupTimeframe, setSetupTimeframe] = useState("1d");
+  const [setupError, setSetupError] = useState("");
   const [ruleNotice, setRuleNotice] = useState("");
   const [events, setEvents] = useState<TrainingEvent[]>([]);
   const [selectedDecisionId, setSelectedDecisionId] = useState("");
@@ -353,10 +381,19 @@ export function TrainingWorkbench() {
   const [loadNonce, setLoadNonce] = useState(0);
   const [restoreNotice, setRestoreNotice] = useState("");
   const restoreRequestRef = useRef<RestoreRequest | null>(null);
+  const newTaskRequestRef = useRef<NewTaskRequest | null>(null);
   const eventSequenceRef = useRef(0);
 
   const visibleBars = useMemo(() => bars.slice(0, cursor + 1), [bars, cursor]);
   const currentBar = bars[cursor];
+  const trainingDateLabel = (timestamp: number) => {
+    if (!trainingTask?.hideDate) return formatDate(timestamp, timeframe);
+    const index = bars.findIndex((bar) => bar.timestamp === timestamp);
+    return index >= 0 ? `K线 #${index + 1}` : "日期已隐藏";
+  };
+  const trainingPriceLabel = (price: number | undefined) => (
+    trainingTask?.hidePrice ? "•••" : price?.toFixed(instrument.pricePrecision) ?? "--"
+  );
   const openPositions = useMemo(() => positions.filter((position) => position.status === "open"), [positions]);
   const closedPositions = useMemo(() => positions.filter((position) => position.status === "closed"), [positions]);
   const closablePositions = useMemo(() => currentBar
@@ -388,7 +425,17 @@ export function TrainingWorkbench() {
         realizedPnl: exitIsVisible ? position.realizedPnl : undefined,
       };
     }), [currentBar, positions]);
-  const progress = bars.length > 1 ? (cursor / (bars.length - 1)) * 100 : 0;
+  const currentTaskProgress = trainingTask
+    ? taskProgress(trainingTask, cursor)
+    : { revealed: 0, total: 0, percent: 0 };
+  const progress = trainingTask
+    ? currentTaskProgress.percent
+    : bars.length > 1 ? (cursor / (bars.length - 1)) * 100 : 0;
+  const trainingComplete = trainingTask?.status === "completed";
+  const reviewLocked = Boolean(
+    trainingTask?.status === "active"
+    && (trainingTask.hideInstrument || trainingTask.hideDate || trainingTask.hidePrice),
+  );
   const planScore = decisionScore(decision);
   const decisionMarkers = useMemo<DecisionMarker[]>(() => decisionSubmissions
     .filter((submission) => !currentBar || submission.barTimestamp <= currentBar.timestamp)
@@ -407,7 +454,7 @@ export function TrainingWorkbench() {
     ? `${bars.length}:${bars[0].timestamp}:${bars[bars.length - 1].timestamp}`
     : "", [bars]);
   const trainingState = useMemo<TrainingState>(() => ({
-    version: 4,
+    version: 5,
     cursor,
     cursorTimestamp: currentBar?.timestamp,
     dataSignature,
@@ -424,7 +471,8 @@ export function TrainingWorkbench() {
     drawings,
     events,
     marketRules,
-  }), [cursor, currentBar?.timestamp, dataSignature, dataSnapshotId, decision, decisionSubmissions, drawings, events, executions, marketRules, orderQty, orderRejections, pendingOrders, positions, randomSeed, snapshotHash]);
+    trainingTask: trainingTask ?? undefined,
+  }), [cursor, currentBar?.timestamp, dataSignature, dataSnapshotId, decision, decisionSubmissions, drawings, events, executions, marketRules, orderQty, orderRejections, pendingOrders, positions, randomSeed, snapshotHash, trainingTask]);
   const reviewState = reviewedSession?.state ?? trainingState;
   const reviewClosedPositions = reviewState.positions.filter((position) => position.status === "closed");
   const reviewRealizedPnl = reviewClosedPositions.reduce((sum, position) => sum + (position.realizedPnl ?? 0), 0);
@@ -440,7 +488,7 @@ export function TrainingWorkbench() {
     const state = value as Partial<TrainingState>;
     if (!Number.isFinite(state.cursor) || !Array.isArray(state.positions) || !Array.isArray(state.pendingOrders)) return null;
     return {
-      version: 4,
+      version: 5,
       cursor: Number(state.cursor),
       cursorTimestamp: typeof state.cursorTimestamp === "number" ? state.cursorTimestamp : undefined,
       dataSignature: typeof state.dataSignature === "string" ? state.dataSignature : undefined,
@@ -457,6 +505,7 @@ export function TrainingWorkbench() {
       drawings: Array.isArray(state.drawings) ? state.drawings : [],
       events: Array.isArray(state.events) ? state.events : [],
       marketRules: state.marketRules && typeof state.marketRules === "object" ? state.marketRules : undefined,
+      trainingTask: state.trainingTask && typeof state.trainingTask === "object" ? state.trainingTask : undefined,
     };
   }, []);
 
@@ -472,6 +521,7 @@ export function TrainingWorkbench() {
 
   const queueRestore = useCallback((request: RestoreRequest) => {
     restoreRequestRef.current = request;
+    newTaskRequestRef.current = null;
     setInstrumentId(request.instrumentId);
     setTimeframe(request.timeframe);
     setView("replay");
@@ -521,11 +571,15 @@ export function TrainingWorkbench() {
     if (!startupReady) return;
     const restoreRequest = restoreRequestRef.current;
     restoreRequestRef.current = null;
+    const newTaskRequest = newTaskRequestRef.current;
+    newTaskRequestRef.current = null;
     setLoading(true);
     setTrainingReady(false);
     setPlaying(false);
     try {
-      const requestedSnapshotId = restoreRequest?.state.dataSnapshotId ?? restoreRequest?.dataSnapshotId;
+      const requestedSnapshotId = restoreRequest?.state.dataSnapshotId
+        ?? restoreRequest?.dataSnapshotId
+        ?? newTaskRequest?.snapshotId;
       let data: { instrument: Instrument; candles: KLineData[]; snapshot: SnapshotMeta };
       let legacySnapshotCreated = false;
       if (requestedSnapshotId) {
@@ -570,6 +624,9 @@ export function TrainingWorkbench() {
         setDrawingsRestoreNonce(Date.now());
         setSessionId(restoreRequest.id);
         setRandomSeed(restoreRequest.state.randomSeed);
+        const restoredTask = restoreRequest.state.trainingTask
+          ?? createLegacyTrainingTask(data.candles, Math.max(0, Math.min(data.candles.length - 1, restoredCursor)));
+        setTrainingTask(finishTask(restoredTask, restoredCursor));
         const lastSequence = restoreRequest.state.events.reduce((maximum, event) => Math.max(maximum, event.sequence), 0);
         eventSequenceRef.current = lastSequence + 1;
         setEvents([
@@ -586,10 +643,16 @@ export function TrainingWorkbench() {
           ? "旧训练已恢复，并从当前行情建立首份不可变快照；从本次保存开始可以跨行情版本完全复现。"
           : `已从不可变快照恢复，哈希 ${data.snapshot.contentHash.slice(0, 12)}；当前行情库后续变化不会影响本次训练。`);
       } else {
-        const startCursor = Math.max(0, Math.min(data.candles.length - 1, Math.floor(data.candles.length * 0.68)));
         const nextSessionId = crypto.randomUUID();
         const nextSeed = crypto.randomUUID();
-        setCursor(startCursor);
+        const nextTask = resolveTrainingTask(
+          newTaskRequest?.draft ?? defaultTrainingTaskDraft,
+          data.candles,
+          data.instrument.timezone,
+          nextSeed,
+        );
+        setCursor(nextTask.startCursor);
+        setTrainingTask(nextTask);
         setPositions([]);
         setPendingOrders([]);
         setExecutions([]);
@@ -603,13 +666,21 @@ export function TrainingWorkbench() {
         setSessionId(nextSessionId);
         setRandomSeed(nextSeed);
         eventSequenceRef.current = 1;
-        setEvents([createTrainingEvent(1, "session_created", data.candles[startCursor]?.timestamp, {
+        setEvents([createTrainingEvent(1, "session_created", data.candles[nextTask.startCursor]?.timestamp, {
           instrumentId,
           timeframe,
           snapshotId: data.snapshot.id,
           snapshotHash: data.snapshot.contentHash,
           randomSeed: nextSeed,
-          startCursor,
+          startCursor: nextTask.startCursor,
+          endCursor: nextTask.endCursor,
+          trainingMode: nextTask.mode,
+          hiddenFields: {
+            instrument: nextTask.hideInstrument,
+            date: nextTask.hideDate,
+            price: nextTask.hidePrice,
+          },
+          sourceSessionId: nextTask.sourceSessionId,
           marketRuleId: loadedMarketRules.id,
           marketRuleVersion: loadedMarketRules.version,
         })]);
@@ -742,14 +813,17 @@ export function TrainingWorkbench() {
   }, [appendEvent, bars, cursor, instrument.timezone, marketRules, positions]);
 
   const revealMany = useCallback((count: number) => {
-    if (cursor >= bars.length - 1) {
+    const endCursor = trainingTask?.endCursor ?? bars.length - 1;
+    if (cursor >= endCursor || trainingTask?.status === "completed") {
       setPlaying(false);
       return;
     }
     const nextBar = bars[cursor + 1];
     executeOrders(pendingOrders, nextBar);
     if (pendingOrders.length) setPendingOrders([]);
-    const nextCursor = Math.min(cursor + Math.max(1, count), bars.length - 1);
+    const nextCursor = trainingTask
+      ? advanceWithinTask(trainingTask, cursor, count)
+      : Math.min(cursor + Math.max(1, count), bars.length - 1);
     setCursor(nextCursor);
     appendEvent("replay_advanced", {
       fromCursor: cursor,
@@ -757,12 +831,22 @@ export function TrainingWorkbench() {
       requestedCount: count,
       executedOrderIds: pendingOrders.map((order) => order.id),
     }, bars[nextCursor]?.timestamp);
+    if (trainingTask && nextCursor >= trainingTask.endCursor) {
+      const completedTask = finishTask(trainingTask, nextCursor);
+      setTrainingTask(completedTask);
+      setPlaying(false);
+      appendEvent("training_completed", {
+        trainingMode: completedTask.mode,
+        startCursor: completedTask.startCursor,
+        endCursor: completedTask.endCursor,
+      }, bars[nextCursor]?.timestamp);
+    }
     setSaveState("有未保存更改");
-  }, [appendEvent, bars, cursor, executeOrders, pendingOrders]);
+  }, [appendEvent, bars, cursor, executeOrders, pendingOrders, trainingTask]);
 
   const revealNext = useCallback(() => revealMany(1), [revealMany]);
   const revealPrevious = () => {
-    const nextCursor = Math.max(0, cursor - 1);
+    const nextCursor = Math.max(trainingTask?.startCursor ?? 0, cursor - 1);
     if (nextCursor === cursor) return;
     setCursor(nextCursor);
     appendEvent("replay_rewound", { fromCursor: cursor, toCursor: nextCursor }, bars[nextCursor]?.timestamp);
@@ -787,7 +871,7 @@ export function TrainingWorkbench() {
   };
 
   const queueOpenOrder = (side: "buy" | "sell", qty = orderQty) => {
-    if (!currentBar || qty <= 0 || cursor >= bars.length - 1) return;
+    if (!currentBar || qty <= 0 || cursor >= (trainingTask?.endCursor ?? bars.length - 1) || trainingComplete) return;
     const validation = validateOpenOrder(marketRules, side, qty);
     if (!validation.ok) {
       rejectOrderAttempt(validation, { action: "open", side, qty });
@@ -820,7 +904,7 @@ export function TrainingWorkbench() {
   };
 
   const queueClosePosition = (positionId: string) => {
-    if (!currentBar || cursor >= bars.length - 1) return;
+    if (!currentBar || cursor >= (trainingTask?.endCursor ?? bars.length - 1) || trainingComplete) return;
     const position = openPositions.find((item) => item.id === positionId);
     if (!position || pendingOrders.some((order) => order.action === "close" && order.positionId === positionId)) return;
     const validation = validateCloseOrder(marketRules, position, currentBar.timestamp, instrument.timezone);
@@ -868,18 +952,28 @@ export function TrainingWorkbench() {
 
   const startFreshTraining = (nextInstrumentId: string, nextTimeframe: string) => {
     restoreRequestRef.current = null;
+    newTaskRequestRef.current = {
+      instrumentId: nextInstrumentId,
+      timeframe: nextTimeframe,
+      draft: defaultTrainingTaskDraft,
+    };
     setInstrumentId(nextInstrumentId);
     setTimeframe(nextTimeframe);
     setLoadNonce((value) => value + 1);
   };
 
-  const resetTraining = (random = false) => {
+  const resetTraining = () => {
     const nextRandomSeed = crypto.randomUUID();
     const nextSessionId = crypto.randomUUID();
-    const nextCursor = random && bars.length > 80
-      ? 40 + Math.floor(seededFraction(nextRandomSeed) * (bars.length - 70))
-      : Math.max(0, Math.floor(bars.length * 0.68));
+    const baseTask = trainingTask ?? createLegacyTrainingTask(bars, Math.max(0, Math.floor(bars.length * 0.68)));
+    const nextTask: TrainingTask = {
+      ...baseTask,
+      status: baseTask.startCursor >= baseTask.endCursor ? "completed" : "active",
+      completedAt: undefined,
+    };
+    const nextCursor = nextTask.startCursor;
     setCursor(nextCursor);
+    setTrainingTask(nextTask);
     setPlaying(false);
     setPositions([]);
     setPendingOrders([]);
@@ -903,7 +997,9 @@ export function TrainingWorkbench() {
       snapshotHash,
       randomSeed: nextRandomSeed,
       startCursor: nextCursor,
-      random,
+      endCursor: nextTask.endCursor,
+      trainingMode: nextTask.mode,
+      restarted: true,
       marketRuleId: marketRules.id,
       marketRuleVersion: marketRules.version,
     })]);
@@ -958,7 +1054,7 @@ export function TrainingWorkbench() {
       }
     }
     if (session.id === sessionId) {
-      resetTraining(false);
+      resetTraining();
       setSaveState("原训练已删除，已开始一场新的空白训练");
     }
   };
@@ -1025,6 +1121,109 @@ export function TrainingWorkbench() {
     }
   }, []);
 
+  const mistakeSources = useMemo<MistakeSource[]>(() => sessions.flatMap((session) => {
+    try {
+      const state = parseTrainingState(JSON.parse(session.stateJson));
+      if (!state) return [];
+      const weakPlans = state.decisionSubmissions.filter((submission) => decisionScore(submission.decision) < 80);
+      const count = weakPlans.length + state.orderRejections.length;
+      if (!count) return [];
+      const targetCursor = weakPlans.at(-1)?.cursor ?? state.cursor;
+      return [{
+        session,
+        state,
+        count,
+        targetCursor,
+        label: `${session.instrumentId} · ${session.timeframe} · ${count} 个错题点 · ${new Date(session.updatedAt).toLocaleDateString("zh-CN")}`,
+      }];
+    } catch {
+      return [];
+    }
+  }), [parseTrainingState, sessions]);
+
+  const openTaskSetup = (preset: "default" | "random" = "default") => {
+    setSetupInstrumentId(instrumentId);
+    setSetupTimeframe(timeframe);
+    setTaskDraft({
+      ...defaultTrainingTaskDraft,
+      startMode: preset === "random" ? "random" : "default",
+      startDate: currentBar ? tradingDate(currentBar.timestamp, instrument.timezone) : "",
+      startBar: cursor + 1,
+      endDate: bars.at(-1) ? tradingDate(bars.at(-1)!.timestamp, instrument.timezone) : "",
+    });
+    setSetupError("");
+    setShowTaskSetup(true);
+    void loadSessions();
+  };
+
+  const selectTrainingMode = (mode: TrainingMode) => {
+    setTaskDraft((draft) => ({
+      ...draft,
+      mode,
+      startMode: mode === "range" ? "date" : mode === "mistake" ? "bar" : draft.startMode,
+      length: mode === "mistake" && !draft.length ? 40 : draft.length,
+      hideInstrument: mode === "blind",
+      hideDate: mode === "blind",
+      hidePrice: mode === "blind",
+      sourceSessionId: mode === "mistake" ? draft.sourceSessionId : undefined,
+      sourceLabel: mode === "mistake" ? draft.sourceLabel : undefined,
+    }));
+    setSetupError("");
+  };
+
+  const startConfiguredTraining = () => {
+    let requestInstrumentId = setupInstrumentId;
+    let requestTimeframe = setupTimeframe;
+    let requestSnapshotId: string | undefined;
+    let draft = { ...taskDraft };
+
+    if (draft.mode === "range") {
+      if (!draft.startDate || !draft.endDate) {
+        setSetupError("测试区间需要填写开始和结束日期。");
+        return;
+      }
+      if (draft.endDate < draft.startDate) {
+        setSetupError("结束日期不能早于开始日期。");
+        return;
+      }
+    } else if (draft.mode === "mistake") {
+      const sourceId = draft.sourceSessionId ?? mistakeSources[0]?.session.id;
+      const source = mistakeSources.find((item) => item.session.id === sourceId);
+      if (!source) {
+        setSetupError("还没有可重练的错题。先完成一份低于 80% 的计划或产生一条规则拒单。");
+        return;
+      }
+      requestInstrumentId = source.session.instrumentId;
+      requestTimeframe = source.session.timeframe;
+      requestSnapshotId = source.state.dataSnapshotId ?? source.session.dataSnapshotId;
+      draft = {
+        ...draft,
+        startMode: "bar",
+        startBar: Math.max(1, source.targetCursor - 19),
+        length: draft.length > 0 ? draft.length : 40,
+        sourceSessionId: source.session.id,
+        sourceLabel: source.label,
+      };
+    } else if (draft.startMode === "date" && !draft.startDate) {
+      setSetupError("请填写训练开始日期。");
+      return;
+    }
+
+    newTaskRequestRef.current = {
+      instrumentId: requestInstrumentId,
+      timeframe: requestTimeframe,
+      draft,
+      snapshotId: requestSnapshotId,
+    };
+    restoreRequestRef.current = null;
+    setInstrumentId(requestInstrumentId);
+    setTimeframe(requestTimeframe);
+    setReviewedSession(null);
+    setView("replay");
+    setShowTaskSetup(false);
+    setLoadNonce((value) => value + 1);
+  };
+
   useEffect(() => {
     const timer = window.setTimeout(() => {
       if (view === "database") loadCoverage();
@@ -1090,7 +1289,12 @@ export function TrainingWorkbench() {
           <button className={view === "database" ? "active" : ""} onClick={() => setView("database")}>
             <Database size={20} /><span>数据</span>
           </button>
-          <button className={view === "review" ? "active" : ""} onClick={() => setView("review")}>
+          <button
+            className={view === "review" ? "active" : ""}
+            disabled={reviewLocked}
+            title={reviewLocked ? "盲测结束后才能查看复盘答案" : ""}
+            onClick={() => setView("review")}
+          >
             <BookOpenCheck size={20} /><span>复盘</span>
           </button>
         </nav>
@@ -1100,11 +1304,17 @@ export function TrainingWorkbench() {
       <main className="workspace">
         <header className="topbar">
           <div className="instrument-selectors">
-            <select value={instrumentId} onChange={(event) => startFreshTraining(event.target.value, timeframe)} aria-label="选择品种">
-              {instruments.map((item) => <option key={item.id} value={item.id}>{item.short} · {item.label}</option>)}
-            </select>
-            <span className="market-pill">{instruments.find((item) => item.id === instrumentId)?.market}</span>
-            <span className="rule-pill">{marketRules.name} · {marketRules.version}</span>
+            {trainingTask?.hideInstrument ? (
+              <span className="blind-pill">品种已隐藏</span>
+            ) : (
+              <>
+                <select value={instrumentId} onChange={(event) => startFreshTraining(event.target.value, timeframe)} aria-label="选择品种">
+                  {instruments.map((item) => <option key={item.id} value={item.id}>{item.short} · {item.label}</option>)}
+                </select>
+                <span className="market-pill">{instruments.find((item) => item.id === instrumentId)?.market}</span>
+              </>
+            )}
+            <span className="rule-pill">{trainingTask ? trainingModeLabels[trainingTask.mode] : "自由训练"}</span>
             <div className="timeframes" aria-label="周期">
               {timeframes.map((item) => (
                 <button key={item} className={timeframe === item ? "active" : ""} onClick={() => startFreshTraining(instrumentId, item)}>{item}</button>
@@ -1113,7 +1323,8 @@ export function TrainingWorkbench() {
           </div>
           <div className="top-actions">
             <span className={`save-state ${saveState.includes("已") ? "saved" : ""}`}>{saveState}</span>
-            <button className="ghost-button" onClick={() => resetTraining(true)}><Shuffle size={16} />随机训练</button>
+            <button className="ghost-button" onClick={() => openTaskSetup("random")}><Shuffle size={16} />随机训练</button>
+            <button className="ghost-button" onClick={() => openTaskSetup()}><CalendarRange size={16} />新建训练</button>
             <button className="primary-button" onClick={saveSession}><Save size={16} />保存训练</button>
           </div>
         </header>
@@ -1125,20 +1336,135 @@ export function TrainingWorkbench() {
           </div>
         )}
 
+        {showTaskSetup && (
+          <div className="task-modal-backdrop" role="presentation" onMouseDown={(event) => {
+            if (event.target === event.currentTarget) setShowTaskSetup(false);
+          }}>
+            <section className="task-modal" role="dialog" aria-modal="true" aria-labelledby="task-modal-title">
+              <div className="task-modal-head">
+                <div>
+                  <span>TRAINING TASK</span>
+                  <h2 id="task-modal-title">新建 Replay 训练</h2>
+                  <p>训练边界和隐藏项会随快照保存，恢复后继续生效。</p>
+                </div>
+                <button aria-label="关闭新建训练" onClick={() => setShowTaskSetup(false)}><X size={19} /></button>
+              </div>
+
+              <div className="task-mode-grid" role="group" aria-label="训练模式">
+                {(Object.keys(trainingModeLabels) as TrainingMode[]).map((mode) => (
+                  <button
+                    key={mode}
+                    className={taskDraft.mode === mode ? "active" : ""}
+                    onClick={() => selectTrainingMode(mode)}
+                  >
+                    <strong>{trainingModeLabels[mode]}</strong>
+                    <span>{mode === "free" ? "按自己的节奏练习" : mode === "blind" ? "隐藏答案，结束后复盘" : mode === "range" ? "固定日期区间自动结束" : "重做低分计划与规则拒单"}</span>
+                  </button>
+                ))}
+              </div>
+
+              {taskDraft.mode !== "mistake" && (
+                <div className="task-form-row">
+                  <label>品种
+                    <select value={setupInstrumentId} onChange={(event) => setSetupInstrumentId(event.target.value)}>
+                      {instruments.map((item) => <option key={item.id} value={item.id}>{item.short} · {item.label}</option>)}
+                    </select>
+                  </label>
+                  <label>周期
+                    <select value={setupTimeframe} onChange={(event) => setSetupTimeframe(event.target.value)}>
+                      {timeframes.map((item) => <option key={item}>{item}</option>)}
+                    </select>
+                  </label>
+                </div>
+              )}
+
+              {taskDraft.mode === "range" ? (
+                <div className="task-form-row">
+                  <label>区间开始
+                    <input type="date" value={taskDraft.startDate} onChange={(event) => setTaskDraft((draft) => ({ ...draft, startDate: event.target.value }))} />
+                  </label>
+                  <label>区间结束
+                    <input type="date" value={taskDraft.endDate} onChange={(event) => setTaskDraft((draft) => ({ ...draft, endDate: event.target.value }))} />
+                  </label>
+                </div>
+              ) : taskDraft.mode === "mistake" ? (
+                <label className="task-wide-field">错题来源
+                  <select value={taskDraft.sourceSessionId ?? mistakeSources[0]?.session.id ?? ""} onChange={(event) => {
+                    const source = mistakeSources.find((item) => item.session.id === event.target.value);
+                    setTaskDraft((draft) => ({
+                      ...draft,
+                      sourceSessionId: event.target.value,
+                      sourceLabel: source?.label,
+                    }));
+                  }}>
+                    {!mistakeSources.length && <option value="">暂无错题训练</option>}
+                    {mistakeSources.map((source) => <option key={source.session.id} value={source.session.id}>{source.label}</option>)}
+                  </select>
+                  <small>错题点当前定义为：计划完整度低于 80%，或被市场规则拒绝的委托。系统从错题前约 20 根开始。</small>
+                </label>
+              ) : (
+                <div className="task-start-block">
+                  <span>训练起点</span>
+                  <div className="task-start-options">
+                    {([
+                      ["default", "默认位置"],
+                      ["date", "指定日期"],
+                      ["bar", "指定 K 线"],
+                      ["random", "随机起点"],
+                    ] as const).map(([value, label]) => (
+                      <button key={value} className={taskDraft.startMode === value ? "active" : ""} onClick={() => setTaskDraft((draft) => ({ ...draft, startMode: value }))}>{label}</button>
+                    ))}
+                  </div>
+                  {taskDraft.startMode === "date" && (
+                    <label>开始日期<input type="date" value={taskDraft.startDate} onChange={(event) => setTaskDraft((draft) => ({ ...draft, startDate: event.target.value }))} /></label>
+                  )}
+                  {taskDraft.startMode === "bar" && (
+                    <label>第几根 K 线<input type="number" min="1" value={taskDraft.startBar} onChange={(event) => setTaskDraft((draft) => ({ ...draft, startBar: Math.max(1, Number(event.target.value)) }))} /></label>
+                  )}
+                </div>
+              )}
+
+              {taskDraft.mode !== "range" && (
+                <label className="task-wide-field">训练长度（揭示 K 线数）
+                  <input type="number" min="0" value={taskDraft.length} onChange={(event) => setTaskDraft((draft) => ({ ...draft, length: Math.max(0, Number(event.target.value)) }))} />
+                  <small>填 0 表示练到数据末尾；填入数量后，到达边界会自动停止并进入完成状态。</small>
+                </label>
+              )}
+
+              <fieldset className="task-privacy">
+                <legend>训练中隐藏</legend>
+                <label><input type="checkbox" checked={taskDraft.hideInstrument} onChange={(event) => setTaskDraft((draft) => ({ ...draft, hideInstrument: event.target.checked }))} />品种名称</label>
+                <label><input type="checkbox" checked={taskDraft.hideDate} onChange={(event) => setTaskDraft((draft) => ({ ...draft, hideDate: event.target.checked }))} />日期坐标</label>
+                <label><input type="checkbox" checked={taskDraft.hidePrice} onChange={(event) => setTaskDraft((draft) => ({ ...draft, hidePrice: event.target.checked }))} />绝对价格</label>
+              </fieldset>
+
+              {setupError && <div className="task-error">{setupError}</div>}
+              <div className="task-modal-actions">
+                <button className="ghost-button" onClick={() => setShowTaskSetup(false)}>取消</button>
+                <button className="primary-button" onClick={startConfiguredTraining}><Play size={16} />开始训练</button>
+              </div>
+            </section>
+          </div>
+        )}
+
         {view === "replay" && (
           <div className="replay-layout">
             <section className="chart-stage">
               <div className="chart-heading">
                 <div>
-                  <strong>{instrument.symbol}</strong>
-                  <span>{instrument.name} · {timeframe} · 历史训练</span>
+                  <strong>{trainingTask?.hideInstrument ? "BLIND" : instrument.symbol}</strong>
+                  <span>{trainingTask?.hideInstrument ? `品种已隐藏 · ${timeframe}` : `${instrument.name} · ${timeframe} · 历史训练`}</span>
                 </div>
                 {currentBar && (
                   <div className="ohlc-line">
-                    <span>O {currentBar.open.toFixed(instrument.pricePrecision)}</span>
-                    <span>H {currentBar.high.toFixed(instrument.pricePrecision)}</span>
-                    <span>L {currentBar.low.toFixed(instrument.pricePrecision)}</span>
-                    <span className={currentBar.close >= currentBar.open ? "up" : "down"}>C {currentBar.close.toFixed(instrument.pricePrecision)}</span>
+                    {trainingTask?.hidePrice ? <span><EyeOff size={13} />绝对价格已隐藏</span> : (
+                      <>
+                        <span>O {currentBar.open.toFixed(instrument.pricePrecision)}</span>
+                        <span>H {currentBar.high.toFixed(instrument.pricePrecision)}</span>
+                        <span>L {currentBar.low.toFixed(instrument.pricePrecision)}</span>
+                        <span className={currentBar.close >= currentBar.open ? "up" : "down"}>C {currentBar.close.toFixed(instrument.pricePrecision)}</span>
+                      </>
+                    )}
                   </div>
                 )}
               </div>
@@ -1158,7 +1484,7 @@ export function TrainingWorkbench() {
                   {loading ? <div className="chart-loading">正在准备历史 K 线…</div> : (
                     <KLineReplayChart
                       bars={visibleBars}
-                      symbol={instrument.symbol}
+                      symbol={trainingTask?.hideInstrument ? "BLIND" : instrument.symbol}
                       timezone={instrument.timezone}
                       timeframe={timeframe}
                       pricePrecision={instrument.pricePrecision}
@@ -1168,6 +1494,8 @@ export function TrainingWorkbench() {
                       decisionMarkers={decisionMarkers}
                       drawings={drawings}
                       drawingsRestoreNonce={drawingsRestoreNonce}
+                      hideDate={Boolean(trainingTask?.hideDate)}
+                      hidePrice={Boolean(trainingTask?.hidePrice)}
                       onDecisionSelect={setSelectedDecisionId}
                       onDrawingsChange={handleDrawingsChange}
                     />
@@ -1177,7 +1505,7 @@ export function TrainingWorkbench() {
                       <div className="decision-chart-card-head">
                         <div>
                           <span>已提交决策</span>
-                          <strong>{formatDate(selectedDecision.barTimestamp, timeframe)}</strong>
+                          <strong>{trainingTask?.hideDate ? `K线 #${selectedDecision.cursor + 1}` : formatDate(selectedDecision.barTimestamp, timeframe)}</strong>
                         </div>
                         <button aria-label="关闭决策卡" onClick={() => setSelectedDecisionId("")}>×</button>
                       </div>
@@ -1187,9 +1515,9 @@ export function TrainingWorkbench() {
                         {selectedDecision.decision.reasons.map((reason) => <span key={reason}>{reason}</span>)}
                       </div>
                       <div className="decision-chart-levels">
-                        <span>参考价 <strong>{selectedDecision.referencePrice.toFixed(instrument.pricePrecision)}</strong></span>
-                        <span>失效 <strong>{selectedDecision.decision.stop || "未填写"}</strong></span>
-                        <span>目标 <strong>{selectedDecision.decision.target || "未填写"}</strong></span>
+                        <span>参考价 <strong>{trainingTask?.hidePrice ? "已隐藏" : selectedDecision.referencePrice.toFixed(instrument.pricePrecision)}</strong></span>
+                        <span>失效 <strong>{trainingTask?.hidePrice ? "训练结束后揭示" : selectedDecision.decision.stop || "未填写"}</strong></span>
+                        <span>目标 <strong>{trainingTask?.hidePrice ? "训练结束后揭示" : selectedDecision.decision.target || "未填写"}</strong></span>
                       </div>
                       <p>{selectedDecision.decision.note || "没有填写计划说明"}</p>
                     </div>
@@ -1200,22 +1528,22 @@ export function TrainingWorkbench() {
 
               <div className="replay-controls">
                 <div className="progress-meta">
-                  <span>{currentBar ? formatDate(currentBar.timestamp, timeframe) : "--"}</span>
-                  <span>{cursor + 1} / {bars.length} 根</span>
+                  <span>{currentBar ? (trainingTask?.hideDate ? `训练第 ${currentTaskProgress.revealed} 根` : formatDate(currentBar.timestamp, timeframe)) : "--"}</span>
+                  <span>{trainingTask ? `${currentTaskProgress.revealed} / ${currentTaskProgress.total} 根` : `${cursor + 1} / ${bars.length} 根`}</span>
                 </div>
                 <div className="progress-track"><span style={{ width: `${progress}%` }} /></div>
                 <div className="transport">
-                  <button aria-label="重置" onClick={() => resetTraining(false)}><RotateCcw size={17} /></button>
-                  <button aria-label="上一根" onClick={revealPrevious}><ChevronLeft size={19} /></button>
-                  <button className="play-button" aria-label={playing ? "暂停" : "播放"} onClick={() => {
+                  <button aria-label="重置" onClick={resetTraining}><RotateCcw size={17} /></button>
+                  <button aria-label="上一根" disabled={trainingComplete || cursor <= (trainingTask?.startCursor ?? 0)} onClick={revealPrevious}><ChevronLeft size={19} /></button>
+                  <button className="play-button" disabled={trainingComplete} aria-label={playing ? "暂停" : "播放"} onClick={() => {
                     const nextPlaying = !playing;
                     setPlaying(nextPlaying);
                     appendEvent("playback_toggled", { playing: nextPlaying, speed });
                   }}>
                     {playing ? <Pause size={20} /> : <Play size={20} fill="currentColor" />}
                   </button>
-                  <button aria-label="下一根" onClick={revealNext}><ChevronRight size={19} /></button>
-                  <button aria-label="前进五根" onClick={() => revealMany(5)}><FastForward size={18} /></button>
+                  <button aria-label="下一根" disabled={trainingComplete} onClick={revealNext}><ChevronRight size={19} /></button>
+                  <button aria-label="前进五根" disabled={trainingComplete} onClick={() => revealMany(5)}><FastForward size={18} /></button>
                 </div>
                 <div className="speed-control">
                   {[0.5, 1, 2, 5].map((value) => <button key={value} className={speed === value ? "active" : ""} onClick={() => {
@@ -1224,6 +1552,18 @@ export function TrainingWorkbench() {
                   }}>{value}x</button>)}
                 </div>
               </div>
+
+              {trainingComplete && (
+                <div className="training-complete-banner">
+                  <div>
+                    <span>TRAINING COMPLETE</span>
+                    <strong>{trainingTask ? `${trainingModeLabels[trainingTask.mode]}已自动结束` : "训练已结束"}</strong>
+                    <small>已到达设定边界，未来 K 线不会继续揭示。</small>
+                  </div>
+                  <button className="ghost-button" onClick={resetTraining}><RotateCcw size={15} />按原条件重练</button>
+                  <button className="primary-button" onClick={() => setView("review")}><BookOpenCheck size={15} />查看复盘</button>
+                </div>
+              )}
 
               <div className="trade-dock">
                 <div className="trade-stats">
@@ -1240,16 +1580,16 @@ export function TrainingWorkbench() {
                   }} step={marketRules.boardLot} /></label>
                   <button
                     className="sell-button"
-                    disabled={!marketRules.tradingEnabled || !marketRules.allowShort}
+                    disabled={trainingComplete || !marketRules.tradingEnabled || !marketRules.allowShort}
                     title={!marketRules.allowShort ? `${marketRules.name}禁止卖出开仓` : ""}
                     onClick={() => queueOpenOrder("sell")}
                   ><TrendingDown size={16} />{marketRules.allowShort ? "卖出开仓" : "A股禁做空"}</button>
                   <button
                     className="buy-button"
-                    disabled={!marketRules.tradingEnabled}
+                    disabled={trainingComplete || !marketRules.tradingEnabled}
                     onClick={() => queueOpenOrder("buy")}
                   ><TrendingUp size={16} />买入开仓</button>
-                  <button className="flat-button" disabled={!closablePositions.length} onClick={queueCloseAll}>
+                  <button className="flat-button" disabled={trainingComplete || !closablePositions.length} onClick={queueCloseAll}>
                     <CircleStop size={16} />{openPositions.length && !closablePositions.length ? "T+1锁定" : "全部平仓"}
                   </button>
                 </div>
@@ -1284,13 +1624,13 @@ export function TrainingWorkbench() {
                               <td><span className="position-id">#{position.id.slice(0, 6)}</span></td>
                               <td><span className={position.side === "long" ? "side-long" : "side-short"}>{position.side === "long" ? "多 / 买" : "空 / 卖"}</span></td>
                               <td>{position.qty}</td>
-                              <td>{formatDate(position.entryTimestamp, timeframe)}</td>
-                              <td>{position.entryPrice.toFixed(instrument.pricePrecision)}</td>
-                              <td>{currentBar?.close.toFixed(instrument.pricePrecision) ?? "--"}</td>
+                              <td>{trainingDateLabel(position.entryTimestamp)}</td>
+                              <td>{trainingPriceLabel(position.entryPrice)}</td>
+                              <td>{trainingPriceLabel(currentBar?.close)}</td>
                               <td><strong className={pnl >= 0 ? "up" : "down"}>{money(pnl)}</strong></td>
                               <td><button
                                 className="row-action"
-                                disabled={closeQueued || !closeValidation.ok}
+                                disabled={trainingComplete || closeQueued || !closeValidation.ok}
                                 title={closeValidation.message}
                                 onClick={() => queueClosePosition(position.id)}
                               >{closeQueued ? "已委托" : closeValidation.ok ? "平仓" : "T+1锁定"}</button></td>
@@ -1309,7 +1649,7 @@ export function TrainingWorkbench() {
                             <td>{order.action === "open" ? "开仓" : "平仓"}</td>
                             <td><span className={order.side === "buy" ? "side-long" : "side-short"}>{order.side === "buy" ? "买入" : "卖出"}</span></td>
                             <td>{order.qty}</td>
-                            <td>{formatDate(order.createdAt, timeframe)}</td>
+                            <td>{trainingDateLabel(order.createdAt)}</td>
                             <td>#{order.positionId.slice(0, 6)}</td>
                             <td>下一根开盘 · {order.ruleVersion ?? "旧规则"}</td>
                             <td><button className="row-action danger" onClick={() => cancelPendingOrder(order.id)}>撤单</button></td>
@@ -1326,10 +1666,10 @@ export function TrainingWorkbench() {
                             <td><span className="position-id">#{position.id.slice(0, 6)}</span></td>
                             <td><span className={position.side === "long" ? "side-long" : "side-short"}>{position.side === "long" ? "多 / 买" : "空 / 卖"}</span></td>
                             <td>{position.qty}</td>
-                            <td>{formatDate(position.entryTimestamp, timeframe)}</td>
-                            <td>{position.entryPrice.toFixed(instrument.pricePrecision)}</td>
-                            <td>{position.exitTimestamp ? formatDate(position.exitTimestamp, timeframe) : "--"}</td>
-                            <td>{position.exitPrice?.toFixed(instrument.pricePrecision) ?? "--"}</td>
+                            <td>{trainingDateLabel(position.entryTimestamp)}</td>
+                            <td>{trainingPriceLabel(position.entryPrice)}</td>
+                            <td>{position.exitTimestamp ? trainingDateLabel(position.exitTimestamp) : "--"}</td>
+                            <td>{trainingPriceLabel(position.exitPrice)}</td>
                             <td><strong className={(position.realizedPnl ?? 0) >= 0 ? "up" : "down"}>{money(position.realizedPnl ?? 0)}</strong></td>
                           </tr>
                         )) : <tr><td className="orders-empty" colSpan={8}>平仓后，买卖点会以浅色虚线连接并保留在这里。</td></tr>}</tbody>
@@ -1341,7 +1681,7 @@ export function TrainingWorkbench() {
                   <div className="rule-rejections">
                     <strong>最近规则拒单</strong>
                     {[...orderRejections].reverse().slice(0, 3).map((rejection) => (
-                      <span key={rejection.id}>{formatDate(rejection.timestamp, timeframe)} · {rejection.message}</span>
+                      <span key={rejection.id}>{trainingDateLabel(rejection.timestamp)} · {rejection.message}</span>
                     ))}
                   </div>
                 )}
@@ -1389,7 +1729,7 @@ export function TrainingWorkbench() {
                 <div><strong>{decision.reasons.length >= 2 ? "条件已成形" : "再找一个独立理由"}</strong><span>评分关注过程，不用结果倒推理由</span></div>
               </div>
               <div className="submitted-plan-count">已提交 <strong>{decisionSubmissions.length}</strong> 份计划 · 点击盘面“计划”标记可查看</div>
-              <button className="commit-plan" onClick={submitDecision}><ListChecks size={17} />提交决策并揭示下一根</button>
+              <button className="commit-plan" disabled={trainingComplete} onClick={submitDecision}><ListChecks size={17} />{trainingComplete ? "训练已结束" : "提交决策并揭示下一根"}</button>
             </aside>
           </div>
         )}
@@ -1448,6 +1788,8 @@ export function TrainingWorkbench() {
                 <div className="evidence-row"><span>交易理由</span><strong>{reviewDecision.reasons.join("、") || "未填写"}</strong></div>
                 <div className="evidence-row"><span>失效 / 止损</span><strong>{reviewDecision.stop || "未填写"}</strong></div>
                 <div className="evidence-row"><span>第一目标</span><strong>{reviewDecision.target || "未填写"}</strong></div>
+                <div className="evidence-row"><span>训练模式</span><strong>{reviewState.trainingTask ? trainingModeLabels[reviewState.trainingTask.mode] : "旧版自由训练"}</strong></div>
+                <div className="evidence-row"><span>任务状态</span><strong>{reviewState.trainingTask?.status === "completed" ? "已完成" : "进行中"}</strong></div>
                 <div className="evidence-row"><span>市场规则</span><strong>{reviewState.marketRules ? `${reviewState.marketRules.name} · ${reviewState.marketRules.version}` : "旧训练未锁定规则版本"}</strong></div>
                 <div className="evidence-row"><span>规则拒单</span><strong>{reviewState.orderRejections.length}</strong></div>
                 <div className="review-note"><span>计划说明</span><p>{reviewDecision.note || "未填写"}</p></div>
