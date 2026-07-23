@@ -30,6 +30,10 @@ test("ships the K-line training workbench instead of the starter", async () => {
   assert.match(workbench, /decisionSubmissions/);
   assert.match(workbench, /事前决策记录/);
   assert.match(workbench, /查看复盘/);
+  assert.match(workbench, /只有点击“保存训练”或训练自动结束后/);
+  assert.match(workbench, /随机训练规则/);
+  assert.match(workbench, /什么是盲测/);
+  assert.match(workbench, /总盈亏/);
   assert.match(workbench, /orders_filled/);
   assert.match(workbench, /deleteSession/);
   assert.match(workbench, /dataSnapshotId/);

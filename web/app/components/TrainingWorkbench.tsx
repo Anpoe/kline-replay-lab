@@ -4,7 +4,6 @@ import {
   BarChart3,
   BookOpenCheck,
   Brush,
-  CalendarRange,
   ChevronLeft,
   ChevronRight,
   CircleStop,
@@ -163,7 +162,7 @@ type SnapshotMeta = {
   createdAt: string;
 };
 type TrainingState = {
-  version: 5;
+  version: 6;
   cursor: number;
   cursorTimestamp?: number;
   dataSignature?: string;
@@ -181,6 +180,13 @@ type TrainingState = {
   events: TrainingEvent[];
   marketRules?: MarketRuleProfile;
   trainingTask?: TrainingTask;
+  pnlSnapshot?: {
+    realized: number;
+    floating: number;
+    total: number;
+    openPositions: number;
+    closedPositions: number;
+  };
 };
 type TrainingSession = {
   id: string;
@@ -211,8 +217,24 @@ type MistakeSource = {
   targetCursor: number;
   label: string;
 };
+type SettingsTab = "basic" | "training";
+type AppSettings = {
+  defaultInstrumentId: string;
+  defaultTimeframe: string;
+  defaultOrderQty: number;
+  defaultSpeed: number;
+  randomInstrumentMode: "current" | "all" | "market";
+  randomMarket: string;
+  randomTimeframeMode: "current" | "all" | "fixed";
+  randomTimeframe: string;
+  randomDateMode: "all" | "range";
+  randomStartDate: string;
+  randomEndDate: string;
+  randomLength: number;
+};
 
 const LAST_DRAFT_KEY = "kline-replay-lab:last-training";
+const APP_SETTINGS_KEY = "kline-replay-lab:settings";
 const defaultDecision: Decision = {
   marketState: "趋势",
   location: "回调位置",
@@ -227,6 +249,20 @@ const instruments = [
   { id: "AAPL.US", short: "AAPL", label: "Apple", market: "美股" },
 ];
 const timeframes = ["5m", "1h", "1d", "1w"];
+const defaultAppSettings: AppSettings = {
+  defaultInstrumentId: "600519.SH",
+  defaultTimeframe: "1d",
+  defaultOrderQty: 100,
+  defaultSpeed: 1,
+  randomInstrumentMode: "all",
+  randomMarket: "A股",
+  randomTimeframeMode: "all",
+  randomTimeframe: "1d",
+  randomDateMode: "all",
+  randomStartDate: "",
+  randomEndDate: "",
+  randomLength: 40,
+};
 const reasonOptions = ["顺势", "关键位置", "突破回踩", "失败突破", "二次入场", "信号K确认"];
 const drawingTools = [
   { name: "horizontalStraightLine", label: "水平线", icon: LineChart },
@@ -239,6 +275,41 @@ const drawingTools = [
 
 function money(value: number) {
   return `${value >= 0 ? "+" : ""}${value.toFixed(2)}`;
+}
+
+function normalizeSettings(value: Partial<AppSettings>): AppSettings {
+  const merged = { ...defaultAppSettings, ...value };
+  return {
+    ...merged,
+    defaultInstrumentId: instruments.some((item) => item.id === merged.defaultInstrumentId)
+      ? merged.defaultInstrumentId
+      : defaultAppSettings.defaultInstrumentId,
+    defaultTimeframe: timeframes.includes(merged.defaultTimeframe)
+      ? merged.defaultTimeframe
+      : defaultAppSettings.defaultTimeframe,
+    defaultOrderQty: Math.max(1, Math.round(Number(merged.defaultOrderQty) || defaultAppSettings.defaultOrderQty)),
+    defaultSpeed: [0.5, 1, 2, 5].includes(Number(merged.defaultSpeed))
+      ? Number(merged.defaultSpeed)
+      : defaultAppSettings.defaultSpeed,
+    randomInstrumentMode: ["current", "all", "market"].includes(merged.randomInstrumentMode)
+      ? merged.randomInstrumentMode
+      : defaultAppSettings.randomInstrumentMode,
+    randomTimeframeMode: ["current", "all", "fixed"].includes(merged.randomTimeframeMode)
+      ? merged.randomTimeframeMode
+      : defaultAppSettings.randomTimeframeMode,
+    randomTimeframe: timeframes.includes(merged.randomTimeframe)
+      ? merged.randomTimeframe
+      : defaultAppSettings.randomTimeframe,
+    randomDateMode: merged.randomDateMode === "range" ? "range" : "all",
+    randomLength: Math.max(0, Math.round(Number(merged.randomLength) || 0)),
+  };
+}
+
+function randomItem<T>(items: T[]) {
+  if (!items.length) return undefined;
+  const values = new Uint32Array(1);
+  crypto.getRandomValues(values);
+  return items[values[0] % items.length];
 }
 
 function formatDate(timestamp: number, timeframe: string) {
@@ -365,6 +436,11 @@ export function TrainingWorkbench() {
   const [marketRules, setMarketRules] = useState<MarketRuleProfile>(CN_A_MAINBOARD_RULES_V1);
   const [trainingTask, setTrainingTask] = useState<TrainingTask | null>(null);
   const [showTaskSetup, setShowTaskSetup] = useState(false);
+  const [showSettings, setShowSettings] = useState(false);
+  const [settingsTab, setSettingsTab] = useState<SettingsTab>("basic");
+  const [appSettings, setAppSettings] = useState<AppSettings>(defaultAppSettings);
+  const [settingsDraft, setSettingsDraft] = useState<AppSettings>(defaultAppSettings);
+  const [settingsError, setSettingsError] = useState("");
   const [taskDraft, setTaskDraft] = useState<TrainingTaskDraft>(defaultTrainingTaskDraft);
   const [setupInstrumentId, setSetupInstrumentId] = useState("600519.SH");
   const [setupTimeframe, setSetupTimeframe] = useState("1d");
@@ -382,6 +458,8 @@ export function TrainingWorkbench() {
   const [restoreNotice, setRestoreNotice] = useState("");
   const restoreRequestRef = useRef<RestoreRequest | null>(null);
   const newTaskRequestRef = useRef<NewTaskRequest | null>(null);
+  const saveCompletedTrainingRef = useRef(false);
+  const appSettingsRef = useRef<AppSettings>(defaultAppSettings);
   const eventSequenceRef = useRef(0);
 
   const visibleBars = useMemo(() => bars.slice(0, cursor + 1), [bars, cursor]);
@@ -410,6 +488,7 @@ export function TrainingWorkbench() {
     ? openPositions.reduce((sum, position) => sum + (currentBar.close - position.entryPrice) * position.qty * (position.side === "long" ? 1 : -1), 0)
     : 0;
   const realizedPnl = closedPositions.reduce((sum, position) => sum + (position.realizedPnl ?? 0), 0);
+  const totalPnl = realizedPnl + openPnl;
   const tradeMarkers = useMemo<TradeMarker[]>(() => positions
     .filter((position) => !currentBar || position.entryTimestamp <= currentBar.timestamp)
     .map((position) => {
@@ -454,7 +533,7 @@ export function TrainingWorkbench() {
     ? `${bars.length}:${bars[0].timestamp}:${bars[bars.length - 1].timestamp}`
     : "", [bars]);
   const trainingState = useMemo<TrainingState>(() => ({
-    version: 5,
+    version: 6,
     cursor,
     cursorTimestamp: currentBar?.timestamp,
     dataSignature,
@@ -472,7 +551,14 @@ export function TrainingWorkbench() {
     events,
     marketRules,
     trainingTask: trainingTask ?? undefined,
-  }), [cursor, currentBar?.timestamp, dataSignature, dataSnapshotId, decision, decisionSubmissions, drawings, events, executions, marketRules, orderQty, orderRejections, pendingOrders, positions, randomSeed, snapshotHash, trainingTask]);
+    pnlSnapshot: {
+      realized: realizedPnl,
+      floating: openPnl,
+      total: totalPnl,
+      openPositions: openPositions.length,
+      closedPositions: closedPositions.length,
+    },
+  }), [closedPositions.length, cursor, currentBar?.timestamp, dataSignature, dataSnapshotId, decision, decisionSubmissions, drawings, events, executions, marketRules, openPnl, openPositions.length, orderQty, orderRejections, pendingOrders, positions, randomSeed, realizedPnl, snapshotHash, totalPnl, trainingTask]);
   const reviewState = reviewedSession?.state ?? trainingState;
   const reviewClosedPositions = reviewState.positions.filter((position) => position.status === "closed");
   const reviewRealizedPnl = reviewClosedPositions.reduce((sum, position) => sum + (position.realizedPnl ?? 0), 0);
@@ -488,7 +574,7 @@ export function TrainingWorkbench() {
     const state = value as Partial<TrainingState>;
     if (!Number.isFinite(state.cursor) || !Array.isArray(state.positions) || !Array.isArray(state.pendingOrders)) return null;
     return {
-      version: 5,
+      version: 6,
       cursor: Number(state.cursor),
       cursorTimestamp: typeof state.cursorTimestamp === "number" ? state.cursorTimestamp : undefined,
       dataSignature: typeof state.dataSignature === "string" ? state.dataSignature : undefined,
@@ -506,7 +592,39 @@ export function TrainingWorkbench() {
       events: Array.isArray(state.events) ? state.events : [],
       marketRules: state.marketRules && typeof state.marketRules === "object" ? state.marketRules : undefined,
       trainingTask: state.trainingTask && typeof state.trainingTask === "object" ? state.trainingTask : undefined,
+      pnlSnapshot: state.pnlSnapshot && typeof state.pnlSnapshot === "object"
+        ? state.pnlSnapshot
+        : {
+          realized: state.positions
+            .filter((position) => position.status === "closed")
+            .reduce((sum, position) => sum + (position.realizedPnl ?? 0), 0),
+          floating: 0,
+          total: state.positions
+            .filter((position) => position.status === "closed")
+            .reduce((sum, position) => sum + (position.realizedPnl ?? 0), 0),
+          openPositions: state.positions.filter((position) => position.status === "open").length,
+          closedPositions: state.positions.filter((position) => position.status === "closed").length,
+        },
     };
+  }, []);
+
+  useEffect(() => {
+    const timer = window.setTimeout(() => {
+      try {
+        const stored = window.localStorage.getItem(APP_SETTINGS_KEY);
+        const nextSettings = stored
+          ? normalizeSettings(JSON.parse(stored) as Partial<AppSettings>)
+          : defaultAppSettings;
+        appSettingsRef.current = nextSettings;
+        setAppSettings(nextSettings);
+        setSettingsDraft(nextSettings);
+        setSpeed(nextSettings.defaultSpeed);
+        setOrderQty(nextSettings.defaultOrderQty);
+      } catch {
+        window.localStorage.removeItem(APP_SETTINGS_KEY);
+      }
+    }, 0);
+    return () => window.clearTimeout(timer);
   }, []);
 
   const appendEvent = useCallback((
@@ -516,7 +634,10 @@ export function TrainingWorkbench() {
   ) => {
     const sequence = eventSequenceRef.current + 1;
     eventSequenceRef.current = sequence;
-    setEvents((items) => [...items, createTrainingEvent(sequence, type, barTimestamp, payload)]);
+    const event = createTrainingEvent(sequence, type, barTimestamp, payload);
+    setEvents((items) => [...items, event]);
+    setSaveState("有未保存更改");
+    return event;
   }, [currentBar?.timestamp]);
 
   const queueRestore = useCallback((request: RestoreRequest) => {
@@ -576,6 +697,7 @@ export function TrainingWorkbench() {
     setLoading(true);
     setTrainingReady(false);
     setPlaying(false);
+    saveCompletedTrainingRef.current = false;
     try {
       const requestedSnapshotId = restoreRequest?.state.dataSnapshotId
         ?? restoreRequest?.dataSnapshotId
@@ -638,7 +760,7 @@ export function TrainingWorkbench() {
             marketRuleVersion: loadedMarketRules.version,
           }),
         ]);
-        setSaveState("已恢复 · 本机自动保存");
+        setSaveState("已恢复保存点");
         setRestoreNotice(legacySnapshotCreated
           ? "旧训练已恢复，并从当前行情建立首份不可变快照；从本次保存开始可以跨行情版本完全复现。"
           : `已从不可变快照恢复，哈希 ${data.snapshot.contentHash.slice(0, 12)}；当前行情库后续变化不会影响本次训练。`);
@@ -653,6 +775,7 @@ export function TrainingWorkbench() {
         );
         setCursor(nextTask.startCursor);
         setTrainingTask(nextTask);
+        saveCompletedTrainingRef.current = nextTask.status === "completed";
         setPositions([]);
         setPendingOrders([]);
         setExecutions([]);
@@ -660,7 +783,8 @@ export function TrainingWorkbench() {
         setDecision(defaultDecision);
         setDecisionSubmissions([]);
         setSelectedDecisionId("");
-        setOrderQty(100);
+        setOrderQty(appSettingsRef.current.defaultOrderQty);
+        setSpeed(appSettingsRef.current.defaultSpeed);
         setDrawings([]);
         setClearNonce(Date.now());
         setSessionId(nextSessionId);
@@ -684,7 +808,7 @@ export function TrainingWorkbench() {
           marketRuleId: loadedMarketRules.id,
           marketRuleVersion: loadedMarketRules.version,
         })]);
-        setSaveState("新训练 · 本机自动保存");
+        setSaveState("新训练 · 尚未保存");
         setRestoreNotice("");
       }
       setOrderPanelTab("positions");
@@ -701,31 +825,38 @@ export function TrainingWorkbench() {
     return () => window.clearTimeout(timer);
   }, [loadBars, loadNonce]);
 
-  useEffect(() => {
-    if (!trainingReady || !bars.length) return;
+  const persistTrainingState = useCallback(async (
+    state: TrainingState,
+    successMessage: string,
+  ) => {
     const savedAt = new Date().toISOString();
     window.localStorage.setItem(LAST_DRAFT_KEY, JSON.stringify({
       id: sessionId,
       instrumentId,
       timeframe,
-      state: trainingState,
+      state,
       updatedAt: savedAt,
     }));
+    try {
+      const response = await fetch("/api/sessions", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ id: sessionId, instrumentId, timeframe, dataSnapshotId, state }),
+      });
+      setSaveState(response.ok ? successMessage : "浏览器保存点已写入 · 数据库保存失败");
+      return response.ok;
+    } catch {
+      setSaveState("浏览器保存点已写入 · 数据库保存失败");
+      return false;
+    }
+  }, [dataSnapshotId, instrumentId, sessionId, timeframe]);
 
-    const timer = window.setTimeout(async () => {
-      try {
-        const response = await fetch("/api/sessions", {
-          method: "POST",
-          headers: { "content-type": "application/json" },
-          body: JSON.stringify({ id: sessionId, instrumentId, timeframe, dataSnapshotId, state: trainingState }),
-        });
-        if (response.ok) setSaveState("已自动保存");
-      } catch {
-        setSaveState("本机已保存 · 数据库稍后重试");
-      }
-    }, 900);
-    return () => window.clearTimeout(timer);
-  }, [bars.length, dataSnapshotId, instrumentId, sessionId, timeframe, trainingReady, trainingState]);
+  useEffect(() => {
+    if (!trainingReady || !trainingComplete || !saveCompletedTrainingRef.current) return;
+    saveCompletedTrainingRef.current = false;
+    setSaveState("训练完成 · 正在保存…");
+    void persistTrainingState(trainingState, "训练完成 · 已保存");
+  }, [persistTrainingState, trainingComplete, trainingReady, trainingState]);
 
   const executeOrders = useCallback((orders: PendingOrder[], bar: KLineData) => {
     if (!orders.length) return;
@@ -835,6 +966,7 @@ export function TrainingWorkbench() {
       const completedTask = finishTask(trainingTask, nextCursor);
       setTrainingTask(completedTask);
       setPlaying(false);
+      saveCompletedTrainingRef.current = true;
       appendEvent("training_completed", {
         trainingMode: completedTask.mode,
         startCursor: completedTask.startCursor,
@@ -963,6 +1095,7 @@ export function TrainingWorkbench() {
   };
 
   const resetTraining = () => {
+    saveCompletedTrainingRef.current = false;
     const nextRandomSeed = crypto.randomUUID();
     const nextSessionId = crypto.randomUUID();
     const baseTask = trainingTask ?? createLegacyTrainingTask(bars, Math.max(0, Math.floor(bars.length * 0.68)));
@@ -1004,24 +1137,16 @@ export function TrainingWorkbench() {
       marketRuleVersion: marketRules.version,
     })]);
     setRestoreNotice("");
-    setSaveState("新训练 · 本机自动保存");
+    setSaveState("新训练 · 尚未保存");
   };
 
   const saveSession = async () => {
-    appendEvent("session_manually_saved");
     setSaveState("保存中…");
-    const response = await fetch("/api/sessions", {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({
-        id: sessionId,
-        instrumentId,
-        timeframe,
-        dataSnapshotId,
-        state: trainingState,
-      }),
-    });
-    setSaveState(response.ok ? "已保存到本地数据库" : "本机已有快照 · 数据库保存失败");
+    const savedEvent = appendEvent("session_manually_saved");
+    await persistTrainingState({
+      ...trainingState,
+      events: [...trainingState.events, savedEvent],
+    }, "已手动保存");
   };
 
   const resumeSession = (session: TrainingSession) => {
@@ -1121,6 +1246,37 @@ export function TrainingWorkbench() {
     }
   }, []);
 
+  const sessionSummaries = useMemo(() => sessions.flatMap((session) => {
+    try {
+      const state = parseTrainingState(JSON.parse(session.stateJson));
+      if (!state) return [];
+      const task = state.trainingTask;
+      const pnl = state.pnlSnapshot ?? {
+        realized: 0,
+        floating: 0,
+        total: 0,
+        openPositions: state.positions.filter((position) => position.status === "open").length,
+        closedPositions: state.positions.filter((position) => position.status === "closed").length,
+      };
+      const progressSummary = task
+        ? taskProgress(task, state.cursor)
+        : { revealed: 0, total: 0, percent: 0 };
+      return [{
+        session,
+        state,
+        task,
+        pnl,
+        progressSummary,
+        modeLabel: task ? trainingModeLabels[task.mode] : "旧版自由训练",
+        rangeLabel: task
+          ? `${formatDate(task.startTimestamp, session.timeframe)} → ${formatDate(task.endTimestamp, session.timeframe)}`
+          : `保存于 K线 ${state.cursor + 1}`,
+      }];
+    } catch {
+      return [];
+    }
+  }), [parseTrainingState, sessions]);
+
   const mistakeSources = useMemo<MistakeSource[]>(() => sessions.flatMap((session) => {
     try {
       const state = parseTrainingState(JSON.parse(session.stateJson));
@@ -1141,12 +1297,43 @@ export function TrainingWorkbench() {
     }
   }), [parseTrainingState, sessions]);
 
-  const openTaskSetup = (preset: "default" | "random" = "default") => {
-    setSetupInstrumentId(instrumentId);
-    setSetupTimeframe(timeframe);
+  const openSettingsPanel = (tab: SettingsTab = "basic") => {
+    setSettingsDraft(appSettings);
+    setSettingsTab(tab);
+    setSettingsError("");
+    setShowSettings(true);
+  };
+
+  const saveSettings = () => {
+    if (
+      settingsDraft.randomDateMode === "range"
+      && (!settingsDraft.randomStartDate || !settingsDraft.randomEndDate)
+    ) {
+      setSettingsError("随机时间段需要填写开始和结束日期。");
+      return;
+    }
+    if (
+      settingsDraft.randomDateMode === "range"
+      && settingsDraft.randomEndDate < settingsDraft.randomStartDate
+    ) {
+      setSettingsError("随机时间段的结束日期不能早于开始日期。");
+      return;
+    }
+    const nextSettings = normalizeSettings(settingsDraft);
+    window.localStorage.setItem(APP_SETTINGS_KEY, JSON.stringify(nextSettings));
+    appSettingsRef.current = nextSettings;
+    setAppSettings(nextSettings);
+    setSettingsDraft(nextSettings);
+    setSpeed(nextSettings.defaultSpeed);
+    setOrderQty(nextSettings.defaultOrderQty);
+    setShowSettings(false);
+  };
+
+  const openTaskSetup = () => {
+    setSetupInstrumentId(appSettings.defaultInstrumentId);
+    setSetupTimeframe(appSettings.defaultTimeframe);
     setTaskDraft({
       ...defaultTrainingTaskDraft,
-      startMode: preset === "random" ? "random" : "default",
       startDate: currentBar ? tradingDate(currentBar.timestamp, instrument.timezone) : "",
       startBar: cursor + 1,
       endDate: bars.at(-1) ? tradingDate(bars.at(-1)!.timestamp, instrument.timezone) : "",
@@ -1176,6 +1363,28 @@ export function TrainingWorkbench() {
     let requestTimeframe = setupTimeframe;
     let requestSnapshotId: string | undefined;
     let draft = { ...taskDraft };
+
+    if (draft.startMode === "random" && draft.mode !== "range" && draft.mode !== "mistake") {
+      const instrumentCandidates = appSettings.randomInstrumentMode === "current"
+        ? instruments.filter((item) => item.id === instrumentId)
+        : appSettings.randomInstrumentMode === "market"
+          ? instruments.filter((item) => item.market === appSettings.randomMarket)
+          : instruments;
+      const selectedInstrument = randomItem(instrumentCandidates) ?? instruments[0];
+      const selectedTimeframe = appSettings.randomTimeframeMode === "current"
+        ? timeframe
+        : appSettings.randomTimeframeMode === "fixed"
+          ? appSettings.randomTimeframe
+          : randomItem(timeframes) ?? timeframe;
+      requestInstrumentId = selectedInstrument.id;
+      requestTimeframe = selectedTimeframe;
+      draft = {
+        ...draft,
+        length: draft.length > 0 ? draft.length : appSettings.randomLength,
+        randomStartDate: appSettings.randomDateMode === "range" ? appSettings.randomStartDate : undefined,
+        randomEndDate: appSettings.randomDateMode === "range" ? appSettings.randomEndDate : undefined,
+      };
+    }
 
     if (draft.mode === "range") {
       if (!draft.startDate || !draft.endDate) {
@@ -1298,7 +1507,9 @@ export function TrainingWorkbench() {
             <BookOpenCheck size={20} /><span>复盘</span>
           </button>
         </nav>
-        <button className="rail-bottom" aria-label="设置"><Settings2 size={20} /></button>
+        <button className={`rail-bottom ${showSettings ? "active" : ""}`} aria-label="设置" onClick={() => openSettingsPanel()}>
+          <Settings2 size={20} /><span>设置</span>
+        </button>
       </aside>
 
       <main className="workspace">
@@ -1323,8 +1534,7 @@ export function TrainingWorkbench() {
           </div>
           <div className="top-actions">
             <span className={`save-state ${saveState.includes("已") ? "saved" : ""}`}>{saveState}</span>
-            <button className="ghost-button" onClick={() => openTaskSetup("random")}><Shuffle size={16} />随机训练</button>
-            <button className="ghost-button" onClick={() => openTaskSetup()}><CalendarRange size={16} />新建训练</button>
+            <button className="ghost-button" onClick={openTaskSetup}><Play size={16} />新建 Replay 训练</button>
             <button className="primary-button" onClick={saveSession}><Save size={16} />保存训练</button>
           </div>
         </header>
@@ -1333,6 +1543,129 @@ export function TrainingWorkbench() {
           <div className="restore-notice">
             <span><RotateCcw size={14} />{restoreNotice}</span>
             <button onClick={() => setRestoreNotice("")}>知道了</button>
+          </div>
+        )}
+
+        {showSettings && (
+          <div className="task-modal-backdrop" role="presentation" onMouseDown={(event) => {
+            if (event.target === event.currentTarget) setShowSettings(false);
+          }}>
+            <section className="task-modal settings-modal" role="dialog" aria-modal="true" aria-labelledby="settings-modal-title">
+              <div className="task-modal-head">
+                <div>
+                  <span>SETTINGS</span>
+                  <h2 id="settings-modal-title">本地设置</h2>
+                  <p>设置只保存在这台电脑，用于新训练的默认值和随机抽样规则。</p>
+                </div>
+                <button aria-label="关闭设置" onClick={() => setShowSettings(false)}><X size={19} /></button>
+              </div>
+
+              <div className="settings-tabs" role="tablist" aria-label="设置分类">
+                <button className={settingsTab === "basic" ? "active" : ""} onClick={() => setSettingsTab("basic")}>基本设置</button>
+                <button className={settingsTab === "training" ? "active" : ""} onClick={() => setSettingsTab("training")}>训练设置</button>
+              </div>
+
+              {settingsTab === "basic" ? (
+                <div className="settings-section">
+                  <div className="settings-section-head">
+                    <strong>新训练默认值</strong>
+                    <span>打开“新建 Replay 训练”时优先使用这些选项。</span>
+                  </div>
+                  <div className="task-form-row">
+                    <label>默认品种
+                      <select value={settingsDraft.defaultInstrumentId} onChange={(event) => setSettingsDraft((draft) => ({ ...draft, defaultInstrumentId: event.target.value }))}>
+                        {instruments.map((item) => <option key={item.id} value={item.id}>{item.short} · {item.label}</option>)}
+                      </select>
+                    </label>
+                    <label>默认周期
+                      <select value={settingsDraft.defaultTimeframe} onChange={(event) => setSettingsDraft((draft) => ({ ...draft, defaultTimeframe: event.target.value }))}>
+                        {timeframes.map((item) => <option key={item}>{item}</option>)}
+                      </select>
+                    </label>
+                    <label>默认下单数量
+                      <input type="number" min="1" value={settingsDraft.defaultOrderQty} onChange={(event) => setSettingsDraft((draft) => ({ ...draft, defaultOrderQty: Math.max(1, Number(event.target.value)) }))} />
+                    </label>
+                    <label>默认播放速度
+                      <select value={settingsDraft.defaultSpeed} onChange={(event) => setSettingsDraft((draft) => ({ ...draft, defaultSpeed: Number(event.target.value) }))}>
+                        {[0.5, 1, 2, 5].map((item) => <option key={item} value={item}>{item}x</option>)}
+                      </select>
+                    </label>
+                  </div>
+                </div>
+              ) : (
+                <div className="settings-section">
+                  <div className="settings-section-head">
+                    <strong>随机训练规则</strong>
+                    <span>在新建训练中选择“随机起点”时，按这里的范围抽取品种、周期和历史片段。</span>
+                  </div>
+
+                  <div className="settings-rule">
+                    <span>如何选择品种</span>
+                    <div className="task-start-options">
+                      {([
+                        ["current", "固定当前品种"],
+                        ["all", "全部品种随机"],
+                        ["market", "指定市场随机"],
+                      ] as const).map(([value, label]) => (
+                        <button key={value} className={settingsDraft.randomInstrumentMode === value ? "active" : ""} onClick={() => setSettingsDraft((draft) => ({ ...draft, randomInstrumentMode: value }))}>{label}</button>
+                      ))}
+                    </div>
+                    {settingsDraft.randomInstrumentMode === "market" && (
+                      <label>指定市场
+                        <select value={settingsDraft.randomMarket} onChange={(event) => setSettingsDraft((draft) => ({ ...draft, randomMarket: event.target.value }))}>
+                          {[...new Set(instruments.map((item) => item.market))].map((market) => <option key={market}>{market}</option>)}
+                        </select>
+                      </label>
+                    )}
+                  </div>
+
+                  <div className="settings-rule">
+                    <span>如何选择时间周期</span>
+                    <div className="task-start-options">
+                      {([
+                        ["current", "固定当前周期"],
+                        ["all", "全部周期随机"],
+                        ["fixed", "指定周期"],
+                      ] as const).map(([value, label]) => (
+                        <button key={value} className={settingsDraft.randomTimeframeMode === value ? "active" : ""} onClick={() => setSettingsDraft((draft) => ({ ...draft, randomTimeframeMode: value }))}>{label}</button>
+                      ))}
+                    </div>
+                    {settingsDraft.randomTimeframeMode === "fixed" && (
+                      <label>指定周期
+                        <select value={settingsDraft.randomTimeframe} onChange={(event) => setSettingsDraft((draft) => ({ ...draft, randomTimeframe: event.target.value }))}>
+                          {timeframes.map((item) => <option key={item}>{item}</option>)}
+                        </select>
+                      </label>
+                    )}
+                  </div>
+
+                  <div className="settings-rule">
+                    <span>随机历史时间段</span>
+                    <div className="task-start-options">
+                      <button className={settingsDraft.randomDateMode === "all" ? "active" : ""} onClick={() => setSettingsDraft((draft) => ({ ...draft, randomDateMode: "all" }))}>全部历史</button>
+                      <button className={settingsDraft.randomDateMode === "range" ? "active" : ""} onClick={() => setSettingsDraft((draft) => ({ ...draft, randomDateMode: "range" }))}>指定时间段</button>
+                    </div>
+                    {settingsDraft.randomDateMode === "range" && (
+                      <div className="task-form-row">
+                        <label>开始日期<input type="date" value={settingsDraft.randomStartDate} onChange={(event) => setSettingsDraft((draft) => ({ ...draft, randomStartDate: event.target.value }))} /></label>
+                        <label>结束日期<input type="date" value={settingsDraft.randomEndDate} onChange={(event) => setSettingsDraft((draft) => ({ ...draft, randomEndDate: event.target.value }))} /></label>
+                      </div>
+                    )}
+                  </div>
+
+                  <label className="task-wide-field">默认训练长度（揭示 K 线数）
+                    <input type="number" min="0" value={settingsDraft.randomLength} onChange={(event) => setSettingsDraft((draft) => ({ ...draft, randomLength: Math.max(0, Number(event.target.value)) }))} />
+                    <small>选择随机起点时作为默认长度；0 表示一直练到该数据集末尾。</small>
+                  </label>
+                </div>
+              )}
+
+              {settingsError && <div className="task-error">{settingsError}</div>}
+              <div className="task-modal-actions">
+                <button className="ghost-button" onClick={() => setShowSettings(false)}>取消</button>
+                <button className="primary-button" onClick={saveSettings}><Save size={16} />保存设置</button>
+              </div>
+            </section>
           </div>
         )}
 
@@ -1345,7 +1678,7 @@ export function TrainingWorkbench() {
                 <div>
                   <span>TRAINING TASK</span>
                   <h2 id="task-modal-title">新建 Replay 训练</h2>
-                  <p>训练边界和隐藏项会随快照保存，恢复后继续生效。</p>
+                  <p>只有点击“保存训练”或训练自动结束后，才会出现在可恢复训练中。</p>
                 </div>
                 <button aria-label="关闭新建训练" onClick={() => setShowTaskSetup(false)}><X size={19} /></button>
               </div>
@@ -1357,13 +1690,23 @@ export function TrainingWorkbench() {
                     className={taskDraft.mode === mode ? "active" : ""}
                     onClick={() => selectTrainingMode(mode)}
                   >
-                    <strong>{trainingModeLabels[mode]}</strong>
-                    <span>{mode === "free" ? "按自己的节奏练习" : mode === "blind" ? "隐藏答案，结束后复盘" : mode === "range" ? "固定日期区间自动结束" : "重做低分计划与规则拒单"}</span>
+                    <strong>{mode === "blind" ? "盲测（隐藏答案）" : trainingModeLabels[mode]}</strong>
+                    <span>{mode === "free" ? "按自己的节奏练习" : mode === "blind" ? "只看结构做判断，结束后揭示" : mode === "range" ? "固定日期区间自动结束" : "重做低分计划与规则拒单"}</span>
                   </button>
                 ))}
               </div>
 
-              {taskDraft.mode !== "mistake" && (
+              {taskDraft.mode === "blind" && (
+                <div className="blind-explainer">
+                  <EyeOff size={18} />
+                  <div>
+                    <strong>什么是盲测？</strong>
+                    <p>系统隐藏品种名、日期和绝对价格，你只能根据 K 线结构制定计划，避免因为“记得这段行情”而提前知道答案。训练结束后再进入复盘查看真实信息。下面三个隐藏项仍可单独调整。</p>
+                  </div>
+                </div>
+              )}
+
+              {taskDraft.mode !== "mistake" && taskDraft.startMode !== "random" && (
                 <div className="task-form-row">
                   <label>品种
                     <select value={setupInstrumentId} onChange={(event) => setSetupInstrumentId(event.target.value)}>
@@ -1375,6 +1718,26 @@ export function TrainingWorkbench() {
                       {timeframes.map((item) => <option key={item}>{item}</option>)}
                     </select>
                   </label>
+                </div>
+              )}
+
+              {taskDraft.mode !== "mistake" && taskDraft.startMode === "random" && (
+                <div className="random-rule-summary">
+                  <Shuffle size={18} />
+                  <div>
+                    <strong>使用训练设置中的随机规则</strong>
+                    <span>
+                      {appSettings.randomInstrumentMode === "current" ? "固定当前品种" : appSettings.randomInstrumentMode === "market" ? `${appSettings.randomMarket}中随机标的` : "全部品种随机"}
+                      {" · "}
+                      {appSettings.randomTimeframeMode === "current" ? "固定当前周期" : appSettings.randomTimeframeMode === "fixed" ? `固定 ${appSettings.randomTimeframe}` : "全部周期随机"}
+                      {" · "}
+                      {appSettings.randomDateMode === "range" ? `${appSettings.randomStartDate || "未设置"} 至 ${appSettings.randomEndDate || "未设置"}` : "全部历史"}
+                    </span>
+                  </div>
+                  <button onClick={() => {
+                    setShowTaskSetup(false);
+                    openSettingsPanel("training");
+                  }}>调整规则</button>
                 </div>
               )}
 
@@ -1412,7 +1775,11 @@ export function TrainingWorkbench() {
                       ["bar", "指定 K 线"],
                       ["random", "随机起点"],
                     ] as const).map(([value, label]) => (
-                      <button key={value} className={taskDraft.startMode === value ? "active" : ""} onClick={() => setTaskDraft((draft) => ({ ...draft, startMode: value }))}>{label}</button>
+                      <button key={value} className={taskDraft.startMode === value ? "active" : ""} onClick={() => setTaskDraft((draft) => ({
+                        ...draft,
+                        startMode: value,
+                        length: value === "random" && draft.length === 0 ? appSettings.randomLength : draft.length,
+                      }))}>{label}</button>
                     ))}
                   </div>
                   {taskDraft.startMode === "date" && (
@@ -1796,25 +2163,41 @@ export function TrainingWorkbench() {
               </article>
               <article className="history-card">
                 <div className="section-label">可恢复训练</div>
-                {sessions.length ? sessions.map((session) => (
-                  <div className={`session-row ${reviewedSession?.session.id === session.id ? "active" : ""}`} key={session.id}>
-                    <div>
-                      <strong>{session.instrumentId} · {session.timeframe}</strong>
-                      <span>{new Date(session.updatedAt).toLocaleString("zh-CN")}</span>
+                {sessionSummaries.length ? sessionSummaries.map((summary) => (
+                  <div className={`session-row ${reviewedSession?.session.id === summary.session.id ? "active" : ""}`} key={summary.session.id}>
+                    <div className="session-main">
+                      <div className="session-title">
+                        <strong>{summary.session.instrumentId} · {summary.session.timeframe}</strong>
+                        <span className={summary.task?.status === "completed" ? "session-status completed" : "session-status"}>
+                          {summary.task?.status === "completed" ? "已完成" : "已保存，可继续"}
+                        </span>
+                      </div>
+                      <div className="session-tags">
+                        <span>{summary.modeLabel}</span>
+                        <span>{summary.rangeLabel}</span>
+                        {summary.task && <span>进度 {summary.progressSummary.revealed}/{summary.progressSummary.total}</span>}
+                      </div>
+                      <div className="session-pnl">
+                        <span>总盈亏<strong className={summary.pnl.total >= 0 ? "up" : "down"}>{money(summary.pnl.total)}</strong></span>
+                        <span>已实现<strong>{money(summary.pnl.realized)}</strong></span>
+                        <span>浮动<strong>{money(summary.pnl.floating)}</strong></span>
+                        <span>{summary.pnl.openPositions} 笔持仓 · {summary.pnl.closedPositions} 笔平仓</span>
+                      </div>
+                      <small>保存时间 {new Date(summary.session.updatedAt).toLocaleString("zh-CN")}</small>
                     </div>
                     <div className="session-actions">
-                      <button className="review-session" onClick={() => inspectSession(session)}>
+                      <button className="review-session" onClick={() => inspectSession(summary.session)}>
                         <BookOpenCheck size={13} />查看复盘
                       </button>
-                      <button className="resume-session" onClick={() => resumeSession(session)}>
+                      <button className="resume-session" onClick={() => resumeSession(summary.session)}>
                         <RotateCcw size={13} />继续训练
                       </button>
-                      <button className="delete-session" aria-label={`删除 ${session.instrumentId} 训练`} onClick={() => deleteSession(session)}>
+                      <button className="delete-session" aria-label={`删除 ${summary.session.instrumentId} 训练`} onClick={() => deleteSession(summary.session)}>
                         <Trash2 size={13} />删除
                       </button>
                     </div>
                   </div>
-                )) : <div className="empty-state">训练会自动保存；产生进度后会在这里显示“继续训练”。</div>}
+                )) : <div className="empty-state">这里还没有保存记录。点击“保存训练”，或完成一场有结束边界的训练后，才会出现在这里。</div>}
               </article>
             </div>
             <div className="review-detail-grid">

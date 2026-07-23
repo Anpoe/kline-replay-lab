@@ -76,3 +76,16 @@ test("persists blind-test visibility settings and leaves room for a random task"
   assert.ok(task.endCursor <= bars.length - 1);
 });
 
+test("keeps random training inside the configured historical window", () => {
+  const task = resolveTrainingTask({
+    ...defaultTrainingTaskDraft,
+    startMode: "random",
+    length: 5,
+    randomStartDate: "2025-03-02",
+    randomEndDate: "2025-03-12",
+  }, bars, "Asia/Shanghai", "bounded-random-seed");
+
+  assert.ok(task.startCursor >= 60);
+  assert.ok(task.startCursor <= 70);
+  assert.equal(task.endCursor - task.startCursor, 5);
+});

@@ -13,6 +13,8 @@ export type TrainingTaskDraft = {
   hidePrice: boolean;
   sourceSessionId?: string;
   sourceLabel?: string;
+  randomStartDate?: string;
+  randomEndDate?: string;
 };
 
 export type TrainingTask = {
@@ -112,10 +114,26 @@ export function resolveTrainingTask(
   } else if (draft.startMode === "bar") {
     startCursor = clamp(Math.round(draft.startBar || 1) - 1, 0, lastCursor);
   } else if (draft.startMode === "random") {
-    const context = Math.min(40, Math.max(0, lastCursor - 1));
-    const maximumStart = Math.max(context, lastCursor - (desiredLength ?? 1));
-    const availableStarts = Math.max(1, maximumStart - context + 1);
-    startCursor = clamp(context + Math.floor(seededFraction(randomSeed) * availableStarts), 0, maximumStart);
+    const historyContext = Math.min(40, Math.max(0, lastCursor - 1));
+    const datedMinimum = draft.randomStartDate
+      ? findStartByDate(bars, draft.randomStartDate, timezone)
+      : historyContext;
+    const datedMaximum = draft.randomEndDate
+      ? findEndByDate(bars, draft.randomEndDate, timezone)
+      : lastCursor;
+    const minimumStart = clamp(Math.max(historyContext, datedMinimum), 0, lastCursor);
+    const lengthSafeMaximum = Math.max(0, lastCursor - (desiredLength ?? 1));
+    const maximumStart = clamp(
+      Math.max(minimumStart, Math.min(datedMaximum, lengthSafeMaximum)),
+      minimumStart,
+      lastCursor,
+    );
+    const availableStarts = Math.max(1, maximumStart - minimumStart + 1);
+    startCursor = clamp(
+      minimumStart + Math.floor(seededFraction(randomSeed) * availableStarts),
+      minimumStart,
+      maximumStart,
+    );
   }
 
   let endCursor = lastCursor;
