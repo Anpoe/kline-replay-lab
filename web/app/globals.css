@@ -67,6 +67,7 @@ button { color: inherit; }
   border-radius: 9px; padding: 9px 34px 9px 12px; outline: none;
 }
 .market-pill { font-size: 11px; color: var(--accent); background: var(--accent-soft); border: 1px solid rgba(32, 201, 151, .2); padding: 5px 8px; border-radius: 999px; }
+.rule-pill { font-size: 9px; color: #e1c57f; background: rgba(241, 200, 106, .07); border: 1px solid rgba(241, 200, 106, .16); padding: 5px 8px; border-radius: 999px; white-space: nowrap; }
 .timeframes { margin-left: 10px; padding-left: 12px; border-left: 1px solid var(--line); }
 .timeframes button, .speed-control button {
   border: 0; background: transparent; color: var(--muted); border-radius: 7px; padding: 7px 9px; font-size: 12px; cursor: pointer;
@@ -144,8 +145,9 @@ button { color: inherit; }
 .buy-button { background: var(--accent); color: #07120f; }
 .sell-button { background: var(--danger); color: #180807; }
 .flat-button { background: var(--surface-raised); border-color: var(--line) !important; color: #b7c3c6; }
-.flat-button:disabled, .row-action:disabled { opacity: .35; cursor: not-allowed; }
+.order-entry button:disabled, .flat-button:disabled, .row-action:disabled { opacity: .35; cursor: not-allowed; }
 .pending-note { grid-column: 1 / -1; color: var(--faint); font-size: 10px; }
+.pending-note.rule-warning { color: #f0b8b5; }
 .orders-board { grid-column: 1 / -1; min-width: 0; border: 1px solid var(--line); border-radius: 10px; overflow: hidden; background: #0b1315; }
 .orders-board-head { min-height: 40px; padding: 6px 10px 5px 12px; display: flex; align-items: center; justify-content: space-between; gap: 14px; border-bottom: 1px solid var(--line); }
 .orders-board-head > strong { font-size: 11px; color: #c7d2d4; white-space: nowrap; }
@@ -167,6 +169,9 @@ button { color: inherit; }
 .row-action:hover { color: var(--accent-strong); border-color: rgba(32, 201, 151, .32); }
 .row-action.danger:hover { color: #ff8b88; border-color: rgba(239, 106, 104, .35); }
 .orders-empty { height: 58px; text-align: center; color: var(--faint) !important; font-family: var(--font-geist-sans), sans-serif; }
+.rule-rejections { grid-column: 1 / -1; display: flex; gap: 7px 12px; flex-wrap: wrap; color: #c98f8d; font-size: 9px; }
+.rule-rejections strong { color: #efaaa7; }
+.rule-rejections span { padding-left: 10px; border-left: 1px solid rgba(239, 106, 104, .22); }
 
 .decision-panel { padding: 18px; background: var(--surface-soft); display: flex; flex-direction: column; gap: 15px; overflow-y: auto; }
 .panel-title { padding-bottom: 15px; border-bottom: 1px solid var(--line); }
@@ -315,6 +320,7 @@ button { color: inherit; }
 
 @media (max-width: 600px) {
   .market-pill { display: none; }
+  .rule-pill { max-width: 160px; overflow: hidden; text-overflow: ellipsis; }
   .timeframes { margin: 0; padding: 0; border: 0; order: 3; width: 100%; justify-content: space-between; }
   .timeframes button { flex: 1; }
   .top-actions { margin-left: auto; }

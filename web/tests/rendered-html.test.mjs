@@ -5,7 +5,7 @@ import test from "node:test";
 const root = new URL("../", import.meta.url);
 
 test("ships the K-line training workbench instead of the starter", async () => {
-  const [page, layout, workbench, packageJson, replayChart, sessionsRoute, snapshotsRoute] = await Promise.all([
+  const [page, layout, workbench, packageJson, replayChart, sessionsRoute, snapshotsRoute, marketRules] = await Promise.all([
     readFile(new URL("app/page.tsx", root), "utf8"),
     readFile(new URL("app/layout.tsx", root), "utf8"),
     readFile(new URL("app/components/TrainingWorkbench.tsx", root), "utf8"),
@@ -13,14 +13,14 @@ test("ships the K-line training workbench instead of the starter", async () => {
     readFile(new URL("app/components/KLineReplayChart.tsx", root), "utf8"),
     readFile(new URL("app/api/sessions/route.ts", root), "utf8"),
     readFile(new URL("app/api/snapshots/route.ts", root), "utf8"),
+    readFile(new URL("app/lib/marketRules.ts", root), "utf8"),
   ]);
 
   assert.match(page, /<TrainingWorkbench\s*\/>/);
   assert.match(layout, /K线训练营 2\.0/);
   assert.match(workbench, /未来已隐藏/);
-  assert.match(workbench, /下一根开盘成交/);
+  assert.match(workbench, /下一根开盘/);
   assert.match(workbench, /K 线数据库/);
-  assert.match(workbench, /每次开仓形成独立持仓/);
   assert.match(workbench, /queueClosePosition/);
   assert.match(workbench, /kline-replay-lab:last-training/);
   assert.match(workbench, /继续训练/);
@@ -43,6 +43,7 @@ test("ships the K-line training workbench instead of the starter", async () => {
   assert.match(sessionsRoute, /ORDER BY sequence ASC/);
   assert.match(snapshotsRoute, /SHA-256/);
   assert.match(snapshotsRoute, /contentHash/);
+  assert.match(marketRules, /CN_A_MAINBOARD_RULES_V1/);
   assert.doesNotMatch(packageJson, /react-loading-skeleton/);
 });
 

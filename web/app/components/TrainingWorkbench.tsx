@@ -34,6 +34,18 @@ import {
   type PersistedDrawing,
   type TradeMarker,
 } from "./KLineReplayChart";
+import {
+  CN_A_MAINBOARD_RULES_V1,
+  createPriceBand,
+  resolveMarketRules,
+  tradingDate,
+  validateCloseOrder,
+  validateMarketFill,
+  validateOpenOrder,
+  type MarketRuleProfile,
+  type PriceBand,
+  type RuleValidation,
+} from "../lib/marketRules";
 
 type View = "replay" | "database" | "review";
 type Instrument = {
@@ -61,6 +73,9 @@ type PendingOrder = {
   qty: number;
   createdAt: number;
   positionId: string;
+  ruleId?: string;
+  ruleVersion?: string;
+  priceBand?: PriceBand | null;
 };
 type PositionLot = {
   id: string;
@@ -85,6 +100,17 @@ type Execution = {
   price: number;
   timestamp: number;
   realizedPnl: number;
+  ruleId?: string;
+  ruleVersion?: string;
+};
+type OrderRejection = {
+  id: string;
+  orderId?: string;
+  code: string;
+  message: string;
+  timestamp: number;
+  ruleId: string;
+  ruleVersion: string;
 };
 type Decision = {
   marketState: string;
@@ -122,7 +148,7 @@ type SnapshotMeta = {
   createdAt: string;
 };
 type TrainingState = {
-  version: 3;
+  version: 4;
   cursor: number;
   cursorTimestamp?: number;
   dataSignature?: string;
@@ -132,11 +158,13 @@ type TrainingState = {
   positions: PositionLot[];
   pendingOrders: PendingOrder[];
   executions: Execution[];
+  orderRejections: OrderRejection[];
   decision: Decision;
   decisionSubmissions: DecisionSubmission[];
   orderQty: number;
   drawings: PersistedDrawing[];
   events: TrainingEvent[];
+  marketRules?: MarketRuleProfile;
 };
 type TrainingSession = {
   id: string;
@@ -237,8 +265,45 @@ function eventLabel(type: string) {
     playback_toggled: "切换自动播放",
     playback_speed_changed: "调整播放速度",
     order_quantity_changed: "调整下单数量",
+    order_rejected: "市场规则拒单",
+    orders_rejected: "成交阶段拒单",
   };
   return labels[type] ?? type;
+}
+
+function priceLimitReference(
+  bars: KLineData[],
+  cursor: number,
+  timezone: string,
+) {
+  const current = bars[cursor];
+  const next = bars[cursor + 1];
+  if (!current) return 0;
+  if (!next || tradingDate(current.timestamp, timezone) !== tradingDate(next.timestamp, timezone)) {
+    return current.close;
+  }
+  const session = tradingDate(current.timestamp, timezone);
+  for (let index = cursor - 1; index >= 0; index -= 1) {
+    if (tradingDate(bars[index].timestamp, timezone) !== session) return bars[index].close;
+  }
+  return current.close;
+}
+
+function createOrderRejection(
+  validation: RuleValidation,
+  rules: MarketRuleProfile,
+  timestamp: number,
+  orderId?: string,
+): OrderRejection {
+  return {
+    id: crypto.randomUUID(),
+    orderId,
+    code: validation.code ?? "market_rule_rejected",
+    message: validation.message ?? "委托不符合当前市场规则",
+    timestamp,
+    ruleId: rules.id,
+    ruleVersion: rules.version,
+  };
 }
 
 export function TrainingWorkbench() {
@@ -261,6 +326,7 @@ export function TrainingWorkbench() {
   const [positions, setPositions] = useState<PositionLot[]>([]);
   const [pendingOrders, setPendingOrders] = useState<PendingOrder[]>([]);
   const [executions, setExecutions] = useState<Execution[]>([]);
+  const [orderRejections, setOrderRejections] = useState<OrderRejection[]>([]);
   const [decisionSubmissions, setDecisionSubmissions] = useState<DecisionSubmission[]>([]);
   const [orderQty, setOrderQty] = useState(100);
   const [orderPanelTab, setOrderPanelTab] = useState<"positions" | "pending" | "history">("positions");
@@ -274,6 +340,8 @@ export function TrainingWorkbench() {
   const [randomSeed, setRandomSeed] = useState(() => crypto.randomUUID());
   const [dataSnapshotId, setDataSnapshotId] = useState("");
   const [snapshotHash, setSnapshotHash] = useState("");
+  const [marketRules, setMarketRules] = useState<MarketRuleProfile>(CN_A_MAINBOARD_RULES_V1);
+  const [ruleNotice, setRuleNotice] = useState("");
   const [events, setEvents] = useState<TrainingEvent[]>([]);
   const [selectedDecisionId, setSelectedDecisionId] = useState("");
   const [reviewedSession, setReviewedSession] = useState<{ session: TrainingSession; state: TrainingState } | null>(null);
@@ -291,6 +359,14 @@ export function TrainingWorkbench() {
   const currentBar = bars[cursor];
   const openPositions = useMemo(() => positions.filter((position) => position.status === "open"), [positions]);
   const closedPositions = useMemo(() => positions.filter((position) => position.status === "closed"), [positions]);
+  const closablePositions = useMemo(() => currentBar
+    ? openPositions.filter((position) => validateCloseOrder(
+      marketRules,
+      position,
+      currentBar.timestamp,
+      instrument.timezone,
+    ).ok)
+    : [], [currentBar, instrument.timezone, marketRules, openPositions]);
   const netQty = openPositions.reduce((sum, position) => sum + (position.side === "long" ? position.qty : -position.qty), 0);
   const grossQty = openPositions.reduce((sum, position) => sum + position.qty, 0);
   const openPnl = currentBar
@@ -331,7 +407,7 @@ export function TrainingWorkbench() {
     ? `${bars.length}:${bars[0].timestamp}:${bars[bars.length - 1].timestamp}`
     : "", [bars]);
   const trainingState = useMemo<TrainingState>(() => ({
-    version: 3,
+    version: 4,
     cursor,
     cursorTimestamp: currentBar?.timestamp,
     dataSignature,
@@ -341,12 +417,14 @@ export function TrainingWorkbench() {
     positions,
     pendingOrders,
     executions,
+    orderRejections,
     decision,
     decisionSubmissions,
     orderQty,
     drawings,
     events,
-  }), [cursor, currentBar?.timestamp, dataSignature, dataSnapshotId, decision, decisionSubmissions, drawings, events, executions, orderQty, pendingOrders, positions, randomSeed, snapshotHash]);
+    marketRules,
+  }), [cursor, currentBar?.timestamp, dataSignature, dataSnapshotId, decision, decisionSubmissions, drawings, events, executions, marketRules, orderQty, orderRejections, pendingOrders, positions, randomSeed, snapshotHash]);
   const reviewState = reviewedSession?.state ?? trainingState;
   const reviewClosedPositions = reviewState.positions.filter((position) => position.status === "closed");
   const reviewRealizedPnl = reviewClosedPositions.reduce((sum, position) => sum + (position.realizedPnl ?? 0), 0);
@@ -362,7 +440,7 @@ export function TrainingWorkbench() {
     const state = value as Partial<TrainingState>;
     if (!Number.isFinite(state.cursor) || !Array.isArray(state.positions) || !Array.isArray(state.pendingOrders)) return null;
     return {
-      version: 3,
+      version: 4,
       cursor: Number(state.cursor),
       cursorTimestamp: typeof state.cursorTimestamp === "number" ? state.cursorTimestamp : undefined,
       dataSignature: typeof state.dataSignature === "string" ? state.dataSignature : undefined,
@@ -372,11 +450,13 @@ export function TrainingWorkbench() {
       positions: state.positions,
       pendingOrders: state.pendingOrders,
       executions: Array.isArray(state.executions) ? state.executions : [],
+      orderRejections: Array.isArray(state.orderRejections) ? state.orderRejections : [],
       decision: state.decision && typeof state.decision === "object" ? { ...defaultDecision, ...state.decision } : defaultDecision,
       decisionSubmissions: Array.isArray(state.decisionSubmissions) ? state.decisionSubmissions : [],
       orderQty: typeof state.orderQty === "number" && state.orderQty > 0 ? state.orderQty : 100,
       drawings: Array.isArray(state.drawings) ? state.drawings : [],
       events: Array.isArray(state.events) ? state.events : [],
+      marketRules: state.marketRules && typeof state.marketRules === "object" ? state.marketRules : undefined,
     };
   }, []);
 
@@ -468,6 +548,10 @@ export function TrainingWorkbench() {
       setBars(data.candles);
       setDataSnapshotId(data.snapshot.id);
       setSnapshotHash(data.snapshot.contentHash);
+      const loadedMarketRules = restoreRequest?.state.marketRules
+        ?? resolveMarketRules(data.instrument.market, data.instrument.id);
+      setMarketRules(loadedMarketRules);
+      setRuleNotice("");
       if (restoreRequest) {
         const timestampCursor = restoreRequest.state.cursorTimestamp == null
           ? -1
@@ -477,6 +561,7 @@ export function TrainingWorkbench() {
         setPositions(restoreRequest.state.positions);
         setPendingOrders(restoreRequest.state.pendingOrders);
         setExecutions(restoreRequest.state.executions);
+        setOrderRejections(restoreRequest.state.orderRejections);
         setDecision(restoreRequest.state.decision);
         setDecisionSubmissions(restoreRequest.state.decisionSubmissions);
         setSelectedDecisionId("");
@@ -492,6 +577,8 @@ export function TrainingWorkbench() {
           createTrainingEvent(lastSequence + 1, "session_restored", data.candles[restoredCursor]?.timestamp, {
             snapshotId: data.snapshot.id,
             snapshotHash: data.snapshot.contentHash,
+            marketRuleId: loadedMarketRules.id,
+            marketRuleVersion: loadedMarketRules.version,
           }),
         ]);
         setSaveState("已恢复 · 本机自动保存");
@@ -506,6 +593,7 @@ export function TrainingWorkbench() {
         setPositions([]);
         setPendingOrders([]);
         setExecutions([]);
+        setOrderRejections([]);
         setDecision(defaultDecision);
         setDecisionSubmissions([]);
         setSelectedDecisionId("");
@@ -522,6 +610,8 @@ export function TrainingWorkbench() {
           snapshotHash: data.snapshot.contentHash,
           randomSeed: nextSeed,
           startCursor,
+          marketRuleId: loadedMarketRules.id,
+          marketRuleVersion: loadedMarketRules.version,
         })]);
         setSaveState("新训练 · 本机自动保存");
         setRestoreNotice("");
@@ -570,8 +660,16 @@ export function TrainingWorkbench() {
     if (!orders.length) return;
     const nextPositions = [...positions];
     const fills: Execution[] = [];
+    const rejections: OrderRejection[] = [];
 
     orders.forEach((order) => {
+      const priceBand = order.priceBand
+        ?? createPriceBand(marketRules, priceLimitReference(bars, cursor, instrument.timezone));
+      const fillValidation = validateMarketFill(marketRules, order.side, bar.open, priceBand);
+      if (!fillValidation.ok) {
+        rejections.push(createOrderRejection(fillValidation, marketRules, bar.timestamp, order.id));
+        return;
+      }
       if (order.action === "open") {
         const side: PositionSide = order.side === "buy" ? "long" : "short";
         nextPositions.push({
@@ -593,6 +691,8 @@ export function TrainingWorkbench() {
           price: bar.open,
           timestamp: bar.timestamp,
           realizedPnl: 0,
+          ruleId: order.ruleId ?? marketRules.id,
+          ruleVersion: order.ruleVersion ?? marketRules.version,
         });
         return;
       }
@@ -620,15 +720,26 @@ export function TrainingWorkbench() {
         price: bar.open,
         timestamp: bar.timestamp,
         realizedPnl: realized,
+        ruleId: order.ruleId ?? marketRules.id,
+        ruleVersion: order.ruleVersion ?? marketRules.version,
       });
     });
 
     setPositions(nextPositions);
     if (fills.length) {
       setExecutions((items) => [...items, ...fills]);
-      appendEvent("orders_filled", { fills }, bar.timestamp);
+      appendEvent("orders_filled", {
+        fills,
+        marketRuleId: marketRules.id,
+        marketRuleVersion: marketRules.version,
+      }, bar.timestamp);
     }
-  }, [appendEvent, positions]);
+    if (rejections.length) {
+      setOrderRejections((items) => [...items, ...rejections]);
+      setRuleNotice(rejections.map((rejection) => rejection.message).join("；"));
+      appendEvent("orders_rejected", { rejections }, bar.timestamp);
+    }
+  }, [appendEvent, bars, cursor, instrument.timezone, marketRules, positions]);
 
   const revealMany = useCallback((count: number) => {
     if (cursor >= bars.length - 1) {
@@ -663,8 +774,29 @@ export function TrainingWorkbench() {
     return () => window.clearInterval(timer);
   }, [playing, revealNext, speed]);
 
+  const rejectOrderAttempt = (validation: RuleValidation, details: Record<string, unknown> = {}) => {
+    if (!currentBar || validation.ok) return;
+    const rejection = createOrderRejection(validation, marketRules, currentBar.timestamp);
+    setOrderRejections((items) => [...items, rejection]);
+    setRuleNotice(rejection.message);
+    appendEvent("order_rejected", {
+      rejection,
+      ...details,
+    }, currentBar.timestamp);
+    setSaveState("市场规则已拒绝委托");
+  };
+
   const queueOpenOrder = (side: "buy" | "sell", qty = orderQty) => {
     if (!currentBar || qty <= 0 || cursor >= bars.length - 1) return;
+    const validation = validateOpenOrder(marketRules, side, qty);
+    if (!validation.ok) {
+      rejectOrderAttempt(validation, { action: "open", side, qty });
+      return;
+    }
+    const priceBand = createPriceBand(
+      marketRules,
+      priceLimitReference(bars, cursor, instrument.timezone),
+    );
     const order: PendingOrder = {
       id: crypto.randomUUID(),
       action: "open",
@@ -672,9 +804,17 @@ export function TrainingWorkbench() {
       qty,
       createdAt: currentBar.timestamp,
       positionId: crypto.randomUUID(),
+      ruleId: marketRules.id,
+      ruleVersion: marketRules.version,
+      priceBand,
     };
     setPendingOrders((items) => [...items, order]);
-    appendEvent("order_queued", { order });
+    setRuleNotice("");
+    appendEvent("order_queued", {
+      order,
+      marketRuleId: marketRules.id,
+      marketRuleVersion: marketRules.version,
+    });
     setOrderPanelTab("pending");
     setSaveState("有未保存更改");
   };
@@ -683,6 +823,15 @@ export function TrainingWorkbench() {
     if (!currentBar || cursor >= bars.length - 1) return;
     const position = openPositions.find((item) => item.id === positionId);
     if (!position || pendingOrders.some((order) => order.action === "close" && order.positionId === positionId)) return;
+    const validation = validateCloseOrder(marketRules, position, currentBar.timestamp, instrument.timezone);
+    if (!validation.ok) {
+      rejectOrderAttempt(validation, { action: "close", positionId, position });
+      return;
+    }
+    const priceBand = createPriceBand(
+      marketRules,
+      priceLimitReference(bars, cursor, instrument.timezone),
+    );
     const order: PendingOrder = {
       id: crypto.randomUUID(),
       action: "close",
@@ -690,9 +839,18 @@ export function TrainingWorkbench() {
       qty: position.qty,
       createdAt: currentBar.timestamp,
       positionId,
+      ruleId: marketRules.id,
+      ruleVersion: marketRules.version,
+      priceBand,
     };
     setPendingOrders((items) => [...items, order]);
-    appendEvent("order_queued", { order, position });
+    setRuleNotice("");
+    appendEvent("order_queued", {
+      order,
+      position,
+      marketRuleId: marketRules.id,
+      marketRuleVersion: marketRules.version,
+    });
     setSaveState("有未保存更改");
   };
 
@@ -726,6 +884,8 @@ export function TrainingWorkbench() {
     setPositions([]);
     setPendingOrders([]);
     setExecutions([]);
+    setOrderRejections([]);
+    setRuleNotice("");
     setDecision(defaultDecision);
     setDecisionSubmissions([]);
     setSelectedDecisionId("");
@@ -744,6 +904,8 @@ export function TrainingWorkbench() {
       randomSeed: nextRandomSeed,
       startCursor: nextCursor,
       random,
+      marketRuleId: marketRules.id,
+      marketRuleVersion: marketRules.version,
     })]);
     setRestoreNotice("");
     setSaveState("新训练 · 本机自动保存");
@@ -942,6 +1104,7 @@ export function TrainingWorkbench() {
               {instruments.map((item) => <option key={item.id} value={item.id}>{item.short} · {item.label}</option>)}
             </select>
             <span className="market-pill">{instruments.find((item) => item.id === instrumentId)?.market}</span>
+            <span className="rule-pill">{marketRules.name} · {marketRules.version}</span>
             <div className="timeframes" aria-label="周期">
               {timeframes.map((item) => (
                 <button key={item} className={timeframe === item ? "active" : ""} onClick={() => startFreshTraining(instrumentId, item)}>{item}</button>
@@ -1074,12 +1237,27 @@ export function TrainingWorkbench() {
                     const quantity = Math.max(1, Number(event.target.value));
                     setOrderQty(quantity);
                     appendEvent("order_quantity_changed", { quantity });
-                  }} /></label>
-                  <button className="sell-button" onClick={() => queueOpenOrder("sell")}><TrendingDown size={16} />卖出开仓</button>
-                  <button className="buy-button" onClick={() => queueOpenOrder("buy")}><TrendingUp size={16} />买入开仓</button>
-                  <button className="flat-button" disabled={!openPositions.length} onClick={queueCloseAll}><CircleStop size={16} />全部平仓</button>
+                  }} step={marketRules.boardLot} /></label>
+                  <button
+                    className="sell-button"
+                    disabled={!marketRules.tradingEnabled || !marketRules.allowShort}
+                    title={!marketRules.allowShort ? `${marketRules.name}禁止卖出开仓` : ""}
+                    onClick={() => queueOpenOrder("sell")}
+                  ><TrendingDown size={16} />{marketRules.allowShort ? "卖出开仓" : "A股禁做空"}</button>
+                  <button
+                    className="buy-button"
+                    disabled={!marketRules.tradingEnabled}
+                    onClick={() => queueOpenOrder("buy")}
+                  ><TrendingUp size={16} />买入开仓</button>
+                  <button className="flat-button" disabled={!closablePositions.length} onClick={queueCloseAll}>
+                    <CircleStop size={16} />{openPositions.length && !closablePositions.length ? "T+1锁定" : "全部平仓"}
+                  </button>
                 </div>
-                <div className="pending-note">{pendingOrders.length ? pendingOrders.length + " 笔委托将在下一根开盘成交" : "每次开仓形成独立持仓，可分别平仓"}</div>
+                <div className={`pending-note ${ruleNotice ? "rule-warning" : ""}`}>
+                  {ruleNotice || (pendingOrders.length
+                    ? `${pendingOrders.length} 笔委托将在下一根开盘按 ${marketRules.name} 规则校验`
+                    : `${marketRules.name}：买入 ${marketRules.boardLot} 股整数倍${marketRules.tPlusOne ? " · T+1" : ""}${marketRules.priceLimitRatio ? ` · 涨跌幅 ${(marketRules.priceLimitRatio * 100).toFixed(0)}%` : ""}`)}
+                </div>
 
                 <div className="orders-board">
                   <div className="orders-board-head">
@@ -1098,6 +1276,9 @@ export function TrainingWorkbench() {
                         <tbody>{openPositions.length ? openPositions.map((position) => {
                           const pnl = currentBar ? (currentBar.close - position.entryPrice) * position.qty * (position.side === "long" ? 1 : -1) : 0;
                           const closeQueued = pendingOrders.some((order) => order.action === "close" && order.positionId === position.id);
+                          const closeValidation = currentBar
+                            ? validateCloseOrder(marketRules, position, currentBar.timestamp, instrument.timezone)
+                            : { ok: false, message: "行情未就绪" };
                           return (
                             <tr key={position.id}>
                               <td><span className="position-id">#{position.id.slice(0, 6)}</span></td>
@@ -1107,7 +1288,12 @@ export function TrainingWorkbench() {
                               <td>{position.entryPrice.toFixed(instrument.pricePrecision)}</td>
                               <td>{currentBar?.close.toFixed(instrument.pricePrecision) ?? "--"}</td>
                               <td><strong className={pnl >= 0 ? "up" : "down"}>{money(pnl)}</strong></td>
-                              <td><button className="row-action" disabled={closeQueued} onClick={() => queueClosePosition(position.id)}>{closeQueued ? "已委托" : "平仓"}</button></td>
+                              <td><button
+                                className="row-action"
+                                disabled={closeQueued || !closeValidation.ok}
+                                title={closeValidation.message}
+                                onClick={() => queueClosePosition(position.id)}
+                              >{closeQueued ? "已委托" : closeValidation.ok ? "平仓" : "T+1锁定"}</button></td>
                             </tr>
                           );
                         }) : <tr><td className="orders-empty" colSpan={8}>暂无持仓。买入或卖出委托会在下一根 K 线开盘形成独立仓位。</td></tr>}</tbody>
@@ -1125,7 +1311,7 @@ export function TrainingWorkbench() {
                             <td>{order.qty}</td>
                             <td>{formatDate(order.createdAt, timeframe)}</td>
                             <td>#{order.positionId.slice(0, 6)}</td>
-                            <td>下一根开盘</td>
+                            <td>下一根开盘 · {order.ruleVersion ?? "旧规则"}</td>
                             <td><button className="row-action danger" onClick={() => cancelPendingOrder(order.id)}>撤单</button></td>
                           </tr>
                         )) : <tr><td className="orders-empty" colSpan={8}>暂无待成交委托。</td></tr>}</tbody>
@@ -1151,6 +1337,14 @@ export function TrainingWorkbench() {
                     )}
                   </div>
                 </div>
+                {orderRejections.length > 0 && (
+                  <div className="rule-rejections">
+                    <strong>最近规则拒单</strong>
+                    {[...orderRejections].reverse().slice(0, 3).map((rejection) => (
+                      <span key={rejection.id}>{formatDate(rejection.timestamp, timeframe)} · {rejection.message}</span>
+                    ))}
+                  </div>
+                )}
               </div>
             </section>
 
@@ -1254,6 +1448,8 @@ export function TrainingWorkbench() {
                 <div className="evidence-row"><span>交易理由</span><strong>{reviewDecision.reasons.join("、") || "未填写"}</strong></div>
                 <div className="evidence-row"><span>失效 / 止损</span><strong>{reviewDecision.stop || "未填写"}</strong></div>
                 <div className="evidence-row"><span>第一目标</span><strong>{reviewDecision.target || "未填写"}</strong></div>
+                <div className="evidence-row"><span>市场规则</span><strong>{reviewState.marketRules ? `${reviewState.marketRules.name} · ${reviewState.marketRules.version}` : "旧训练未锁定规则版本"}</strong></div>
+                <div className="evidence-row"><span>规则拒单</span><strong>{reviewState.orderRejections.length}</strong></div>
                 <div className="review-note"><span>计划说明</span><p>{reviewDecision.note || "未填写"}</p></div>
               </article>
               <article className="history-card">
