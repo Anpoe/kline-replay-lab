@@ -88,3 +88,29 @@ export const sessionEvents = sqliteTable(
     index("session_events_lookup_idx").on(table.sessionId, table.sequence),
   ],
 );
+
+export const dataDownloadJobs = sqliteTable(
+  "data_download_jobs",
+  {
+    id: text("id").primaryKey(),
+    provider: text("provider").notNull(),
+    instrumentId: text("instrument_id").notNull(),
+    vendorSymbol: text("vendor_symbol").notNull(),
+    instrumentName: text("instrument_name").notNull(),
+    market: text("market").notNull(),
+    timeframe: text("timeframe").notNull(),
+    startDate: text("start_date").notNull(),
+    endDate: text("end_date").notNull(),
+    adjustmentType: text("adjustment_type").notNull().default("none"),
+    status: text("status").notNull().default("queued"),
+    cursorJson: text("cursor_json").notNull().default("{}"),
+    insertedCount: integer("inserted_count").notNull().default(0),
+    qualityReportJson: text("quality_report_json").notNull().default("{}"),
+    lastError: text("last_error"),
+    createdAt: text("created_at").notNull(),
+    updatedAt: text("updated_at").notNull(),
+  },
+  (table) => [
+    index("data_download_jobs_status_idx").on(table.status, table.updatedAt),
+  ],
+);

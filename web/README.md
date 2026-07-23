@@ -34,7 +34,20 @@ npm run dev
 - K 线、品种目录和训练记录保存在项目本地的开发数据库中。
 - 数据目录由本地 Cloudflare Miniflare/D1 运行时管理，状态文件位于被忽略的 `.wrangler/` 目录。
 - CSV 导入格式：`timestamp,open,high,low,close,volume,turnover`。
-- 当前内置 A 股和美股样例行情；真实市场数据适配器尚未接入。
+- 当前内置 A 股和美股样例行情；“数据”页面可用 Tushare 下载 A 股、用 Alpaca 下载美股的 5m、1h、1d、1w 历史 K 线。
+- 下载任务保存在本地 D1 中，可暂停、继续和失败重试；任务完成后的品种会自动加入 Replay 和随机训练的品种列表。
+
+### 本地行情凭证
+
+复制 `.env.example` 为 `.env.local`，填写自己的凭证后重启服务：
+
+```dotenv
+TUSHARE_TOKEN=
+APCA_API_KEY_ID=
+APCA_API_SECRET_KEY=
+```
+
+不要把真实密钥提交到 Git。Alpaca 两项凭证用于美股；Tushare Token 用于 A 股，5m/1h 历史分钟线还需要对应的数据权限。
 
 ## 常用命令
 

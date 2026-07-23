@@ -37,6 +37,7 @@ import {
   type PersistedDrawing,
   type TradeMarker,
 } from "./KLineReplayChart";
+import { DataSourceManager } from "./DataSourceManager";
 import {
   CN_A_MAINBOARD_RULES_V1,
   createPriceBand,
@@ -263,7 +264,7 @@ const defaultDecision: Decision = {
   note: "",
 };
 
-const instruments = [
+const defaultInstruments = [
   { id: "600519.SH", short: "600519", label: "贵州茅台", market: "A股" },
   { id: "AAPL.US", short: "AAPL", label: "Apple", market: "美股" },
 ];
@@ -306,7 +307,7 @@ function normalizeSettings(value: Partial<AppSettings>): AppSettings {
   const merged = { ...defaultAppSettings, ...value };
   return {
     ...merged,
-    defaultInstrumentId: instruments.some((item) => item.id === merged.defaultInstrumentId)
+    defaultInstrumentId: typeof merged.defaultInstrumentId === "string" && merged.defaultInstrumentId
       ? merged.defaultInstrumentId
       : defaultAppSettings.defaultInstrumentId,
     defaultTimeframe: timeframes.includes(merged.defaultTimeframe)
@@ -426,6 +427,7 @@ function createOrderRejection(
 
 export function TrainingWorkbench() {
   const [view, setView] = useState<View>("replay");
+  const [availableInstruments, setAvailableInstruments] = useState(defaultInstruments);
   const [instrumentId, setInstrumentId] = useState("600519.SH");
   const [timeframe, setTimeframe] = useState("1d");
   const [instrument, setInstrument] = useState<Instrument>({
@@ -1271,6 +1273,19 @@ export function TrainingWorkbench() {
     }
   }, []);
 
+  const loadInstrumentCatalog = useCallback(async () => {
+    const response = await fetch("/api/candles?instruments=1");
+    if (!response.ok) return;
+    const data = await response.json() as { instruments: Instrument[] };
+    if (!data.instruments.length) return;
+    setAvailableInstruments(data.instruments.map((item) => ({
+      id: item.id,
+      short: item.symbol,
+      label: item.name,
+      market: item.market === "CN" ? "A股" : item.market === "US" ? "美股" : item.market,
+    })));
+  }, []);
+
   const loadSessions = useCallback(async (includeAll = false) => {
     const response = await fetch(includeAll ? "/api/sessions?all=1" : "/api/sessions");
     if (response.ok) {
@@ -1489,11 +1504,11 @@ export function TrainingWorkbench() {
 
   const resolveRandomRequest = (draft: TrainingTaskDraft) => {
     const instrumentCandidates = appSettings.randomInstrumentMode === "current"
-      ? instruments.filter((item) => item.id === instrumentId)
+      ? availableInstruments.filter((item) => item.id === instrumentId)
       : appSettings.randomInstrumentMode === "market"
-        ? instruments.filter((item) => item.market === appSettings.randomMarket)
-        : instruments;
-    const selectedInstrument = randomItem(instrumentCandidates) ?? instruments[0];
+        ? availableInstruments.filter((item) => item.market === appSettings.randomMarket)
+        : availableInstruments;
+    const selectedInstrument = randomItem(instrumentCandidates) ?? availableInstruments[0] ?? defaultInstruments[0];
     const selectedTimeframe = appSettings.randomTimeframeMode === "current"
       ? timeframe
       : appSettings.randomTimeframeMode === "fixed"
@@ -1584,6 +1599,13 @@ export function TrainingWorkbench() {
     return () => window.clearTimeout(timer);
   }, [loadCoverage, loadSessions, view]);
 
+  useEffect(() => {
+    const timer = window.setTimeout(() => {
+      void loadInstrumentCatalog();
+    }, 0);
+    return () => window.clearTimeout(timer);
+  }, [loadInstrumentCatalog]);
+
   const importCsv = async (event: ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0];
     if (!file) return;
@@ -1666,9 +1688,9 @@ export function TrainingWorkbench() {
             ) : (
               <>
                 <select value={instrumentId} onChange={(event) => startFreshTraining(event.target.value, timeframe)} aria-label="选择品种">
-                  {instruments.map((item) => <option key={item.id} value={item.id}>{item.short} · {item.label}</option>)}
+                  {availableInstruments.map((item) => <option key={item.id} value={item.id}>{item.short} · {item.label}</option>)}
                 </select>
-                <span className="market-pill">{instruments.find((item) => item.id === instrumentId)?.market}</span>
+                <span className="market-pill">{availableInstruments.find((item) => item.id === instrumentId)?.market}</span>
               </>
             )}
             <span className="rule-pill">{trainingTask ? trainingModeLabels[trainingTask.mode] : "自由训练"}</span>
@@ -1721,7 +1743,7 @@ export function TrainingWorkbench() {
                   <div className="task-form-row">
                     <label>默认品种
                       <select value={settingsDraft.defaultInstrumentId} onChange={(event) => setSettingsDraft((draft) => ({ ...draft, defaultInstrumentId: event.target.value }))}>
-                        {instruments.map((item) => <option key={item.id} value={item.id}>{item.short} · {item.label}</option>)}
+                        {availableInstruments.map((item) => <option key={item.id} value={item.id}>{item.short} · {item.label}</option>)}
                       </select>
                     </label>
                     <label>默认周期
@@ -1760,7 +1782,7 @@ export function TrainingWorkbench() {
                     {settingsDraft.randomInstrumentMode === "market" && (
                       <label>指定市场
                         <select value={settingsDraft.randomMarket} onChange={(event) => setSettingsDraft((draft) => ({ ...draft, randomMarket: event.target.value }))}>
-                          {[...new Set(instruments.map((item) => item.market))].map((market) => <option key={market}>{market}</option>)}
+                          {[...new Set(availableInstruments.map((item) => item.market))].map((market) => <option key={market}>{market}</option>)}
                         </select>
                       </label>
                     )}
@@ -1864,7 +1886,7 @@ export function TrainingWorkbench() {
                 <div className="task-form-row">
                   <label>品种
                     <select value={setupInstrumentId} onChange={(event) => setSetupInstrumentId(event.target.value)}>
-                      {instruments.map((item) => <option key={item.id} value={item.id}>{item.short} · {item.label}</option>)}
+                      {availableInstruments.map((item) => <option key={item.id} value={item.id}>{item.short} · {item.label}</option>)}
                     </select>
                   </label>
                   <label>周期
@@ -2465,11 +2487,14 @@ export function TrainingWorkbench() {
               <div><strong>{new Set(coverage.map((item) => item.timeframe)).size}</strong><span>周期</span></div>
               <div><strong>0</strong><span>已知异常</span></div>
             </div>
+            <DataSourceManager onDataChanged={() => {
+              void Promise.all([loadCoverage(), loadInstrumentCatalog()]);
+            }} />
             <div className="coverage-table-wrap">
               <table className="coverage-table">
                 <thead><tr><th>品种</th><th>市场</th><th>周期</th><th>数量</th><th>覆盖范围</th><th>复权</th><th>来源</th><th>状态</th></tr></thead>
                 <tbody>{coverage.map((item) => (
-                  <tr key={`${item.id}-${item.timeframe}`}>
+                  <tr key={`${item.id}-${item.timeframe}-${item.adjustmentType}-${item.source}`}>
                     <td><strong>{item.symbol}</strong><span>{item.name}</span></td>
                     <td>{item.market}</td><td><span className="tf-badge">{item.timeframe}</span></td>
                     <td>{Number(item.barCount).toLocaleString()}</td>

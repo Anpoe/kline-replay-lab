@@ -85,7 +85,16 @@ export async function GET(request: Request) {
   await seedIfNeeded();
   const url = new URL(request.url);
   const coverage = url.searchParams.get("coverage");
+  const instruments = url.searchParams.get("instruments");
   const db = getRawDb();
+
+  if (instruments === "1") {
+    const rows = await db
+      .prepare(`SELECT id, symbol, name, market, timezone, price_precision AS pricePrecision
+        FROM instruments ORDER BY market, symbol`)
+      .all();
+    return Response.json({ instruments: rows.results });
+  }
 
   if (coverage === "1") {
     const rows = await db

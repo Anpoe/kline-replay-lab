@@ -74,6 +74,27 @@ export async function ensureSchema() {
     )`),
     db.prepare(`CREATE INDEX IF NOT EXISTS session_events_lookup_idx
       ON session_events (session_id, sequence)`),
+    db.prepare(`CREATE TABLE IF NOT EXISTS data_download_jobs (
+      id TEXT PRIMARY KEY,
+      provider TEXT NOT NULL,
+      instrument_id TEXT NOT NULL,
+      vendor_symbol TEXT NOT NULL,
+      instrument_name TEXT NOT NULL,
+      market TEXT NOT NULL,
+      timeframe TEXT NOT NULL,
+      start_date TEXT NOT NULL,
+      end_date TEXT NOT NULL,
+      adjustment_type TEXT NOT NULL DEFAULT 'none',
+      status TEXT NOT NULL DEFAULT 'queued',
+      cursor_json TEXT NOT NULL DEFAULT '{}',
+      inserted_count INTEGER NOT NULL DEFAULT 0,
+      quality_report_json TEXT NOT NULL DEFAULT '{}',
+      last_error TEXT,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    )`),
+    db.prepare(`CREATE INDEX IF NOT EXISTS data_download_jobs_status_idx
+      ON data_download_jobs (status, updated_at)`),
   ]);
 
   const sessionColumns = await db.prepare("PRAGMA table_info(training_sessions)").all<{ name: string }>();
