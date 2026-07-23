@@ -15,6 +15,7 @@ export type TrainingTaskDraft = {
   sourceLabel?: string;
   randomStartDate?: string;
   randomEndDate?: string;
+  randomRun?: boolean;
 };
 
 export type TrainingTask = {
@@ -30,6 +31,7 @@ export type TrainingTask = {
   hidePrice: boolean;
   sourceSessionId?: string;
   sourceLabel?: string;
+  randomRun?: boolean;
   status: "active" | "completed";
   completedAt?: string;
 };
@@ -160,6 +162,7 @@ export function resolveTrainingTask(
     hidePrice: draft.hidePrice,
     sourceSessionId: draft.sourceSessionId,
     sourceLabel: draft.sourceLabel,
+    randomRun: draft.randomRun,
     status: endCursor === startCursor ? "completed" : "active",
     completedAt: endCursor === startCursor ? new Date().toISOString() : undefined,
   };

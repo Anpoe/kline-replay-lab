@@ -83,9 +83,11 @@ test("keeps random training inside the configured historical window", () => {
     length: 5,
     randomStartDate: "2025-03-02",
     randomEndDate: "2025-03-12",
+    randomRun: true,
   }, bars, "Asia/Shanghai", "bounded-random-seed");
 
   assert.ok(task.startCursor >= 60);
   assert.ok(task.startCursor <= 70);
   assert.equal(task.endCursor - task.startCursor, 5);
+  assert.equal(task.randomRun, true);
 });

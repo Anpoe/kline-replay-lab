@@ -218,6 +218,7 @@ type MistakeSource = {
   label: string;
 };
 type SettingsTab = "basic" | "training";
+type TaskSetupKind = "configured" | "random";
 type AppSettings = {
   defaultInstrumentId: string;
   defaultTimeframe: string;
@@ -436,6 +437,8 @@ export function TrainingWorkbench() {
   const [marketRules, setMarketRules] = useState<MarketRuleProfile>(CN_A_MAINBOARD_RULES_V1);
   const [trainingTask, setTrainingTask] = useState<TrainingTask | null>(null);
   const [showTaskSetup, setShowTaskSetup] = useState(false);
+  const [taskSetupKind, setTaskSetupKind] = useState<TaskSetupKind>("configured");
+  const [showRandomComplete, setShowRandomComplete] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
   const [settingsTab, setSettingsTab] = useState<SettingsTab>("basic");
   const [appSettings, setAppSettings] = useState<AppSettings>(defaultAppSettings);
@@ -697,6 +700,7 @@ export function TrainingWorkbench() {
     setLoading(true);
     setTrainingReady(false);
     setPlaying(false);
+    setShowRandomComplete(false);
     saveCompletedTrainingRef.current = false;
     try {
       const requestedSnapshotId = restoreRequest?.state.dataSnapshotId
@@ -966,6 +970,7 @@ export function TrainingWorkbench() {
       const completedTask = finishTask(trainingTask, nextCursor);
       setTrainingTask(completedTask);
       setPlaying(false);
+      if (completedTask.randomRun) setShowRandomComplete(true);
       saveCompletedTrainingRef.current = true;
       appendEvent("training_completed", {
         trainingMode: completedTask.mode,
@@ -1096,6 +1101,7 @@ export function TrainingWorkbench() {
 
   const resetTraining = () => {
     saveCompletedTrainingRef.current = false;
+    setShowRandomComplete(false);
     const nextRandomSeed = crypto.randomUUID();
     const nextSessionId = crypto.randomUUID();
     const baseTask = trainingTask ?? createLegacyTrainingTask(bars, Math.max(0, Math.floor(bars.length * 0.68)));
@@ -1267,7 +1273,11 @@ export function TrainingWorkbench() {
         task,
         pnl,
         progressSummary,
-        modeLabel: task ? trainingModeLabels[task.mode] : "旧版自由训练",
+        modeLabel: task
+          ? task.randomRun
+            ? task.mode === "blind" ? "随机盲测" : "随机训练"
+            : trainingModeLabels[task.mode]
+          : "旧版自由训练",
         rangeLabel: task
           ? `${formatDate(task.startTimestamp, session.timeframe)} → ${formatDate(task.endTimestamp, session.timeframe)}`
           : `保存于 K线 ${state.cursor + 1}`,
@@ -1330,10 +1340,12 @@ export function TrainingWorkbench() {
   };
 
   const openTaskSetup = () => {
+    setTaskSetupKind("configured");
     setSetupInstrumentId(appSettings.defaultInstrumentId);
     setSetupTimeframe(appSettings.defaultTimeframe);
     setTaskDraft({
       ...defaultTrainingTaskDraft,
+      randomRun: false,
       startDate: currentBar ? tradingDate(currentBar.timestamp, instrument.timezone) : "",
       startBar: cursor + 1,
       endDate: bars.at(-1) ? tradingDate(bars.at(-1)!.timestamp, instrument.timezone) : "",
@@ -1341,6 +1353,19 @@ export function TrainingWorkbench() {
     setSetupError("");
     setShowTaskSetup(true);
     void loadSessions();
+  };
+
+  const openRandomTraining = () => {
+    setTaskSetupKind("random");
+    setTaskDraft({
+      ...defaultTrainingTaskDraft,
+      mode: "free",
+      startMode: "random",
+      length: appSettings.randomLength,
+      randomRun: true,
+    });
+    setSetupError("");
+    setShowTaskSetup(true);
   };
 
   const selectTrainingMode = (mode: TrainingMode) => {
@@ -1358,6 +1383,54 @@ export function TrainingWorkbench() {
     setSetupError("");
   };
 
+  const launchTraining = (
+    requestInstrumentId: string,
+    requestTimeframe: string,
+    draft: TrainingTaskDraft,
+    snapshotId?: string,
+  ) => {
+    newTaskRequestRef.current = {
+      instrumentId: requestInstrumentId,
+      timeframe: requestTimeframe,
+      draft,
+      snapshotId,
+    };
+    restoreRequestRef.current = null;
+    setInstrumentId(requestInstrumentId);
+    setTimeframe(requestTimeframe);
+    setReviewedSession(null);
+    setShowRandomComplete(false);
+    setView("replay");
+    setShowTaskSetup(false);
+    setLoadNonce((value) => value + 1);
+  };
+
+  const resolveRandomRequest = (draft: TrainingTaskDraft) => {
+    const instrumentCandidates = appSettings.randomInstrumentMode === "current"
+      ? instruments.filter((item) => item.id === instrumentId)
+      : appSettings.randomInstrumentMode === "market"
+        ? instruments.filter((item) => item.market === appSettings.randomMarket)
+        : instruments;
+    const selectedInstrument = randomItem(instrumentCandidates) ?? instruments[0];
+    const selectedTimeframe = appSettings.randomTimeframeMode === "current"
+      ? timeframe
+      : appSettings.randomTimeframeMode === "fixed"
+        ? appSettings.randomTimeframe
+        : randomItem(timeframes) ?? timeframe;
+    return {
+      instrumentId: selectedInstrument.id,
+      timeframe: selectedTimeframe,
+      draft: {
+        ...draft,
+        startMode: "random" as const,
+        length: draft.length > 0 ? draft.length : appSettings.randomLength,
+        randomStartDate: appSettings.randomDateMode === "range" ? appSettings.randomStartDate : undefined,
+        randomEndDate: appSettings.randomDateMode === "range" ? appSettings.randomEndDate : undefined,
+        randomRun: true,
+      },
+    };
+  };
+
   const startConfiguredTraining = () => {
     let requestInstrumentId = setupInstrumentId;
     let requestTimeframe = setupTimeframe;
@@ -1365,25 +1438,10 @@ export function TrainingWorkbench() {
     let draft = { ...taskDraft };
 
     if (draft.startMode === "random" && draft.mode !== "range" && draft.mode !== "mistake") {
-      const instrumentCandidates = appSettings.randomInstrumentMode === "current"
-        ? instruments.filter((item) => item.id === instrumentId)
-        : appSettings.randomInstrumentMode === "market"
-          ? instruments.filter((item) => item.market === appSettings.randomMarket)
-          : instruments;
-      const selectedInstrument = randomItem(instrumentCandidates) ?? instruments[0];
-      const selectedTimeframe = appSettings.randomTimeframeMode === "current"
-        ? timeframe
-        : appSettings.randomTimeframeMode === "fixed"
-          ? appSettings.randomTimeframe
-          : randomItem(timeframes) ?? timeframe;
-      requestInstrumentId = selectedInstrument.id;
-      requestTimeframe = selectedTimeframe;
-      draft = {
-        ...draft,
-        length: draft.length > 0 ? draft.length : appSettings.randomLength,
-        randomStartDate: appSettings.randomDateMode === "range" ? appSettings.randomStartDate : undefined,
-        randomEndDate: appSettings.randomDateMode === "range" ? appSettings.randomEndDate : undefined,
-      };
+      const request = resolveRandomRequest(draft);
+      requestInstrumentId = request.instrumentId;
+      requestTimeframe = request.timeframe;
+      draft = request.draft;
     }
 
     if (draft.mode === "range") {
@@ -1418,19 +1476,22 @@ export function TrainingWorkbench() {
       return;
     }
 
-    newTaskRequestRef.current = {
-      instrumentId: requestInstrumentId,
-      timeframe: requestTimeframe,
-      draft,
-      snapshotId: requestSnapshotId,
-    };
-    restoreRequestRef.current = null;
-    setInstrumentId(requestInstrumentId);
-    setTimeframe(requestTimeframe);
-    setReviewedSession(null);
-    setView("replay");
-    setShowTaskSetup(false);
-    setLoadNonce((value) => value + 1);
+    launchTraining(requestInstrumentId, requestTimeframe, draft, requestSnapshotId);
+  };
+
+  const continueRandomTraining = () => {
+    const blind = trainingTask?.mode === "blind";
+    const request = resolveRandomRequest({
+      ...defaultTrainingTaskDraft,
+      mode: blind ? "blind" : "free",
+      startMode: "random",
+      length: trainingTask?.requestedLength ?? appSettings.randomLength,
+      hideInstrument: blind,
+      hideDate: blind,
+      hidePrice: blind,
+      randomRun: true,
+    });
+    launchTraining(request.instrumentId, request.timeframe, request.draft);
   };
 
   useEffect(() => {
@@ -1534,6 +1595,7 @@ export function TrainingWorkbench() {
           </div>
           <div className="top-actions">
             <span className={`save-state ${saveState.includes("已") ? "saved" : ""}`}>{saveState}</span>
+            <button className="ghost-button" onClick={openRandomTraining}><Shuffle size={16} />随机训练</button>
             <button className="ghost-button" onClick={openTaskSetup}><Play size={16} />新建 Replay 训练</button>
             <button className="primary-button" onClick={saveSession}><Save size={16} />保存训练</button>
           </div>
@@ -1596,7 +1658,7 @@ export function TrainingWorkbench() {
                 <div className="settings-section">
                   <div className="settings-section-head">
                     <strong>随机训练规则</strong>
-                    <span>在新建训练中选择“随机起点”时，按这里的范围抽取品种、周期和历史片段。</span>
+                    <span>点击顶部“随机训练”时，按这里的范围抽取品种、周期和历史片段。</span>
                   </div>
 
                   <div className="settings-rule">
@@ -1655,7 +1717,7 @@ export function TrainingWorkbench() {
 
                   <label className="task-wide-field">默认训练长度（揭示 K 线数）
                     <input type="number" min="0" value={settingsDraft.randomLength} onChange={(event) => setSettingsDraft((draft) => ({ ...draft, randomLength: Math.max(0, Number(event.target.value)) }))} />
-                    <small>选择随机起点时作为默认长度；0 表示一直练到该数据集末尾。</small>
+                    <small>每局随机训练的默认长度；0 表示一直练到该数据集末尾。</small>
                   </label>
                 </div>
               )}
@@ -1676,22 +1738,29 @@ export function TrainingWorkbench() {
             <section className="task-modal" role="dialog" aria-modal="true" aria-labelledby="task-modal-title">
               <div className="task-modal-head">
                 <div>
-                  <span>TRAINING TASK</span>
-                  <h2 id="task-modal-title">新建 Replay 训练</h2>
+                  <span>{taskSetupKind === "random" ? "RANDOM REPLAY" : "TRAINING TASK"}</span>
+                  <h2 id="task-modal-title">{taskSetupKind === "random" ? "随机训练" : "新建 Replay 训练"}</h2>
                   <p>只有点击“保存训练”或训练自动结束后，才会出现在可恢复训练中。</p>
                 </div>
-                <button aria-label="关闭新建训练" onClick={() => setShowTaskSetup(false)}><X size={19} /></button>
+                <button aria-label={taskSetupKind === "random" ? "关闭随机训练设置" : "关闭新建训练"} onClick={() => setShowTaskSetup(false)}><X size={19} /></button>
               </div>
 
-              <div className="task-mode-grid" role="group" aria-label="训练模式">
-                {(Object.keys(trainingModeLabels) as TrainingMode[]).map((mode) => (
+              <div
+                className={`task-mode-grid ${taskSetupKind === "random" ? "random-mode-grid" : ""}`}
+                role="group"
+                aria-label="训练模式"
+              >
+                {(taskSetupKind === "random"
+                  ? (["free", "blind"] as TrainingMode[])
+                  : (Object.keys(trainingModeLabels) as TrainingMode[])
+                ).map((mode) => (
                   <button
                     key={mode}
                     className={taskDraft.mode === mode ? "active" : ""}
                     onClick={() => selectTrainingMode(mode)}
                   >
-                    <strong>{mode === "blind" ? "盲测（隐藏答案）" : trainingModeLabels[mode]}</strong>
-                    <span>{mode === "free" ? "按自己的节奏练习" : mode === "blind" ? "只看结构做判断，结束后揭示" : mode === "range" ? "固定日期区间自动结束" : "重做低分计划与规则拒单"}</span>
+                    <strong>{taskSetupKind === "random" && mode === "free" ? "普通随机" : mode === "blind" ? "盲测随机（隐藏答案）" : trainingModeLabels[mode]}</strong>
+                    <span>{mode === "free" ? (taskSetupKind === "random" ? "显示品种、日期和价格" : "按自己的节奏练习") : mode === "blind" ? "只看结构做判断，结束后揭示" : mode === "range" ? "固定日期区间自动结束" : "重做低分计划与规则拒单"}</span>
                   </button>
                 ))}
               </div>
@@ -1701,12 +1770,12 @@ export function TrainingWorkbench() {
                   <EyeOff size={18} />
                   <div>
                     <strong>什么是盲测？</strong>
-                    <p>系统隐藏品种名、日期和绝对价格，你只能根据 K 线结构制定计划，避免因为“记得这段行情”而提前知道答案。训练结束后再进入复盘查看真实信息。下面三个隐藏项仍可单独调整。</p>
+                    <p>系统隐藏品种名、日期和绝对价格，你只能根据 K 线结构制定计划，避免因为“记得这段行情”而提前知道答案。训练结束后再进入复盘查看真实信息。{taskSetupKind === "configured" ? "下面三个隐藏项仍可单独调整。" : ""}</p>
                   </div>
                 </div>
               )}
 
-              {taskDraft.mode !== "mistake" && taskDraft.startMode !== "random" && (
+              {taskSetupKind === "configured" && taskDraft.mode !== "mistake" && (
                 <div className="task-form-row">
                   <label>品种
                     <select value={setupInstrumentId} onChange={(event) => setSetupInstrumentId(event.target.value)}>
@@ -1721,7 +1790,7 @@ export function TrainingWorkbench() {
                 </div>
               )}
 
-              {taskDraft.mode !== "mistake" && taskDraft.startMode === "random" && (
+              {taskSetupKind === "random" && (
                 <div className="random-rule-summary">
                   <Shuffle size={18} />
                   <div>
@@ -1741,7 +1810,7 @@ export function TrainingWorkbench() {
                 </div>
               )}
 
-              {taskDraft.mode === "range" ? (
+              {taskSetupKind === "configured" && (taskDraft.mode === "range" ? (
                 <div className="task-form-row">
                   <label>区间开始
                     <input type="date" value={taskDraft.startDate} onChange={(event) => setTaskDraft((draft) => ({ ...draft, startDate: event.target.value }))} />
@@ -1773,12 +1842,10 @@ export function TrainingWorkbench() {
                       ["default", "默认位置"],
                       ["date", "指定日期"],
                       ["bar", "指定 K 线"],
-                      ["random", "随机起点"],
                     ] as const).map(([value, label]) => (
                       <button key={value} className={taskDraft.startMode === value ? "active" : ""} onClick={() => setTaskDraft((draft) => ({
                         ...draft,
                         startMode: value,
-                        length: value === "random" && draft.length === 0 ? appSettings.randomLength : draft.length,
                       }))}>{label}</button>
                     ))}
                   </div>
@@ -1789,7 +1856,7 @@ export function TrainingWorkbench() {
                     <label>第几根 K 线<input type="number" min="1" value={taskDraft.startBar} onChange={(event) => setTaskDraft((draft) => ({ ...draft, startBar: Math.max(1, Number(event.target.value)) }))} /></label>
                   )}
                 </div>
-              )}
+              ))}
 
               {taskDraft.mode !== "range" && (
                 <label className="task-wide-field">训练长度（揭示 K 线数）
@@ -1798,17 +1865,42 @@ export function TrainingWorkbench() {
                 </label>
               )}
 
-              <fieldset className="task-privacy">
-                <legend>训练中隐藏</legend>
-                <label><input type="checkbox" checked={taskDraft.hideInstrument} onChange={(event) => setTaskDraft((draft) => ({ ...draft, hideInstrument: event.target.checked }))} />品种名称</label>
-                <label><input type="checkbox" checked={taskDraft.hideDate} onChange={(event) => setTaskDraft((draft) => ({ ...draft, hideDate: event.target.checked }))} />日期坐标</label>
-                <label><input type="checkbox" checked={taskDraft.hidePrice} onChange={(event) => setTaskDraft((draft) => ({ ...draft, hidePrice: event.target.checked }))} />绝对价格</label>
-              </fieldset>
+              {taskSetupKind === "configured" && (
+                <fieldset className="task-privacy">
+                  <legend>训练中隐藏</legend>
+                  <label><input type="checkbox" checked={taskDraft.hideInstrument} onChange={(event) => setTaskDraft((draft) => ({ ...draft, hideInstrument: event.target.checked }))} />品种名称</label>
+                  <label><input type="checkbox" checked={taskDraft.hideDate} onChange={(event) => setTaskDraft((draft) => ({ ...draft, hideDate: event.target.checked }))} />日期坐标</label>
+                  <label><input type="checkbox" checked={taskDraft.hidePrice} onChange={(event) => setTaskDraft((draft) => ({ ...draft, hidePrice: event.target.checked }))} />绝对价格</label>
+                </fieldset>
+              )}
 
               {setupError && <div className="task-error">{setupError}</div>}
               <div className="task-modal-actions">
                 <button className="ghost-button" onClick={() => setShowTaskSetup(false)}>取消</button>
-                <button className="primary-button" onClick={startConfiguredTraining}><Play size={16} />开始训练</button>
+                <button className="primary-button" onClick={startConfiguredTraining}><Play size={16} />{taskSetupKind === "random" ? "开始随机训练" : "开始训练"}</button>
+              </div>
+            </section>
+          </div>
+        )}
+
+        {showRandomComplete && trainingTask?.randomRun && (
+          <div className="task-modal-backdrop">
+            <section className="random-complete-modal" role="dialog" aria-modal="true" aria-labelledby="random-complete-title">
+              <button className="random-complete-close" aria-label="退出随机训练" onClick={() => setShowRandomComplete(false)}><X size={20} /></button>
+              <span>RANDOM ROUND COMPLETE</span>
+              <h2 id="random-complete-title">本局随机训练已结束</h2>
+              <p>{trainingTask.mode === "blind" ? "盲测答案现在已经解锁。" : "已到达本局设定的 K 线边界。"} 本局已经自动保存，可以继续抽取下一局或查看复盘。</p>
+              <div className="random-complete-stats">
+                <div><span>总盈亏</span><strong className={totalPnl >= 0 ? "up" : "down"}>{money(totalPnl)}</strong></div>
+                <div><span>已实现</span><strong>{money(realizedPnl)}</strong></div>
+                <div><span>本局进度</span><strong>{currentTaskProgress.revealed}/{currentTaskProgress.total}</strong></div>
+              </div>
+              <div className="random-complete-actions">
+                <button className="ghost-button" onClick={() => {
+                  setShowRandomComplete(false);
+                  setView("review");
+                }}><BookOpenCheck size={16} />查看复盘</button>
+                <button className="primary-button" onClick={continueRandomTraining}><Shuffle size={16} />继续随机</button>
               </div>
             </section>
           </div>
@@ -1920,7 +2012,7 @@ export function TrainingWorkbench() {
                 </div>
               </div>
 
-              {trainingComplete && (
+              {trainingComplete && !trainingTask?.randomRun && (
                 <div className="training-complete-banner">
                   <div>
                     <span>TRAINING COMPLETE</span>
@@ -2155,7 +2247,7 @@ export function TrainingWorkbench() {
                 <div className="evidence-row"><span>交易理由</span><strong>{reviewDecision.reasons.join("、") || "未填写"}</strong></div>
                 <div className="evidence-row"><span>失效 / 止损</span><strong>{reviewDecision.stop || "未填写"}</strong></div>
                 <div className="evidence-row"><span>第一目标</span><strong>{reviewDecision.target || "未填写"}</strong></div>
-                <div className="evidence-row"><span>训练模式</span><strong>{reviewState.trainingTask ? trainingModeLabels[reviewState.trainingTask.mode] : "旧版自由训练"}</strong></div>
+                <div className="evidence-row"><span>训练模式</span><strong>{reviewState.trainingTask ? reviewState.trainingTask.randomRun ? reviewState.trainingTask.mode === "blind" ? "随机盲测" : "随机训练" : trainingModeLabels[reviewState.trainingTask.mode] : "旧版自由训练"}</strong></div>
                 <div className="evidence-row"><span>任务状态</span><strong>{reviewState.trainingTask?.status === "completed" ? "已完成" : "进行中"}</strong></div>
                 <div className="evidence-row"><span>市场规则</span><strong>{reviewState.marketRules ? `${reviewState.marketRules.name} · ${reviewState.marketRules.version}` : "旧训练未锁定规则版本"}</strong></div>
                 <div className="evidence-row"><span>规则拒单</span><strong>{reviewState.orderRejections.length}</strong></div>
