@@ -49,11 +49,12 @@ export async function GET(request: Request) {
     return Response.json({ session, events: normalizedEvents });
   }
 
+  const includeAll = new URL(request.url).searchParams.get("all") === "1";
   const rows = await db
     .prepare(`SELECT id, instrument_id AS instrumentId, timeframe,
       data_snapshot_id AS dataSnapshotId, state_json AS stateJson,
       created_at AS createdAt, updated_at AS updatedAt
-      FROM training_sessions ORDER BY updated_at DESC LIMIT 20`)
+      FROM training_sessions ORDER BY updated_at DESC${includeAll ? "" : " LIMIT 20"}`)
     .all();
   return Response.json({ sessions: rows.results });
 }

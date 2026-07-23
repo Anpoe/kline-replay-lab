@@ -51,6 +51,7 @@ test("ships the K-line training workbench instead of the starter", async () => {
   assert.match(replayChart, /style: "dashed"/);
   assert.match(sessionsRoute, /export async function DELETE/);
   assert.match(sessionsRoute, /ORDER BY sequence ASC/);
+  assert.match(sessionsRoute, /searchParams\.get\("all"\) === "1"/);
   assert.match(snapshotsRoute, /SHA-256/);
   assert.match(snapshotsRoute, /contentHash/);
   assert.match(marketRules, /CN_A_MAINBOARD_RULES_V1/);

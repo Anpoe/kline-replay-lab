@@ -1271,8 +1271,8 @@ export function TrainingWorkbench() {
     }
   }, []);
 
-  const loadSessions = useCallback(async () => {
-    const response = await fetch("/api/sessions");
+  const loadSessions = useCallback(async (includeAll = false) => {
+    const response = await fetch(includeAll ? "/api/sessions?all=1" : "/api/sessions");
     if (response.ok) {
       const data = await response.json() as { sessions: typeof sessions };
       setSessions(data.sessions);
@@ -1579,7 +1579,7 @@ export function TrainingWorkbench() {
   useEffect(() => {
     const timer = window.setTimeout(() => {
       if (view === "database") loadCoverage();
-      if (view === "review" || view === "performance") loadSessions();
+      if (view === "review" || view === "performance") loadSessions(view === "performance");
     }, 0);
     return () => window.clearTimeout(timer);
   }, [loadCoverage, loadSessions, view]);
