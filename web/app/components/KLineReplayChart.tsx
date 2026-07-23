@@ -1,9 +1,22 @@
 "use client";
 
-import { useEffect, useRef } from "react";
-import type { Chart, KLineData, OverlayTemplate, Period } from "klinecharts";
+import { useCallback, useEffect, useRef } from "react";
+import type { Chart, KLineData, Overlay, OverlayTemplate, Period, Point } from "klinecharts";
 
 type DrawingRequest = { name: string; nonce: number } | null;
+
+export type PersistedDrawing = {
+  id: string;
+  name: string;
+  paneId: string;
+  points: Array<Partial<Point>>;
+  lock: boolean;
+  visible: boolean;
+  zLevel: number;
+  mode: "normal" | "weak_magnet" | "strong_magnet";
+  styles?: unknown;
+  extendData?: unknown;
+};
 
 export type TradeMarker = {
   id: string;
@@ -149,6 +162,29 @@ function syncTradeMarkers(chart: Chart, tradeMarkers: TradeMarker[]) {
   });
 }
 
+function serializeDrawing(overlay: Overlay): PersistedDrawing {
+  return {
+    id: overlay.id,
+    name: overlay.name,
+    paneId: overlay.paneId,
+    points: overlay.points.map((point) => ({
+      dataIndex: point.dataIndex,
+      timestamp: point.timestamp,
+      value: point.value,
+    })),
+    lock: overlay.lock,
+    visible: overlay.visible,
+    zLevel: overlay.zLevel,
+    mode: overlay.mode,
+    styles: overlay.styles ?? undefined,
+    extendData: overlay.extendData ?? undefined,
+  };
+}
+
+function getPersistedDrawings(chart: Chart) {
+  return chart.getOverlays({ groupId: USER_DRAWING_GROUP }).map(serializeDrawing);
+}
+
 const periods: Record<string, Period> = {
   "5m": { type: "minute", span: 5 },
   "1h": { type: "hour", span: 1 },
@@ -165,6 +201,9 @@ export function KLineReplayChart({
   drawingRequest,
   clearNonce,
   tradeMarkers,
+  drawings,
+  drawingsRestoreNonce,
+  onDrawingsChange,
 }: {
   bars: KLineData[];
   symbol: string;
@@ -174,25 +213,65 @@ export function KLineReplayChart({
   drawingRequest: DrawingRequest;
   clearNonce: number;
   tradeMarkers: TradeMarker[];
+  drawings: PersistedDrawing[];
+  drawingsRestoreNonce: number;
+  onDrawingsChange: (drawings: PersistedDrawing[]) => void;
 }) {
   const containerRef = useRef<HTMLDivElement>(null);
   const chartRef = useRef<Chart | null>(null);
   const barsRef = useRef<KLineData[]>(bars);
   const tradeMarkersRef = useRef<TradeMarker[]>(tradeMarkers);
+  const drawingsRef = useRef<PersistedDrawing[]>(drawings);
+  const onDrawingsChangeRef = useRef(onDrawingsChange);
+  const suppressDrawingEventsRef = useRef(false);
+
+  const createPersistedDrawing = useCallback((chart: Chart, drawing: PersistedDrawing) => chart.createOverlay({
+    id: drawing.id,
+    name: drawing.name,
+    groupId: USER_DRAWING_GROUP,
+    paneId: drawing.paneId,
+    points: drawing.points,
+    lock: drawing.lock,
+    visible: drawing.visible,
+    zLevel: drawing.zLevel,
+    mode: drawing.mode,
+    styles: drawing.styles,
+    extendData: drawing.extendData,
+    onDrawEnd: ({ chart: eventChart }) => {
+      if (!suppressDrawingEventsRef.current) onDrawingsChangeRef.current(getPersistedDrawings(eventChart));
+    },
+    onPressedMoveEnd: ({ chart: eventChart }) => {
+      if (!suppressDrawingEventsRef.current) onDrawingsChangeRef.current(getPersistedDrawings(eventChart));
+    },
+    onRemoved: ({ chart: eventChart }) => {
+      if (suppressDrawingEventsRef.current) return;
+      queueMicrotask(() => onDrawingsChangeRef.current(getPersistedDrawings(eventChart)));
+    },
+  }), []);
+
+  const restoreDrawings = useCallback((chart: Chart, nextDrawings: PersistedDrawing[]) => {
+    suppressDrawingEventsRef.current = true;
+    chart.removeOverlay({ groupId: USER_DRAWING_GROUP });
+    nextDrawings.forEach((drawing) => createPersistedDrawing(chart, drawing));
+    suppressDrawingEventsRef.current = false;
+  }, [createPersistedDrawing]);
 
   useEffect(() => {
     if (!containerRef.current) return;
     let cancelled = false;
-    let resizeObserver: ResizeObserver | null = null;
     let disposeChart: (() => void) | null = null;
 
     void import("klinecharts").then(({ dispose, init, registerOverlay }) => {
       if (cancelled || !containerRef.current) return;
       ensureTradeOverlay(registerOverlay);
-      const chart = init(containerRef.current, {
-        locale: "zh-CN",
-        timezone,
-        styles: {
+      const nativeResizeObserver = window.ResizeObserver;
+      let chart: Chart | null = null;
+      try {
+        window.ResizeObserver = undefined as unknown as typeof ResizeObserver;
+        chart = init(containerRef.current, {
+          locale: "zh-CN",
+          timezone,
+          styles: {
           grid: {
             horizontal: { color: "rgba(133, 149, 158, 0.10)", size: 1 },
             vertical: { color: "rgba(133, 149, 158, 0.08)", size: 1 },
@@ -240,8 +319,11 @@ export function KLineReplayChart({
               text: { backgroundColor: "#263238", color: "#eff6f3" },
             },
           },
-        },
-      });
+          },
+        });
+      } finally {
+        window.ResizeObserver = nativeResizeObserver;
+      }
       if (!chart) return;
       chartRef.current = chart;
       chart.setSymbol({ ticker: symbol, pricePrecision, volumePrecision: 0 });
@@ -251,19 +333,17 @@ export function KLineReplayChart({
       });
       chart.createIndicator("VOL", false);
       syncTradeMarkers(chart, tradeMarkersRef.current);
+      restoreDrawings(chart, drawingsRef.current);
 
-      resizeObserver = new ResizeObserver(() => chart.resize());
-      resizeObserver.observe(containerRef.current);
       disposeChart = () => dispose(chart);
     });
 
     return () => {
       cancelled = true;
-      resizeObserver?.disconnect();
       disposeChart?.();
       chartRef.current = null;
     };
-  }, [pricePrecision, symbol, timeframe, timezone]);
+  }, [pricePrecision, restoreDrawings, symbol, timeframe, timezone]);
 
   useEffect(() => {
     barsRef.current = bars;
@@ -285,13 +365,37 @@ export function KLineReplayChart({
   }, [tradeMarkers]);
 
   useEffect(() => {
+    drawingsRef.current = drawings;
+  }, [drawings]);
+
+  useEffect(() => {
+    onDrawingsChangeRef.current = onDrawingsChange;
+  }, [onDrawingsChange]);
+
+  useEffect(() => {
     if (!drawingRequest || !chartRef.current) return;
-    chartRef.current.createOverlay({ name: drawingRequest.name, groupId: USER_DRAWING_GROUP });
+    chartRef.current.createOverlay({
+      name: drawingRequest.name,
+      groupId: USER_DRAWING_GROUP,
+      onDrawEnd: ({ chart }) => onDrawingsChangeRef.current(getPersistedDrawings(chart)),
+      onPressedMoveEnd: ({ chart }) => onDrawingsChangeRef.current(getPersistedDrawings(chart)),
+      onRemoved: ({ chart }) => {
+        if (suppressDrawingEventsRef.current) return;
+        queueMicrotask(() => onDrawingsChangeRef.current(getPersistedDrawings(chart)));
+      },
+    });
   }, [drawingRequest]);
 
   useEffect(() => {
+    if (!drawingsRestoreNonce || !chartRef.current) return;
+    restoreDrawings(chartRef.current, drawingsRef.current);
+  }, [drawingsRestoreNonce, restoreDrawings]);
+
+  useEffect(() => {
     if (!clearNonce || !chartRef.current) return;
+    suppressDrawingEventsRef.current = true;
     chartRef.current.removeOverlay({ groupId: USER_DRAWING_GROUP });
+    suppressDrawingEventsRef.current = false;
   }, [clearNonce]);
 
   return <div ref={containerRef} className="chart-canvas" aria-label={symbol + " K线图"} />;

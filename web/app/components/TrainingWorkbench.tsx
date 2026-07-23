@@ -27,8 +27,12 @@ import {
   TrendingUp,
 } from "lucide-react";
 import type { KLineData } from "klinecharts";
-import { ChangeEvent, useCallback, useEffect, useMemo, useState } from "react";
-import { KLineReplayChart, type TradeMarker } from "./KLineReplayChart";
+import { ChangeEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import {
+  KLineReplayChart,
+  type PersistedDrawing,
+  type TradeMarker,
+} from "./KLineReplayChart";
 
 type View = "replay" | "database" | "review";
 type Instrument = {
@@ -89,6 +93,44 @@ type Decision = {
   target: string;
   note: string;
 };
+type TrainingState = {
+  version: 1;
+  cursor: number;
+  cursorTimestamp?: number;
+  dataSignature?: string;
+  randomSeed: string;
+  positions: PositionLot[];
+  pendingOrders: PendingOrder[];
+  executions: Execution[];
+  decision: Decision;
+  orderQty: number;
+  drawings: PersistedDrawing[];
+};
+type TrainingSession = {
+  id: string;
+  instrumentId: string;
+  timeframe: string;
+  stateJson: string;
+  createdAt: string;
+  updatedAt: string;
+};
+type RestoreRequest = {
+  id: string;
+  instrumentId: string;
+  timeframe: string;
+  state: TrainingState;
+  updatedAt?: string;
+};
+
+const LAST_DRAFT_KEY = "kline-replay-lab:last-training";
+const defaultDecision: Decision = {
+  marketState: "趋势",
+  location: "回调位置",
+  reasons: ["顺势", "关键位置"],
+  stop: "",
+  target: "",
+  note: "",
+};
 
 const instruments = [
   { id: "600519.SH", short: "600519", label: "贵州茅台", market: "A股" },
@@ -116,6 +158,15 @@ function formatDate(timestamp: number, timeframe: string) {
     : date.toLocaleDateString("zh-CN", { year: "numeric", month: "2-digit", day: "2-digit" });
 }
 
+function seededFraction(seed: string) {
+  let hash = 2166136261;
+  for (const character of seed) {
+    hash ^= character.charCodeAt(0);
+    hash = Math.imul(hash, 16777619);
+  }
+  return (hash >>> 0) / 4294967296;
+}
+
 export function TrainingWorkbench() {
   const [view, setView] = useState<View>("replay");
   const [instrumentId, setInstrumentId] = useState("600519.SH");
@@ -138,21 +189,22 @@ export function TrainingWorkbench() {
   const [executions, setExecutions] = useState<Execution[]>([]);
   const [orderQty, setOrderQty] = useState(100);
   const [orderPanelTab, setOrderPanelTab] = useState<"positions" | "pending" | "history">("positions");
-  const [decision, setDecision] = useState<Decision>({
-    marketState: "趋势",
-    location: "回调位置",
-    reasons: ["顺势", "关键位置"],
-    stop: "",
-    target: "",
-    note: "",
-  });
+  const [decision, setDecision] = useState<Decision>(defaultDecision);
   const [drawingRequest, setDrawingRequest] = useState<{ name: string; nonce: number } | null>(null);
   const [clearNonce, setClearNonce] = useState(0);
+  const [drawingsRestoreNonce, setDrawingsRestoreNonce] = useState(0);
+  const [drawings, setDrawings] = useState<PersistedDrawing[]>([]);
   const [saveState, setSaveState] = useState("未保存");
   const [sessionId, setSessionId] = useState(() => crypto.randomUUID());
+  const [randomSeed, setRandomSeed] = useState(() => crypto.randomUUID());
   const [coverage, setCoverage] = useState<Coverage[]>([]);
-  const [sessions, setSessions] = useState<Array<{ id: string; instrumentId: string; timeframe: string; stateJson: string; updatedAt: string }>>([]);
+  const [sessions, setSessions] = useState<TrainingSession[]>([]);
   const [importStatus, setImportStatus] = useState("");
+  const [startupReady, setStartupReady] = useState(false);
+  const [trainingReady, setTrainingReady] = useState(false);
+  const [loadNonce, setLoadNonce] = useState(0);
+  const [restoreNotice, setRestoreNotice] = useState("");
+  const restoreRequestRef = useRef<RestoreRequest | null>(null);
 
   const visibleBars = useMemo(() => bars.slice(0, cursor + 1), [bars, cursor]);
   const currentBar = bars[cursor];
@@ -183,8 +235,95 @@ export function TrainingWorkbench() {
   const planScore = [decision.marketState, decision.location, decision.stop, decision.target].filter(Boolean).length * 15
     + Math.min(decision.reasons.length, 2) * 20;
 
+  const dataSignature = useMemo(() => bars.length
+    ? `${bars.length}:${bars[0].timestamp}:${bars[bars.length - 1].timestamp}`
+    : "", [bars]);
+  const trainingState = useMemo<TrainingState>(() => ({
+    version: 1,
+    cursor,
+    cursorTimestamp: currentBar?.timestamp,
+    dataSignature,
+    randomSeed,
+    positions,
+    pendingOrders,
+    executions,
+    decision,
+    orderQty,
+    drawings,
+  }), [cursor, currentBar?.timestamp, dataSignature, decision, drawings, executions, orderQty, pendingOrders, positions, randomSeed]);
+
+  const parseTrainingState = useCallback((value: unknown): TrainingState | null => {
+    if (!value || typeof value !== "object") return null;
+    const state = value as Partial<TrainingState>;
+    if (!Number.isFinite(state.cursor) || !Array.isArray(state.positions) || !Array.isArray(state.pendingOrders)) return null;
+    return {
+      version: 1,
+      cursor: Number(state.cursor),
+      cursorTimestamp: typeof state.cursorTimestamp === "number" ? state.cursorTimestamp : undefined,
+      dataSignature: typeof state.dataSignature === "string" ? state.dataSignature : undefined,
+      randomSeed: typeof state.randomSeed === "string" ? state.randomSeed : crypto.randomUUID(),
+      positions: state.positions,
+      pendingOrders: state.pendingOrders,
+      executions: Array.isArray(state.executions) ? state.executions : [],
+      decision: state.decision && typeof state.decision === "object" ? { ...defaultDecision, ...state.decision } : defaultDecision,
+      orderQty: typeof state.orderQty === "number" && state.orderQty > 0 ? state.orderQty : 100,
+      drawings: Array.isArray(state.drawings) ? state.drawings : [],
+    };
+  }, []);
+
+  const queueRestore = useCallback((request: RestoreRequest) => {
+    restoreRequestRef.current = request;
+    setInstrumentId(request.instrumentId);
+    setTimeframe(request.timeframe);
+    setView("replay");
+    setLoadNonce((value) => value + 1);
+  }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+    const findLastTraining = async () => {
+      let request: RestoreRequest | null = null;
+      try {
+        const localDraft = window.localStorage.getItem(LAST_DRAFT_KEY);
+        if (localDraft) {
+          const parsed = JSON.parse(localDraft) as Omit<RestoreRequest, "state"> & { state: unknown };
+          const state = parseTrainingState(parsed.state);
+          if (parsed.id && parsed.instrumentId && parsed.timeframe && state) request = { ...parsed, state };
+        }
+        if (!request) {
+          const response = await fetch("/api/sessions");
+          if (response.ok) {
+            const data = await response.json() as { sessions: TrainingSession[] };
+            const latest = data.sessions[0];
+            if (latest) {
+              const state = parseTrainingState(JSON.parse(latest.stateJson));
+              if (state) request = { ...latest, state };
+            }
+          }
+        }
+      } catch {
+        window.localStorage.removeItem(LAST_DRAFT_KEY);
+      }
+      if (cancelled) return;
+      if (request) {
+        restoreRequestRef.current = request;
+        setInstrumentId(request.instrumentId);
+        setTimeframe(request.timeframe);
+      }
+      setStartupReady(true);
+    };
+    void findLastTraining();
+    return () => {
+      cancelled = true;
+    };
+  }, [parseTrainingState]);
+
   const loadBars = useCallback(async () => {
+    if (!startupReady) return;
+    const restoreRequest = restoreRequestRef.current;
+    restoreRequestRef.current = null;
     setLoading(true);
+    setTrainingReady(false);
     setPlaying(false);
     try {
       const response = await fetch(`/api/candles?instrument=${encodeURIComponent(instrumentId)}&timeframe=${timeframe}`);
@@ -192,24 +331,81 @@ export function TrainingWorkbench() {
       const data = await response.json() as { instrument: Instrument; candles: KLineData[] };
       setInstrument(data.instrument);
       setBars(data.candles);
-      setCursor(Math.max(0, Math.min(data.candles.length - 1, Math.floor(data.candles.length * 0.68))));
-      setPositions([]);
-      setPendingOrders([]);
-      setExecutions([]);
+      const nextSignature = data.candles.length
+        ? `${data.candles.length}:${data.candles[0].timestamp}:${data.candles[data.candles.length - 1].timestamp}`
+        : "";
+      if (restoreRequest) {
+        const timestampCursor = restoreRequest.state.cursorTimestamp == null
+          ? -1
+          : data.candles.findIndex((bar) => bar.timestamp === restoreRequest.state.cursorTimestamp);
+        const restoredCursor = timestampCursor >= 0 ? timestampCursor : restoreRequest.state.cursor;
+        setCursor(Math.max(0, Math.min(data.candles.length - 1, restoredCursor)));
+        setPositions(restoreRequest.state.positions);
+        setPendingOrders(restoreRequest.state.pendingOrders);
+        setExecutions(restoreRequest.state.executions);
+        setDecision(restoreRequest.state.decision);
+        setOrderQty(restoreRequest.state.orderQty);
+        setDrawings(restoreRequest.state.drawings);
+        setDrawingsRestoreNonce(Date.now());
+        setSessionId(restoreRequest.id);
+        setRandomSeed(restoreRequest.state.randomSeed);
+        setSaveState("已恢复 · 本机自动保存");
+        setRestoreNotice(restoreRequest.state.dataSignature && restoreRequest.state.dataSignature !== nextSignature
+          ? "训练已恢复，但行情数据版本发生变化；系统已按时间定位到最接近的 K 线。"
+          : "已恢复上次训练：回放位置、订单、持仓、决策卡和图表标记均已载入。");
+      } else {
+        setCursor(Math.max(0, Math.min(data.candles.length - 1, Math.floor(data.candles.length * 0.68))));
+        setPositions([]);
+        setPendingOrders([]);
+        setExecutions([]);
+        setDecision(defaultDecision);
+        setOrderQty(100);
+        setDrawings([]);
+        setClearNonce(Date.now());
+        setSessionId(crypto.randomUUID());
+        setRandomSeed(crypto.randomUUID());
+        setSaveState("新训练 · 本机自动保存");
+        setRestoreNotice("");
+      }
       setOrderPanelTab("positions");
-      setSessionId(crypto.randomUUID());
-      setSaveState("未保存");
+      setTrainingReady(true);
     } catch (error) {
       setImportStatus(error instanceof Error ? error.message : "行情加载失败");
     } finally {
       setLoading(false);
     }
-  }, [instrumentId, timeframe]);
+  }, [instrumentId, startupReady, timeframe]);
 
   useEffect(() => {
     const timer = window.setTimeout(loadBars, 0);
     return () => window.clearTimeout(timer);
-  }, [loadBars]);
+  }, [loadBars, loadNonce]);
+
+  useEffect(() => {
+    if (!trainingReady || !bars.length) return;
+    const savedAt = new Date().toISOString();
+    window.localStorage.setItem(LAST_DRAFT_KEY, JSON.stringify({
+      id: sessionId,
+      instrumentId,
+      timeframe,
+      state: trainingState,
+      updatedAt: savedAt,
+    }));
+
+    const timer = window.setTimeout(async () => {
+      try {
+        const response = await fetch("/api/sessions", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ id: sessionId, instrumentId, timeframe, state: trainingState }),
+        });
+        if (response.ok) setSaveState("已自动保存");
+      } catch {
+        setSaveState("本机已保存 · 数据库稍后重试");
+      }
+    }, 900);
+    return () => window.clearTimeout(timer);
+  }, [bars.length, instrumentId, sessionId, timeframe, trainingReady, trainingState]);
 
   const executeOrders = useCallback((orders: PendingOrder[], bar: KLineData) => {
     if (!orders.length) return;
@@ -337,18 +533,32 @@ export function TrainingWorkbench() {
     setSaveState("有未保存更改");
   };
 
+  const startFreshTraining = (nextInstrumentId: string, nextTimeframe: string) => {
+    restoreRequestRef.current = null;
+    setInstrumentId(nextInstrumentId);
+    setTimeframe(nextTimeframe);
+    setLoadNonce((value) => value + 1);
+  };
+
   const resetTraining = (random = false) => {
+    const nextRandomSeed = crypto.randomUUID();
     const nextCursor = random && bars.length > 80
-      ? 40 + Math.floor(Math.random() * (bars.length - 70))
+      ? 40 + Math.floor(seededFraction(nextRandomSeed) * (bars.length - 70))
       : Math.max(0, Math.floor(bars.length * 0.68));
     setCursor(nextCursor);
     setPlaying(false);
     setPositions([]);
     setPendingOrders([]);
     setExecutions([]);
+    setDecision(defaultDecision);
+    setOrderQty(100);
+    setDrawings([]);
+    setClearNonce(Date.now());
     setOrderPanelTab("positions");
     setSessionId(crypto.randomUUID());
-    setSaveState("未保存");
+    setRandomSeed(nextRandomSeed);
+    setRestoreNotice("");
+    setSaveState("新训练 · 本机自动保存");
   };
 
   const saveSession = async () => {
@@ -360,10 +570,20 @@ export function TrainingWorkbench() {
         id: sessionId,
         instrumentId,
         timeframe,
-        state: { cursor, positions, pendingOrders, executions, decision },
+        state: trainingState,
       }),
     });
-    setSaveState(response.ok ? "已保存" : "保存失败");
+    setSaveState(response.ok ? "已保存到本地数据库" : "本机已有快照 · 数据库保存失败");
+  };
+
+  const resumeSession = (session: TrainingSession) => {
+    try {
+      const state = parseTrainingState(JSON.parse(session.stateJson));
+      if (!state) throw new Error("invalid session");
+      queueRestore({ ...session, state });
+    } catch {
+      setImportStatus("这条训练记录不完整，暂时无法恢复。");
+    }
   };
 
   const loadCoverage = useCallback(async () => {
@@ -457,22 +677,29 @@ export function TrainingWorkbench() {
       <main className="workspace">
         <header className="topbar">
           <div className="instrument-selectors">
-            <select value={instrumentId} onChange={(event) => setInstrumentId(event.target.value)} aria-label="选择品种">
+            <select value={instrumentId} onChange={(event) => startFreshTraining(event.target.value, timeframe)} aria-label="选择品种">
               {instruments.map((item) => <option key={item.id} value={item.id}>{item.short} · {item.label}</option>)}
             </select>
             <span className="market-pill">{instruments.find((item) => item.id === instrumentId)?.market}</span>
             <div className="timeframes" aria-label="周期">
               {timeframes.map((item) => (
-                <button key={item} className={timeframe === item ? "active" : ""} onClick={() => setTimeframe(item)}>{item}</button>
+                <button key={item} className={timeframe === item ? "active" : ""} onClick={() => startFreshTraining(instrumentId, item)}>{item}</button>
               ))}
             </div>
           </div>
           <div className="top-actions">
-            <span className={`save-state ${saveState === "已保存" ? "saved" : ""}`}>{saveState}</span>
+            <span className={`save-state ${saveState.includes("已") ? "saved" : ""}`}>{saveState}</span>
             <button className="ghost-button" onClick={() => resetTraining(true)}><Shuffle size={16} />随机训练</button>
             <button className="primary-button" onClick={saveSession}><Save size={16} />保存训练</button>
           </div>
         </header>
+
+        {restoreNotice && (
+          <div className="restore-notice">
+            <span><RotateCcw size={14} />{restoreNotice}</span>
+            <button onClick={() => setRestoreNotice("")}>知道了</button>
+          </div>
+        )}
 
         {view === "replay" && (
           <div className="replay-layout">
@@ -498,7 +725,10 @@ export function TrainingWorkbench() {
                     <button key={name} title={label} aria-label={label} onClick={() => setDrawingRequest({ name, nonce: Date.now() })}><Icon size={18} /></button>
                   ))}
                   <span className="tool-divider" />
-                  <button title="清除绘图" aria-label="清除绘图" onClick={() => setClearNonce(Date.now())}><Trash2 size={18} /></button>
+                  <button title="清除绘图" aria-label="清除绘图" onClick={() => {
+                    setDrawings([]);
+                    setClearNonce(Date.now());
+                  }}><Trash2 size={18} /></button>
                 </div>
                 <div className="chart-wrap">
                   {loading ? <div className="chart-loading">正在准备历史 K 线…</div> : (
@@ -511,6 +741,9 @@ export function TrainingWorkbench() {
                       drawingRequest={drawingRequest}
                       clearNonce={clearNonce}
                       tradeMarkers={tradeMarkers}
+                      drawings={drawings}
+                      drawingsRestoreNonce={drawingsRestoreNonce}
+                      onDrawingsChange={setDrawings}
                     />
                   )}
                   <div className="replay-watermark">REPLAY · 未来已隐藏</div>
@@ -713,7 +946,20 @@ export function TrainingWorkbench() {
             </div>
             <div className="review-columns">
               <article className="insight-card"><div className="section-label">流程观察</div><h2>{planScore >= 80 ? "计划完整，可以进入样本积累" : "先补齐失效点和目标"}</h2><p>当前训练卡记录了市场状态、位置和 {decision.reasons.length} 个理由。系统不会因为单次盈利直接判断策略有效。</p><div className="evidence-row"><span>市场状态</span><strong>{decision.marketState}</strong></div><div className="evidence-row"><span>位置</span><strong>{decision.location}</strong></div><div className="evidence-row"><span>样本置信度</span><strong>低 · 继续收集</strong></div></article>
-              <article className="history-card"><div className="section-label">已保存训练</div>{sessions.length ? sessions.map((session) => <div className="session-row" key={session.id}><div><strong>{session.instrumentId} · {session.timeframe}</strong><span>{new Date(session.updatedAt).toLocaleString("zh-CN")}</span></div><span>已保存</span></div>) : <div className="empty-state">保存一次训练后，会在这里形成可回看的历史记录。</div>}</article>
+              <article className="history-card">
+                <div className="section-label">可恢复训练</div>
+                {sessions.length ? sessions.map((session) => (
+                  <div className="session-row" key={session.id}>
+                    <div>
+                      <strong>{session.instrumentId} · {session.timeframe}</strong>
+                      <span>{new Date(session.updatedAt).toLocaleString("zh-CN")}</span>
+                    </div>
+                    <button className="resume-session" onClick={() => resumeSession(session)}>
+                      <RotateCcw size={13} />继续训练
+                    </button>
+                  </div>
+                )) : <div className="empty-state">训练会自动保存；产生进度后会在这里显示“继续训练”。</div>}
+              </article>
             </div>
           </section>
         )}

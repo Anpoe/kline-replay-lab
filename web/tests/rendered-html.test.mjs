@@ -20,7 +20,12 @@ test("ships the K-line training workbench instead of the starter", async () => {
   assert.match(workbench, /K 线数据库/);
   assert.match(workbench, /每次开仓形成独立持仓/);
   assert.match(workbench, /queueClosePosition/);
+  assert.match(workbench, /kline-replay-lab:last-training/);
+  assert.match(workbench, /继续训练/);
+  assert.match(workbench, /drawingsRestoreNonce/);
   assert.match(replayChart, /tradeLifecycle/);
+  assert.match(replayChart, /PersistedDrawing/);
+  assert.match(replayChart, /getPersistedDrawings/);
   assert.match(replayChart, /style: "dashed"/);
   assert.doesNotMatch(packageJson, /react-loading-skeleton/);
 });
