@@ -1,0 +1,723 @@
+"use client";
+
+import {
+  BarChart3,
+  BookOpenCheck,
+  Brush,
+  ChevronLeft,
+  ChevronRight,
+  CircleStop,
+  Database,
+  FastForward,
+  FileUp,
+  Gauge,
+  LineChart,
+  ListChecks,
+  Pause,
+  Play,
+  RotateCcw,
+  Save,
+  Settings2,
+  Shuffle,
+  Sparkles,
+  Tag,
+  Target,
+  Trash2,
+  TrendingDown,
+  TrendingUp,
+} from "lucide-react";
+import type { KLineData } from "klinecharts";
+import { ChangeEvent, useCallback, useEffect, useMemo, useState } from "react";
+import { KLineReplayChart, type TradeMarker } from "./KLineReplayChart";
+
+type View = "replay" | "database" | "review";
+type Instrument = {
+  id: string;
+  symbol: string;
+  name: string;
+  market: string;
+  timezone: string;
+  pricePrecision: number;
+};
+type Coverage = Instrument & {
+  timeframe: string;
+  barCount: number;
+  firstTimestamp: number;
+  lastTimestamp: number;
+  adjustmentType: string;
+  source: string;
+};
+type PositionSide = "long" | "short";
+type OrderAction = "open" | "close";
+type PendingOrder = {
+  id: string;
+  action: OrderAction;
+  side: "buy" | "sell";
+  qty: number;
+  createdAt: number;
+  positionId: string;
+};
+type PositionLot = {
+  id: string;
+  side: PositionSide;
+  qty: number;
+  entryPrice: number;
+  entryTimestamp: number;
+  entryOrderId: string;
+  status: "open" | "closed";
+  exitPrice?: number;
+  exitTimestamp?: number;
+  exitOrderId?: string;
+  realizedPnl?: number;
+};
+type Execution = {
+  id: string;
+  orderId: string;
+  positionId: string;
+  action: OrderAction;
+  side: "buy" | "sell";
+  qty: number;
+  price: number;
+  timestamp: number;
+  realizedPnl: number;
+};
+type Decision = {
+  marketState: string;
+  location: string;
+  reasons: string[];
+  stop: string;
+  target: string;
+  note: string;
+};
+
+const instruments = [
+  { id: "600519.SH", short: "600519", label: "贵州茅台", market: "A股" },
+  { id: "AAPL.US", short: "AAPL", label: "Apple", market: "美股" },
+];
+const timeframes = ["5m", "1h", "1d", "1w"];
+const reasonOptions = ["顺势", "关键位置", "突破回踩", "失败突破", "二次入场", "信号K确认"];
+const drawingTools = [
+  { name: "horizontalStraightLine", label: "水平线", icon: LineChart },
+  { name: "rayLine", label: "趋势线", icon: TrendingUp },
+  { name: "priceChannelLine", label: "通道", icon: Gauge },
+  { name: "fibonacciLine", label: "斐波那契", icon: Target },
+  { name: "brush", label: "自由画笔", icon: Brush },
+  { name: "simpleAnnotation", label: "K线标记", icon: Tag },
+];
+
+function money(value: number) {
+  return `${value >= 0 ? "+" : ""}${value.toFixed(2)}`;
+}
+
+function formatDate(timestamp: number, timeframe: string) {
+  const date = new Date(timestamp);
+  return timeframe === "5m" || timeframe === "1h"
+    ? date.toLocaleString("zh-CN", { month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit" })
+    : date.toLocaleDateString("zh-CN", { year: "numeric", month: "2-digit", day: "2-digit" });
+}
+
+export function TrainingWorkbench() {
+  const [view, setView] = useState<View>("replay");
+  const [instrumentId, setInstrumentId] = useState("600519.SH");
+  const [timeframe, setTimeframe] = useState("1d");
+  const [instrument, setInstrument] = useState<Instrument>({
+    id: "600519.SH",
+    symbol: "600519.SH",
+    name: "贵州茅台",
+    market: "CN",
+    timezone: "Asia/Shanghai",
+    pricePrecision: 2,
+  });
+  const [bars, setBars] = useState<KLineData[]>([]);
+  const [cursor, setCursor] = useState(0);
+  const [loading, setLoading] = useState(true);
+  const [playing, setPlaying] = useState(false);
+  const [speed, setSpeed] = useState(1);
+  const [positions, setPositions] = useState<PositionLot[]>([]);
+  const [pendingOrders, setPendingOrders] = useState<PendingOrder[]>([]);
+  const [executions, setExecutions] = useState<Execution[]>([]);
+  const [orderQty, setOrderQty] = useState(100);
+  const [orderPanelTab, setOrderPanelTab] = useState<"positions" | "pending" | "history">("positions");
+  const [decision, setDecision] = useState<Decision>({
+    marketState: "趋势",
+    location: "回调位置",
+    reasons: ["顺势", "关键位置"],
+    stop: "",
+    target: "",
+    note: "",
+  });
+  const [drawingRequest, setDrawingRequest] = useState<{ name: string; nonce: number } | null>(null);
+  const [clearNonce, setClearNonce] = useState(0);
+  const [saveState, setSaveState] = useState("未保存");
+  const [sessionId, setSessionId] = useState(() => crypto.randomUUID());
+  const [coverage, setCoverage] = useState<Coverage[]>([]);
+  const [sessions, setSessions] = useState<Array<{ id: string; instrumentId: string; timeframe: string; stateJson: string; updatedAt: string }>>([]);
+  const [importStatus, setImportStatus] = useState("");
+
+  const visibleBars = useMemo(() => bars.slice(0, cursor + 1), [bars, cursor]);
+  const currentBar = bars[cursor];
+  const openPositions = useMemo(() => positions.filter((position) => position.status === "open"), [positions]);
+  const closedPositions = useMemo(() => positions.filter((position) => position.status === "closed"), [positions]);
+  const netQty = openPositions.reduce((sum, position) => sum + (position.side === "long" ? position.qty : -position.qty), 0);
+  const grossQty = openPositions.reduce((sum, position) => sum + position.qty, 0);
+  const openPnl = currentBar
+    ? openPositions.reduce((sum, position) => sum + (currentBar.close - position.entryPrice) * position.qty * (position.side === "long" ? 1 : -1), 0)
+    : 0;
+  const realizedPnl = closedPositions.reduce((sum, position) => sum + (position.realizedPnl ?? 0), 0);
+  const tradeMarkers = useMemo<TradeMarker[]>(() => positions
+    .filter((position) => !currentBar || position.entryTimestamp <= currentBar.timestamp)
+    .map((position) => {
+      const exitIsVisible = position.exitTimestamp != null && (!currentBar || position.exitTimestamp <= currentBar.timestamp);
+      return {
+        id: position.id,
+        side: position.side,
+        qty: position.qty,
+        entryPrice: position.entryPrice,
+        entryTimestamp: position.entryTimestamp,
+        exitPrice: exitIsVisible ? position.exitPrice : undefined,
+        exitTimestamp: exitIsVisible ? position.exitTimestamp : undefined,
+        realizedPnl: exitIsVisible ? position.realizedPnl : undefined,
+      };
+    }), [currentBar, positions]);
+  const progress = bars.length > 1 ? (cursor / (bars.length - 1)) * 100 : 0;
+  const planScore = [decision.marketState, decision.location, decision.stop, decision.target].filter(Boolean).length * 15
+    + Math.min(decision.reasons.length, 2) * 20;
+
+  const loadBars = useCallback(async () => {
+    setLoading(true);
+    setPlaying(false);
+    try {
+      const response = await fetch(`/api/candles?instrument=${encodeURIComponent(instrumentId)}&timeframe=${timeframe}`);
+      if (!response.ok) throw new Error("行情加载失败");
+      const data = await response.json() as { instrument: Instrument; candles: KLineData[] };
+      setInstrument(data.instrument);
+      setBars(data.candles);
+      setCursor(Math.max(0, Math.min(data.candles.length - 1, Math.floor(data.candles.length * 0.68))));
+      setPositions([]);
+      setPendingOrders([]);
+      setExecutions([]);
+      setOrderPanelTab("positions");
+      setSessionId(crypto.randomUUID());
+      setSaveState("未保存");
+    } catch (error) {
+      setImportStatus(error instanceof Error ? error.message : "行情加载失败");
+    } finally {
+      setLoading(false);
+    }
+  }, [instrumentId, timeframe]);
+
+  useEffect(() => {
+    const timer = window.setTimeout(loadBars, 0);
+    return () => window.clearTimeout(timer);
+  }, [loadBars]);
+
+  const executeOrders = useCallback((orders: PendingOrder[], bar: KLineData) => {
+    if (!orders.length) return;
+    const nextPositions = [...positions];
+    const fills: Execution[] = [];
+
+    orders.forEach((order) => {
+      if (order.action === "open") {
+        const side: PositionSide = order.side === "buy" ? "long" : "short";
+        nextPositions.push({
+          id: order.positionId,
+          side,
+          qty: order.qty,
+          entryPrice: bar.open,
+          entryTimestamp: bar.timestamp,
+          entryOrderId: order.id,
+          status: "open",
+        });
+        fills.push({
+          id: crypto.randomUUID(),
+          orderId: order.id,
+          positionId: order.positionId,
+          action: "open",
+          side: order.side,
+          qty: order.qty,
+          price: bar.open,
+          timestamp: bar.timestamp,
+          realizedPnl: 0,
+        });
+        return;
+      }
+
+      const positionIndex = nextPositions.findIndex((position) => position.id === order.positionId && position.status === "open");
+      if (positionIndex < 0) return;
+      const position = nextPositions[positionIndex];
+      const direction = position.side === "long" ? 1 : -1;
+      const realized = (bar.open - position.entryPrice) * position.qty * direction;
+      nextPositions[positionIndex] = {
+        ...position,
+        status: "closed",
+        exitPrice: bar.open,
+        exitTimestamp: bar.timestamp,
+        exitOrderId: order.id,
+        realizedPnl: realized,
+      };
+      fills.push({
+        id: crypto.randomUUID(),
+        orderId: order.id,
+        positionId: position.id,
+        action: "close",
+        side: order.side,
+        qty: position.qty,
+        price: bar.open,
+        timestamp: bar.timestamp,
+        realizedPnl: realized,
+      });
+    });
+
+    setPositions(nextPositions);
+    if (fills.length) setExecutions((items) => [...items, ...fills]);
+  }, [positions]);
+
+  const revealMany = useCallback((count: number) => {
+    if (cursor >= bars.length - 1) {
+      setPlaying(false);
+      return;
+    }
+    const nextBar = bars[cursor + 1];
+    executeOrders(pendingOrders, nextBar);
+    if (pendingOrders.length) setPendingOrders([]);
+    setCursor((value) => Math.min(value + Math.max(1, count), bars.length - 1));
+    setSaveState("有未保存更改");
+  }, [bars, cursor, executeOrders, pendingOrders]);
+
+  const revealNext = useCallback(() => revealMany(1), [revealMany]);
+
+  useEffect(() => {
+    if (!playing) return;
+    const timer = window.setInterval(revealNext, Math.max(120, 950 / speed));
+    return () => window.clearInterval(timer);
+  }, [playing, revealNext, speed]);
+
+  const queueOpenOrder = (side: "buy" | "sell", qty = orderQty) => {
+    if (!currentBar || qty <= 0 || cursor >= bars.length - 1) return;
+    setPendingOrders((items) => [
+      ...items,
+      {
+        id: crypto.randomUUID(),
+        action: "open",
+        side,
+        qty,
+        createdAt: currentBar.timestamp,
+        positionId: crypto.randomUUID(),
+      },
+    ]);
+    setOrderPanelTab("pending");
+    setSaveState("有未保存更改");
+  };
+
+  const queueClosePosition = (positionId: string) => {
+    if (!currentBar || cursor >= bars.length - 1) return;
+    const position = openPositions.find((item) => item.id === positionId);
+    if (!position || pendingOrders.some((order) => order.action === "close" && order.positionId === positionId)) return;
+    setPendingOrders((items) => [
+      ...items,
+      {
+        id: crypto.randomUUID(),
+        action: "close",
+        side: position.side === "long" ? "sell" : "buy",
+        qty: position.qty,
+        createdAt: currentBar.timestamp,
+        positionId,
+      },
+    ]);
+    setSaveState("有未保存更改");
+  };
+
+  const queueCloseAll = () => {
+    openPositions.forEach((position) => queueClosePosition(position.id));
+    setOrderPanelTab("pending");
+  };
+
+  const cancelPendingOrder = (orderId: string) => {
+    setPendingOrders((items) => items.filter((order) => order.id !== orderId));
+    setSaveState("有未保存更改");
+  };
+
+  const resetTraining = (random = false) => {
+    const nextCursor = random && bars.length > 80
+      ? 40 + Math.floor(Math.random() * (bars.length - 70))
+      : Math.max(0, Math.floor(bars.length * 0.68));
+    setCursor(nextCursor);
+    setPlaying(false);
+    setPositions([]);
+    setPendingOrders([]);
+    setExecutions([]);
+    setOrderPanelTab("positions");
+    setSessionId(crypto.randomUUID());
+    setSaveState("未保存");
+  };
+
+  const saveSession = async () => {
+    setSaveState("保存中…");
+    const response = await fetch("/api/sessions", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        id: sessionId,
+        instrumentId,
+        timeframe,
+        state: { cursor, positions, pendingOrders, executions, decision },
+      }),
+    });
+    setSaveState(response.ok ? "已保存" : "保存失败");
+  };
+
+  const loadCoverage = useCallback(async () => {
+    const response = await fetch("/api/candles?coverage=1");
+    if (response.ok) {
+      const data = await response.json() as { coverage: Coverage[] };
+      setCoverage(data.coverage);
+    }
+  }, []);
+
+  const loadSessions = useCallback(async () => {
+    const response = await fetch("/api/sessions");
+    if (response.ok) {
+      const data = await response.json() as { sessions: typeof sessions };
+      setSessions(data.sessions);
+    }
+  }, []);
+
+  useEffect(() => {
+    const timer = window.setTimeout(() => {
+      if (view === "database") loadCoverage();
+      if (view === "review") loadSessions();
+    }, 0);
+    return () => window.clearTimeout(timer);
+  }, [loadCoverage, loadSessions, view]);
+
+  const importCsv = async (event: ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0];
+    if (!file) return;
+    setImportStatus("正在校验…");
+    try {
+      const text = await file.text();
+      const lines = text.trim().split(/\r?\n/);
+      const headers = lines[0].split(",").map((item) => item.trim().toLowerCase());
+      const barsToImport = lines.slice(1).filter(Boolean).map((line) => {
+        const cells = line.split(",").map((item) => item.trim());
+        const row = Object.fromEntries(headers.map((header, index) => [header, cells[index]]));
+        let timestamp = Number(row.timestamp);
+        if (!Number.isFinite(timestamp)) timestamp = Date.parse(row.date ?? row.datetime ?? row.time);
+        if (timestamp < 10_000_000_000) timestamp *= 1000;
+        return {
+          timestamp,
+          open: Number(row.open),
+          high: Number(row.high),
+          low: Number(row.low),
+          close: Number(row.close),
+          volume: row.volume ? Number(row.volume) : undefined,
+          turnover: row.turnover ? Number(row.turnover) : undefined,
+        };
+      });
+      const customId = `CUSTOM.${file.name.replace(/\.[^.]+$/, "").toUpperCase()}`;
+      const response = await fetch("/api/candles", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          instrument: { id: customId, symbol: customId, name: file.name, market: "CUSTOM", timezone: "Asia/Shanghai" },
+          timeframe: "1d",
+          adjustmentType: "none",
+          bars: barsToImport,
+        }),
+      });
+      const result = await response.json() as { imported?: number; error?: string };
+      if (!response.ok) throw new Error(result.error ?? "导入失败");
+      setImportStatus(`已导入 ${result.imported} 根日 K`);
+      await loadCoverage();
+    } catch (error) {
+      setImportStatus(error instanceof Error ? error.message : "导入失败");
+    } finally {
+      event.target.value = "";
+    }
+  };
+
+  return (
+    <div className="app-shell">
+      <aside className="main-rail">
+        <button className="brand-mark" aria-label="K线训练营">K</button>
+        <nav aria-label="主导航">
+          <button className={view === "replay" ? "active" : ""} onClick={() => setView("replay")}>
+            <BarChart3 size={20} /><span>训练</span>
+          </button>
+          <button className={view === "database" ? "active" : ""} onClick={() => setView("database")}>
+            <Database size={20} /><span>数据</span>
+          </button>
+          <button className={view === "review" ? "active" : ""} onClick={() => setView("review")}>
+            <BookOpenCheck size={20} /><span>复盘</span>
+          </button>
+        </nav>
+        <button className="rail-bottom" aria-label="设置"><Settings2 size={20} /></button>
+      </aside>
+
+      <main className="workspace">
+        <header className="topbar">
+          <div className="instrument-selectors">
+            <select value={instrumentId} onChange={(event) => setInstrumentId(event.target.value)} aria-label="选择品种">
+              {instruments.map((item) => <option key={item.id} value={item.id}>{item.short} · {item.label}</option>)}
+            </select>
+            <span className="market-pill">{instruments.find((item) => item.id === instrumentId)?.market}</span>
+            <div className="timeframes" aria-label="周期">
+              {timeframes.map((item) => (
+                <button key={item} className={timeframe === item ? "active" : ""} onClick={() => setTimeframe(item)}>{item}</button>
+              ))}
+            </div>
+          </div>
+          <div className="top-actions">
+            <span className={`save-state ${saveState === "已保存" ? "saved" : ""}`}>{saveState}</span>
+            <button className="ghost-button" onClick={() => resetTraining(true)}><Shuffle size={16} />随机训练</button>
+            <button className="primary-button" onClick={saveSession}><Save size={16} />保存训练</button>
+          </div>
+        </header>
+
+        {view === "replay" && (
+          <div className="replay-layout">
+            <section className="chart-stage">
+              <div className="chart-heading">
+                <div>
+                  <strong>{instrument.symbol}</strong>
+                  <span>{instrument.name} · {timeframe} · 历史训练</span>
+                </div>
+                {currentBar && (
+                  <div className="ohlc-line">
+                    <span>O {currentBar.open.toFixed(instrument.pricePrecision)}</span>
+                    <span>H {currentBar.high.toFixed(instrument.pricePrecision)}</span>
+                    <span>L {currentBar.low.toFixed(instrument.pricePrecision)}</span>
+                    <span className={currentBar.close >= currentBar.open ? "up" : "down"}>C {currentBar.close.toFixed(instrument.pricePrecision)}</span>
+                  </div>
+                )}
+              </div>
+
+              <div className="chart-area">
+                <div className="drawing-rail" aria-label="画图工具">
+                  {drawingTools.map(({ name, label, icon: Icon }) => (
+                    <button key={name} title={label} aria-label={label} onClick={() => setDrawingRequest({ name, nonce: Date.now() })}><Icon size={18} /></button>
+                  ))}
+                  <span className="tool-divider" />
+                  <button title="清除绘图" aria-label="清除绘图" onClick={() => setClearNonce(Date.now())}><Trash2 size={18} /></button>
+                </div>
+                <div className="chart-wrap">
+                  {loading ? <div className="chart-loading">正在准备历史 K 线…</div> : (
+                    <KLineReplayChart
+                      bars={visibleBars}
+                      symbol={instrument.symbol}
+                      timezone={instrument.timezone}
+                      timeframe={timeframe}
+                      pricePrecision={instrument.pricePrecision}
+                      drawingRequest={drawingRequest}
+                      clearNonce={clearNonce}
+                      tradeMarkers={tradeMarkers}
+                    />
+                  )}
+                  <div className="replay-watermark">REPLAY · 未来已隐藏</div>
+                </div>
+              </div>
+
+              <div className="replay-controls">
+                <div className="progress-meta">
+                  <span>{currentBar ? formatDate(currentBar.timestamp, timeframe) : "--"}</span>
+                  <span>{cursor + 1} / {bars.length} 根</span>
+                </div>
+                <div className="progress-track"><span style={{ width: `${progress}%` }} /></div>
+                <div className="transport">
+                  <button aria-label="重置" onClick={() => resetTraining(false)}><RotateCcw size={17} /></button>
+                  <button aria-label="上一根" onClick={() => setCursor((value) => Math.max(0, value - 1))}><ChevronLeft size={19} /></button>
+                  <button className="play-button" aria-label={playing ? "暂停" : "播放"} onClick={() => setPlaying((value) => !value)}>
+                    {playing ? <Pause size={20} /> : <Play size={20} fill="currentColor" />}
+                  </button>
+                  <button aria-label="下一根" onClick={revealNext}><ChevronRight size={19} /></button>
+                  <button aria-label="前进五根" onClick={() => revealMany(5)}><FastForward size={18} /></button>
+                </div>
+                <div className="speed-control">
+                  {[0.5, 1, 2, 5].map((value) => <button key={value} className={speed === value ? "active" : ""} onClick={() => setSpeed(value)}>{value}x</button>)}
+                </div>
+              </div>
+
+              <div className="trade-dock">
+                <div className="trade-stats">
+                  <span>持仓笔数 <strong>{openPositions.length}</strong></span>
+                  <span>净 / 总数量 <strong>{netQty} / {grossQty}</strong></span>
+                  <span>浮盈 <strong className={openPnl >= 0 ? "up" : "down"}>{money(openPnl)}</strong></span>
+                  <span>已实现 <strong className={realizedPnl >= 0 ? "up" : "down"}>{money(realizedPnl)}</strong></span>
+                </div>
+                <div className="order-entry">
+                  <label>数量<input type="number" min="1" value={orderQty} onChange={(event) => setOrderQty(Math.max(1, Number(event.target.value)))} /></label>
+                  <button className="sell-button" onClick={() => queueOpenOrder("sell")}><TrendingDown size={16} />卖出开仓</button>
+                  <button className="buy-button" onClick={() => queueOpenOrder("buy")}><TrendingUp size={16} />买入开仓</button>
+                  <button className="flat-button" disabled={!openPositions.length} onClick={queueCloseAll}><CircleStop size={16} />全部平仓</button>
+                </div>
+                <div className="pending-note">{pendingOrders.length ? pendingOrders.length + " 笔委托将在下一根开盘成交" : "每次开仓形成独立持仓，可分别平仓"}</div>
+
+                <div className="orders-board">
+                  <div className="orders-board-head">
+                    <strong>订单与持仓</strong>
+                    <div className="orders-tabs">
+                      <button className={orderPanelTab === "positions" ? "active" : ""} onClick={() => setOrderPanelTab("positions")}>当前持仓 <span>{openPositions.length}</span></button>
+                      <button className={orderPanelTab === "pending" ? "active" : ""} onClick={() => setOrderPanelTab("pending")}>待成交 <span>{pendingOrders.length}</span></button>
+                      <button className={orderPanelTab === "history" ? "active" : ""} onClick={() => setOrderPanelTab("history")}>已平仓 <span>{closedPositions.length}</span></button>
+                    </div>
+                  </div>
+
+                  <div className="orders-table-wrap">
+                    {orderPanelTab === "positions" && (
+                      <table className="orders-table">
+                        <thead><tr><th>仓位</th><th>方向</th><th>数量</th><th>开仓时间</th><th>开仓价</th><th>现价</th><th>浮动盈亏</th><th>操作</th></tr></thead>
+                        <tbody>{openPositions.length ? openPositions.map((position) => {
+                          const pnl = currentBar ? (currentBar.close - position.entryPrice) * position.qty * (position.side === "long" ? 1 : -1) : 0;
+                          const closeQueued = pendingOrders.some((order) => order.action === "close" && order.positionId === position.id);
+                          return (
+                            <tr key={position.id}>
+                              <td><span className="position-id">#{position.id.slice(0, 6)}</span></td>
+                              <td><span className={position.side === "long" ? "side-long" : "side-short"}>{position.side === "long" ? "多 / 买" : "空 / 卖"}</span></td>
+                              <td>{position.qty}</td>
+                              <td>{formatDate(position.entryTimestamp, timeframe)}</td>
+                              <td>{position.entryPrice.toFixed(instrument.pricePrecision)}</td>
+                              <td>{currentBar?.close.toFixed(instrument.pricePrecision) ?? "--"}</td>
+                              <td><strong className={pnl >= 0 ? "up" : "down"}>{money(pnl)}</strong></td>
+                              <td><button className="row-action" disabled={closeQueued} onClick={() => queueClosePosition(position.id)}>{closeQueued ? "已委托" : "平仓"}</button></td>
+                            </tr>
+                          );
+                        }) : <tr><td className="orders-empty" colSpan={8}>暂无持仓。买入或卖出委托会在下一根 K 线开盘形成独立仓位。</td></tr>}</tbody>
+                      </table>
+                    )}
+
+                    {orderPanelTab === "pending" && (
+                      <table className="orders-table">
+                        <thead><tr><th>委托</th><th>动作</th><th>方向</th><th>数量</th><th>提交时间</th><th>关联仓位</th><th>成交规则</th><th>操作</th></tr></thead>
+                        <tbody>{pendingOrders.length ? pendingOrders.map((order) => (
+                          <tr key={order.id}>
+                            <td><span className="position-id">#{order.id.slice(0, 6)}</span></td>
+                            <td>{order.action === "open" ? "开仓" : "平仓"}</td>
+                            <td><span className={order.side === "buy" ? "side-long" : "side-short"}>{order.side === "buy" ? "买入" : "卖出"}</span></td>
+                            <td>{order.qty}</td>
+                            <td>{formatDate(order.createdAt, timeframe)}</td>
+                            <td>#{order.positionId.slice(0, 6)}</td>
+                            <td>下一根开盘</td>
+                            <td><button className="row-action danger" onClick={() => cancelPendingOrder(order.id)}>撤单</button></td>
+                          </tr>
+                        )) : <tr><td className="orders-empty" colSpan={8}>暂无待成交委托。</td></tr>}</tbody>
+                      </table>
+                    )}
+
+                    {orderPanelTab === "history" && (
+                      <table className="orders-table">
+                        <thead><tr><th>仓位</th><th>方向</th><th>数量</th><th>开仓时间</th><th>开仓价</th><th>平仓时间</th><th>平仓价</th><th>已实现</th></tr></thead>
+                        <tbody>{closedPositions.length ? [...closedPositions].reverse().map((position) => (
+                          <tr key={position.id}>
+                            <td><span className="position-id">#{position.id.slice(0, 6)}</span></td>
+                            <td><span className={position.side === "long" ? "side-long" : "side-short"}>{position.side === "long" ? "多 / 买" : "空 / 卖"}</span></td>
+                            <td>{position.qty}</td>
+                            <td>{formatDate(position.entryTimestamp, timeframe)}</td>
+                            <td>{position.entryPrice.toFixed(instrument.pricePrecision)}</td>
+                            <td>{position.exitTimestamp ? formatDate(position.exitTimestamp, timeframe) : "--"}</td>
+                            <td>{position.exitPrice?.toFixed(instrument.pricePrecision) ?? "--"}</td>
+                            <td><strong className={(position.realizedPnl ?? 0) >= 0 ? "up" : "down"}>{money(position.realizedPnl ?? 0)}</strong></td>
+                          </tr>
+                        )) : <tr><td className="orders-empty" colSpan={8}>平仓后，买卖点会以浅色虚线连接并保留在这里。</td></tr>}</tbody>
+                      </table>
+                    )}
+                  </div>
+                </div>
+              </div>
+            </section>
+
+            <aside className="decision-panel">
+              <div className="panel-title">
+                <div><span>事前决策卡</span><strong>{planScore}%</strong></div>
+                <p>先写计划，再揭示下一根</p>
+              </div>
+              <label>市场状态
+                <select value={decision.marketState} onChange={(event) => setDecision({ ...decision, marketState: event.target.value })}>
+                  <option>趋势</option><option>宽通道</option><option>震荡区间</option><option>突破模式</option><option>反转尝试</option>
+                </select>
+              </label>
+              <label>当前位置
+                <select value={decision.location} onChange={(event) => setDecision({ ...decision, location: event.target.value })}>
+                  <option>回调位置</option><option>区间上沿</option><option>区间中部</option><option>区间下沿</option><option>关键突破位</option>
+                </select>
+              </label>
+              <fieldset>
+                <legend>交易理由 <small>至少 2 个</small></legend>
+                <div className="reason-chips">
+                  {reasonOptions.map((reason) => {
+                    const selected = decision.reasons.includes(reason);
+                    return (
+                      <button key={reason} className={selected ? "selected" : ""} onClick={() => setDecision({
+                        ...decision,
+                        reasons: selected ? decision.reasons.filter((item) => item !== reason) : [...decision.reasons, reason],
+                      })}>{selected ? "✓ " : "+ "}{reason}</button>
+                    );
+                  })}
+                </div>
+              </fieldset>
+              <div className="price-plan">
+                <label>失效 / 止损<input inputMode="decimal" placeholder="价格" value={decision.stop} onChange={(event) => setDecision({ ...decision, stop: event.target.value })} /></label>
+                <label>第一目标<input inputMode="decimal" placeholder="价格" value={decision.target} onChange={(event) => setDecision({ ...decision, target: event.target.value })} /></label>
+              </div>
+              <label>计划说明
+                <textarea placeholder="我在等待什么？什么情况放弃？" value={decision.note} onChange={(event) => setDecision({ ...decision, note: event.target.value })} />
+              </label>
+              <div className="discipline-card">
+                <Sparkles size={18} />
+                <div><strong>{decision.reasons.length >= 2 ? "条件已成形" : "再找一个独立理由"}</strong><span>评分关注过程，不用结果倒推理由</span></div>
+              </div>
+              <button className="commit-plan" onClick={() => { setSaveState("有未保存更改"); revealNext(); }}><ListChecks size={17} />提交决策并揭示下一根</button>
+            </aside>
+          </div>
+        )}
+
+        {view === "database" && (
+          <section className="content-page">
+            <div className="page-heading"><div><span>DATA LIBRARY</span><h1>K 线数据库</h1><p>当前只管理历史 K 线及其覆盖、来源和质量。</p></div>
+              <label className="primary-button file-button"><FileUp size={17} />导入 CSV<input type="file" accept=".csv,text/csv" onChange={importCsv} /></label>
+            </div>
+            {importStatus && <div className="status-banner">{importStatus}</div>}
+            <div className="database-summary">
+              <div><strong>{new Set(coverage.map((item) => item.id)).size}</strong><span>品种</span></div>
+              <div><strong>{coverage.reduce((sum, item) => sum + Number(item.barCount), 0).toLocaleString()}</strong><span>K 线总数</span></div>
+              <div><strong>{new Set(coverage.map((item) => item.timeframe)).size}</strong><span>周期</span></div>
+              <div><strong>0</strong><span>已知异常</span></div>
+            </div>
+            <div className="coverage-table-wrap">
+              <table className="coverage-table">
+                <thead><tr><th>品种</th><th>市场</th><th>周期</th><th>数量</th><th>覆盖范围</th><th>复权</th><th>来源</th><th>状态</th></tr></thead>
+                <tbody>{coverage.map((item) => (
+                  <tr key={`${item.id}-${item.timeframe}`}>
+                    <td><strong>{item.symbol}</strong><span>{item.name}</span></td>
+                    <td>{item.market}</td><td><span className="tf-badge">{item.timeframe}</span></td>
+                    <td>{Number(item.barCount).toLocaleString()}</td>
+                    <td>{new Date(item.firstTimestamp).toLocaleDateString("zh-CN")} — {new Date(item.lastTimestamp).toLocaleDateString("zh-CN")}</td>
+                    <td>{item.adjustmentType}</td><td>{item.source}</td><td><span className="healthy-dot" />完整</td>
+                  </tr>
+                ))}</tbody>
+              </table>
+            </div>
+            <div className="csv-help"><strong>CSV 格式</strong><code>timestamp,open,high,low,close,volume,turnover</code><span>时间可用毫秒时间戳或可解析日期；单次最多 5000 根。</span></div>
+          </section>
+        )}
+
+        {view === "review" && (
+          <section className="content-page review-page">
+            <div className="page-heading"><div><span>REVIEW</span><h1>训练复盘</h1><p>先看事实，再判断执行质量。</p></div></div>
+            <div className="review-grid">
+              <div className="review-hero">
+                <span>本次已实现盈亏</span><strong className={realizedPnl >= 0 ? "up" : "down"}>{money(realizedPnl)}</strong><small>{closedPositions.length} 笔已平仓 · {executions.length} 笔成交 · 当前流程完整度 {planScore}%</small>
+              </div>
+              <div className="metric-card"><span>胜率</span><strong>{closedPositions.length ? Math.round(closedPositions.filter((position) => (position.realizedPnl ?? 0) > 0).length / closedPositions.length * 100) : 0}%</strong><small>仅统计已平仓成交</small></div>
+              <div className="metric-card"><span>事前理由</span><strong>{decision.reasons.length}</strong><small>{decision.reasons.length >= 2 ? "达到最低要求" : "理由不足"}</small></div>
+              <div className="metric-card"><span>待验证</span><strong>{pendingOrders.length}</strong><small>下一根开盘执行</small></div>
+            </div>
+            <div className="review-columns">
+              <article className="insight-card"><div className="section-label">流程观察</div><h2>{planScore >= 80 ? "计划完整，可以进入样本积累" : "先补齐失效点和目标"}</h2><p>当前训练卡记录了市场状态、位置和 {decision.reasons.length} 个理由。系统不会因为单次盈利直接判断策略有效。</p><div className="evidence-row"><span>市场状态</span><strong>{decision.marketState}</strong></div><div className="evidence-row"><span>位置</span><strong>{decision.location}</strong></div><div className="evidence-row"><span>样本置信度</span><strong>低 · 继续收集</strong></div></article>
+              <article className="history-card"><div className="section-label">已保存训练</div>{sessions.length ? sessions.map((session) => <div className="session-row" key={session.id}><div><strong>{session.instrumentId} · {session.timeframe}</strong><span>{new Date(session.updatedAt).toLocaleString("zh-CN")}</span></div><span>已保存</span></div>) : <div className="empty-state">保存一次训练后，会在这里形成可回看的历史记录。</div>}</article>
+            </div>
+          </section>
+        )}
+      </main>
+    </div>
+  );
+}
