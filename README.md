@@ -51,15 +51,14 @@ npm run dev
 
 ## 配置真实行情
 
-复制 `web/.env.example` 为 `web/.env.local`，只在本机填写：
+启动本地网页版后，打开侧栏“设置 → 数据源设置”，直接填写并保存：
 
-```dotenv
-TUSHARE_TOKEN=
-APCA_API_KEY_ID=
-APCA_API_SECRET_KEY=
-```
+- Alpaca API Key ID 和 Secret Key：用于美股。
+- Tushare Token：用于 A 股。
 
-Alpaca 的两项 Key 用于美股，Tushare Token 用于 A 股。保存后重启 `启动本地网页版.bat`，进入“数据”页面创建下载任务。真实密钥不会进入 Git；Tushare 的 5m/1h 历史分钟线还取决于账户权限。
+凭证只保存在这台电脑的本地数据库，界面不会回显完整内容，也不会进入 Git。保存后无需重启，进入“数据”页面即可创建下载任务。Tushare 的 5m/1h 历史分钟线还取决于账户权限。
+
+`web/.env.local` 仍可作为高级兼容配置，但普通使用不再需要手动编辑文件。
 
 ## 项目结构
 

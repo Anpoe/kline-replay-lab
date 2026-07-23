@@ -38,6 +38,7 @@ import {
   type TradeMarker,
 } from "./KLineReplayChart";
 import { DataSourceManager } from "./DataSourceManager";
+import { ProviderSettingsPanel } from "./ProviderSettingsPanel";
 import {
   CN_A_MAINBOARD_RULES_V1,
   createPriceBand,
@@ -220,7 +221,7 @@ type MistakeSource = {
   targetCursor: number;
   label: string;
 };
-type SettingsTab = "basic" | "training";
+type SettingsTab = "basic" | "training" | "data";
 type TaskSetupKind = "configured" | "random";
 type PerformanceFilters = {
   instrumentId: string;
@@ -1724,7 +1725,7 @@ export function TrainingWorkbench() {
                 <div>
                   <span>SETTINGS</span>
                   <h2 id="settings-modal-title">本地设置</h2>
-                  <p>设置只保存在这台电脑，用于新训练的默认值和随机抽样规则。</p>
+                  <p>管理训练偏好、随机抽样规则和本机数据源凭证。</p>
                 </div>
                 <button aria-label="关闭设置" onClick={() => setShowSettings(false)}><X size={19} /></button>
               </div>
@@ -1732,6 +1733,7 @@ export function TrainingWorkbench() {
               <div className="settings-tabs" role="tablist" aria-label="设置分类">
                 <button className={settingsTab === "basic" ? "active" : ""} onClick={() => setSettingsTab("basic")}>基本设置</button>
                 <button className={settingsTab === "training" ? "active" : ""} onClick={() => setSettingsTab("training")}>训练设置</button>
+                <button className={settingsTab === "data" ? "active" : ""} onClick={() => setSettingsTab("data")}>数据源设置</button>
               </div>
 
               {settingsTab === "basic" ? (
@@ -1761,7 +1763,7 @@ export function TrainingWorkbench() {
                     </label>
                   </div>
                 </div>
-              ) : (
+              ) : settingsTab === "training" ? (
                 <div className="settings-section">
                   <div className="settings-section-head">
                     <strong>随机训练规则</strong>
@@ -1827,12 +1829,14 @@ export function TrainingWorkbench() {
                     <small>每局随机训练的默认长度；0 表示一直练到该数据集末尾。</small>
                   </label>
                 </div>
+              ) : (
+                <ProviderSettingsPanel />
               )}
 
               {settingsError && <div className="task-error">{settingsError}</div>}
               <div className="task-modal-actions">
-                <button className="ghost-button" onClick={() => setShowSettings(false)}>取消</button>
-                <button className="primary-button" onClick={saveSettings}><Save size={16} />保存设置</button>
+                <button className="ghost-button" onClick={() => setShowSettings(false)}>{settingsTab === "data" ? "关闭" : "取消"}</button>
+                {settingsTab !== "data" && <button className="primary-button" onClick={saveSettings}><Save size={16} />保存设置</button>}
               </div>
             </section>
           </div>

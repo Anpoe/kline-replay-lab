@@ -39,15 +39,9 @@ npm run dev
 
 ### 本地行情凭证
 
-复制 `.env.example` 为 `.env.local`，填写自己的凭证后重启服务：
+打开应用侧栏“设置 → 数据源设置”，直接保存 Alpaca API Key ID、Secret Key 或 Tushare Token。凭证保存在本地 D1，接口只返回配置状态和掩码，不会回显完整内容，也不会进入 Git；保存后无需重启。
 
-```dotenv
-TUSHARE_TOKEN=
-APCA_API_KEY_ID=
-APCA_API_SECRET_KEY=
-```
-
-不要把真实密钥提交到 Git。Alpaca 两项凭证用于美股；Tushare Token 用于 A 股，5m/1h 历史分钟线还需要对应的数据权限。
+`.env.local` 仍作为高级兼容方式保留，对应字段见 `.env.example`。Tushare 的 5m/1h 历史分钟线还需要对应的数据权限。
 
 ## 常用命令
 

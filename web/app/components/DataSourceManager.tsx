@@ -1,6 +1,6 @@
 "use client";
 
-import { CloudDownload, KeyRound, Pause, Play, RefreshCw, Trash2 } from "lucide-react";
+import { CloudDownload, Pause, Play, RefreshCw, Trash2 } from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
 
 type ProviderId = "tushare" | "alpaca";
@@ -10,7 +10,6 @@ type Provider = {
   market: string;
   configured: boolean;
   supportedTimeframes: string[];
-  credentialNames: string[];
 };
 type DownloadJob = {
   id: string;
@@ -87,6 +86,14 @@ export function DataSourceManager({ onDataChanged }: { onDataChanged?: () => voi
     };
   }, [loadJobs, loadProviders]);
 
+  useEffect(() => {
+    const reload = () => {
+      void loadProviders();
+    };
+    window.addEventListener("provider-settings-updated", reload);
+    return () => window.removeEventListener("provider-settings-updated", reload);
+  }, [loadProviders]);
+
   const selectProvider = (nextProvider: ProviderId) => {
     setProviderId(nextProvider);
     setForm((current) => ({ ...current, ...providerDefaults(nextProvider) }));
@@ -131,7 +138,7 @@ export function DataSourceManager({ onDataChanged }: { onDataChanged?: () => voi
   const createJob = async () => {
     const configured = providers.find((provider) => provider.id === providerId)?.configured;
     if (!configured) {
-      setNotice("这个数据源尚未配置本地凭证，请先按下方提示填写 web/.env.local 并重启服务。");
+      setNotice("这个数据源尚未配置，请先进入侧栏“设置 → 数据源设置”保存个人凭证。");
       return;
     }
     setNotice("正在创建下载任务…");
@@ -164,8 +171,6 @@ export function DataSourceManager({ onDataChanged }: { onDataChanged?: () => voi
     await fetch(`/api/data-jobs?id=${encodeURIComponent(job.id)}`, { method: "DELETE" });
     await loadJobs();
   };
-
-  const selectedProvider = providers.find((provider) => provider.id === providerId);
 
   return (
     <section className="data-source-manager">
@@ -204,12 +209,6 @@ export function DataSourceManager({ onDataChanged }: { onDataChanged?: () => voi
         </button>
       </div>
 
-      {!selectedProvider?.configured && (
-        <div className="credential-notice">
-          <KeyRound size={17} />
-          <span>复制 <code>web/.env.example</code> 为 <code>web/.env.local</code>，填写 {selectedProvider?.credentialNames.join("、") || "本地凭证"} 后重启本地网页版。</span>
-        </div>
-      )}
       {providerId === "tushare" && <div className="provider-note">5m / 1h 分钟线需要 Tushare 的历史分钟权限；日线和周线按账户现有权限调用。</div>}
       {notice && <div className="status-banner">{notice}</div>}
 

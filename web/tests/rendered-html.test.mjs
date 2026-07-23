@@ -5,11 +5,13 @@ import test from "node:test";
 const root = new URL("../", import.meta.url);
 
 test("ships the K-line training workbench instead of the starter", async () => {
-  const [page, layout, workbench, dataSourceManager, packageJson, replayChart, sessionsRoute, snapshotsRoute, marketRules] = await Promise.all([
+  const [page, layout, workbench, dataSourceManager, providerSettings, providerSettingsRoute, packageJson, replayChart, sessionsRoute, snapshotsRoute, marketRules] = await Promise.all([
     readFile(new URL("app/page.tsx", root), "utf8"),
     readFile(new URL("app/layout.tsx", root), "utf8"),
     readFile(new URL("app/components/TrainingWorkbench.tsx", root), "utf8"),
     readFile(new URL("app/components/DataSourceManager.tsx", root), "utf8"),
+    readFile(new URL("app/components/ProviderSettingsPanel.tsx", root), "utf8"),
+    readFile(new URL("app/api/provider-settings/route.ts", root), "utf8"),
     readFile(new URL("package.json", root), "utf8"),
     readFile(new URL("app/components/KLineReplayChart.tsx", root), "utf8"),
     readFile(new URL("app/api/sessions/route.ts", root), "utf8"),
@@ -49,6 +51,11 @@ test("ships the K-line training workbench instead of the starter", async () => {
   assert.match(dataSourceManager, /Alpaca/);
   assert.match(dataSourceManager, /创建并开始下载/);
   assert.match(dataSourceManager, /任务按页保存进度/);
+  assert.doesNotMatch(dataSourceManager, /\.env\.local/);
+  assert.match(providerSettings, /数据源设置|历史行情数据源/);
+  assert.match(providerSettings, /保存 Alpaca/);
+  assert.match(providerSettings, /清除本机凭证/);
+  assert.doesNotMatch(providerSettingsRoute, /credentialsJson.*Response\.json/s);
   assert.match(replayChart, /tradeLifecycle/);
   assert.match(replayChart, /decisionSubmission/);
   assert.match(replayChart, /syncDecisionMarkers/);
@@ -80,5 +87,6 @@ test("build output and database migration exist", async () => {
     access(new URL("drizzle/0001_pale_jazinda.sql", root)),
     access(new URL("drizzle/0002_watery_thunderbolt_ross.sql", root)),
     access(new URL("drizzle/0003_calm_silvermane.sql", root)),
+    access(new URL("drizzle/0004_violet_squirrel_girl.sql", root)),
   ]);
 });

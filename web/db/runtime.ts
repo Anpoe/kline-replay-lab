@@ -95,6 +95,11 @@ export async function ensureSchema() {
     )`),
     db.prepare(`CREATE INDEX IF NOT EXISTS data_download_jobs_status_idx
       ON data_download_jobs (status, updated_at)`),
+    db.prepare(`CREATE TABLE IF NOT EXISTS local_provider_credentials (
+      provider TEXT PRIMARY KEY,
+      credentials_json TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    )`),
   ]);
 
   const sessionColumns = await db.prepare("PRAGMA table_info(training_sessions)").all<{ name: string }>();

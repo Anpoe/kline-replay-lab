@@ -114,3 +114,9 @@ export const dataDownloadJobs = sqliteTable(
     index("data_download_jobs_status_idx").on(table.status, table.updatedAt),
   ],
 );
+
+export const localProviderCredentials = sqliteTable("local_provider_credentials", {
+  provider: text("provider").primaryKey(),
+  credentialsJson: text("credentials_json").notNull(),
+  updatedAt: text("updated_at").notNull(),
+});

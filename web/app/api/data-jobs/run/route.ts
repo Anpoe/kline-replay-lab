@@ -1,13 +1,12 @@
-import { env } from "cloudflare:workers";
 import { ensureSchema, getRawDb } from "../../../../db/runtime";
 import {
   fetchProviderChunk,
   type MarketDataProviderId,
   type ProviderCursor,
-  type ProviderSecrets,
   type QualityReport,
   type SupportedTimeframe,
 } from "../../../lib/marketDataProviders";
+import { loadProviderSecrets } from "../../../lib/providerCredentials";
 
 type DownloadJobRow = {
   id: string;
@@ -24,12 +23,6 @@ type DownloadJobRow = {
   cursorJson: string;
   insertedCount: number;
   qualityReportJson: string;
-};
-
-type MarketDataEnv = {
-  TUSHARE_TOKEN?: string;
-  APCA_API_KEY_ID?: string;
-  APCA_API_SECRET_KEY?: string;
 };
 
 function mergeQuality(previous: Partial<QualityReport>, current: QualityReport): QualityReport {
@@ -70,12 +63,7 @@ export async function POST(request: Request) {
     .run();
 
   try {
-    const runtime = env as unknown as MarketDataEnv;
-    const secrets: ProviderSecrets = {
-      tushareToken: runtime.TUSHARE_TOKEN,
-      alpacaKeyId: runtime.APCA_API_KEY_ID,
-      alpacaSecretKey: runtime.APCA_API_SECRET_KEY,
-    };
+    const { secrets } = await loadProviderSecrets();
     const chunk = await fetchProviderChunk({
       provider: job.provider,
       vendorSymbol: job.vendorSymbol,
