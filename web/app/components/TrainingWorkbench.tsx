@@ -93,11 +93,32 @@ type Decision = {
   target: string;
   note: string;
 };
+type TrainingEvent = {
+  id: string;
+  sequence: number;
+  type: string;
+  barTimestamp?: number;
+  payload: Record<string, unknown>;
+  occurredAt: string;
+};
+type SnapshotMeta = {
+  id: string;
+  contentHash: string;
+  instrumentId: string;
+  timeframe: string;
+  adjustmentType: string;
+  barCount: number;
+  firstTimestamp: number;
+  lastTimestamp: number;
+  createdAt: string;
+};
 type TrainingState = {
-  version: 1;
+  version: 2;
   cursor: number;
   cursorTimestamp?: number;
   dataSignature?: string;
+  dataSnapshotId?: string;
+  snapshotHash?: string;
   randomSeed: string;
   positions: PositionLot[];
   pendingOrders: PendingOrder[];
@@ -105,11 +126,13 @@ type TrainingState = {
   decision: Decision;
   orderQty: number;
   drawings: PersistedDrawing[];
+  events: TrainingEvent[];
 };
 type TrainingSession = {
   id: string;
   instrumentId: string;
   timeframe: string;
+  dataSnapshotId?: string;
   stateJson: string;
   createdAt: string;
   updatedAt: string;
@@ -167,6 +190,22 @@ function seededFraction(seed: string) {
   return (hash >>> 0) / 4294967296;
 }
 
+function createTrainingEvent(
+  sequence: number,
+  type: string,
+  barTimestamp?: number,
+  payload: Record<string, unknown> = {},
+): TrainingEvent {
+  return {
+    id: crypto.randomUUID(),
+    sequence,
+    type,
+    barTimestamp,
+    payload,
+    occurredAt: new Date().toISOString(),
+  };
+}
+
 export function TrainingWorkbench() {
   const [view, setView] = useState<View>("replay");
   const [instrumentId, setInstrumentId] = useState("600519.SH");
@@ -197,6 +236,9 @@ export function TrainingWorkbench() {
   const [saveState, setSaveState] = useState("未保存");
   const [sessionId, setSessionId] = useState(() => crypto.randomUUID());
   const [randomSeed, setRandomSeed] = useState(() => crypto.randomUUID());
+  const [dataSnapshotId, setDataSnapshotId] = useState("");
+  const [snapshotHash, setSnapshotHash] = useState("");
+  const [events, setEvents] = useState<TrainingEvent[]>([]);
   const [coverage, setCoverage] = useState<Coverage[]>([]);
   const [sessions, setSessions] = useState<TrainingSession[]>([]);
   const [importStatus, setImportStatus] = useState("");
@@ -205,6 +247,7 @@ export function TrainingWorkbench() {
   const [loadNonce, setLoadNonce] = useState(0);
   const [restoreNotice, setRestoreNotice] = useState("");
   const restoreRequestRef = useRef<RestoreRequest | null>(null);
+  const eventSequenceRef = useRef(0);
 
   const visibleBars = useMemo(() => bars.slice(0, cursor + 1), [bars, cursor]);
   const currentBar = bars[cursor];
@@ -239,10 +282,12 @@ export function TrainingWorkbench() {
     ? `${bars.length}:${bars[0].timestamp}:${bars[bars.length - 1].timestamp}`
     : "", [bars]);
   const trainingState = useMemo<TrainingState>(() => ({
-    version: 1,
+    version: 2,
     cursor,
     cursorTimestamp: currentBar?.timestamp,
     dataSignature,
+    dataSnapshotId,
+    snapshotHash,
     randomSeed,
     positions,
     pendingOrders,
@@ -250,17 +295,20 @@ export function TrainingWorkbench() {
     decision,
     orderQty,
     drawings,
-  }), [cursor, currentBar?.timestamp, dataSignature, decision, drawings, executions, orderQty, pendingOrders, positions, randomSeed]);
+    events,
+  }), [cursor, currentBar?.timestamp, dataSignature, dataSnapshotId, decision, drawings, events, executions, orderQty, pendingOrders, positions, randomSeed, snapshotHash]);
 
   const parseTrainingState = useCallback((value: unknown): TrainingState | null => {
     if (!value || typeof value !== "object") return null;
     const state = value as Partial<TrainingState>;
     if (!Number.isFinite(state.cursor) || !Array.isArray(state.positions) || !Array.isArray(state.pendingOrders)) return null;
     return {
-      version: 1,
+      version: 2,
       cursor: Number(state.cursor),
       cursorTimestamp: typeof state.cursorTimestamp === "number" ? state.cursorTimestamp : undefined,
       dataSignature: typeof state.dataSignature === "string" ? state.dataSignature : undefined,
+      dataSnapshotId: typeof state.dataSnapshotId === "string" ? state.dataSnapshotId : undefined,
+      snapshotHash: typeof state.snapshotHash === "string" ? state.snapshotHash : undefined,
       randomSeed: typeof state.randomSeed === "string" ? state.randomSeed : crypto.randomUUID(),
       positions: state.positions,
       pendingOrders: state.pendingOrders,
@@ -268,8 +316,19 @@ export function TrainingWorkbench() {
       decision: state.decision && typeof state.decision === "object" ? { ...defaultDecision, ...state.decision } : defaultDecision,
       orderQty: typeof state.orderQty === "number" && state.orderQty > 0 ? state.orderQty : 100,
       drawings: Array.isArray(state.drawings) ? state.drawings : [],
+      events: Array.isArray(state.events) ? state.events : [],
     };
   }, []);
+
+  const appendEvent = useCallback((
+    type: string,
+    payload: Record<string, unknown> = {},
+    barTimestamp = currentBar?.timestamp,
+  ) => {
+    const sequence = eventSequenceRef.current + 1;
+    eventSequenceRef.current = sequence;
+    setEvents((items) => [...items, createTrainingEvent(sequence, type, barTimestamp, payload)]);
+  }, [currentBar?.timestamp]);
 
   const queueRestore = useCallback((request: RestoreRequest) => {
     restoreRequestRef.current = request;
@@ -326,14 +385,29 @@ export function TrainingWorkbench() {
     setTrainingReady(false);
     setPlaying(false);
     try {
-      const response = await fetch(`/api/candles?instrument=${encodeURIComponent(instrumentId)}&timeframe=${timeframe}`);
-      if (!response.ok) throw new Error("行情加载失败");
-      const data = await response.json() as { instrument: Instrument; candles: KLineData[] };
+      const requestedSnapshotId = restoreRequest?.state.dataSnapshotId ?? restoreRequest?.dataSnapshotId;
+      let data: { instrument: Instrument; candles: KLineData[]; snapshot: SnapshotMeta };
+      let legacySnapshotCreated = false;
+      if (requestedSnapshotId) {
+        const response = await fetch(`/api/snapshots?id=${encodeURIComponent(requestedSnapshotId)}`);
+        if (!response.ok) throw new Error("训练绑定的数据快照不存在，无法进行确定性恢复");
+        data = await response.json() as typeof data;
+      } else {
+        const candlesResponse = await fetch(`/api/candles?instrument=${encodeURIComponent(instrumentId)}&timeframe=${timeframe}`);
+        if (!candlesResponse.ok) throw new Error("行情加载失败");
+        const snapshotResponse = await fetch("/api/snapshots", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ instrumentId, timeframe, adjustmentType: "none" }),
+        });
+        if (!snapshotResponse.ok) throw new Error("不可变行情快照创建失败");
+        data = await snapshotResponse.json() as typeof data;
+        legacySnapshotCreated = Boolean(restoreRequest);
+      }
       setInstrument(data.instrument);
       setBars(data.candles);
-      const nextSignature = data.candles.length
-        ? `${data.candles.length}:${data.candles[0].timestamp}:${data.candles[data.candles.length - 1].timestamp}`
-        : "";
+      setDataSnapshotId(data.snapshot.id);
+      setSnapshotHash(data.snapshot.contentHash);
       if (restoreRequest) {
         const timestampCursor = restoreRequest.state.cursorTimestamp == null
           ? -1
@@ -349,12 +423,24 @@ export function TrainingWorkbench() {
         setDrawingsRestoreNonce(Date.now());
         setSessionId(restoreRequest.id);
         setRandomSeed(restoreRequest.state.randomSeed);
+        const lastSequence = restoreRequest.state.events.reduce((maximum, event) => Math.max(maximum, event.sequence), 0);
+        eventSequenceRef.current = lastSequence + 1;
+        setEvents([
+          ...restoreRequest.state.events,
+          createTrainingEvent(lastSequence + 1, "session_restored", data.candles[restoredCursor]?.timestamp, {
+            snapshotId: data.snapshot.id,
+            snapshotHash: data.snapshot.contentHash,
+          }),
+        ]);
         setSaveState("已恢复 · 本机自动保存");
-        setRestoreNotice(restoreRequest.state.dataSignature && restoreRequest.state.dataSignature !== nextSignature
-          ? "训练已恢复，但行情数据版本发生变化；系统已按时间定位到最接近的 K 线。"
-          : "已恢复上次训练：回放位置、订单、持仓、决策卡和图表标记均已载入。");
+        setRestoreNotice(legacySnapshotCreated
+          ? "旧训练已恢复，并从当前行情建立首份不可变快照；从本次保存开始可以跨行情版本完全复现。"
+          : `已从不可变快照恢复，哈希 ${data.snapshot.contentHash.slice(0, 12)}；当前行情库后续变化不会影响本次训练。`);
       } else {
-        setCursor(Math.max(0, Math.min(data.candles.length - 1, Math.floor(data.candles.length * 0.68))));
+        const startCursor = Math.max(0, Math.min(data.candles.length - 1, Math.floor(data.candles.length * 0.68)));
+        const nextSessionId = crypto.randomUUID();
+        const nextSeed = crypto.randomUUID();
+        setCursor(startCursor);
         setPositions([]);
         setPendingOrders([]);
         setExecutions([]);
@@ -362,8 +448,17 @@ export function TrainingWorkbench() {
         setOrderQty(100);
         setDrawings([]);
         setClearNonce(Date.now());
-        setSessionId(crypto.randomUUID());
-        setRandomSeed(crypto.randomUUID());
+        setSessionId(nextSessionId);
+        setRandomSeed(nextSeed);
+        eventSequenceRef.current = 1;
+        setEvents([createTrainingEvent(1, "session_created", data.candles[startCursor]?.timestamp, {
+          instrumentId,
+          timeframe,
+          snapshotId: data.snapshot.id,
+          snapshotHash: data.snapshot.contentHash,
+          randomSeed: nextSeed,
+          startCursor,
+        })]);
         setSaveState("新训练 · 本机自动保存");
         setRestoreNotice("");
       }
@@ -397,7 +492,7 @@ export function TrainingWorkbench() {
         const response = await fetch("/api/sessions", {
           method: "POST",
           headers: { "content-type": "application/json" },
-          body: JSON.stringify({ id: sessionId, instrumentId, timeframe, state: trainingState }),
+          body: JSON.stringify({ id: sessionId, instrumentId, timeframe, dataSnapshotId, state: trainingState }),
         });
         if (response.ok) setSaveState("已自动保存");
       } catch {
@@ -405,7 +500,7 @@ export function TrainingWorkbench() {
       }
     }, 900);
     return () => window.clearTimeout(timer);
-  }, [bars.length, instrumentId, sessionId, timeframe, trainingReady, trainingState]);
+  }, [bars.length, dataSnapshotId, instrumentId, sessionId, timeframe, trainingReady, trainingState]);
 
   const executeOrders = useCallback((orders: PendingOrder[], bar: KLineData) => {
     if (!orders.length) return;
@@ -465,8 +560,11 @@ export function TrainingWorkbench() {
     });
 
     setPositions(nextPositions);
-    if (fills.length) setExecutions((items) => [...items, ...fills]);
-  }, [positions]);
+    if (fills.length) {
+      setExecutions((items) => [...items, ...fills]);
+      appendEvent("orders_filled", { fills }, bar.timestamp);
+    }
+  }, [appendEvent, positions]);
 
   const revealMany = useCallback((count: number) => {
     if (cursor >= bars.length - 1) {
@@ -476,11 +574,24 @@ export function TrainingWorkbench() {
     const nextBar = bars[cursor + 1];
     executeOrders(pendingOrders, nextBar);
     if (pendingOrders.length) setPendingOrders([]);
-    setCursor((value) => Math.min(value + Math.max(1, count), bars.length - 1));
+    const nextCursor = Math.min(cursor + Math.max(1, count), bars.length - 1);
+    setCursor(nextCursor);
+    appendEvent("replay_advanced", {
+      fromCursor: cursor,
+      toCursor: nextCursor,
+      requestedCount: count,
+      executedOrderIds: pendingOrders.map((order) => order.id),
+    }, bars[nextCursor]?.timestamp);
     setSaveState("有未保存更改");
-  }, [bars, cursor, executeOrders, pendingOrders]);
+  }, [appendEvent, bars, cursor, executeOrders, pendingOrders]);
 
   const revealNext = useCallback(() => revealMany(1), [revealMany]);
+  const revealPrevious = () => {
+    const nextCursor = Math.max(0, cursor - 1);
+    if (nextCursor === cursor) return;
+    setCursor(nextCursor);
+    appendEvent("replay_rewound", { fromCursor: cursor, toCursor: nextCursor }, bars[nextCursor]?.timestamp);
+  };
 
   useEffect(() => {
     if (!playing) return;
@@ -490,17 +601,16 @@ export function TrainingWorkbench() {
 
   const queueOpenOrder = (side: "buy" | "sell", qty = orderQty) => {
     if (!currentBar || qty <= 0 || cursor >= bars.length - 1) return;
-    setPendingOrders((items) => [
-      ...items,
-      {
-        id: crypto.randomUUID(),
-        action: "open",
-        side,
-        qty,
-        createdAt: currentBar.timestamp,
-        positionId: crypto.randomUUID(),
-      },
-    ]);
+    const order: PendingOrder = {
+      id: crypto.randomUUID(),
+      action: "open",
+      side,
+      qty,
+      createdAt: currentBar.timestamp,
+      positionId: crypto.randomUUID(),
+    };
+    setPendingOrders((items) => [...items, order]);
+    appendEvent("order_queued", { order });
     setOrderPanelTab("pending");
     setSaveState("有未保存更改");
   };
@@ -509,17 +619,16 @@ export function TrainingWorkbench() {
     if (!currentBar || cursor >= bars.length - 1) return;
     const position = openPositions.find((item) => item.id === positionId);
     if (!position || pendingOrders.some((order) => order.action === "close" && order.positionId === positionId)) return;
-    setPendingOrders((items) => [
-      ...items,
-      {
-        id: crypto.randomUUID(),
-        action: "close",
-        side: position.side === "long" ? "sell" : "buy",
-        qty: position.qty,
-        createdAt: currentBar.timestamp,
-        positionId,
-      },
-    ]);
+    const order: PendingOrder = {
+      id: crypto.randomUUID(),
+      action: "close",
+      side: position.side === "long" ? "sell" : "buy",
+      qty: position.qty,
+      createdAt: currentBar.timestamp,
+      positionId,
+    };
+    setPendingOrders((items) => [...items, order]);
+    appendEvent("order_queued", { order, position });
     setSaveState("有未保存更改");
   };
 
@@ -529,7 +638,9 @@ export function TrainingWorkbench() {
   };
 
   const cancelPendingOrder = (orderId: string) => {
+    const order = pendingOrders.find((item) => item.id === orderId);
     setPendingOrders((items) => items.filter((order) => order.id !== orderId));
+    appendEvent("order_cancelled", { orderId, order });
     setSaveState("有未保存更改");
   };
 
@@ -542,6 +653,7 @@ export function TrainingWorkbench() {
 
   const resetTraining = (random = false) => {
     const nextRandomSeed = crypto.randomUUID();
+    const nextSessionId = crypto.randomUUID();
     const nextCursor = random && bars.length > 80
       ? 40 + Math.floor(seededFraction(nextRandomSeed) * (bars.length - 70))
       : Math.max(0, Math.floor(bars.length * 0.68));
@@ -555,13 +667,24 @@ export function TrainingWorkbench() {
     setDrawings([]);
     setClearNonce(Date.now());
     setOrderPanelTab("positions");
-    setSessionId(crypto.randomUUID());
+    setSessionId(nextSessionId);
     setRandomSeed(nextRandomSeed);
+    eventSequenceRef.current = 1;
+    setEvents([createTrainingEvent(1, "session_created", bars[nextCursor]?.timestamp, {
+      instrumentId,
+      timeframe,
+      snapshotId: dataSnapshotId,
+      snapshotHash,
+      randomSeed: nextRandomSeed,
+      startCursor: nextCursor,
+      random,
+    })]);
     setRestoreNotice("");
     setSaveState("新训练 · 本机自动保存");
   };
 
   const saveSession = async () => {
+    appendEvent("session_manually_saved");
     setSaveState("保存中…");
     const response = await fetch("/api/sessions", {
       method: "POST",
@@ -570,6 +693,7 @@ export function TrainingWorkbench() {
         id: sessionId,
         instrumentId,
         timeframe,
+        dataSnapshotId,
         state: trainingState,
       }),
     });
@@ -584,6 +708,40 @@ export function TrainingWorkbench() {
     } catch {
       setImportStatus("这条训练记录不完整，暂时无法恢复。");
     }
+  };
+
+  const deleteSession = async (session: TrainingSession) => {
+    if (!window.confirm(`确定删除 ${session.instrumentId} · ${session.timeframe} 的这次训练吗？此操作不可撤销。`)) return;
+    const response = await fetch(`/api/sessions?id=${encodeURIComponent(session.id)}`, { method: "DELETE" });
+    if (!response.ok) {
+      setImportStatus("训练记录删除失败。");
+      return;
+    }
+    setSessions((items) => items.filter((item) => item.id !== session.id));
+    const localDraft = window.localStorage.getItem(LAST_DRAFT_KEY);
+    if (localDraft) {
+      try {
+        const parsed = JSON.parse(localDraft) as { id?: string };
+        if (parsed.id === session.id) window.localStorage.removeItem(LAST_DRAFT_KEY);
+      } catch {
+        window.localStorage.removeItem(LAST_DRAFT_KEY);
+      }
+    }
+    if (session.id === sessionId) {
+      resetTraining(false);
+      setSaveState("原训练已删除，已开始一场新的空白训练");
+    }
+  };
+
+  const updateDecision = (field: keyof Decision, value: string | string[]) => {
+    const nextDecision = { ...decision, [field]: value } as Decision;
+    setDecision(nextDecision);
+    appendEvent("decision_changed", { field, value, decision: nextDecision });
+  };
+
+  const handleDrawingsChange = (nextDrawings: PersistedDrawing[]) => {
+    setDrawings(nextDrawings);
+    appendEvent("drawings_changed", { drawings: nextDrawings });
   };
 
   const loadCoverage = useCallback(async () => {
@@ -726,7 +884,7 @@ export function TrainingWorkbench() {
                   ))}
                   <span className="tool-divider" />
                   <button title="清除绘图" aria-label="清除绘图" onClick={() => {
-                    setDrawings([]);
+                    handleDrawingsChange([]);
                     setClearNonce(Date.now());
                   }}><Trash2 size={18} /></button>
                 </div>
@@ -743,7 +901,7 @@ export function TrainingWorkbench() {
                       tradeMarkers={tradeMarkers}
                       drawings={drawings}
                       drawingsRestoreNonce={drawingsRestoreNonce}
-                      onDrawingsChange={setDrawings}
+                      onDrawingsChange={handleDrawingsChange}
                     />
                   )}
                   <div className="replay-watermark">REPLAY · 未来已隐藏</div>
@@ -758,15 +916,22 @@ export function TrainingWorkbench() {
                 <div className="progress-track"><span style={{ width: `${progress}%` }} /></div>
                 <div className="transport">
                   <button aria-label="重置" onClick={() => resetTraining(false)}><RotateCcw size={17} /></button>
-                  <button aria-label="上一根" onClick={() => setCursor((value) => Math.max(0, value - 1))}><ChevronLeft size={19} /></button>
-                  <button className="play-button" aria-label={playing ? "暂停" : "播放"} onClick={() => setPlaying((value) => !value)}>
+                  <button aria-label="上一根" onClick={revealPrevious}><ChevronLeft size={19} /></button>
+                  <button className="play-button" aria-label={playing ? "暂停" : "播放"} onClick={() => {
+                    const nextPlaying = !playing;
+                    setPlaying(nextPlaying);
+                    appendEvent("playback_toggled", { playing: nextPlaying, speed });
+                  }}>
                     {playing ? <Pause size={20} /> : <Play size={20} fill="currentColor" />}
                   </button>
                   <button aria-label="下一根" onClick={revealNext}><ChevronRight size={19} /></button>
                   <button aria-label="前进五根" onClick={() => revealMany(5)}><FastForward size={18} /></button>
                 </div>
                 <div className="speed-control">
-                  {[0.5, 1, 2, 5].map((value) => <button key={value} className={speed === value ? "active" : ""} onClick={() => setSpeed(value)}>{value}x</button>)}
+                  {[0.5, 1, 2, 5].map((value) => <button key={value} className={speed === value ? "active" : ""} onClick={() => {
+                    setSpeed(value);
+                    appendEvent("playback_speed_changed", { speed: value });
+                  }}>{value}x</button>)}
                 </div>
               </div>
 
@@ -778,7 +943,11 @@ export function TrainingWorkbench() {
                   <span>已实现 <strong className={realizedPnl >= 0 ? "up" : "down"}>{money(realizedPnl)}</strong></span>
                 </div>
                 <div className="order-entry">
-                  <label>数量<input type="number" min="1" value={orderQty} onChange={(event) => setOrderQty(Math.max(1, Number(event.target.value)))} /></label>
+                  <label>数量<input type="number" min="1" value={orderQty} onChange={(event) => {
+                    const quantity = Math.max(1, Number(event.target.value));
+                    setOrderQty(quantity);
+                    appendEvent("order_quantity_changed", { quantity });
+                  }} /></label>
                   <button className="sell-button" onClick={() => queueOpenOrder("sell")}><TrendingDown size={16} />卖出开仓</button>
                   <button className="buy-button" onClick={() => queueOpenOrder("buy")}><TrendingUp size={16} />买入开仓</button>
                   <button className="flat-button" disabled={!openPositions.length} onClick={queueCloseAll}><CircleStop size={16} />全部平仓</button>
@@ -864,12 +1033,12 @@ export function TrainingWorkbench() {
                 <p>先写计划，再揭示下一根</p>
               </div>
               <label>市场状态
-                <select value={decision.marketState} onChange={(event) => setDecision({ ...decision, marketState: event.target.value })}>
+                <select value={decision.marketState} onChange={(event) => updateDecision("marketState", event.target.value)}>
                   <option>趋势</option><option>宽通道</option><option>震荡区间</option><option>突破模式</option><option>反转尝试</option>
                 </select>
               </label>
               <label>当前位置
-                <select value={decision.location} onChange={(event) => setDecision({ ...decision, location: event.target.value })}>
+                <select value={decision.location} onChange={(event) => updateDecision("location", event.target.value)}>
                   <option>回调位置</option><option>区间上沿</option><option>区间中部</option><option>区间下沿</option><option>关键突破位</option>
                 </select>
               </label>
@@ -879,20 +1048,20 @@ export function TrainingWorkbench() {
                   {reasonOptions.map((reason) => {
                     const selected = decision.reasons.includes(reason);
                     return (
-                      <button key={reason} className={selected ? "selected" : ""} onClick={() => setDecision({
-                        ...decision,
-                        reasons: selected ? decision.reasons.filter((item) => item !== reason) : [...decision.reasons, reason],
-                      })}>{selected ? "✓ " : "+ "}{reason}</button>
+                      <button key={reason} className={selected ? "selected" : ""} onClick={() => updateDecision(
+                        "reasons",
+                        selected ? decision.reasons.filter((item) => item !== reason) : [...decision.reasons, reason],
+                      )}>{selected ? "✓ " : "+ "}{reason}</button>
                     );
                   })}
                 </div>
               </fieldset>
               <div className="price-plan">
-                <label>失效 / 止损<input inputMode="decimal" placeholder="价格" value={decision.stop} onChange={(event) => setDecision({ ...decision, stop: event.target.value })} /></label>
-                <label>第一目标<input inputMode="decimal" placeholder="价格" value={decision.target} onChange={(event) => setDecision({ ...decision, target: event.target.value })} /></label>
+                <label>失效 / 止损<input inputMode="decimal" placeholder="价格" value={decision.stop} onChange={(event) => updateDecision("stop", event.target.value)} /></label>
+                <label>第一目标<input inputMode="decimal" placeholder="价格" value={decision.target} onChange={(event) => updateDecision("target", event.target.value)} /></label>
               </div>
               <label>计划说明
-                <textarea placeholder="我在等待什么？什么情况放弃？" value={decision.note} onChange={(event) => setDecision({ ...decision, note: event.target.value })} />
+                <textarea placeholder="我在等待什么？什么情况放弃？" value={decision.note} onChange={(event) => updateDecision("note", event.target.value)} />
               </label>
               <div className="discipline-card">
                 <Sparkles size={18} />
@@ -942,7 +1111,7 @@ export function TrainingWorkbench() {
               </div>
               <div className="metric-card"><span>胜率</span><strong>{closedPositions.length ? Math.round(closedPositions.filter((position) => (position.realizedPnl ?? 0) > 0).length / closedPositions.length * 100) : 0}%</strong><small>仅统计已平仓成交</small></div>
               <div className="metric-card"><span>事前理由</span><strong>{decision.reasons.length}</strong><small>{decision.reasons.length >= 2 ? "达到最低要求" : "理由不足"}</small></div>
-              <div className="metric-card"><span>待验证</span><strong>{pendingOrders.length}</strong><small>下一根开盘执行</small></div>
+              <div className="metric-card"><span>审计事件</span><strong>{events.length}</strong><small>{snapshotHash ? `快照 ${snapshotHash.slice(0, 8)}` : "旧训练待建立快照"}</small></div>
             </div>
             <div className="review-columns">
               <article className="insight-card"><div className="section-label">流程观察</div><h2>{planScore >= 80 ? "计划完整，可以进入样本积累" : "先补齐失效点和目标"}</h2><p>当前训练卡记录了市场状态、位置和 {decision.reasons.length} 个理由。系统不会因为单次盈利直接判断策略有效。</p><div className="evidence-row"><span>市场状态</span><strong>{decision.marketState}</strong></div><div className="evidence-row"><span>位置</span><strong>{decision.location}</strong></div><div className="evidence-row"><span>样本置信度</span><strong>低 · 继续收集</strong></div></article>
@@ -954,9 +1123,14 @@ export function TrainingWorkbench() {
                       <strong>{session.instrumentId} · {session.timeframe}</strong>
                       <span>{new Date(session.updatedAt).toLocaleString("zh-CN")}</span>
                     </div>
-                    <button className="resume-session" onClick={() => resumeSession(session)}>
-                      <RotateCcw size={13} />继续训练
-                    </button>
+                    <div className="session-actions">
+                      <button className="resume-session" onClick={() => resumeSession(session)}>
+                        <RotateCcw size={13} />继续训练
+                      </button>
+                      <button className="delete-session" aria-label={`删除 ${session.instrumentId} 训练`} onClick={() => deleteSession(session)}>
+                        <Trash2 size={13} />删除
+                      </button>
+                    </div>
                   </div>
                 )) : <div className="empty-state">训练会自动保存；产生进度后会在这里显示“继续训练”。</div>}
               </article>

@@ -42,10 +42,43 @@ export async function ensureSchema() {
       id TEXT PRIMARY KEY,
       instrument_id TEXT NOT NULL,
       timeframe TEXT NOT NULL,
+      data_snapshot_id TEXT,
       state_json TEXT NOT NULL,
       created_at TEXT NOT NULL,
       updated_at TEXT NOT NULL
     )`),
+    db.prepare(`CREATE TABLE IF NOT EXISTS data_snapshots (
+      id TEXT PRIMARY KEY,
+      content_hash TEXT NOT NULL UNIQUE,
+      instrument_id TEXT NOT NULL,
+      timeframe TEXT NOT NULL,
+      adjustment_type TEXT NOT NULL,
+      instrument_json TEXT NOT NULL,
+      candles_json TEXT NOT NULL,
+      bar_count INTEGER NOT NULL,
+      first_timestamp INTEGER NOT NULL,
+      last_timestamp INTEGER NOT NULL,
+      created_at TEXT NOT NULL
+    )`),
+    db.prepare(`CREATE INDEX IF NOT EXISTS data_snapshots_lookup_idx
+      ON data_snapshots (instrument_id, timeframe, adjustment_type, created_at)`),
+    db.prepare(`CREATE TABLE IF NOT EXISTS session_events (
+      event_id TEXT PRIMARY KEY,
+      session_id TEXT NOT NULL,
+      sequence INTEGER NOT NULL,
+      event_type TEXT NOT NULL,
+      bar_timestamp INTEGER,
+      payload_json TEXT NOT NULL,
+      occurred_at TEXT NOT NULL,
+      UNIQUE (session_id, sequence)
+    )`),
+    db.prepare(`CREATE INDEX IF NOT EXISTS session_events_lookup_idx
+      ON session_events (session_id, sequence)`),
   ]);
+
+  const sessionColumns = await db.prepare("PRAGMA table_info(training_sessions)").all<{ name: string }>();
+  if (!sessionColumns.results.some((column) => column.name === "data_snapshot_id")) {
+    await db.prepare("ALTER TABLE training_sessions ADD COLUMN data_snapshot_id TEXT").run();
+  }
   schemaReady = true;
 }
