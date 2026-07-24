@@ -21,6 +21,8 @@ test("ships the K-line training workbench instead of the starter", async () => {
 
   assert.match(page, /<TrainingWorkbench\s*\/>/);
   assert.match(layout, /K线训练营 2\.0/);
+  assert.match(layout, /ResizeObserver loop completed with undelivered notifications/);
+  assert.match(layout, /stopImmediatePropagation/);
   assert.match(workbench, /未来已隐藏/);
   assert.match(workbench, /下一根开盘/);
   assert.match(workbench, /K 线数据库/);
@@ -61,6 +63,7 @@ test("ships the K-line training workbench instead of the starter", async () => {
   assert.match(replayChart, /syncDecisionMarkers/);
   assert.match(replayChart, /PersistedDrawing/);
   assert.match(replayChart, /getPersistedDrawings/);
+  assert.doesNotMatch(replayChart, /FrameResizeObserver/);
   assert.match(replayChart, /style: "dashed"/);
   assert.match(sessionsRoute, /export async function DELETE/);
   assert.match(sessionsRoute, /ORDER BY sequence ASC/);

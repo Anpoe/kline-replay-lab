@@ -367,53 +367,15 @@ export function KLineReplayChart({
     if (!containerRef.current) return;
     let cancelled = false;
     let disposeChart: (() => void) | null = null;
-    let restoreResizeObserver: (() => void) | null = null;
 
     void import("klinecharts").then(({ dispose, init, registerOverlay }) => {
       if (cancelled || !containerRef.current) return;
       ensureTradeOverlay(registerOverlay);
       ensureDecisionOverlay(registerOverlay);
-      const nativeResizeObserver = window.ResizeObserver;
-      let chart: Chart | null = null;
-      try {
-        if (nativeResizeObserver) {
-          class FrameResizeObserver implements ResizeObserver {
-            private readonly observer: ResizeObserver;
-            private frameId = 0;
-
-            constructor(callback: ResizeObserverCallback) {
-              this.observer = new nativeResizeObserver((entries) => {
-                window.cancelAnimationFrame(this.frameId);
-                this.frameId = window.requestAnimationFrame(() => callback(entries, this));
-              });
-            }
-
-            observe(target: Element, options?: ResizeObserverOptions) {
-              this.observer.observe(target, options);
-            }
-
-            unobserve(target: Element) {
-              this.observer.unobserve(target);
-            }
-
-            disconnect() {
-              window.cancelAnimationFrame(this.frameId);
-              this.observer.disconnect();
-            }
-
-            takeRecords() {
-              return this.observer.takeRecords();
-            }
-          }
-          window.ResizeObserver = FrameResizeObserver;
-          restoreResizeObserver = () => {
-            if (window.ResizeObserver === FrameResizeObserver) window.ResizeObserver = nativeResizeObserver;
-          };
-        }
-        chart = init(containerRef.current, {
-          locale: "zh-CN",
-          timezone,
-          styles: {
+      const chart = init(containerRef.current, {
+        locale: "zh-CN",
+        timezone,
+        styles: {
           grid: {
             horizontal: { color: "rgba(133, 149, 158, 0.10)", size: 1 },
             vertical: { color: "rgba(133, 149, 158, 0.08)", size: 1 },
@@ -471,13 +433,8 @@ export function KLineReplayChart({
               },
             },
           },
-          },
-        });
-      } catch (error) {
-        restoreResizeObserver?.();
-        restoreResizeObserver = null;
-        throw error;
-      }
+        },
+      });
       if (!chart) return;
       chartRef.current = chart;
       chart.setSymbol({ ticker: symbol, pricePrecision, volumePrecision: 0 });
@@ -496,7 +453,6 @@ export function KLineReplayChart({
     return () => {
       cancelled = true;
       disposeChart?.();
-      restoreResizeObserver?.();
       chartRef.current = null;
     };
   }, [hideDate, hidePrice, pricePrecision, restoreDrawings, symbol, timeframe, timezone]);
