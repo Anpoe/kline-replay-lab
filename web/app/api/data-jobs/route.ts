@@ -15,18 +15,43 @@ type DownloadJobInput = {
 const providers = new Set(["tushare", "alpaca"]);
 const timeframes = new Set(["5m", "1h", "1d", "1w"]);
 
-export async function GET() {
+export async function GET(request: Request) {
   await ensureSchema();
-  const rows = await getRawDb()
+  const market = new URL(request.url).searchParams.get("market");
+  const db = getRawDb();
+  const statement = db
     .prepare(`SELECT id, provider, instrument_id AS instrumentId, vendor_symbol AS vendorSymbol,
       instrument_name AS instrumentName, market, timeframe, start_date AS startDate,
       end_date AS endDate, adjustment_type AS adjustmentType, status,
       cursor_json AS cursorJson, inserted_count AS insertedCount,
       quality_report_json AS qualityReportJson, last_error AS lastError,
       created_at AS createdAt, updated_at AS updatedAt
-      FROM data_download_jobs ORDER BY updated_at DESC LIMIT 100`)
-    .all();
-  return Response.json({ jobs: rows.results });
+      FROM data_download_jobs ${market ? "WHERE market = ?" : ""}
+      ORDER BY updated_at DESC LIMIT 100`);
+  const rows = market ? await statement.bind(market).all() : await statement.all();
+  const summaryStatement = db.prepare(`WITH instrument_status AS (
+      SELECT instrument_id,
+        MAX(CASE WHEN status = 'completed' THEN 1 ELSE 0 END) AS has_completed,
+        MAX(CASE WHEN status = 'queued' THEN 1 ELSE 0 END) AS has_queued,
+        MAX(CASE WHEN status = 'running' THEN 1 ELSE 0 END) AS has_running,
+        MAX(CASE WHEN status = 'paused' THEN 1 ELSE 0 END) AS has_paused,
+        MAX(CASE WHEN status = 'failed' THEN 1 ELSE 0 END) AS has_failed,
+        SUM(inserted_count) AS inserted_count
+      FROM data_download_jobs ${market ? "WHERE market = ?" : ""}
+      GROUP BY instrument_id
+    )
+    SELECT COUNT(*) AS total,
+      COALESCE(SUM(CASE WHEN has_completed = 0 AND has_queued = 1 THEN 1 ELSE 0 END), 0) AS queued,
+      COALESCE(SUM(CASE WHEN has_completed = 0 AND has_running = 1 THEN 1 ELSE 0 END), 0) AS running,
+      COALESCE(SUM(CASE WHEN has_completed = 0 AND has_paused = 1 THEN 1 ELSE 0 END), 0) AS paused,
+      COALESCE(SUM(has_completed), 0) AS completed,
+      COALESCE(SUM(CASE WHEN has_completed = 0 AND has_failed = 1 THEN 1 ELSE 0 END), 0) AS failed,
+      COALESCE(SUM(inserted_count), 0) AS insertedCount
+    FROM instrument_status`);
+  const summary = market
+    ? await summaryStatement.bind(market).first()
+    : await summaryStatement.first();
+  return Response.json({ jobs: rows.results, summary });
 }
 
 export async function POST(request: Request) {

@@ -6,13 +6,19 @@ import {
   SAMPLE_INSTRUMENTS,
   type SeedCandle,
 } from "../../../db/sample-data";
+import { fetchLocalData, readLocalDataJson } from "../../lib/localDataService";
 
 type ImportedBar = Partial<SeedCandle> & { timestamp?: number | string };
 
 async function seedIfNeeded() {
   const db = getRawDb();
+  const seeded = await db.prepare("SELECT value FROM app_metadata WHERE key = 'sample_data_seeded'").first();
+  if (seeded) return;
   const count = await db.prepare("SELECT COUNT(*) AS count FROM instruments").first<{ count: number }>();
-  if ((count?.count ?? 0) > 0) return;
+  if ((count?.count ?? 0) > 0) {
+    await db.prepare("INSERT OR REPLACE INTO app_metadata (key, value) VALUES ('sample_data_seeded', '1')").run();
+    return;
+  }
 
   for (const instrument of SAMPLE_INSTRUMENTS) {
     await db
@@ -61,6 +67,7 @@ async function seedIfNeeded() {
       }
     }
   }
+  await db.prepare("INSERT OR REPLACE INTO app_metadata (key, value) VALUES ('sample_data_seeded', '1')").run();
 }
 
 function isValidBar(bar: ImportedBar) {
@@ -93,7 +100,11 @@ export async function GET(request: Request) {
       .prepare(`SELECT id, symbol, name, market, timezone, price_precision AS pricePrecision
         FROM instruments ORDER BY market, symbol`)
       .all();
-    return Response.json({ instruments: rows.results });
+    const local = await readLocalDataJson<{ instruments: Array<Record<string, unknown>> }>("/instruments");
+    const merged = new Map<string, Record<string, unknown>>();
+    for (const item of rows.results as Array<Record<string, unknown>>) merged.set(String(item.id), item);
+    for (const item of local?.instruments ?? []) merged.set(String(item.id), item);
+    return Response.json({ instruments: [...merged.values()] });
   }
 
   if (coverage === "1") {
@@ -106,7 +117,49 @@ export async function GET(request: Request) {
         GROUP BY i.id, c.timeframe, c.adjustment_type, c.source
         ORDER BY i.market, i.symbol, c.timeframe`)
       .all();
-    return Response.json({ coverage: rows.results });
+    const page = Math.max(1, Number(url.searchParams.get("page") ?? 1));
+    const pageSize = Math.min(200, Math.max(20, Number(url.searchParams.get("pageSize") ?? 100)));
+    const query = (url.searchParams.get("q") ?? "").trim().toLowerCase();
+    const requestedMarket = (url.searchParams.get("market") ?? "").trim().toUpperCase();
+    const matchesMarket = (market: unknown) => {
+      const normalized = String(market ?? "").toUpperCase();
+      if (!requestedMarket) return true;
+      if (requestedMarket === "FX") return normalized === "FX" || normalized === "FOREX";
+      if (requestedMarket === "GOLD") return normalized === "GOLD" || normalized === "METAL";
+      return normalized === requestedMarket;
+    };
+    const allDatabaseRows = rows.results as Array<Record<string, unknown>>;
+    const marketDatabaseRows = allDatabaseRows.filter((item) => matchesMarket(item.market));
+    const databaseRows = marketDatabaseRows.filter((item) =>
+      !query ||
+      String(item.id ?? "").toLowerCase().includes(query) ||
+      String(item.name ?? "").toLowerCase().includes(query) ||
+      String(item.source ?? "").toLowerCase().includes(query) ||
+      String(item.market ?? "").toLowerCase().includes(query) ||
+      String(item.timeframe ?? "").toLowerCase().includes(query));
+    const offset = (page - 1) * pageSize;
+    const databasePage = databaseRows.slice(offset, offset + pageSize);
+    const localOffset = Math.max(0, offset - databaseRows.length);
+    const localLimit = Math.max(0, pageSize - databasePage.length);
+    const includeLocalTdx = !requestedMarket || requestedMarket === "CN";
+    const local = localLimit && includeLocalTdx
+      ? await readLocalDataJson<{
+          coverage: Array<Record<string, unknown>>;
+          total: number;
+          summary: { instrumentCount: number; barCount: number; timeframes: string[] };
+        }>(`/coverage?offset=${localOffset}&limit=${localLimit}&q=${encodeURIComponent(query)}`)
+      : null;
+    const databaseBarCount = marketDatabaseRows.reduce((sum, item) => sum + Number(item.barCount ?? 0), 0);
+    const databaseTimeframes = new Set(marketDatabaseRows.map((item) => String(item.timeframe)));
+    for (const timeframe of local?.summary.timeframes ?? []) databaseTimeframes.add(timeframe);
+    return Response.json({
+      coverage: [...databasePage, ...(local?.coverage ?? [])],
+      total: databaseRows.length + Number(local?.total ?? 0),
+      summary: {
+        barCount: databaseBarCount + Number(local?.summary.barCount ?? 0),
+        timeframeCount: databaseTimeframes.size,
+      },
+    });
   }
 
   const instrumentId = url.searchParams.get("instrument") ?? "600519.SH";
@@ -124,6 +177,17 @@ export async function GET(request: Request) {
     .bind(instrumentId, timeframe)
     .all();
 
+  if (instrument && rows.results.length) {
+    return Response.json({ instrument, timeframe, candles: rows.results });
+  }
+  const local = await readLocalDataJson<{
+    instrument: Record<string, unknown>;
+    timeframe: string;
+    candles: Array<Record<string, unknown>>;
+    source: string;
+    datasetVersion: string;
+  }>(`/candles?instrument=${encodeURIComponent(instrumentId)}&timeframe=${encodeURIComponent(timeframe)}`, 15000);
+  if (local) return Response.json(local);
   return Response.json({ instrument, timeframe, candles: rows.results });
 }
 
@@ -190,4 +254,70 @@ export async function POST(request: Request) {
     await db.batch(statements.slice(index, index + 80));
   }
   return Response.json({ imported: bars.length }, { status: 201 });
+}
+
+export async function DELETE(request: Request) {
+  await ensureSchema();
+  await seedIfNeeded();
+  const payload = (await request.json()) as {
+    selections?: Array<{
+      id?: string;
+      timeframe?: string;
+      adjustmentType?: string;
+      source?: string;
+    }>;
+  };
+  const selections = (payload.selections ?? []).filter((item) =>
+    item.id && item.timeframe && item.adjustmentType && item.source);
+  if (!selections.length || selections.length > 200) {
+    return Response.json({ error: "请选择 1～200 条数据记录" }, { status: 400 });
+  }
+
+  const localInstrumentIds = [...new Set(
+    selections.filter((item) => item.source === "tdx-official").map((item) => item.id as string),
+  )];
+  let deletedLocalInstruments = 0;
+  if (localInstrumentIds.length) {
+    try {
+      const response = await fetchLocalData("/data", {
+        method: "DELETE",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ instrumentIds: localInstrumentIds }),
+      }, 15000);
+      const result = await response.json() as { deletedInstruments?: number; error?: string };
+      if (!response.ok) throw new Error(result.error ?? "本机行情删除失败");
+      deletedLocalInstruments = Number(result.deletedInstruments ?? 0);
+    } catch (error) {
+      return Response.json({
+        error: error instanceof Error ? error.message : "本机行情删除失败",
+      }, { status: 503 });
+    }
+  }
+
+  const databaseSelections = selections.filter((item) => item.source !== "tdx-official");
+  const db = getRawDb();
+  let deletedRows = 0;
+  for (const item of databaseSelections) {
+    const result = await db.prepare(`DELETE FROM candles
+      WHERE instrument_id = ? AND timeframe = ? AND adjustment_type = ? AND source = ?`)
+      .bind(item.id, item.timeframe, item.adjustmentType, item.source)
+      .run();
+    deletedRows += Number(result.meta?.changes ?? 0);
+  }
+  const touchedIds = [...new Set(databaseSelections.map((item) => item.id as string))];
+  for (const instrumentId of touchedIds) {
+    const remaining = await db.prepare("SELECT COUNT(*) AS count FROM candles WHERE instrument_id = ?")
+      .bind(instrumentId)
+      .first<{ count: number }>();
+    if ((remaining?.count ?? 0) === 0) {
+      await db.prepare("DELETE FROM instruments WHERE id = ?").bind(instrumentId).run();
+    }
+  }
+  return Response.json({
+    deletedRows,
+    deletedLocalInstruments,
+    note: deletedLocalInstruments
+      ? "TDX 周线由日线生成，因此删除任一 TDX 周期会同时删除该品种的日线和周线。"
+      : undefined,
+  });
 }

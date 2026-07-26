@@ -72,6 +72,15 @@ type AlpacaPayload = {
   message?: string;
 };
 
+export type AlpacaAsset = {
+  symbol?: string;
+  name?: string;
+  status?: string;
+  tradable?: boolean;
+  class?: string;
+  asset_class?: string;
+};
+
 const timeframeToAlpaca: Record<SupportedTimeframe, string> = {
   "5m": "5Min",
   "1h": "1Hour",
@@ -176,6 +185,14 @@ export function normalizeAlpacaBars(payload: AlpacaPayload) {
   return validateCandles(candles);
 }
 
+export function filterTradableUsAssets(assets: AlpacaAsset[]) {
+  return assets.filter((asset) =>
+    (asset.class === "us_equity" || asset.asset_class === "us_equity")
+    && asset.status === "active"
+    && asset.tradable === true
+    && Boolean(asset.symbol?.trim()));
+}
+
 function tushareChunkRequest(request: ProviderChunkRequest) {
   const cursorStart = request.cursor.nextStartDate ?? request.startDate;
   const chunkDays = request.timeframe === "5m" ? 120 : request.timeframe === "1h" ? 900 : request.timeframe === "1d" ? 3000 : 6000;
@@ -243,7 +260,7 @@ export async function fetchProviderChunk(
     end: request.endDate,
     limit: "10000",
     adjustment: "raw",
-    feed: "sip",
+    feed: "iex",
     sort: "asc",
   });
   if (request.cursor.pageToken) params.set("page_token", request.cursor.pageToken);
@@ -265,6 +282,6 @@ export async function fetchProviderChunk(
     quality: normalized.report,
     cursor: pageToken ? { pageToken } : {},
     complete: !pageToken,
-    source: "alpaca-sip",
+    source: "alpaca-iex",
   };
 }

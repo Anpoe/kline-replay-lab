@@ -2,10 +2,11 @@ import { ensureSchema, getRawDb } from "../../../db/runtime";
 import { loadProviderSecrets } from "../../lib/providerCredentials";
 
 type ProviderSettingsInput = {
-  provider?: "tushare" | "alpaca";
+  provider?: "tushare" | "alpaca" | "tdxquant";
   tushareToken?: string;
   alpacaKeyId?: string;
   alpacaSecretKey?: string;
+  tdxQuantEndpoint?: string;
 };
 
 function hint(value?: string) {
@@ -15,7 +16,7 @@ function hint(value?: string) {
 
 export async function GET() {
   await ensureSchema();
-  const { secrets, sources } = await loadProviderSecrets();
+  const { secrets, sources, tdxQuantEndpoint } = await loadProviderSecrets();
   return Response.json({
     providers: {
       tushare: {
@@ -27,6 +28,11 @@ export async function GET() {
         configured: Boolean(secrets.alpacaKeyId && secrets.alpacaSecretKey),
         source: sources.alpaca,
         keyIdHint: hint(secrets.alpacaKeyId),
+      },
+      tdxquant: {
+        configured: Boolean(tdxQuantEndpoint),
+        source: sources.tdxquant,
+        endpoint: tdxQuantEndpoint,
       },
     },
   });
@@ -47,6 +53,19 @@ export async function PUT(request: Request) {
       return Response.json({ error: "请同时填写 Alpaca API Key ID 和 Secret Key" }, { status: 400 });
     }
     credentials = { alpacaKeyId: keyId, alpacaSecretKey: secretKey };
+  } else if (payload.provider === "tdxquant") {
+    const endpoint = payload.tdxQuantEndpoint?.trim().replace(/\/+$/, "");
+    if (!endpoint) return Response.json({ error: "请填写 TdxQuant 本地端点" }, { status: 400 });
+    let parsed: URL;
+    try {
+      parsed = new URL(endpoint);
+    } catch {
+      return Response.json({ error: "TdxQuant 端点格式不正确" }, { status: 400 });
+    }
+    if (!["127.0.0.1", "localhost"].includes(parsed.hostname)) {
+      return Response.json({ error: "TdxQuant 只能连接本机 127.0.0.1 或 localhost" }, { status: 400 });
+    }
+    credentials = { tdxQuantEndpoint: endpoint };
   } else {
     return Response.json({ error: "不支持的数据源" }, { status: 400 });
   }
@@ -65,16 +84,18 @@ export async function PUT(request: Request) {
 export async function DELETE(request: Request) {
   await ensureSchema();
   const provider = new URL(request.url).searchParams.get("provider");
-  if (provider !== "tushare" && provider !== "alpaca") {
+  if (provider !== "tushare" && provider !== "alpaca" && provider !== "tdxquant") {
     return Response.json({ error: "不支持的数据源" }, { status: 400 });
   }
   await getRawDb()
     .prepare("DELETE FROM local_provider_credentials WHERE provider = ?")
     .bind(provider)
     .run();
-  const { secrets, sources } = await loadProviderSecrets();
+  const { secrets, sources, tdxQuantEndpoint } = await loadProviderSecrets();
   const configured = provider === "tushare"
     ? Boolean(secrets.tushareToken)
-    : Boolean(secrets.alpacaKeyId && secrets.alpacaSecretKey);
+    : provider === "alpaca"
+      ? Boolean(secrets.alpacaKeyId && secrets.alpacaSecretKey)
+      : Boolean(tdxQuantEndpoint);
   return Response.json({ provider, configured, source: sources[provider] });
 }

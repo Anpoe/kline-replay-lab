@@ -5,7 +5,7 @@ import test from "node:test";
 const root = new URL("../", import.meta.url);
 
 test("ships the K-line training workbench instead of the starter", async () => {
-  const [page, layout, workbench, dataSourceManager, providerSettings, providerSettingsRoute, packageJson, replayChart, sessionsRoute, snapshotsRoute, marketRules] = await Promise.all([
+  const [page, layout, workbench, dataSourceManager, providerSettings, providerSettingsRoute, packageJson, replayChart, sessionsRoute, snapshotsRoute, marketRules, marketJobsRoute, dataJobsRoute] = await Promise.all([
     readFile(new URL("app/page.tsx", root), "utf8"),
     readFile(new URL("app/layout.tsx", root), "utf8"),
     readFile(new URL("app/components/TrainingWorkbench.tsx", root), "utf8"),
@@ -17,6 +17,8 @@ test("ships the K-line training workbench instead of the starter", async () => {
     readFile(new URL("app/api/sessions/route.ts", root), "utf8"),
     readFile(new URL("app/api/snapshots/route.ts", root), "utf8"),
     readFile(new URL("app/lib/marketRules.ts", root), "utf8"),
+    readFile(new URL("app/api/data-jobs/market/route.ts", root), "utf8"),
+    readFile(new URL("app/api/data-jobs/route.ts", root), "utf8"),
   ]);
 
   assert.match(page, /<TrainingWorkbench\s*\/>/);
@@ -51,8 +53,18 @@ test("ships the K-line training workbench instead of the starter", async () => {
   assert.match(workbench, /DataSourceManager/);
   assert.match(dataSourceManager, /Tushare/);
   assert.match(dataSourceManager, /Alpaca/);
-  assert.match(dataSourceManager, /创建并开始下载/);
-  assert.match(dataSourceManager, /任务按页保存进度/);
+  assert.match(dataSourceManager, /快速初始化/);
+  assert.match(dataSourceManager, /高级自定义/);
+  assert.match(dataSourceManager, /TdxQuant/);
+  assert.match(dataSourceManager, /锁定训练数据版本/);
+  assert.match(dataSourceManager, /刷新完整基础包/);
+  assert.match(dataSourceManager, /每日增量更新/);
+  assert.match(dataSourceManager, /扫描并修复缺口/);
+  assert.match(dataSourceManager, /初始化美股市场库/);
+  assert.doesNotMatch(dataSourceManager, /供应商代码/);
+  assert.match(workbench, /选择要管理的数据市场/);
+  assert.match(dataSourceManager, /result\.recovered/);
+  assert.match(dataSourceManager, /4000/);
   assert.doesNotMatch(dataSourceManager, /\.env\.local/);
   assert.match(providerSettings, /数据源设置|历史行情数据源/);
   assert.match(providerSettings, /保存 Alpaca/);
@@ -70,7 +82,13 @@ test("ships the K-line training workbench instead of the starter", async () => {
   assert.match(sessionsRoute, /searchParams\.get\("all"\) === "1"/);
   assert.match(snapshotsRoute, /SHA-256/);
   assert.match(snapshotsRoute, /contentHash/);
+  assert.match(snapshotsRoute, /storageMode/);
+  assert.match(snapshotsRoute, /baseSnapshotId/);
   assert.match(marketRules, /CN_A_MAINBOARD_RULES_V1/);
+  assert.match(marketJobsRoute, /filterTradableUsAssets/);
+  assert.match(marketJobsRoute, /loadLatestClosedUsSession/);
+  assert.match(marketJobsRoute, /resumeOnly/);
+  assert.match(dataJobsRoute, /WITH instrument_status AS/);
   assert.doesNotMatch(packageJson, /react-loading-skeleton/);
 });
 
@@ -91,5 +109,6 @@ test("build output and database migration exist", async () => {
     access(new URL("drizzle/0002_watery_thunderbolt_ross.sql", root)),
     access(new URL("drizzle/0003_calm_silvermane.sql", root)),
     access(new URL("drizzle/0004_violet_squirrel_girl.sql", root)),
+    access(new URL("drizzle/0005_normal_supernaut.sql", root)),
   ]);
 });

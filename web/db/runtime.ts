@@ -58,7 +58,12 @@ export async function ensureSchema() {
       bar_count INTEGER NOT NULL,
       first_timestamp INTEGER NOT NULL,
       last_timestamp INTEGER NOT NULL,
-      created_at TEXT NOT NULL
+      created_at TEXT NOT NULL,
+      base_snapshot_id TEXT,
+      storage_mode TEXT NOT NULL DEFAULT 'full',
+      removed_timestamps_json TEXT NOT NULL DEFAULT '[]',
+      chain_depth INTEGER NOT NULL DEFAULT 0,
+      stored_bar_count INTEGER NOT NULL DEFAULT 0
     )`),
     db.prepare(`CREATE INDEX IF NOT EXISTS data_snapshots_lookup_idx
       ON data_snapshots (instrument_id, timeframe, adjustment_type, created_at)`),
@@ -100,11 +105,32 @@ export async function ensureSchema() {
       credentials_json TEXT NOT NULL,
       updated_at TEXT NOT NULL
     )`),
+    db.prepare(`CREATE TABLE IF NOT EXISTS app_metadata (
+      key TEXT PRIMARY KEY,
+      value TEXT NOT NULL
+    )`),
   ]);
 
   const sessionColumns = await db.prepare("PRAGMA table_info(training_sessions)").all<{ name: string }>();
   if (!sessionColumns.results.some((column) => column.name === "data_snapshot_id")) {
     await db.prepare("ALTER TABLE training_sessions ADD COLUMN data_snapshot_id TEXT").run();
+  }
+  const snapshotColumns = await db.prepare("PRAGMA table_info(data_snapshots)").all<{ name: string }>();
+  if (!snapshotColumns.results.some((column) => column.name === "base_snapshot_id")) {
+    await db.prepare("ALTER TABLE data_snapshots ADD COLUMN base_snapshot_id TEXT").run();
+  }
+  if (!snapshotColumns.results.some((column) => column.name === "storage_mode")) {
+    await db.prepare("ALTER TABLE data_snapshots ADD COLUMN storage_mode TEXT NOT NULL DEFAULT 'full'").run();
+  }
+  if (!snapshotColumns.results.some((column) => column.name === "removed_timestamps_json")) {
+    await db.prepare("ALTER TABLE data_snapshots ADD COLUMN removed_timestamps_json TEXT NOT NULL DEFAULT '[]'").run();
+  }
+  if (!snapshotColumns.results.some((column) => column.name === "chain_depth")) {
+    await db.prepare("ALTER TABLE data_snapshots ADD COLUMN chain_depth INTEGER NOT NULL DEFAULT 0").run();
+  }
+  if (!snapshotColumns.results.some((column) => column.name === "stored_bar_count")) {
+    await db.prepare("ALTER TABLE data_snapshots ADD COLUMN stored_bar_count INTEGER NOT NULL DEFAULT 0").run();
+    await db.prepare("UPDATE data_snapshots SET stored_bar_count = bar_count WHERE stored_bar_count = 0").run();
   }
   schemaReady = true;
 }

@@ -61,6 +61,11 @@ export const dataSnapshots = sqliteTable(
     firstTimestamp: integer("first_timestamp").notNull(),
     lastTimestamp: integer("last_timestamp").notNull(),
     createdAt: text("created_at").notNull(),
+    baseSnapshotId: text("base_snapshot_id"),
+    storageMode: text("storage_mode").notNull().default("full"),
+    removedTimestampsJson: text("removed_timestamps_json").notNull().default("[]"),
+    chainDepth: integer("chain_depth").notNull().default(0),
+    storedBarCount: integer("stored_bar_count").notNull().default(0),
   },
   (table) => [
     index("data_snapshots_lookup_idx").on(
@@ -119,4 +124,9 @@ export const localProviderCredentials = sqliteTable("local_provider_credentials"
   provider: text("provider").primaryKey(),
   credentialsJson: text("credentials_json").notNull(),
   updatedAt: text("updated_at").notNull(),
+});
+
+export const appMetadata = sqliteTable("app_metadata", {
+  key: text("key").primaryKey(),
+  value: text("value").notNull(),
 });

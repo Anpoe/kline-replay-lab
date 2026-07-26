@@ -66,6 +66,7 @@ import {
 import { summarizePerformance, type PerformanceRecord } from "../lib/performance";
 
 type View = "replay" | "performance" | "database" | "review";
+type DataMarket = "CN" | "US" | "FX" | "GOLD";
 type Instrument = {
   id: string;
   symbol: string;
@@ -74,6 +75,88 @@ type Instrument = {
   timezone: string;
   pricePrecision: number;
 };
+type AvailableInstrument = {
+  id: string;
+  short: string;
+  label: string;
+  market: string;
+};
+function InstrumentPicker({
+  value,
+  instruments,
+  onChange,
+  ariaLabel,
+}: {
+  value: string;
+  instruments: AvailableInstrument[];
+  onChange: (instrumentId: string) => void;
+  ariaLabel: string;
+}) {
+  const selected = instruments.find((item) => item.id === value);
+  const selectedText = selected ? `${selected.short} · ${selected.label}` : value;
+  const [query, setQuery] = useState(selectedText);
+  const [open, setOpen] = useState(false);
+
+  const matches = useMemo(() => {
+    const normalized = query.trim().toLowerCase();
+    const filtered = normalized && normalized !== selectedText.toLowerCase()
+      ? instruments.filter((item) =>
+          item.short.toLowerCase().includes(normalized) ||
+          item.label.toLowerCase().includes(normalized))
+      : instruments;
+    const result = filtered.slice(0, 40);
+    if (selected && !result.some((item) => item.id === selected.id)) result.unshift(selected);
+    return result.slice(0, 40);
+  }, [instruments, query, selected, selectedText]);
+
+  return (
+    <div className="instrument-picker">
+      <input
+        value={open ? query : selectedText}
+        aria-label={ariaLabel}
+        autoComplete="off"
+        onFocus={(event) => {
+          setQuery(selectedText);
+          setOpen(true);
+          event.currentTarget.select();
+        }}
+        onBlur={() => window.setTimeout(() => setOpen(false), 120)}
+        onChange={(event) => {
+          setQuery(event.target.value);
+          setOpen(true);
+        }}
+        onKeyDown={(event) => {
+          if (event.key === "Enter" && matches[0]) {
+            event.preventDefault();
+            onChange(matches[0].id);
+            setOpen(false);
+          }
+          if (event.key === "Escape") setOpen(false);
+        }}
+      />
+      {open && (
+        <div className="instrument-picker-menu" role="listbox" aria-label={`${ariaLabel}搜索结果`}>
+          {matches.length ? matches.map((item) => (
+            <button
+              type="button"
+              role="option"
+              aria-selected={item.id === value}
+              key={item.id}
+              onMouseDown={(event) => event.preventDefault()}
+              onClick={() => {
+                onChange(item.id);
+                setOpen(false);
+              }}
+            >
+              <strong>{item.short}</strong><span>{item.label}</span><small>{item.market}</small>
+            </button>
+          )) : <span className="instrument-picker-empty">没有匹配的品种</span>}
+          {instruments.length > matches.length && <i>输入代码或名称继续筛选 · 最多显示 40 条</i>}
+        </div>
+      )}
+    </div>
+  );
+}
 type Coverage = Instrument & {
   timeframe: string;
   barCount: number;
@@ -82,6 +165,15 @@ type Coverage = Instrument & {
   adjustmentType: string;
   source: string;
 };
+function coverageKey(item: Coverage) {
+  return `${item.id}\u0000${item.timeframe}\u0000${item.adjustmentType}\u0000${item.source}`;
+}
+const dataMarkets: Array<{ id: DataMarket; label: string; description: string }> = [
+  { id: "CN", label: "A股", description: "沪深京股票、指数、基金与可转债" },
+  { id: "US", label: "美股", description: "Alpaca 免费历史行情" },
+  { id: "FX", label: "外汇", description: "主要与交叉货币对" },
+  { id: "GOLD", label: "黄金", description: "现货黄金与贵金属" },
+];
 type PositionSide = "long" | "short";
 type OrderAction = "open" | "close";
 type PendingOrder = {
@@ -270,6 +362,7 @@ const defaultInstruments = [
   { id: "AAPL.US", short: "AAPL", label: "Apple", market: "美股" },
 ];
 const timeframes = ["5m", "1h", "1d", "1w"];
+const coveragePageSize = 100;
 const defaultAppSettings: AppSettings = {
   defaultInstrumentId: "600519.SH",
   defaultTimeframe: "1d",
@@ -480,6 +573,14 @@ export function TrainingWorkbench() {
   const [selectedDecisionId, setSelectedDecisionId] = useState("");
   const [reviewedSession, setReviewedSession] = useState<{ session: TrainingSession; state: TrainingState } | null>(null);
   const [coverage, setCoverage] = useState<Coverage[]>([]);
+  const [coveragePage, setCoveragePage] = useState(1);
+  const [coverageTotal, setCoverageTotal] = useState(0);
+  const [coverageSummary, setCoverageSummary] = useState({ barCount: 0, timeframeCount: 0 });
+  const [coverageSearch, setCoverageSearch] = useState("");
+  const [coverageQuery, setCoverageQuery] = useState("");
+  const [coverageLoading, setCoverageLoading] = useState(false);
+  const [selectedCoverageKeys, setSelectedCoverageKeys] = useState<string[]>([]);
+  const [dataMarket, setDataMarket] = useState<DataMarket>("CN");
   const [sessions, setSessions] = useState<TrainingSession[]>([]);
   const [performanceFilters, setPerformanceFilters] = useState<PerformanceFilters>(defaultPerformanceFilters);
   const [selectedPerformanceSessionId, setSelectedPerformanceSessionId] = useState("");
@@ -495,6 +596,15 @@ export function TrainingWorkbench() {
   const eventSequenceRef = useRef(0);
 
   const visibleBars = useMemo(() => bars.slice(0, cursor + 1), [bars, cursor]);
+  const dataMarketInstrumentCount = useMemo(() => availableInstruments.filter((item) => {
+    const market = item.market.toUpperCase();
+    if (dataMarket === "CN") return market === "CN" || market === "A股";
+    if (dataMarket === "US") return market === "US" || market === "美股";
+    if (dataMarket === "FX") return market === "FX" || market === "FOREX";
+    if (dataMarket === "GOLD") return market === "GOLD" || market === "METAL";
+    return false;
+  }).length, [availableInstruments, dataMarket]);
+  const dataMarketLabel = dataMarkets.find((market) => market.id === dataMarket)?.label ?? dataMarket;
   const currentBar = bars[cursor];
   const trainingDateLabel = (timestamp: number) => {
     if (!trainingTask?.hideDate) return formatDate(timestamp, timeframe);
@@ -1267,12 +1377,64 @@ export function TrainingWorkbench() {
   };
 
   const loadCoverage = useCallback(async () => {
-    const response = await fetch("/api/candles?coverage=1");
-    if (response.ok) {
-      const data = await response.json() as { coverage: Coverage[] };
-      setCoverage(data.coverage);
+    setCoverageLoading(true);
+    try {
+      const response = await fetch(`/api/candles?coverage=1&page=${coveragePage}&pageSize=${coveragePageSize}&q=${encodeURIComponent(coverageQuery)}&market=${dataMarket}`);
+      if (response.ok) {
+        const data = await response.json() as {
+          coverage: Coverage[];
+          total: number;
+          summary: { barCount: number; timeframeCount: number };
+        };
+        setCoverage(data.coverage);
+        setSelectedCoverageKeys([]);
+        setCoverageTotal(data.total);
+        setCoverageSummary(data.summary);
+      }
+    } finally {
+      setCoverageLoading(false);
     }
-  }, []);
+  }, [coveragePage, coverageQuery, dataMarket]);
+
+  const deleteSelectedCoverage = async () => {
+    const selected = coverage.filter((item) => selectedCoverageKeys.includes(coverageKey(item)));
+    if (!selected.length) return;
+    const localCount = new Set(
+      selected.filter((item) => item.source === "tdx-official").map((item) => item.id),
+    ).size;
+    const explanation = localCount
+      ? `\n\n其中包含 ${localCount} 个 TDX 品种。TDX 周线由日线生成，删除任一周期会同时删除该品种的日线和周线。`
+      : "";
+    if (!window.confirm(`确定删除选中的 ${selected.length} 条数据记录？训练快照会保留，但当前行情库数据将被删除。${explanation}`)) return;
+    setCoverageLoading(true);
+    try {
+      const response = await fetch("/api/candles", {
+        method: "DELETE",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          selections: selected.map((item) => ({
+            id: item.id,
+            timeframe: item.timeframe,
+            adjustmentType: item.adjustmentType,
+            source: item.source,
+          })),
+        }),
+      });
+      const result = await response.json() as {
+        deletedRows?: number;
+        deletedLocalInstruments?: number;
+        error?: string;
+      };
+      if (!response.ok) throw new Error(result.error ?? "删除失败");
+      setImportStatus(`删除完成：数据库 K 线 ${Number(result.deletedRows ?? 0).toLocaleString()} 根，TDX 品种 ${Number(result.deletedLocalInstruments ?? 0).toLocaleString()} 个。训练快照未受影响。`);
+      setSelectedCoverageKeys([]);
+      await Promise.all([loadCoverage(), loadInstrumentCatalog()]);
+    } catch (error) {
+      setImportStatus(error instanceof Error ? error.message : "删除失败");
+    } finally {
+      setCoverageLoading(false);
+    }
+  };
 
   const loadInstrumentCatalog = useCallback(async () => {
     const response = await fetch("/api/candles?instruments=1");
@@ -1631,12 +1793,17 @@ export function TrainingWorkbench() {
           turnover: row.turnover ? Number(row.turnover) : undefined,
         };
       });
-      const customId = `CUSTOM.${file.name.replace(/\.[^.]+$/, "").toUpperCase()}`;
+      const customId = `CUSTOM.${dataMarket}.${file.name.replace(/\.[^.]+$/, "").toUpperCase()}`;
+      const timezone = dataMarket === "CN"
+        ? "Asia/Shanghai"
+        : dataMarket === "US"
+          ? "America/New_York"
+          : "UTC";
       const response = await fetch("/api/candles", {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({
-          instrument: { id: customId, symbol: customId, name: file.name, market: "CUSTOM", timezone: "Asia/Shanghai" },
+          instrument: { id: customId, symbol: customId, name: file.name, market: dataMarket, timezone },
           timeframe: "1d",
           adjustmentType: "none",
           bars: barsToImport,
@@ -1645,7 +1812,7 @@ export function TrainingWorkbench() {
       const result = await response.json() as { imported?: number; error?: string };
       if (!response.ok) throw new Error(result.error ?? "导入失败");
       setImportStatus(`已导入 ${result.imported} 根日 K`);
-      await loadCoverage();
+      await Promise.all([loadCoverage(), loadInstrumentCatalog()]);
     } catch (error) {
       setImportStatus(error instanceof Error ? error.message : "导入失败");
     } finally {
@@ -1688,9 +1855,12 @@ export function TrainingWorkbench() {
               <span className="blind-pill">品种已隐藏</span>
             ) : (
               <>
-                <select value={instrumentId} onChange={(event) => startFreshTraining(event.target.value, timeframe)} aria-label="选择品种">
-                  {availableInstruments.map((item) => <option key={item.id} value={item.id}>{item.short} · {item.label}</option>)}
-                </select>
+                <InstrumentPicker
+                  value={instrumentId}
+                  instruments={availableInstruments}
+                  ariaLabel="选择品种"
+                  onChange={(nextInstrumentId) => startFreshTraining(nextInstrumentId, timeframe)}
+                />
                 <span className="market-pill">{availableInstruments.find((item) => item.id === instrumentId)?.market}</span>
               </>
             )}
@@ -1744,9 +1914,12 @@ export function TrainingWorkbench() {
                   </div>
                   <div className="task-form-row">
                     <label>默认品种
-                      <select value={settingsDraft.defaultInstrumentId} onChange={(event) => setSettingsDraft((draft) => ({ ...draft, defaultInstrumentId: event.target.value }))}>
-                        {availableInstruments.map((item) => <option key={item.id} value={item.id}>{item.short} · {item.label}</option>)}
-                      </select>
+                      <InstrumentPicker
+                        value={settingsDraft.defaultInstrumentId}
+                        instruments={availableInstruments}
+                        ariaLabel="默认品种"
+                        onChange={(defaultInstrumentId) => setSettingsDraft((draft) => ({ ...draft, defaultInstrumentId }))}
+                      />
                     </label>
                     <label>默认周期
                       <select value={settingsDraft.defaultTimeframe} onChange={(event) => setSettingsDraft((draft) => ({ ...draft, defaultTimeframe: event.target.value }))}>
@@ -1889,9 +2062,12 @@ export function TrainingWorkbench() {
               {taskSetupKind === "configured" && taskDraft.mode !== "mistake" && (
                 <div className="task-form-row">
                   <label>品种
-                    <select value={setupInstrumentId} onChange={(event) => setSetupInstrumentId(event.target.value)}>
-                      {availableInstruments.map((item) => <option key={item.id} value={item.id}>{item.short} · {item.label}</option>)}
-                    </select>
+                    <InstrumentPicker
+                      value={setupInstrumentId}
+                      instruments={availableInstruments}
+                      ariaLabel="训练品种"
+                      onChange={setSetupInstrumentId}
+                    />
                   </label>
                   <label>周期
                     <select value={setupTimeframe} onChange={(event) => setSetupTimeframe(event.target.value)}>
@@ -2482,30 +2658,121 @@ export function TrainingWorkbench() {
         {view === "database" && (
           <section className="content-page">
             <div className="page-heading"><div><span>DATA LIBRARY</span><h1>K 线数据库</h1><p>当前只管理历史 K 线及其覆盖、来源和质量。</p></div>
-              <label className="primary-button file-button"><FileUp size={17} />导入 CSV<input type="file" accept=".csv,text/csv" onChange={importCsv} /></label>
+              <label className="primary-button file-button"><FileUp size={17} />导入到{dataMarketLabel}<input type="file" accept=".csv,text/csv" onChange={importCsv} /></label>
             </div>
             {importStatus && <div className="status-banner">{importStatus}</div>}
+            <div className="data-market-tabs" role="tablist" aria-label="选择要管理的数据市场">
+              {dataMarkets.map((market) => (
+                <button
+                  type="button"
+                  role="tab"
+                  aria-selected={dataMarket === market.id}
+                  className={dataMarket === market.id ? "active" : ""}
+                  key={market.id}
+                  onClick={() => {
+                    setDataMarket(market.id);
+                    setCoveragePage(1);
+                    setCoverageSearch("");
+                    setCoverageQuery("");
+                    setSelectedCoverageKeys([]);
+                  }}
+                >
+                  <strong>{market.label}</strong><span>{market.description}</span>
+                </button>
+              ))}
+            </div>
             <div className="database-summary">
-              <div><strong>{new Set(coverage.map((item) => item.id)).size}</strong><span>品种</span></div>
-              <div><strong>{coverage.reduce((sum, item) => sum + Number(item.barCount), 0).toLocaleString()}</strong><span>K 线总数</span></div>
-              <div><strong>{new Set(coverage.map((item) => item.timeframe)).size}</strong><span>周期</span></div>
+              <div><strong>{dataMarketInstrumentCount.toLocaleString()}</strong><span>品种</span></div>
+              <div><strong>{coverageSummary.barCount.toLocaleString()}</strong><span>K 线总数</span></div>
+              <div><strong>{coverageSummary.timeframeCount}</strong><span>周期</span></div>
               <div><strong>0</strong><span>已知异常</span></div>
             </div>
-            <DataSourceManager onDataChanged={() => {
-              void Promise.all([loadCoverage(), loadInstrumentCatalog()]);
-            }} />
+            <DataSourceManager
+              market={dataMarket}
+              onOpenSettings={() => openSettingsPanel("data")}
+              onDataChanged={() => {
+                void Promise.all([loadCoverage(), loadInstrumentCatalog()]);
+              }}
+            />
+            <div className="coverage-toolbar">
+              <form onSubmit={(event) => {
+                event.preventDefault();
+                setCoveragePage(1);
+                setCoverageQuery(coverageSearch.trim());
+              }}>
+                <input
+                  value={coverageSearch}
+                  onChange={(event) => setCoverageSearch(event.target.value)}
+                  placeholder="搜索代码、名称或来源"
+                  aria-label="搜索行情覆盖"
+                />
+                <button type="submit">查询</button>
+                {coverageQuery && <button type="button" onClick={() => {
+                  setCoverageSearch("");
+                  setCoverageQuery("");
+                  setCoveragePage(1);
+                }}>清除</button>}
+              </form>
+              <span>
+                {coverageLoading ? "正在读取…" : `共 ${coverageTotal.toLocaleString()} 条，仅渲染当前 ${coverage.length} 条`}
+              </span>
+              <button
+                type="button"
+                className="coverage-delete-button"
+                disabled={!selectedCoverageKeys.length || coverageLoading}
+                onClick={() => void deleteSelectedCoverage()}
+              >
+                <Trash2 size={13} />删除所选数据
+                {selectedCoverageKeys.length > 0 && ` (${selectedCoverageKeys.length})`}
+              </button>
+              <div>
+                <button disabled={coveragePage <= 1 || coverageLoading} onClick={() => setCoveragePage((value) => Math.max(1, value - 1))}><ChevronLeft size={14} />上一页</button>
+                <strong>{coveragePage} / {Math.max(1, Math.ceil(coverageTotal / coveragePageSize))}</strong>
+                <button disabled={coveragePage >= Math.ceil(coverageTotal / coveragePageSize) || coverageLoading} onClick={() => setCoveragePage((value) => value + 1)}>下一页<ChevronRight size={14} /></button>
+              </div>
+            </div>
             <div className="coverage-table-wrap">
               <table className="coverage-table">
-                <thead><tr><th>品种</th><th>市场</th><th>周期</th><th>数量</th><th>覆盖范围</th><th>复权</th><th>来源</th><th>状态</th></tr></thead>
-                <tbody>{coverage.map((item) => (
-                  <tr key={`${item.id}-${item.timeframe}-${item.adjustmentType}-${item.source}`}>
+                <thead><tr>
+                  <th className="coverage-select-cell">
+                    <input
+                      type="checkbox"
+                      aria-label="全选当前页数据"
+                      checked={coverage.length > 0 && coverage.every((item) => selectedCoverageKeys.includes(coverageKey(item)))}
+                      onChange={() => {
+                        const pageKeys = coverage.map(coverageKey);
+                        const pageKeySet = new Set(pageKeys);
+                        const allSelected = pageKeys.every((key) => selectedCoverageKeys.includes(key));
+                        setSelectedCoverageKeys((current) => allSelected
+                          ? current.filter((key) => !pageKeySet.has(key))
+                          : Array.from(new Set([...current, ...pageKeys])));
+                      }}
+                    />
+                  </th>
+                  <th>品种</th><th>市场</th><th>周期</th><th>数量</th><th>覆盖范围</th><th>复权</th><th>来源</th><th>状态</th>
+                </tr></thead>
+                <tbody>{coverage.map((item) => {
+                  const key = coverageKey(item);
+                  const selected = selectedCoverageKeys.includes(key);
+                  return (
+                  <tr className={selected ? "selected" : ""} key={key}>
+                    <td className="coverage-select-cell">
+                      <input
+                        type="checkbox"
+                        aria-label={`选择 ${item.symbol} ${item.timeframe} ${item.source}`}
+                        checked={selected}
+                        onChange={() => setSelectedCoverageKeys((current) => current.includes(key)
+                          ? current.filter((value) => value !== key)
+                          : [...current, key])}
+                      />
+                    </td>
                     <td><strong>{item.symbol}</strong><span>{item.name}</span></td>
                     <td>{item.market}</td><td><span className="tf-badge">{item.timeframe}</span></td>
                     <td>{Number(item.barCount).toLocaleString()}</td>
                     <td>{new Date(item.firstTimestamp).toLocaleDateString("zh-CN")} — {new Date(item.lastTimestamp).toLocaleDateString("zh-CN")}</td>
                     <td>{item.adjustmentType}</td><td>{item.source}</td><td><span className="healthy-dot" />完整</td>
                   </tr>
-                ))}</tbody>
+                );})}</tbody>
               </table>
             </div>
             <div className="csv-help"><strong>CSV 格式</strong><code>timestamp,open,high,low,close,volume,turnover</code><span>时间可用毫秒时间戳或可解析日期；单次最多 5000 根。</span></div>

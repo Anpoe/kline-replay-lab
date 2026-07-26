@@ -3,7 +3,7 @@ import { loadProviderSecrets } from "../../lib/providerCredentials";
 
 export async function GET() {
   await ensureSchema();
-  const { secrets } = await loadProviderSecrets();
+  const { secrets, tdxQuantEndpoint } = await loadProviderSecrets();
   return Response.json({
     providers: [
       {
@@ -21,6 +21,14 @@ export async function GET() {
         configured: Boolean(secrets.alpacaKeyId && secrets.alpacaSecretKey),
         supportedTimeframes: ["5m", "1h", "1d", "1w"],
         credentialNames: ["APCA_API_KEY_ID", "APCA_API_SECRET_KEY"],
+      },
+      {
+        id: "tdxquant",
+        name: "TdxQuant 本地客户端",
+        market: "A股增强",
+        configured: Boolean(tdxQuantEndpoint),
+        supportedTimeframes: ["5m", "1h", "1d", "1w"],
+        credentialNames: [],
       },
     ],
   });

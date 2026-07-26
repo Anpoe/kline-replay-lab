@@ -1,73 +1,118 @@
 @echo off
 setlocal EnableExtensions
-chcp 65001 >nul
-title K线训练营 2.0 - 本地网页版
+title KLine Training Camp 2.0 - Local Web
 
 set "KLINE_WEB_DIR=%~dp0web"
 set "KLINE_LOCAL_URL=http://localhost:3000"
+set "KLINE_DATA_URL=http://127.0.0.1:3100/health"
+set "KLINE_DATA_STARTED=0"
 
-if not exist "%KLINE_WEB_DIR%\package.json" (
-  echo [错误] 找不到网页项目：%KLINE_WEB_DIR%
-  echo 请确认本文件仍放在“K线训练营2.0”文件夹中。
-  pause
-  exit /b 1
-)
+if exist "%KLINE_WEB_DIR%\package.json" goto project_found
+echo [ERROR] Web project not found: %KLINE_WEB_DIR%
+echo Keep this BAT file in the KLine Training Camp project folder.
+goto fatal
 
-where node >nul 2>nul
-if errorlevel 1 (
-  echo [错误] 未检测到 Node.js。
-  echo 请先安装 Node.js 22.13 或更高版本，然后重新双击本文件。
-  echo 下载地址：https://nodejs.org/
-  pause
-  exit /b 1
-)
+:project_found
+where node.exe >nul 2>nul
+if not errorlevel 1 goto node_found
+echo [ERROR] Node.js was not found.
+echo Install Node.js 22.13 or newer from https://nodejs.org/
+goto fatal
 
-where npm >nul 2>nul
-if errorlevel 1 (
-  echo [错误] 未检测到 npm，请重新安装 Node.js。
-  pause
-  exit /b 1
-)
+:node_found
+where npm.cmd >nul 2>nul
+if not errorlevel 1 goto npm_found
+echo [ERROR] npm was not found. Reinstall Node.js and try again.
+goto fatal
 
+:npm_found
 cd /d "%KLINE_WEB_DIR%"
+if not exist "node_modules\" goto install_dependencies
+node -e "import('unzipper')" >nul 2>nul
+if not errorlevel 1 goto dependencies_ready
 
-rem 如果训练营已经在 3000 端口运行，直接打开，不重复启动。
-powershell.exe -NoProfile -Command "try { $r = Invoke-WebRequest -Uri '%KLINE_LOCAL_URL%' -UseBasicParsing -TimeoutSec 3; if ($r.StatusCode -eq 200 -and $r.Content -match 'K线训练营') { exit 0 } } catch {}; exit 1" >nul 2>nul
-if not errorlevel 1 (
-  echo K线训练营已经在运行，正在打开浏览器……
-  start "" "%KLINE_LOCAL_URL%"
-  exit /b 0
-)
+:install_dependencies
+echo Installing required components. Please wait...
+call npm.cmd install
+if not errorlevel 1 goto dependencies_ready
+echo [ERROR] Dependency installation failed. Check the network and retry.
+goto fatal
 
-rem 避免误打开占用了 3000 端口的其他程序。
+:dependencies_ready
+if not exist ".local-data\" mkdir ".local-data"
+
+rem Check the companion service used for resumable TDX downloads.
+powershell.exe -NoProfile -Command "try { $r = Invoke-WebRequest -Uri '%KLINE_DATA_URL%' -UseBasicParsing -TimeoutSec 5; if ($r.StatusCode -eq 200 -and $r.Content -match 'kline-local-data') { exit 0 } } catch {}; exit 1" >nul 2>nul
+if not errorlevel 1 goto data_ready
+
+rem A service may already be starting on port 3100. Give it time before treating it as a conflict.
+powershell.exe -NoProfile -Command "if (Get-NetTCPConnection -LocalPort 3100 -State Listen -ErrorAction SilentlyContinue) { exit 0 } else { exit 1 }" >nul 2>nul
+if errorlevel 1 goto start_data_service
+
+echo Local data port 3100 is active. Waiting for the service to become ready...
+powershell.exe -NoProfile -Command "$deadline = (Get-Date).AddSeconds(20); do { try { $r = Invoke-WebRequest -Uri '%KLINE_DATA_URL%' -UseBasicParsing -TimeoutSec 3; if ($r.StatusCode -eq 200 -and $r.Content -match 'kline-local-data') { exit 0 } } catch {}; Start-Sleep -Milliseconds 700 } while ((Get-Date) -lt $deadline); exit 1" >nul 2>nul
+if not errorlevel 1 goto data_ready
+goto data_port_conflict
+
+:start_data_service
+echo Starting local market data service...
+powershell.exe -NoProfile -Command "$p = Start-Process -FilePath 'node.exe' -ArgumentList 'local-data/server.mjs' -WorkingDirectory '%KLINE_WEB_DIR%' -WindowStyle Hidden -PassThru; Set-Content -LiteralPath '%KLINE_WEB_DIR%\.local-data\service.pid' -Value $p.Id -Encoding ascii"
+if errorlevel 1 goto data_start_error
+set "KLINE_DATA_STARTED=1"
+
+powershell.exe -NoProfile -Command "$deadline = (Get-Date).AddSeconds(30); do { try { $r = Invoke-WebRequest -Uri '%KLINE_DATA_URL%' -UseBasicParsing -TimeoutSec 3; if ($r.StatusCode -eq 200 -and $r.Content -match 'kline-local-data') { exit 0 } } catch {}; Start-Sleep -Milliseconds 700 } while ((Get-Date) -lt $deadline); exit 1" >nul 2>nul
+if not errorlevel 1 goto data_ready
+
+:data_start_error
+echo [ERROR] Local data service did not become ready.
+echo Restart this BAT once. If it still fails, check whether security software blocked node.exe.
+goto cleanup_and_fatal
+
+:data_port_conflict
+echo [ERROR] Port 3100 is used by another program, but it is not this project's data service.
+powershell.exe -NoProfile -Command "$owner = Get-NetTCPConnection -LocalPort 3100 -State Listen -ErrorAction SilentlyContinue | Select-Object -First 1 -ExpandProperty OwningProcess; if ($owner) { $p = Get-Process -Id $owner -ErrorAction SilentlyContinue; if ($p) { Write-Host ('Process: ' + $p.ProcessName + ' (PID ' + $owner + ')') } }"
+echo Close the program shown above and retry.
+goto fatal
+
+:data_ready
+rem If this application is already running, only open the browser.
+powershell.exe -NoProfile -Command "try { $r = Invoke-WebRequest -Uri '%KLINE_LOCAL_URL%' -UseBasicParsing -TimeoutSec 3; if ($r.StatusCode -eq 200 -and $r.Content -match 'K') { exit 0 } } catch {}; exit 1" >nul 2>nul
+if errorlevel 1 goto check_web_port
+echo KLine Training Camp is already running. Opening the browser...
+start "" "%KLINE_LOCAL_URL%"
+exit /b 0
+
+:check_web_port
 powershell.exe -NoProfile -Command "if (Get-NetTCPConnection -LocalPort 3000 -State Listen -ErrorAction SilentlyContinue) { exit 0 } else { exit 1 }" >nul 2>nul
-if not errorlevel 1 (
-  echo [错误] 端口 3000 已被其他程序占用。
-  echo 请关闭占用端口的程序后再试。
-  pause
-  exit /b 1
-)
+if errorlevel 1 goto start_web
+echo [ERROR] Port 3000 is already used by another program.
+goto cleanup_and_fatal
 
-if not exist "node_modules\" (
-  echo 首次运行，正在安装所需组件，请稍候……
-  call npm install
-  if errorlevel 1 (
-    echo.
-    echo [错误] 组件安装失败，请检查网络后重试。
-    pause
-    exit /b 1
-  )
-)
-
-echo 正在启动 K线训练营……
-echo 浏览器会自动打开：%KLINE_LOCAL_URL%
-echo 关闭本窗口或按 Ctrl+C 可以停止本地服务。
+:start_web
+echo Starting KLine Training Camp...
+echo Web:  %KLINE_LOCAL_URL%
+echo Data: http://127.0.0.1:3100
+echo Close this window or press Ctrl+C to stop the local web service.
 echo.
-
 start "" powershell.exe -NoProfile -WindowStyle Hidden -Command "Start-Sleep -Seconds 3; Start-Process '%KLINE_LOCAL_URL%'"
-call npm run dev
+call npm.cmd run dev
+goto cleanup_and_exit
 
+:cleanup_and_fatal
+if not "%KLINE_DATA_STARTED%"=="1" goto fatal
+powershell.exe -NoProfile -Command "$pidFile = '%KLINE_WEB_DIR%\.local-data\service.pid'; if (Test-Path -LiteralPath $pidFile) { $servicePid = [int](Get-Content -LiteralPath $pidFile -Raw); Stop-Process -Id $servicePid -ErrorAction SilentlyContinue; Remove-Item -LiteralPath $pidFile -Force -ErrorAction SilentlyContinue }"
+goto fatal
+
+:cleanup_and_exit
+if not "%KLINE_DATA_STARTED%"=="1" goto stopped
+powershell.exe -NoProfile -Command "$pidFile = '%KLINE_WEB_DIR%\.local-data\service.pid'; if (Test-Path -LiteralPath $pidFile) { $servicePid = [int](Get-Content -LiteralPath $pidFile -Raw); Stop-Process -Id $servicePid -ErrorAction SilentlyContinue; Remove-Item -LiteralPath $pidFile -Force -ErrorAction SilentlyContinue }"
+
+:stopped
 echo.
-echo 本地服务已停止。
+echo Local services stopped.
 pause
 exit /b 0
+
+:fatal
+pause
+exit /b 1

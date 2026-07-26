@@ -18,7 +18,7 @@
 http://localhost:3000
 ```
 
-关闭运行窗口或按 `Ctrl+C` 可停止本地服务。
+脚本会同时启动网页服务和仅监听 `127.0.0.1:3100` 的本机数据服务。关闭运行窗口或按 `Ctrl+C` 可停止本地服务。
 
 ## 命令行启动
 
@@ -26,20 +26,31 @@ http://localhost:3000
 
 ```bash
 npm install
+npm run local-data
+```
+
+另开一个终端：
+
+```bash
 npm run dev
 ```
 
 ## 本地数据
 
-- K 线、品种目录和训练记录保存在项目本地的开发数据库中。
+- 训练记录、小规模导入和不可变训练快照保存在项目本地的开发数据库中。
 - 数据目录由本地 Cloudflare Miniflare/D1 运行时管理，状态文件位于被忽略的 `.wrangler/` 目录。
+- 通达信全市场数据保存在被忽略的 `.local-data/` 目录：下载支持 HTTP Range 断点续传，完成后按交易所保留 `.day` 分区文件并生成数据版本清单；默认删除原始 ZIP，避免双份占用。
 - CSV 导入格式：`timestamp,open,high,low,close,volume,turnover`。
-- 当前内置 A 股和美股样例行情；“数据”页面可用 Tushare 下载 A 股、用 Alpaca 下载美股的 5m、1h、1d、1w 历史 K 线。
-- 下载任务保存在本地 D1 中，可暂停、继续和失败重试；任务完成后的品种会自动加入 Replay 和随机训练的品种列表。
+- 当前内置 A 股和美股样例行情；“数据”页面首次进入提供快速初始化与高级自定义，高级方案可组合 Tushare、TdxQuant、Alpaca 和本地文件。
+- 快速初始化已接入通达信官方沪深京日线完整包；自动识别股票、交易所指数、场内基金和可转债，日线直接读取，周线按需聚合。导入完成后自动从在线证券目录补全中文名称，也可手动更新；无法匹配的历史代码使用确定性占位名，并可在 `.local-data/catalog.json` 中补充映射。
+- 数据页按 A股、美股、外汇、黄金独立管理，不再提供逐个代码下载表单。A股用 TDX 完整包建立全历史基础层，之后用 Tushare 120 按日期做全市场普通股票日线增量和最近 30 日缺口修复；美股通过 Alpaca 活跃证券目录批量初始化免费 IEX 日线，并按最后日期串行限速更新。
+- 数据覆盖表支持逐行勾选、全选当前页和二次确认删除；样例数据删除后不会自动恢复，既有不可变训练快照不随行情库删除。
+- Tushare 变化数据保存在 `.local-data/tdx/tushare-overlay.sqlite`，只记录新增或修正的日线；读取时与 TDX 分区合并后生成日线和周线，不复制整库。
+- Tushare 维护状态保存在本地任务文件中，可暂停、继续和失败重试，但 Token 不落任务文件；Alpaca 下载任务仍保存在本地 D1。
 
 ### 本地行情凭证
 
-打开应用侧栏“设置 → 数据源设置”，直接保存 Alpaca API Key ID、Secret Key 或 Tushare Token。凭证保存在本地 D1，接口只返回配置状态和掩码，不会回显完整内容，也不会进入 Git；保存后无需重启。
+打开应用侧栏“设置 → 数据源设置”，直接保存 Alpaca API Key ID、Secret Key、Tushare Token 或 TdxQuant 本地端点。配置保存在本地 D1，接口只返回状态和掩码，不会回显完整凭证，也不会进入 Git；保存后无需重启。
 
 `.env.local` 仍作为高级兼容方式保留，对应字段见 `.env.example`。Tushare 的 5m/1h 历史分钟线还需要对应的数据权限。
 
@@ -47,6 +58,7 @@ npm run dev
 
 ```bash
 npm run dev         # 启动本地开发版
+npm run local-data  # 启动 TDX 大文件与分区数据服务
 npm run build       # 验证生产构建
 npm run lint        # 代码检查
 npm test            # 构建并运行自动测试

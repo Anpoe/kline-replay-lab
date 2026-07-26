@@ -36,6 +36,13 @@
       "when": 1784821505401,
       "tag": "0004_violet_squirrel_girl",
       "breakpoints": true
+    },
+    {
+      "idx": 5,
+      "version": "6",
+      "when": 1784870987901,
+      "tag": "0005_normal_supernaut",
+      "breakpoints": true
     }
   ]
 }

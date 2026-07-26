@@ -1,6 +1,6 @@
 "use client";
 
-import { KeyRound, Save, Trash2 } from "lucide-react";
+import { KeyRound, Link2, Save, Trash2 } from "lucide-react";
 import { useCallback, useEffect, useState } from "react";
 
 type ProviderState = {
@@ -8,18 +8,21 @@ type ProviderState = {
   source: "settings" | "environment" | null;
   hint?: string;
   keyIdHint?: string;
+  endpoint?: string;
 };
 
 type ProviderSettingsResponse = {
   providers: {
     tushare: ProviderState;
     alpaca: ProviderState;
+    tdxquant: ProviderState;
   };
 };
 
 const emptyStatus: ProviderSettingsResponse["providers"] = {
   tushare: { configured: false, source: null },
   alpaca: { configured: false, source: null },
+  tdxquant: { configured: false, source: null },
 };
 
 function sourceLabel(source: ProviderState["source"]) {
@@ -33,14 +36,16 @@ export function ProviderSettingsPanel() {
   const [tushareToken, setTushareToken] = useState("");
   const [alpacaKeyId, setAlpacaKeyId] = useState("");
   const [alpacaSecretKey, setAlpacaSecretKey] = useState("");
+  const [tdxQuantEndpoint, setTdxQuantEndpoint] = useState("http://127.0.0.1:17709");
   const [notice, setNotice] = useState("");
-  const [saving, setSaving] = useState<"" | "tushare" | "alpaca">("");
+  const [saving, setSaving] = useState<"" | "tushare" | "alpaca" | "tdxquant">("");
 
   const loadStatus = useCallback(async () => {
     const response = await fetch("/api/provider-settings");
     if (!response.ok) return;
     const data = await response.json() as ProviderSettingsResponse;
     setStatus(data.providers);
+    if (data.providers.tdxquant.endpoint) setTdxQuantEndpoint(data.providers.tdxquant.endpoint);
   }, []);
 
   useEffect(() => {
@@ -50,7 +55,7 @@ export function ProviderSettingsPanel() {
     return () => window.clearTimeout(timer);
   }, [loadStatus]);
 
-  const saveProvider = async (provider: "tushare" | "alpaca") => {
+  const saveProvider = async (provider: "tushare" | "alpaca" | "tdxquant") => {
     setSaving(provider);
     setNotice("");
     try {
@@ -59,7 +64,9 @@ export function ProviderSettingsPanel() {
         headers: { "content-type": "application/json" },
         body: JSON.stringify(provider === "tushare"
           ? { provider, tushareToken }
-          : { provider, alpacaKeyId, alpacaSecretKey }),
+          : provider === "alpaca"
+            ? { provider, alpacaKeyId, alpacaSecretKey }
+            : { provider, tdxQuantEndpoint }),
       });
       const result = await response.json() as { error?: string };
       if (!response.ok) throw new Error(result.error ?? "保存失败");
@@ -68,7 +75,9 @@ export function ProviderSettingsPanel() {
       setAlpacaSecretKey("");
       await loadStatus();
       window.dispatchEvent(new Event("provider-settings-updated"));
-      setNotice(`${provider === "alpaca" ? "Alpaca" : "Tushare"} 凭证已保存在本机。`);
+      setNotice(provider === "tdxquant"
+        ? "TdxQuant 本地端点已保存。使用分钟数据时仍需启动并登录支持 TQ 的通达信客户端。"
+        : `${provider === "alpaca" ? "Alpaca" : "Tushare"} 凭证已保存在本机。`);
     } catch (error) {
       setNotice(error instanceof Error ? error.message : "保存失败");
     } finally {
@@ -76,8 +85,9 @@ export function ProviderSettingsPanel() {
     }
   };
 
-  const clearProvider = async (provider: "tushare" | "alpaca") => {
-    if (!window.confirm(`清除本机保存的 ${provider === "alpaca" ? "Alpaca" : "Tushare"} 凭证？`)) return;
+  const clearProvider = async (provider: "tushare" | "alpaca" | "tdxquant") => {
+    const label = provider === "alpaca" ? "Alpaca" : provider === "tushare" ? "Tushare" : "TdxQuant";
+    if (!window.confirm(`清除本机保存的 ${label} 配置？`)) return;
     const response = await fetch(`/api/provider-settings?provider=${provider}`, { method: "DELETE" });
     const result = await response.json() as { error?: string };
     if (!response.ok) {
@@ -114,6 +124,23 @@ export function ProviderSettingsPanel() {
         <div className="provider-setting-actions">
           {status.alpaca.source === "settings" && <button className="delete-session" onClick={() => clearProvider("alpaca")}><Trash2 size={13} />清除本机凭证</button>}
           <button className="primary-button" disabled={saving === "alpaca"} onClick={() => saveProvider("alpaca")}><Save size={14} />保存 Alpaca</button>
+        </div>
+      </article>
+
+      <article className="provider-setting-card">
+        <div className="provider-setting-title">
+          <div><Link2 size={17} /><span><strong>TdxQuant</strong><small>A 股 5m / 1h 与增强历史数据</small></span></div>
+          <span className={status.tdxquant.configured ? "configured" : ""}>{sourceLabel(status.tdxquant.source)}</span>
+        </div>
+        <div className="provider-secret-fields single">
+          <label>本地 HTTP 端点
+            <input value={tdxQuantEndpoint} onChange={(event) => setTdxQuantEndpoint(event.target.value)} placeholder="http://127.0.0.1:17709" />
+          </label>
+        </div>
+        <p className="provider-setting-help">不需要券商资金账号，但使用时必须启动并登录支持 TQ 的通达信客户端。这里只允许保存本机地址。</p>
+        <div className="provider-setting-actions">
+          {status.tdxquant.source === "settings" && <button className="delete-session" onClick={() => clearProvider("tdxquant")}><Trash2 size={13} />清除本机配置</button>}
+          <button className="primary-button" disabled={saving === "tdxquant"} onClick={() => saveProvider("tdxquant")}><Save size={14} />保存 TdxQuant</button>
         </div>
       </article>
 

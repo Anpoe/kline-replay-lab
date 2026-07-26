@@ -2,10 +2,21 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
   fetchProviderChunk,
+  filterTradableUsAssets,
   normalizeAlpacaBars,
   normalizeTusharePayload,
   validateCandles,
 } from "../app/lib/marketDataProviders.ts";
+
+test("Alpaca 美股目录兼容官方 class 字段和旧 asset_class 字段", () => {
+  const assets = filterTradableUsAssets([
+    { symbol: "AAPL", class: "us_equity", status: "active", tradable: true },
+    { symbol: "MSFT", asset_class: "us_equity", status: "active", tradable: true },
+    { symbol: "OLD", class: "us_equity", status: "inactive", tradable: true },
+    { symbol: "LOCKED", class: "us_equity", status: "active", tradable: false },
+  ]);
+  assert.deepEqual(assets.map((asset) => asset.symbol), ["AAPL", "MSFT"]);
+});
 
 test("Tushare 日线被标准化、排序，并把手和千元转换为股和元", () => {
   const result = normalizeTusharePayload({
@@ -75,7 +86,7 @@ test("Alpaca 下载使用免费历史行情接口、认证头和分页游标", a
   assert.equal(url.hostname, "data.alpaca.markets");
   assert.equal(url.pathname, "/v2/stocks/AAPL/bars");
   assert.equal(url.searchParams.get("timeframe"), "5Min");
-  assert.equal(url.searchParams.get("feed"), "sip");
+  assert.equal(url.searchParams.get("feed"), "iex");
   assert.equal(url.searchParams.get("page_token"), "next-token");
   assert.equal(capturedHeaders["APCA-API-KEY-ID"], "local-key");
   assert.deepEqual(result.cursor, { pageToken: "page-2" });
