@@ -168,6 +168,7 @@ export class TdxLocalStore {
     this.abortController = null;
     this.maintenanceAbortController = null;
     this.lastPersistAt = 0;
+    this.manifestCache = undefined;
   }
 
   async init() {
@@ -244,10 +245,13 @@ export class TdxLocalStore {
   }
 
   async getManifest() {
+    if (this.manifestCache !== undefined) return this.manifestCache;
     if (!(await exists(this.manifestFile))) return null;
     try {
-      return JSON.parse(await readFile(this.manifestFile, "utf8"));
+      this.manifestCache = JSON.parse(await readFile(this.manifestFile, "utf8"));
+      return this.manifestCache;
     } catch {
+      this.manifestCache = null;
       return null;
     }
   }
@@ -519,6 +523,7 @@ export class TdxLocalStore {
           manifest.updatedAt = now();
           manifest.maintenanceSource = "tushare-120-daily";
           await writeJsonAtomic(this.manifestFile, manifest);
+          this.manifestCache = manifest;
         }
         await this.persistMaintenanceTask();
         const remainingThrottle = this.tushareThrottleMs - (Date.now() - startedAt);
@@ -581,6 +586,7 @@ export class TdxLocalStore {
   async persistCatalogState(names, manifest) {
     await writeJsonAtomic(this.catalogFile, names);
     await writeJsonAtomic(this.manifestFile, manifest);
+    this.manifestCache = manifest;
     if (this.catalogTask) {
       this.catalogTask.updatedAt = now();
       await writeJsonAtomic(this.catalogTaskFile, this.catalogTask);
@@ -681,6 +687,7 @@ export class TdxLocalStore {
       manifest.datasetVersion = `${manifest.datasetVersion.split("-edit-")[0]}-edit-${Date.now()}`;
       manifest.updatedAt = now();
       await writeJsonAtomic(this.manifestFile, manifest);
+      this.manifestCache = manifest;
     }
     return { deletedInstruments: deleted.length, instrumentIds: deleted };
   }
@@ -966,6 +973,7 @@ export class TdxLocalStore {
       instruments,
     };
     await writeJsonAtomic(this.manifestFile, manifest);
+    this.manifestCache = manifest;
     this.task.stage = "weekly-ready";
     this.task.message = "日线索引已建立；周线将在首次打开品种时自动聚合并缓存于内存。";
     await this.persistTask(true);

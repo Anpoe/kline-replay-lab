@@ -56,6 +56,10 @@ type DownloadJobSummary = {
   failed: number;
   insertedCount: number;
 };
+type JobRunResult = {
+  status: DownloadJob["status"];
+  insertedCount: number;
+};
 type LocalDataTask = {
   id: string;
   status: "queued" | "running" | "paused" | "completed" | "failed";
@@ -125,6 +129,9 @@ type AdvancedSetup = {
 };
 
 const onboardingKey = "kline-training:data-onboarding";
+const usDownloadConcurrency = 8;
+const usRequestSpacingMs = 400;
+const usProgressRefreshSize = 20;
 
 const defaultAdvancedSetup: AdvancedSetup = {
   cnMarket: true,
@@ -218,6 +225,7 @@ export function DataSourceManager({
   const [localServiceAvailable, setLocalServiceAvailable] = useState(true);
   const aliveRef = useRef(true);
   const bulkStopRef = useRef(false);
+  const bulkRequestGateRef = useRef<Promise<void>>(Promise.resolve());
   const localServiceAvailableRef = useRef(true);
 
   const loadProviders = useCallback(async () => {
@@ -496,10 +504,23 @@ export function DataSourceManager({
     }
   };
 
-  const runJob = async (id: string) => {
-    setNotice("正在分批下载并校验 K 线，可以随时暂停。");
+  const runJob = async (id: string, bulk = false): Promise<JobRunResult> => {
+    if (!bulk) setNotice("正在分批下载并校验 K 线，可以随时暂停。");
     try {
       while (aliveRef.current) {
+        if (bulk) {
+          // Reserve request slots synchronously so all workers share one limiter.
+          // 400 ms spacing caps the client at 150 requests/minute, below Alpaca
+          // Basic's documented 200 historical requests/minute limit.
+          const previousSlot = bulkRequestGateRef.current;
+          let releaseSlot = () => {};
+          bulkRequestGateRef.current = new Promise<void>((resolve) => {
+            releaseSlot = resolve;
+          });
+          await previousSlot;
+          await new Promise((resolve) => window.setTimeout(resolve, usRequestSpacingMs));
+          releaseSlot();
+        }
         const response = await fetch("/api/data-jobs/run", {
           method: "POST",
           headers: { "content-type": "application/json" },
@@ -511,21 +532,31 @@ export function DataSourceManager({
           insertedCount?: number;
           error?: string;
         };
-        await loadJobs();
+        if (!bulk) await loadJobs();
         if (!response.ok) throw new Error(result.error ?? "下载失败");
         if (result.complete || result.status === "paused" || result.status === "completed") {
-          setNotice(result.status === "paused"
-            ? "任务已暂停，下载游标和已导入数据均已保存。"
-            : `下载完成，累计处理 ${Number(result.insertedCount ?? 0).toLocaleString()} 根 K 线。`);
-          onDataChanged?.();
-          break;
+          const finalStatus = result.status ?? (result.complete ? "completed" : "queued");
+          if (!bulk) {
+            setNotice(finalStatus === "paused"
+              ? "任务已暂停，下载游标和已导入数据均已保存。"
+              : `下载完成，累计处理 ${Number(result.insertedCount ?? 0).toLocaleString()} 根 K 线。`);
+            onDataChanged?.();
+          }
+          return {
+            status: finalStatus,
+            insertedCount: Number(result.insertedCount ?? 0),
+          };
         }
         await new Promise((resolve) => window.setTimeout(resolve, 180));
       }
     } catch (error) {
-      setNotice(error instanceof Error ? error.message : "下载失败");
-      await loadJobs();
+      if (!bulk) {
+        setNotice(error instanceof Error ? error.message : "下载失败");
+        await loadJobs();
+      }
+      return { status: "failed", insertedCount: 0 };
     }
+    return { status: "paused", insertedCount: 0 };
   };
 
   const refreshCnMarket = async () => {
@@ -560,21 +591,38 @@ export function DataSourceManager({
       return;
     }
     bulkStopRef.current = false;
+    bulkRequestGateRef.current = Promise.resolve();
     setBulkQueueRunning(true);
-    for (let index = 0; index < jobIds.length && aliveRef.current; index += 1) {
-      if (bulkStopRef.current) break;
-      setNotice(`正在低速批量更新美股：${index + 1} / ${jobIds.length}。每次只处理一个品种，避免拖慢电脑。`);
-      await runJob(jobIds[index]);
-      if (!bulkStopRef.current && index < jobIds.length - 1) {
-        await new Promise((resolve) => window.setTimeout(resolve, 450));
+    let processed = 0;
+    let failed = 0;
+    let nextIndex = 0;
+    setNotice(`正在高速批量更新美股：0 / ${jobIds.length.toLocaleString()}。8 路动态并发，保留安全限速。`);
+    const worker = async () => {
+      while (aliveRef.current && !bulkStopRef.current) {
+        const currentIndex = nextIndex;
+        nextIndex += 1;
+        if (currentIndex >= jobIds.length) return;
+        const result = await runJob(jobIds[currentIndex], true);
+        processed += 1;
+        if (result.status === "failed") failed += 1;
+        if (processed % usDownloadConcurrency === 0 || processed === jobIds.length) {
+          setNotice(`正在高速批量更新美股：${processed.toLocaleString()} / ${jobIds.length.toLocaleString()}。8 路动态并发，保留安全限速。`);
+        }
+        if (processed % usProgressRefreshSize === 0 || processed === jobIds.length) {
+          await loadJobs();
+        }
       }
-    }
+    };
+    await Promise.all(Array.from(
+      { length: Math.min(usDownloadConcurrency, jobIds.length) },
+      () => worker(),
+    ));
     setBulkQueueRunning(false);
     await loadJobs();
     onDataChanged?.();
     setNotice(bulkStopRef.current
       ? "批量更新已暂停；未执行的任务仍保存在本机，下次可继续。"
-      : `本轮市场更新完成，共处理 ${jobIds.length.toLocaleString()} 个品种。`);
+      : `本轮市场更新完成，共处理 ${processed.toLocaleString()} 个品种${failed ? `，其中 ${failed.toLocaleString()} 个待重试` : ""}。`);
   };
 
   const syncUsMarket = async (mode: "initialize" | "update") => {
@@ -603,7 +651,7 @@ export function DataSourceManager({
       return;
     }
     await loadJobs();
-    setNotice(`已建立 ${Number(result.createdJobs ?? 0).toLocaleString()} 条任务，开始低速顺序执行。`);
+    setNotice(`已建立 ${Number(result.createdJobs ?? 0).toLocaleString()} 条任务，开始 8 路动态并发执行。`);
     void runMarketJobs(result.jobIds);
   };
 
@@ -1097,7 +1145,7 @@ export function DataSourceManager({
               ? "点击更新后，系统会检查已初始化的全部美股并从最后日期继续，不需要输入代码。"
               : usStarted
                 ? `已完成 ${jobSummary.completed.toLocaleString()} / ${jobSummary.total.toLocaleString()} 个任务；继续时优先处理未完成任务，不会重下已有 K 线。`
-              : "首次初始化会自动读取活跃可交易美股目录，并建立从 2016 年至今的日线任务。低速顺序下载，可随时暂停。"}</small>
+              : "首次初始化会自动读取活跃可交易美股目录，并建立从 2016 年至今的日线任务。8 路动态并发并保留安全限速，可随时暂停。"}</small>
           </div>
           <div className="market-maintenance-actions">
             {!configured.alpaca && <button onClick={onOpenSettings}><Settings2 size={14} />配置 Alpaca</button>}

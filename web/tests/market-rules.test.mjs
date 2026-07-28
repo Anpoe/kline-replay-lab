@@ -3,6 +3,11 @@ import test from "node:test";
 
 import {
   CN_A_MAINBOARD_RULES_V1,
+  CN_BEIJING_RULES_V1,
+  CN_CHINEXT_RULES_V1,
+  CN_STAR_MARKET_RULES_V1,
+  describeBuyQuantity,
+  findNextTradingSessionIndex,
   createPriceBand,
   resolveMarketRules,
   validateCloseOrder,
@@ -25,6 +30,39 @@ test("enforces board lots and prevents unbacked short selling", () => {
   assert.equal(validateOpenOrder(CN_A_MAINBOARD_RULES_V1, "sell", 100).code, "short_not_allowed");
 });
 
+test("resolves and trades the STAR Market, ChiNext and Beijing exchange", () => {
+  assert.equal(resolveMarketRules("CN", "688322.SH").id, "cn-a-star-market-cash");
+  assert.equal(resolveMarketRules("CN", "300750.SZ").id, "cn-a-chinext-cash");
+  assert.equal(resolveMarketRules("CN", "920001.BJ").id, "cn-a-beijing-cash");
+
+  assert.equal(validateOpenOrder(CN_STAR_MARKET_RULES_V1, "buy", 100).code, "minimum_quantity_required");
+  assert.equal(validateOpenOrder(CN_STAR_MARKET_RULES_V1, "buy", 200).ok, true);
+  assert.equal(validateOpenOrder(CN_STAR_MARKET_RULES_V1, "buy", 201).ok, true);
+  assert.equal(describeBuyQuantity(CN_STAR_MARKET_RULES_V1), "买入至少 200 股，之后按 1 股递增");
+
+  assert.equal(validateOpenOrder(CN_CHINEXT_RULES_V1, "buy", 100).ok, true);
+  assert.equal(validateOpenOrder(CN_CHINEXT_RULES_V1, "buy", 150).code, "board_lot_required");
+  assert.equal(validateOpenOrder(CN_BEIJING_RULES_V1, "buy", 100).ok, true);
+  assert.equal(validateOpenOrder(CN_BEIJING_RULES_V1, "buy", 101).ok, true);
+});
+
+test("uses board-specific price limits and skips IPO no-limit sessions", () => {
+  assert.equal(createPriceBand(CN_STAR_MARKET_RULES_V1, 10, 5), null);
+  assert.deepEqual(createPriceBand(CN_STAR_MARKET_RULES_V1, 10, 6), {
+    referenceClose: 10,
+    lower: 8,
+    upper: 12,
+    ratio: 0.2,
+  });
+  assert.equal(createPriceBand(CN_BEIJING_RULES_V1, 10, 1), null);
+  assert.deepEqual(createPriceBand(CN_BEIJING_RULES_V1, 10, 2), {
+    referenceClose: 10,
+    lower: 7,
+    upper: 13,
+    ratio: 0.3,
+  });
+});
+
 test("locks a newly bought A-share position until the next trading date", () => {
   const position = {
     side: "long",
@@ -45,6 +83,18 @@ test("locks a newly bought A-share position until the next trading date", () => 
   );
   assert.equal(sameDay.code, "t_plus_one_locked");
   assert.equal(nextDay.ok, true);
+});
+
+test("finds the first bar of the next trading session for a deferred close", () => {
+  const bars = [
+    { timestamp: Date.parse("2026-07-23T01:35:00Z") },
+    { timestamp: Date.parse("2026-07-23T06:55:00Z") },
+    { timestamp: Date.parse("2026-07-24T01:30:00Z") },
+    { timestamp: Date.parse("2026-07-24T01:35:00Z") },
+  ];
+  assert.equal(findNextTradingSessionIndex(bars, 0, "Asia/Shanghai"), 2);
+  assert.equal(findNextTradingSessionIndex(bars, 1, "Asia/Shanghai"), 2);
+  assert.equal(findNextTradingSessionIndex(bars, 3, "Asia/Shanghai"), -1);
 });
 
 test("uses a 10% price band and conservative limit fill policy", () => {

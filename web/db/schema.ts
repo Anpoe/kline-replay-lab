@@ -37,6 +37,31 @@ export const candles = sqliteTable(
   ],
 );
 
+export const candleCoverage = sqliteTable(
+  "candle_coverage",
+  {
+    instrumentId: text("instrument_id").notNull(),
+    timeframe: text("timeframe").notNull(),
+    adjustmentType: text("adjustment_type").notNull(),
+    source: text("source").notNull(),
+    barCount: integer("bar_count").notNull(),
+    firstTimestamp: integer("first_timestamp").notNull(),
+    lastTimestamp: integer("last_timestamp").notNull(),
+    updatedAt: text("updated_at").notNull(),
+  },
+  (table) => [
+    primaryKey({
+      columns: [table.instrumentId, table.timeframe, table.adjustmentType, table.source],
+    }),
+    index("candle_coverage_lookup_idx").on(
+      table.instrumentId,
+      table.timeframe,
+      table.adjustmentType,
+      table.source,
+    ),
+  ],
+);
+
 export const trainingSessions = sqliteTable("training_sessions", {
   id: text("id").primaryKey(),
   instrumentId: text("instrument_id").notNull(),

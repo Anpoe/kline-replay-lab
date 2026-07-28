@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useRef } from "react";
+import { useCallback, useEffect, useRef, type MouseEvent as ReactMouseEvent } from "react";
 import type { Chart, KLineData, Overlay, OverlayTemplate, Period, Point } from "klinecharts";
 
 type DrawingRequest = { name: string; nonce: number } | null;
@@ -36,6 +36,12 @@ export type DecisionMarker = {
   price: number;
   label: string;
   hovered?: boolean;
+};
+
+export type CandleContextTarget = {
+  dataIndex: number;
+  timestamp: number;
+  referencePrice: number;
 };
 
 type TradeOverlayData = TradeMarker;
@@ -304,6 +310,7 @@ export function KLineReplayChart({
   hideDate,
   hidePrice,
   onDecisionSelect,
+  onCandleContextMenu,
   onDrawingsChange,
 }: {
   bars: KLineData[];
@@ -320,6 +327,7 @@ export function KLineReplayChart({
   hideDate: boolean;
   hidePrice: boolean;
   onDecisionSelect: (id: string) => void;
+  onCandleContextMenu: (target: CandleContextTarget) => void;
   onDrawingsChange: (drawings: PersistedDrawing[]) => void;
 }) {
   const containerRef = useRef<HTMLDivElement>(null);
@@ -329,6 +337,7 @@ export function KLineReplayChart({
   const decisionMarkersRef = useRef<DecisionMarker[]>(decisionMarkers);
   const drawingsRef = useRef<PersistedDrawing[]>(drawings);
   const onDecisionSelectRef = useRef(onDecisionSelect);
+  const onCandleContextMenuRef = useRef(onCandleContextMenu);
   const onDrawingsChangeRef = useRef(onDrawingsChange);
   const suppressDrawingEventsRef = useRef(false);
 
@@ -497,6 +506,10 @@ export function KLineReplayChart({
   }, [onDecisionSelect]);
 
   useEffect(() => {
+    onCandleContextMenuRef.current = onCandleContextMenu;
+  }, [onCandleContextMenu]);
+
+  useEffect(() => {
     if (!drawingRequest || !chartRef.current) return;
     chartRef.current.createOverlay({
       name: drawingRequest.name,
@@ -522,5 +535,36 @@ export function KLineReplayChart({
     suppressDrawingEventsRef.current = false;
   }, [clearNonce]);
 
-  return <div ref={containerRef} className="chart-canvas" aria-label={symbol + " K线图"} />;
+  const handleContextMenu = (event: ReactMouseEvent<HTMLDivElement>) => {
+    const chart = chartRef.current;
+    const container = containerRef.current;
+    if (!chart || !container) return;
+
+    const bounds = container.getBoundingClientRect();
+    const candlePane = chart.getSize("candle_pane", "root");
+    const x = event.clientX - bounds.left;
+    const y = event.clientY - bounds.top;
+    if (!candlePane || y < candlePane.top || y > candlePane.top + candlePane.height) return;
+
+    const converted = chart.convertFromPixel([{ x, y }], { paneId: "candle_pane" });
+    const point = Array.isArray(converted) ? converted[0] : converted;
+    const dataIndex = Math.round(point?.dataIndex ?? Number.NaN);
+    const bar = barsRef.current[dataIndex];
+    if (!bar) return;
+
+    event.preventDefault();
+    onCandleContextMenuRef.current({
+      dataIndex,
+      timestamp: bar.timestamp,
+      referencePrice: bar.close,
+    });
+  };
+
+  return <div
+    ref={containerRef}
+    className="chart-canvas"
+    aria-label={symbol + " K线图，右键已揭示的 K 线可补写事前决策"}
+    title="右键已揭示的 K 线可补写事前决策"
+    onContextMenu={handleContextMenu}
+  />;
 }

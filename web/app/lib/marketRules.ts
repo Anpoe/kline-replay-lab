@@ -6,6 +6,9 @@ export type MarketRuleProfile = {
   tradingEnabled: boolean;
   allowShort: boolean;
   boardLot: number;
+  minimumBuyQuantity?: number;
+  buyQuantityStep?: number;
+  ipoNoLimitTradingDays?: number;
   tPlusOne: boolean;
   priceLimitRatio: number | null;
   priceTick: number;
@@ -33,6 +36,9 @@ export const CN_A_MAINBOARD_RULES_V1: MarketRuleProfile = Object.freeze({
   tradingEnabled: true,
   allowShort: false,
   boardLot: 100,
+  minimumBuyQuantity: 100,
+  buyQuantityStep: 100,
+  ipoNoLimitTradingDays: 5,
   tPlusOne: true,
   priceLimitRatio: 0.1,
   priceTick: 0.01,
@@ -47,6 +53,9 @@ export const GENERIC_CASH_RULES_V1: MarketRuleProfile = Object.freeze({
   tradingEnabled: true,
   allowShort: true,
   boardLot: 1,
+  minimumBuyQuantity: 1,
+  buyQuantityStep: 1,
+  ipoNoLimitTradingDays: 0,
   tPlusOne: false,
   priceLimitRatio: null,
   priceTick: 0.01,
@@ -61,6 +70,9 @@ export const CN_UNSUPPORTED_RULES_V1: MarketRuleProfile = Object.freeze({
   tradingEnabled: false,
   allowShort: false,
   boardLot: 100,
+  minimumBuyQuantity: 100,
+  buyQuantityStep: 100,
+  ipoNoLimitTradingDays: 0,
   tPlusOne: true,
   priceLimitRatio: null,
   priceTick: 0.01,
@@ -68,12 +80,93 @@ export const CN_UNSUPPORTED_RULES_V1: MarketRuleProfile = Object.freeze({
 });
 
 const MAINBOARD_SYMBOL = /^(?:60[0135]\d{3}\.SH|00[0123]\d{3}\.SZ)$/;
+const STAR_MARKET_SYMBOL = /^(?:688|689)\d{3}\.SH$/;
+const CHINEXT_SYMBOL = /^(?:300|301)\d{3}\.SZ$/;
+const BEIJING_SYMBOL = /^[489]\d{5}\.BJ$/;
+
+export const CN_STAR_MARKET_RULES_V1: MarketRuleProfile = Object.freeze({
+  id: "cn-a-star-market-cash",
+  version: "2026.07-v1",
+  name: "科创板现货",
+  market: "CN",
+  tradingEnabled: true,
+  allowShort: false,
+  boardLot: 200,
+  minimumBuyQuantity: 200,
+  buyQuantityStep: 1,
+  ipoNoLimitTradingDays: 5,
+  tPlusOne: true,
+  priceLimitRatio: 0.2,
+  priceTick: 0.01,
+  limitFillPolicy: "conservative",
+});
+
+export const CN_CHINEXT_RULES_V1: MarketRuleProfile = Object.freeze({
+  id: "cn-a-chinext-cash",
+  version: "2026.07-v1",
+  name: "创业板现货",
+  market: "CN",
+  tradingEnabled: true,
+  allowShort: false,
+  boardLot: 100,
+  minimumBuyQuantity: 100,
+  buyQuantityStep: 100,
+  ipoNoLimitTradingDays: 5,
+  tPlusOne: true,
+  priceLimitRatio: 0.2,
+  priceTick: 0.01,
+  limitFillPolicy: "conservative",
+});
+
+export const CN_BEIJING_RULES_V1: MarketRuleProfile = Object.freeze({
+  id: "cn-a-beijing-cash",
+  version: "2026.07-v1",
+  name: "北交所现货",
+  market: "CN",
+  tradingEnabled: true,
+  allowShort: false,
+  boardLot: 100,
+  minimumBuyQuantity: 100,
+  buyQuantityStep: 1,
+  ipoNoLimitTradingDays: 1,
+  tPlusOne: true,
+  priceLimitRatio: 0.3,
+  priceTick: 0.01,
+  limitFillPolicy: "conservative",
+});
 
 export function resolveMarketRules(market: string, instrumentId: string): MarketRuleProfile {
   if (market === "CN") {
-    return MAINBOARD_SYMBOL.test(instrumentId) ? CN_A_MAINBOARD_RULES_V1 : CN_UNSUPPORTED_RULES_V1;
+    if (MAINBOARD_SYMBOL.test(instrumentId)) return CN_A_MAINBOARD_RULES_V1;
+    if (STAR_MARKET_SYMBOL.test(instrumentId)) return CN_STAR_MARKET_RULES_V1;
+    if (CHINEXT_SYMBOL.test(instrumentId)) return CN_CHINEXT_RULES_V1;
+    if (BEIJING_SYMBOL.test(instrumentId)) return CN_BEIJING_RULES_V1;
+    return CN_UNSUPPORTED_RULES_V1;
   }
   return { ...GENERIC_CASH_RULES_V1, market };
+}
+
+export function minimumBuyQuantity(rules: MarketRuleProfile) {
+  return rules.minimumBuyQuantity ?? rules.boardLot;
+}
+
+export function buyQuantityStep(rules: MarketRuleProfile) {
+  return rules.buyQuantityStep ?? rules.boardLot;
+}
+
+export function normalizeBuyQuantity(rules: MarketRuleProfile, requested: number) {
+  const minimum = minimumBuyQuantity(rules);
+  const step = buyQuantityStep(rules);
+  const safeRequested = Number.isFinite(requested) ? Math.max(minimum, Math.round(requested)) : minimum;
+  return Math.ceil(safeRequested / step) * step;
+}
+
+export function describeBuyQuantity(rules: MarketRuleProfile) {
+  const minimum = minimumBuyQuantity(rules);
+  const step = buyQuantityStep(rules);
+  return minimum === step
+    ? `买入 ${minimum} 股整数倍`
+    : `买入至少 ${minimum} 股，之后按 ${step} 股递增`;
 }
 
 export function validateOpenOrder(
@@ -90,11 +183,20 @@ export function validateOpenOrder(
   if (side === "sell" && !rules.allowShort) {
     return { ok: false, code: "short_not_allowed", message: `${rules.name}默认禁止卖出开仓` };
   }
-  if (side === "buy" && quantity % rules.boardLot !== 0) {
+  const minimum = minimumBuyQuantity(rules);
+  const step = buyQuantityStep(rules);
+  if (side === "buy" && quantity < minimum) {
+    return {
+      ok: false,
+      code: "minimum_quantity_required",
+      message: `买入数量不得少于 ${minimum} 股`,
+    };
+  }
+  if (side === "buy" && quantity % step !== 0) {
     return {
       ok: false,
       code: "board_lot_required",
-      message: `买入数量必须是 ${rules.boardLot} 股的整数倍`,
+      message: `买入数量必须以 ${step} 股为增量`,
     };
   }
   return { ok: true };
@@ -107,6 +209,19 @@ export function tradingDate(timestamp: number, timezone: string) {
     month: "2-digit",
     day: "2-digit",
   }).format(new Date(timestamp));
+}
+
+export function findNextTradingSessionIndex(
+  bars: Array<{ timestamp: number }>,
+  cursor: number,
+  timezone: string,
+) {
+  const current = bars[cursor];
+  if (!current) return -1;
+  const currentSession = tradingDate(current.timestamp, timezone);
+  return bars.findIndex((bar, index) => (
+    index > cursor && tradingDate(bar.timestamp, timezone) !== currentSession
+  ));
 }
 
 export function validateCloseOrder(
@@ -137,7 +252,15 @@ function roundToTick(value: number, tick: number) {
   return Number((Math.round((value + Number.EPSILON) / tick) * tick).toFixed(tickPrecision(tick)));
 }
 
-export function createPriceBand(rules: MarketRuleProfile, referenceClose: number): PriceBand | null {
+export function createPriceBand(
+  rules: MarketRuleProfile,
+  referenceClose: number,
+  listedTradingDay?: number,
+): PriceBand | null {
+  if (
+    listedTradingDay != null
+    && listedTradingDay <= (rules.ipoNoLimitTradingDays ?? 0)
+  ) return null;
   if (rules.priceLimitRatio == null || !Number.isFinite(referenceClose) || referenceClose <= 0) return null;
   return {
     referenceClose,

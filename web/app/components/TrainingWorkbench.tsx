@@ -33,6 +33,7 @@ import type { KLineData } from "klinecharts";
 import { ChangeEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   KLineReplayChart,
+  type CandleContextTarget,
   type DecisionMarker,
   type PersistedDrawing,
   type TradeMarker,
@@ -41,7 +42,12 @@ import { DataSourceManager } from "./DataSourceManager";
 import { ProviderSettingsPanel } from "./ProviderSettingsPanel";
 import {
   CN_A_MAINBOARD_RULES_V1,
+  buyQuantityStep,
   createPriceBand,
+  describeBuyQuantity,
+  findNextTradingSessionIndex,
+  minimumBuyQuantity,
+  normalizeBuyQuantity,
   resolveMarketRules,
   tradingDate,
   validateCloseOrder,
@@ -64,6 +70,15 @@ import {
   type TrainingTaskDraft,
 } from "../lib/trainingTasks";
 import { summarizePerformance, type PerformanceRecord } from "../lib/performance";
+import {
+  accountEquity,
+  accountMarketValue,
+  availableCash as calculateAvailableCash,
+  executionCashFlow,
+  portfolioReturnPct,
+  positionReturnPct,
+  type TradingMode,
+} from "../lib/tradingAccount";
 
 type View = "replay" | "performance" | "database" | "review";
 type DataMarket = "CN" | "US" | "FX" | "GOLD";
@@ -186,6 +201,8 @@ type PendingOrder = {
   ruleId?: string;
   ruleVersion?: string;
   priceBand?: PriceBand | null;
+  reservedCash?: number;
+  executeAtTimestamp?: number;
 };
 type PositionLot = {
   id: string;
@@ -237,6 +254,8 @@ type DecisionSubmission = {
   referencePrice: number;
   decision: Decision;
   submittedAt: string;
+  backfilled?: boolean;
+  recordedAtCursor?: number;
 };
 type TrainingEvent = {
   id: string;
@@ -258,7 +277,7 @@ type SnapshotMeta = {
   createdAt: string;
 };
 type TrainingState = {
-  version: 6;
+  version: 7;
   cursor: number;
   cursorTimestamp?: number;
   dataSignature?: string;
@@ -276,12 +295,18 @@ type TrainingState = {
   events: TrainingEvent[];
   marketRules?: MarketRuleProfile;
   trainingTask?: TrainingTask;
+  tradingMode: TradingMode;
+  initialCapital: number;
+  cashBalance: number;
   pnlSnapshot?: {
     realized: number;
     floating: number;
     total: number;
     openPositions: number;
     closedPositions: number;
+    returnPct?: number;
+    equity?: number;
+    cashBalance?: number;
   };
 };
 type TrainingSession = {
@@ -328,6 +353,8 @@ type AppSettings = {
   defaultTimeframe: string;
   defaultOrderQty: number;
   defaultSpeed: number;
+  tradingMode: TradingMode;
+  initialCapital: number;
   randomInstrumentMode: "current" | "all" | "market";
   randomMarket: string;
   randomTimeframeMode: "current" | "all" | "fixed";
@@ -368,6 +395,8 @@ const defaultAppSettings: AppSettings = {
   defaultTimeframe: "1d",
   defaultOrderQty: 100,
   defaultSpeed: 1,
+  tradingMode: "return",
+  initialCapital: 100000,
   randomInstrumentMode: "all",
   randomMarket: "A股",
   randomTimeframeMode: "all",
@@ -391,6 +420,10 @@ function money(value: number) {
   return `${value >= 0 ? "+" : ""}${value.toFixed(2)}`;
 }
 
+function percent(value: number) {
+  return `${value >= 0 ? "+" : ""}${value.toFixed(2)}%`;
+}
+
 function profitFactorLabel(value: number | null) {
   if (value === null) return "—";
   if (!Number.isFinite(value)) return "∞";
@@ -408,6 +441,8 @@ function normalizeSettings(value: Partial<AppSettings>): AppSettings {
       ? merged.defaultTimeframe
       : defaultAppSettings.defaultTimeframe,
     defaultOrderQty: Math.max(1, Math.round(Number(merged.defaultOrderQty) || defaultAppSettings.defaultOrderQty)),
+    tradingMode: merged.tradingMode === "capital" ? "capital" : "return",
+    initialCapital: Math.max(1000, Math.round(Number(merged.initialCapital) || defaultAppSettings.initialCapital)),
     defaultSpeed: [0.5, 1, 2, 5].includes(Number(merged.defaultSpeed))
       ? Number(merged.defaultSpeed)
       : defaultAppSettings.defaultSpeed,
@@ -470,6 +505,7 @@ function eventLabel(type: string) {
     replay_advanced: "推进K线",
     replay_rewound: "回看上一根",
     order_queued: "提交委托",
+    order_queued_for_next_session: "预约次日开盘平仓",
     order_cancelled: "撤销委托",
     orders_filled: "订单成交",
     drawings_changed: "更新图表标记",
@@ -500,6 +536,25 @@ function priceLimitReference(
     if (tradingDate(bars[index].timestamp, timezone) !== session) return bars[index].close;
   }
   return current.close;
+}
+
+function replayPriceBand(
+  rules: MarketRuleProfile,
+  bars: KLineData[],
+  cursor: number,
+  timezone: string,
+  timeframe: string,
+) {
+  // A weekly bar spans several sessions, so a daily price-limit band cannot be
+  // inferred from its previous weekly close. Daily data is ordered from listing
+  // onward in the complete local A-share library, which lets us honor IPO days.
+  if (timeframe === "1w") return null;
+  const listedTradingDay = timeframe === "1d" ? cursor + 2 : undefined;
+  return createPriceBand(
+    rules,
+    priceLimitReference(bars, cursor, timezone),
+    listedTradingDay,
+  );
 }
 
 function createOrderRejection(
@@ -555,6 +610,9 @@ export function TrainingWorkbench() {
   const [dataSnapshotId, setDataSnapshotId] = useState("");
   const [snapshotHash, setSnapshotHash] = useState("");
   const [marketRules, setMarketRules] = useState<MarketRuleProfile>(CN_A_MAINBOARD_RULES_V1);
+  const [tradingMode, setTradingMode] = useState<TradingMode>("return");
+  const [initialCapital, setInitialCapital] = useState(defaultAppSettings.initialCapital);
+  const [cashBalance, setCashBalance] = useState(defaultAppSettings.initialCapital);
   const [trainingTask, setTrainingTask] = useState<TrainingTask | null>(null);
   const [showTaskSetup, setShowTaskSetup] = useState(false);
   const [taskSetupKind, setTaskSetupKind] = useState<TaskSetupKind>("configured");
@@ -571,6 +629,7 @@ export function TrainingWorkbench() {
   const [ruleNotice, setRuleNotice] = useState("");
   const [events, setEvents] = useState<TrainingEvent[]>([]);
   const [selectedDecisionId, setSelectedDecisionId] = useState("");
+  const [decisionTarget, setDecisionTarget] = useState<CandleContextTarget | null>(null);
   const [reviewedSession, setReviewedSession] = useState<{ session: TrainingSession; state: TrainingState } | null>(null);
   const [coverage, setCoverage] = useState<Coverage[]>([]);
   const [coveragePage, setCoveragePage] = useState(1);
@@ -594,6 +653,8 @@ export function TrainingWorkbench() {
   const saveCompletedTrainingRef = useRef(false);
   const appSettingsRef = useRef<AppSettings>(defaultAppSettings);
   const eventSequenceRef = useRef(0);
+  const decisionPanelRef = useRef<HTMLElement | null>(null);
+  const decisionDraftBeforeBackfillRef = useRef<Decision | null>(null);
 
   const visibleBars = useMemo(() => bars.slice(0, cursor + 1), [bars, cursor]);
   const dataMarketInstrumentCount = useMemo(() => availableInstruments.filter((item) => {
@@ -624,13 +685,18 @@ export function TrainingWorkbench() {
       instrument.timezone,
     ).ok)
     : [], [currentBar, instrument.timezone, marketRules, openPositions]);
-  const netQty = openPositions.reduce((sum, position) => sum + (position.side === "long" ? position.qty : -position.qty), 0);
-  const grossQty = openPositions.reduce((sum, position) => sum + position.qty, 0);
   const openPnl = currentBar
     ? openPositions.reduce((sum, position) => sum + (currentBar.close - position.entryPrice) * position.qty * (position.side === "long" ? 1 : -1), 0)
     : 0;
   const realizedPnl = closedPositions.reduce((sum, position) => sum + (position.realizedPnl ?? 0), 0);
   const totalPnl = realizedPnl + openPnl;
+  const currentPrice = currentBar?.close ?? 0;
+  const floatingReturnPct = portfolioReturnPct(openPositions, currentPrice);
+  const realizedReturnPct = portfolioReturnPct(closedPositions, currentPrice);
+  const totalReturnPct = portfolioReturnPct(positions, currentPrice);
+  const availableBuyingPower = calculateAvailableCash(cashBalance, pendingOrders);
+  const marketValue = accountMarketValue(positions, currentPrice);
+  const equity = accountEquity(cashBalance, positions, currentPrice);
   const tradeMarkers = useMemo<TradeMarker[]>(() => positions
     .filter((position) => !currentBar || position.entryTimestamp <= currentBar.timestamp)
     .map((position) => {
@@ -653,6 +719,7 @@ export function TrainingWorkbench() {
     ? currentTaskProgress.percent
     : bars.length > 1 ? (cursor / (bars.length - 1)) * 100 : 0;
   const trainingComplete = trainingTask?.status === "completed";
+  const rewindLocked = Boolean(trainingTask?.randomRun);
   const reviewLocked = Boolean(
     trainingTask?.status === "active"
     && (trainingTask.hideInstrument || trainingTask.hideDate || trainingTask.hidePrice),
@@ -675,7 +742,7 @@ export function TrainingWorkbench() {
     ? `${bars.length}:${bars[0].timestamp}:${bars[bars.length - 1].timestamp}`
     : "", [bars]);
   const trainingState = useMemo<TrainingState>(() => ({
-    version: 6,
+    version: 7,
     cursor,
     cursorTimestamp: currentBar?.timestamp,
     dataSignature,
@@ -693,17 +760,24 @@ export function TrainingWorkbench() {
     events,
     marketRules,
     trainingTask: trainingTask ?? undefined,
+    tradingMode,
+    initialCapital,
+    cashBalance,
     pnlSnapshot: {
       realized: realizedPnl,
       floating: openPnl,
       total: totalPnl,
       openPositions: openPositions.length,
       closedPositions: closedPositions.length,
+      returnPct: totalReturnPct,
+      equity,
+      cashBalance,
     },
-  }), [closedPositions.length, cursor, currentBar?.timestamp, dataSignature, dataSnapshotId, decision, decisionSubmissions, drawings, events, executions, marketRules, openPnl, openPositions.length, orderQty, orderRejections, pendingOrders, positions, randomSeed, realizedPnl, snapshotHash, totalPnl, trainingTask]);
+  }), [cashBalance, closedPositions.length, cursor, currentBar?.timestamp, dataSignature, dataSnapshotId, decision, decisionSubmissions, drawings, equity, events, executions, initialCapital, marketRules, openPnl, openPositions.length, orderQty, orderRejections, pendingOrders, positions, randomSeed, realizedPnl, snapshotHash, totalPnl, totalReturnPct, tradingMode, trainingTask]);
   const reviewState = reviewedSession?.state ?? trainingState;
   const reviewClosedPositions = reviewState.positions.filter((position) => position.status === "closed");
   const reviewRealizedPnl = reviewClosedPositions.reduce((sum, position) => sum + (position.realizedPnl ?? 0), 0);
+  const reviewRealizedReturnPct = portfolioReturnPct(reviewClosedPositions, 0);
   const reviewLatestSubmission = reviewState.decisionSubmissions.at(-1);
   const reviewDecision = reviewLatestSubmission?.decision ?? reviewState.decision;
   const reviewPlanScore = decisionScore(reviewDecision);
@@ -716,7 +790,7 @@ export function TrainingWorkbench() {
     const state = value as Partial<TrainingState>;
     if (!Number.isFinite(state.cursor) || !Array.isArray(state.positions) || !Array.isArray(state.pendingOrders)) return null;
     return {
-      version: 6,
+      version: 7,
       cursor: Number(state.cursor),
       cursorTimestamp: typeof state.cursorTimestamp === "number" ? state.cursorTimestamp : undefined,
       dataSignature: typeof state.dataSignature === "string" ? state.dataSignature : undefined,
@@ -734,6 +808,13 @@ export function TrainingWorkbench() {
       events: Array.isArray(state.events) ? state.events : [],
       marketRules: state.marketRules && typeof state.marketRules === "object" ? state.marketRules : undefined,
       trainingTask: state.trainingTask && typeof state.trainingTask === "object" ? state.trainingTask : undefined,
+      tradingMode: state.tradingMode === "capital" ? "capital" : "return",
+      initialCapital: typeof state.initialCapital === "number" && state.initialCapital > 0
+        ? state.initialCapital
+        : defaultAppSettings.initialCapital,
+      cashBalance: typeof state.cashBalance === "number" && Number.isFinite(state.cashBalance)
+        ? state.cashBalance
+        : defaultAppSettings.initialCapital,
       pnlSnapshot: state.pnlSnapshot && typeof state.pnlSnapshot === "object"
         ? state.pnlSnapshot
         : {
@@ -840,6 +921,8 @@ export function TrainingWorkbench() {
     setTrainingReady(false);
     setPlaying(false);
     setShowRandomComplete(false);
+    setDecisionTarget(null);
+    decisionDraftBeforeBackfillRef.current = null;
     saveCompletedTrainingRef.current = false;
     try {
       const requestedSnapshotId = restoreRequest?.state.dataSnapshotId
@@ -852,8 +935,8 @@ export function TrainingWorkbench() {
         if (!response.ok) throw new Error("训练绑定的数据快照不存在，无法进行确定性恢复");
         data = await response.json() as typeof data;
       } else {
-        const candlesResponse = await fetch(`/api/candles?instrument=${encodeURIComponent(instrumentId)}&timeframe=${timeframe}`);
-        if (!candlesResponse.ok) throw new Error("行情加载失败");
+        // Snapshot creation already loads and returns the complete candle set.
+        // Avoid reading and serializing the same market file twice per launch.
         const snapshotResponse = await fetch("/api/snapshots", {
           method: "POST",
           headers: { "content-type": "application/json" },
@@ -884,7 +967,11 @@ export function TrainingWorkbench() {
         setDecision(restoreRequest.state.decision);
         setDecisionSubmissions(restoreRequest.state.decisionSubmissions);
         setSelectedDecisionId("");
+        setDecisionTarget(null);
         setOrderQty(restoreRequest.state.orderQty);
+        setTradingMode(restoreRequest.state.tradingMode);
+        setInitialCapital(restoreRequest.state.initialCapital);
+        setCashBalance(restoreRequest.state.cashBalance);
         setDrawings(restoreRequest.state.drawings);
         setDrawingsRestoreNonce(Date.now());
         setSessionId(restoreRequest.id);
@@ -926,7 +1013,11 @@ export function TrainingWorkbench() {
         setDecision(defaultDecision);
         setDecisionSubmissions([]);
         setSelectedDecisionId("");
-        setOrderQty(appSettingsRef.current.defaultOrderQty);
+        setDecisionTarget(null);
+        setOrderQty(normalizeBuyQuantity(loadedMarketRules, appSettingsRef.current.defaultOrderQty));
+        setTradingMode(appSettingsRef.current.tradingMode);
+        setInitialCapital(appSettingsRef.current.initialCapital);
+        setCashBalance(appSettingsRef.current.initialCapital);
         setSpeed(appSettingsRef.current.defaultSpeed);
         setDrawings([]);
         setClearNonce(Date.now());
@@ -950,6 +1041,8 @@ export function TrainingWorkbench() {
           sourceSessionId: nextTask.sourceSessionId,
           marketRuleId: loadedMarketRules.id,
           marketRuleVersion: loadedMarketRules.version,
+          tradingMode: appSettingsRef.current.tradingMode,
+          initialCapital: appSettingsRef.current.initialCapital,
         })]);
         setSaveState("新训练 · 尚未保存");
         setRestoreNotice("");
@@ -1006,16 +1099,26 @@ export function TrainingWorkbench() {
     const nextPositions = [...positions];
     const fills: Execution[] = [];
     const rejections: OrderRejection[] = [];
+    let nextCashBalance = cashBalance;
 
     orders.forEach((order) => {
       const priceBand = order.priceBand
-        ?? createPriceBand(marketRules, priceLimitReference(bars, cursor, instrument.timezone));
+        ?? replayPriceBand(marketRules, bars, cursor, instrument.timezone, timeframe);
       const fillValidation = validateMarketFill(marketRules, order.side, bar.open, priceBand);
       if (!fillValidation.ok) {
         rejections.push(createOrderRejection(fillValidation, marketRules, bar.timestamp, order.id));
         return;
       }
       if (order.action === "open") {
+        const cashFlow = executionCashFlow(order.side, bar.open, order.qty);
+        if (tradingMode === "capital" && cashFlow < 0 && nextCashBalance + cashFlow < -0.000001) {
+          rejections.push(createOrderRejection({
+            ok: false,
+            code: "insufficient_cash_at_fill",
+            message: `下一根开盘需要 ${Math.abs(cashFlow).toFixed(2)}，可用资金仅 ${nextCashBalance.toFixed(2)}`,
+          }, marketRules, bar.timestamp, order.id));
+          return;
+        }
         const side: PositionSide = order.side === "buy" ? "long" : "short";
         nextPositions.push({
           id: order.positionId,
@@ -1039,6 +1142,7 @@ export function TrainingWorkbench() {
           ruleId: order.ruleId ?? marketRules.id,
           ruleVersion: order.ruleVersion ?? marketRules.version,
         });
+        if (tradingMode === "capital") nextCashBalance += cashFlow;
         return;
       }
 
@@ -1068,15 +1172,21 @@ export function TrainingWorkbench() {
         ruleId: order.ruleId ?? marketRules.id,
         ruleVersion: order.ruleVersion ?? marketRules.version,
       });
+      if (tradingMode === "capital") {
+        nextCashBalance += executionCashFlow(order.side, bar.open, position.qty);
+      }
     });
 
     setPositions(nextPositions);
+    if (tradingMode === "capital") setCashBalance(nextCashBalance);
     if (fills.length) {
       setExecutions((items) => [...items, ...fills]);
       appendEvent("orders_filled", {
         fills,
         marketRuleId: marketRules.id,
         marketRuleVersion: marketRules.version,
+        tradingMode,
+        cashBalance: nextCashBalance,
       }, bar.timestamp);
     }
     if (rejections.length) {
@@ -1084,7 +1194,7 @@ export function TrainingWorkbench() {
       setRuleNotice(rejections.map((rejection) => rejection.message).join("；"));
       appendEvent("orders_rejected", { rejections }, bar.timestamp);
     }
-  }, [appendEvent, bars, cursor, instrument.timezone, marketRules, positions]);
+  }, [appendEvent, bars, cashBalance, cursor, instrument.timezone, marketRules, positions, timeframe, tradingMode]);
 
   const revealMany = useCallback((count: number) => {
     const endCursor = trainingTask?.endCursor ?? bars.length - 1;
@@ -1092,18 +1202,34 @@ export function TrainingWorkbench() {
       setPlaying(false);
       return;
     }
-    const nextBar = bars[cursor + 1];
-    executeOrders(pendingOrders, nextBar);
-    if (pendingOrders.length) setPendingOrders([]);
-    const nextCursor = trainingTask
+    const requestedNextCursor = trainingTask
       ? advanceWithinTask(trainingTask, cursor, count)
       : Math.min(cursor + Math.max(1, count), bars.length - 1);
+    const earliestScheduledIndex = pendingOrders
+      .filter((order) => order.executeAtTimestamp != null)
+      .map((order) => bars.findIndex((bar, index) => index > cursor && bar.timestamp >= Number(order.executeAtTimestamp)))
+      .filter((index) => index >= 0)
+      .reduce((earliest, index) => Math.min(earliest, index), Number.POSITIVE_INFINITY);
+    const nextCursor = Number.isFinite(earliestScheduledIndex)
+      && earliestScheduledIndex > cursor + 1
+      && requestedNextCursor >= earliestScheduledIndex
+      ? earliestScheduledIndex - 1
+      : requestedNextCursor;
+    const nextBar = bars[cursor + 1];
+    const dueOrders = pendingOrders.filter((order) => (
+      order.executeAtTimestamp == null || order.executeAtTimestamp <= nextBar.timestamp
+    ));
+    executeOrders(dueOrders, nextBar);
+    if (dueOrders.length) {
+      const dueIds = new Set(dueOrders.map((order) => order.id));
+      setPendingOrders((orders) => orders.filter((order) => !dueIds.has(order.id)));
+    }
     setCursor(nextCursor);
     appendEvent("replay_advanced", {
       fromCursor: cursor,
       toCursor: nextCursor,
       requestedCount: count,
-      executedOrderIds: pendingOrders.map((order) => order.id),
+      executedOrderIds: dueOrders.map((order) => order.id),
     }, bars[nextCursor]?.timestamp);
     if (trainingTask && nextCursor >= trainingTask.endCursor) {
       const completedTask = finishTask(trainingTask, nextCursor);
@@ -1122,8 +1248,14 @@ export function TrainingWorkbench() {
 
   const revealNext = useCallback(() => revealMany(1), [revealMany]);
   const revealPrevious = () => {
+    if (rewindLocked) return;
     const nextCursor = Math.max(trainingTask?.startCursor ?? 0, cursor - 1);
     if (nextCursor === cursor) return;
+    if (decisionTarget && decisionTarget.dataIndex > nextCursor) {
+      if (decisionDraftBeforeBackfillRef.current) setDecision(decisionDraftBeforeBackfillRef.current);
+      decisionDraftBeforeBackfillRef.current = null;
+      setDecisionTarget(null);
+    }
     setCursor(nextCursor);
     appendEvent("replay_rewound", { fromCursor: cursor, toCursor: nextCursor }, bars[nextCursor]?.timestamp);
   };
@@ -1153,10 +1285,16 @@ export function TrainingWorkbench() {
       rejectOrderAttempt(validation, { action: "open", side, qty });
       return;
     }
-    const priceBand = createPriceBand(
-      marketRules,
-      priceLimitReference(bars, cursor, instrument.timezone),
-    );
+    const reservedCash = side === "buy" ? currentBar.close * qty : 0;
+    if (tradingMode === "capital" && reservedCash > availableBuyingPower + 0.000001) {
+      rejectOrderAttempt({
+        ok: false,
+        code: "insufficient_cash",
+        message: `预计需要 ${reservedCash.toFixed(2)}，当前可用资金仅 ${availableBuyingPower.toFixed(2)}`,
+      }, { action: "open", side, qty, availableBuyingPower });
+      return;
+    }
+    const priceBand = replayPriceBand(marketRules, bars, cursor, instrument.timezone, timeframe);
     const order: PendingOrder = {
       id: crypto.randomUUID(),
       action: "open",
@@ -1167,6 +1305,7 @@ export function TrainingWorkbench() {
       ruleId: marketRules.id,
       ruleVersion: marketRules.version,
       priceBand,
+      reservedCash,
     };
     setPendingOrders((items) => [...items, order]);
     setRuleNotice("");
@@ -1174,6 +1313,8 @@ export function TrainingWorkbench() {
       order,
       marketRuleId: marketRules.id,
       marketRuleVersion: marketRules.version,
+      tradingMode,
+      initialCapital,
     });
     setOrderPanelTab("pending");
     setSaveState("有未保存更改");
@@ -1188,10 +1329,7 @@ export function TrainingWorkbench() {
       rejectOrderAttempt(validation, { action: "close", positionId, position });
       return;
     }
-    const priceBand = createPriceBand(
-      marketRules,
-      priceLimitReference(bars, cursor, instrument.timezone),
-    );
+    const priceBand = replayPriceBand(marketRules, bars, cursor, instrument.timezone, timeframe);
     const order: PendingOrder = {
       id: crypto.randomUUID(),
       action: "close",
@@ -1214,8 +1352,54 @@ export function TrainingWorkbench() {
     setSaveState("有未保存更改");
   };
 
+  const queueCloseNextSession = (positionId: string) => {
+    if (!currentBar || trainingComplete) return;
+    const position = openPositions.find((item) => item.id === positionId);
+    if (!position || pendingOrders.some((order) => order.action === "close" && order.positionId === positionId)) return;
+    const targetIndex = findNextTradingSessionIndex(bars, cursor, instrument.timezone);
+    const taskEndCursor = trainingTask?.endCursor ?? bars.length - 1;
+    if (targetIndex < 0 || targetIndex > taskEndCursor) {
+      setRuleNotice("本次训练结束前没有可用的下一交易日开盘，无法预约平仓");
+      return;
+    }
+    const targetBar = bars[targetIndex];
+    const validation = validateCloseOrder(marketRules, position, targetBar.timestamp, instrument.timezone);
+    if (!validation.ok) {
+      rejectOrderAttempt(validation, { action: "close_next_session", positionId, position });
+      return;
+    }
+    const order: PendingOrder = {
+      id: crypto.randomUUID(),
+      action: "close",
+      side: position.side === "long" ? "sell" : "buy",
+      qty: position.qty,
+      createdAt: currentBar.timestamp,
+      positionId,
+      ruleId: marketRules.id,
+      ruleVersion: marketRules.version,
+      executeAtTimestamp: targetBar.timestamp,
+    };
+    setPendingOrders((items) => [...items, order]);
+    setRuleNotice(`已预约 ${trainingDateLabel(targetBar.timestamp)} 开盘平仓`);
+    appendEvent("order_queued_for_next_session", {
+      order,
+      position,
+      targetTimestamp: targetBar.timestamp,
+      marketRuleId: marketRules.id,
+      marketRuleVersion: marketRules.version,
+    });
+    setOrderPanelTab("pending");
+    setSaveState("有未保存更改");
+  };
+
   const queueCloseAll = () => {
-    openPositions.forEach((position) => queueClosePosition(position.id));
+    openPositions.forEach((position) => {
+      const validation: RuleValidation = currentBar
+        ? validateCloseOrder(marketRules, position, currentBar.timestamp, instrument.timezone)
+        : { ok: false };
+      if (validation.ok) queueClosePosition(position.id);
+      else if (validation.code === "t_plus_one_locked") queueCloseNextSession(position.id);
+    });
     setOrderPanelTab("pending");
   };
 
@@ -1239,6 +1423,7 @@ export function TrainingWorkbench() {
   };
 
   const resetTraining = () => {
+    if (rewindLocked) return;
     saveCompletedTrainingRef.current = false;
     setShowRandomComplete(false);
     const nextRandomSeed = crypto.randomUUID();
@@ -1261,7 +1446,10 @@ export function TrainingWorkbench() {
     setDecision(defaultDecision);
     setDecisionSubmissions([]);
     setSelectedDecisionId("");
-    setOrderQty(100);
+    setDecisionTarget(null);
+    decisionDraftBeforeBackfillRef.current = null;
+    setOrderQty(normalizeBuyQuantity(marketRules, appSettingsRef.current.defaultOrderQty));
+    setCashBalance(initialCapital);
     setDrawings([]);
     setClearNonce(Date.now());
     setOrderPanelTab("positions");
@@ -1280,6 +1468,8 @@ export function TrainingWorkbench() {
       restarted: true,
       marketRuleId: marketRules.id,
       marketRuleVersion: marketRules.version,
+      tradingMode,
+      initialCapital,
     })]);
     setRestoreNotice("");
     setSaveState("新训练 · 尚未保存");
@@ -1335,27 +1525,70 @@ export function TrainingWorkbench() {
     setSaveState("决策草稿已更新");
   };
 
+  const openDecisionForCandle = useCallback((target: CandleContextTarget) => {
+    const targetCursor = bars.findIndex((bar) => bar.timestamp === target.timestamp);
+    if (targetCursor < 0 || targetCursor > cursor) return;
+    const targetBar = bars[targetCursor];
+    if (!decisionTarget) {
+      decisionDraftBeforeBackfillRef.current = {
+        ...decision,
+        reasons: [...decision.reasons],
+      };
+      setDecision(defaultDecision);
+    }
+    setDecisionTarget({
+      dataIndex: targetCursor,
+      timestamp: targetBar.timestamp,
+      referencePrice: targetBar.close,
+    });
+    setSelectedDecisionId("");
+    setPlaying(false);
+    setSaveState("正在补写历史 K 线决策");
+    requestAnimationFrame(() => decisionPanelRef.current?.scrollIntoView({ behavior: "smooth", block: "nearest" }));
+  }, [bars, cursor, decision, decisionTarget]);
+
+  const cancelDecisionBackfill = () => {
+    if (decisionDraftBeforeBackfillRef.current) setDecision(decisionDraftBeforeBackfillRef.current);
+    decisionDraftBeforeBackfillRef.current = null;
+    setDecisionTarget(null);
+    setSaveState("已取消补写，原决策草稿已恢复");
+  };
+
   const submitDecision = () => {
-    if (!currentBar) return;
+    const backfillTarget = decisionTarget && decisionTarget.dataIndex <= cursor ? decisionTarget : null;
+    const targetCursor = backfillTarget?.dataIndex ?? cursor;
+    const targetBar = bars[targetCursor] ?? currentBar;
+    if (!targetBar) return;
     const submission: DecisionSubmission = {
       id: crypto.randomUUID(),
-      barTimestamp: currentBar.timestamp,
-      cursor,
-      referencePrice: currentBar.close,
+      barTimestamp: targetBar.timestamp,
+      cursor: targetCursor,
+      referencePrice: targetBar.close,
       decision: {
         ...decision,
         reasons: [...decision.reasons],
       },
       submittedAt: new Date().toISOString(),
+      backfilled: Boolean(backfillTarget),
+      recordedAtCursor: backfillTarget ? cursor : undefined,
     };
     setDecisionSubmissions((items) => [...items, submission]);
     setSelectedDecisionId(submission.id);
     appendEvent("decision_submitted", {
       submissionId: submission.id,
-      cursor,
-      referencePrice: currentBar.close,
+      cursor: targetCursor,
+      referencePrice: targetBar.close,
       decision: submission.decision,
-    }, currentBar.timestamp);
+      backfilled: Boolean(backfillTarget),
+      recordedAtCursor: backfillTarget ? cursor : undefined,
+    }, targetBar.timestamp);
+    if (backfillTarget) {
+      if (decisionDraftBeforeBackfillRef.current) setDecision(decisionDraftBeforeBackfillRef.current);
+      decisionDraftBeforeBackfillRef.current = null;
+      setDecisionTarget(null);
+      setSaveState(trainingComplete ? "补写决策已加入，请保存训练" : "补写决策已保存 · 回放位置未改变");
+      return;
+    }
     setSaveState("决策已提交");
     revealNext();
   };
@@ -1472,6 +1705,10 @@ export function TrainingWorkbench() {
         openPositions: state.positions.filter((position) => position.status === "open").length,
         closedPositions: state.positions.filter((position) => position.status === "closed").length,
       };
+      const returnPct = pnl.returnPct ?? portfolioReturnPct(
+        state.positions.filter((position) => position.status === "closed"),
+        0,
+      );
       const progressSummary = task
         ? taskProgress(task, state.cursor)
         : { revealed: 0, total: 0, percent: 0 };
@@ -1480,6 +1717,7 @@ export function TrainingWorkbench() {
         state,
         task,
         pnl,
+        returnPct,
         progressSummary,
         modeLabel: task
           ? task.randomRun
@@ -1865,6 +2103,7 @@ export function TrainingWorkbench() {
               </>
             )}
             <span className="rule-pill">{trainingTask ? trainingModeLabels[trainingTask.mode] : "自由训练"}</span>
+            <span className="rule-pill">{tradingMode === "capital" ? "资金账户" : "收益率"}</span>
             <div className="timeframes" aria-label="周期">
               {timeframes.map((item) => (
                 <button key={item} className={timeframe === item ? "active" : ""} onClick={() => startFreshTraining(instrumentId, item)}>{item}</button>
@@ -1911,6 +2150,34 @@ export function TrainingWorkbench() {
                   <div className="settings-section-head">
                     <strong>新训练默认值</strong>
                     <span>打开“新建 Replay 训练”时优先使用这些选项。</span>
+                  </div>
+                  <div className="settings-rule">
+                    <span>模拟交易账户</span>
+                    <div className="task-start-options">
+                      <button
+                        className={settingsDraft.tradingMode === "return" ? "active" : ""}
+                        onClick={() => setSettingsDraft((draft) => ({ ...draft, tradingMode: "return" }))}
+                      >收益率模式</button>
+                      <button
+                        className={settingsDraft.tradingMode === "capital" ? "active" : ""}
+                        onClick={() => setSettingsDraft((draft) => ({ ...draft, tradingMode: "capital" }))}
+                      >资金账户模式</button>
+                    </div>
+                    <small>{settingsDraft.tradingMode === "return"
+                      ? "不限制本金和购买力，只比较仓位收益率，适合练习入场与出场质量。"
+                      : "按初始资金核算现金、持仓市值和账户权益；买入资金不足时拒单。"}</small>
+                    {settingsDraft.tradingMode === "capital" && (
+                      <label>新训练初始资金
+                        <input
+                          type="number"
+                          min="1000"
+                          step="1000"
+                          value={settingsDraft.initialCapital}
+                          onChange={(event) => setSettingsDraft((draft) => ({ ...draft, initialCapital: Math.max(1000, Number(event.target.value)) }))}
+                        />
+                      </label>
+                    )}
+                    <small>切换只影响之后新建的训练；已开始和已保存训练会继续使用创建时锁定的账户模式。</small>
                   </div>
                   <div className="task-form-row">
                     <label>默认品种
@@ -2178,8 +2445,8 @@ export function TrainingWorkbench() {
               <h2 id="random-complete-title">本局随机训练已结束</h2>
               <p>{trainingTask.mode === "blind" ? "盲测答案现在已经解锁。" : "已到达本局设定的 K 线边界。"} 本局已经自动保存，可以继续抽取下一局或查看复盘。</p>
               <div className="random-complete-stats">
-                <div><span>总盈亏</span><strong className={totalPnl >= 0 ? "up" : "down"}>{money(totalPnl)}</strong></div>
-                <div><span>已实现</span><strong>{money(realizedPnl)}</strong></div>
+                <div><span>{tradingMode === "capital" ? "账户总盈亏" : "总收益率"}</span><strong className={totalPnl >= 0 ? "up" : "down"}>{tradingMode === "capital" ? money(totalPnl) : percent(totalReturnPct)}</strong></div>
+                <div><span>{tradingMode === "capital" ? "账户权益" : "已实现收益率"}</span><strong>{tradingMode === "capital" ? money(equity) : percent(realizedReturnPct)}</strong></div>
                 <div><span>本局进度</span><strong>{currentTaskProgress.revealed}/{currentTaskProgress.total}</strong></div>
               </div>
               <div className="random-complete-actions">
@@ -2243,6 +2510,7 @@ export function TrainingWorkbench() {
                       hideDate={Boolean(trainingTask?.hideDate)}
                       hidePrice={Boolean(trainingTask?.hidePrice)}
                       onDecisionSelect={setSelectedDecisionId}
+                      onCandleContextMenu={openDecisionForCandle}
                       onDrawingsChange={handleDrawingsChange}
                     />
                   )}
@@ -2250,7 +2518,7 @@ export function TrainingWorkbench() {
                     <div className="decision-chart-card">
                       <div className="decision-chart-card-head">
                         <div>
-                          <span>已提交决策</span>
+                          <span>{selectedDecision.backfilled ? "补写决策" : "已提交决策"}</span>
                           <strong>{trainingTask?.hideDate ? `K线 #${selectedDecision.cursor + 1}` : formatDate(selectedDecision.barTimestamp, timeframe)}</strong>
                         </div>
                         <button aria-label="关闭决策卡" onClick={() => setSelectedDecisionId("")}>×</button>
@@ -2279,8 +2547,8 @@ export function TrainingWorkbench() {
                 </div>
                 <div className="progress-track"><span style={{ width: `${progress}%` }} /></div>
                 <div className="transport">
-                  <button aria-label="重置" onClick={resetTraining}><RotateCcw size={17} /></button>
-                  <button aria-label="上一根" disabled={trainingComplete || cursor <= (trainingTask?.startCursor ?? 0)} onClick={revealPrevious}><ChevronLeft size={19} /></button>
+                  <button aria-label={rewindLocked ? "随机训练不可重置" : "重置"} title={rewindLocked ? "随机训练为单向揭示，不允许重置" : undefined} disabled={rewindLocked} onClick={resetTraining}><RotateCcw size={17} /></button>
+                  <button aria-label={rewindLocked ? "随机训练不可回退" : "上一根"} title={rewindLocked ? "随机训练为单向揭示，不允许查看上一根" : undefined} disabled={rewindLocked || trainingComplete || cursor <= (trainingTask?.startCursor ?? 0)} onClick={revealPrevious}><ChevronLeft size={19} /></button>
                   <button className="play-button" disabled={trainingComplete} aria-label={playing ? "暂停" : "播放"} onClick={() => {
                     const nextPlaying = !playing;
                     setPlaying(nextPlaying);
@@ -2313,17 +2581,28 @@ export function TrainingWorkbench() {
 
               <div className="trade-dock">
                 <div className="trade-stats">
-                  <span>持仓笔数 <strong>{openPositions.length}</strong></span>
-                  <span>净 / 总数量 <strong>{netQty} / {grossQty}</strong></span>
-                  <span>浮盈 <strong className={openPnl >= 0 ? "up" : "down"}>{money(openPnl)}</strong></span>
-                  <span>已实现 <strong className={realizedPnl >= 0 ? "up" : "down"}>{money(realizedPnl)}</strong></span>
+                  {tradingMode === "capital" ? (
+                    <>
+                      <span>账户权益 <strong className={equity >= initialCapital ? "up" : "down"}>{money(equity)}</strong></span>
+                      <span>可用资金 <strong>{money(availableBuyingPower)}</strong></span>
+                      <span>持仓市值 <strong>{money(marketValue)}</strong></span>
+                      <span>总盈亏 <strong className={totalPnl >= 0 ? "up" : "down"}>{money(totalPnl)}</strong></span>
+                    </>
+                  ) : (
+                    <>
+                      <span>持仓笔数 <strong>{openPositions.length}</strong></span>
+                      <span>总收益率 <strong className={totalReturnPct >= 0 ? "up" : "down"}>{percent(totalReturnPct)}</strong></span>
+                      <span>浮动收益率 <strong className={floatingReturnPct >= 0 ? "up" : "down"}>{percent(floatingReturnPct)}</strong></span>
+                      <span>已实现收益率 <strong className={realizedReturnPct >= 0 ? "up" : "down"}>{percent(realizedReturnPct)}</strong></span>
+                    </>
+                  )}
                 </div>
                 <div className="order-entry">
-                  <label>数量<input type="number" min="1" value={orderQty} onChange={(event) => {
+                  <label>数量<input type="number" min={minimumBuyQuantity(marketRules)} value={orderQty} onChange={(event) => {
                     const quantity = Math.max(1, Number(event.target.value));
                     setOrderQty(quantity);
                     appendEvent("order_quantity_changed", { quantity });
-                  }} step={marketRules.boardLot} /></label>
+                  }} step={buyQuantityStep(marketRules)} /></label>
                   <button
                     className="sell-button"
                     disabled={trainingComplete || !marketRules.tradingEnabled || !marketRules.allowShort}
@@ -2335,14 +2614,14 @@ export function TrainingWorkbench() {
                     disabled={trainingComplete || !marketRules.tradingEnabled}
                     onClick={() => queueOpenOrder("buy")}
                   ><TrendingUp size={16} />买入开仓</button>
-                  <button className="flat-button" disabled={trainingComplete || !closablePositions.length} onClick={queueCloseAll}>
-                    <CircleStop size={16} />{openPositions.length && !closablePositions.length ? "T+1锁定" : "全部平仓"}
+                  <button className="flat-button" disabled={trainingComplete || !openPositions.some((position) => !pendingOrders.some((order) => order.action === "close" && order.positionId === position.id))} onClick={queueCloseAll}>
+                    <CircleStop size={16} />{openPositions.length && !closablePositions.length ? "次日开盘全平" : "全部平仓"}
                   </button>
                 </div>
                 <div className={`pending-note ${ruleNotice ? "rule-warning" : ""}`}>
                   {ruleNotice || (pendingOrders.length
-                    ? `${pendingOrders.length} 笔委托将在下一根开盘按 ${marketRules.name} 规则校验`
-                    : `${marketRules.name}：买入 ${marketRules.boardLot} 股整数倍${marketRules.tPlusOne ? " · T+1" : ""}${marketRules.priceLimitRatio ? ` · 涨跌幅 ${(marketRules.priceLimitRatio * 100).toFixed(0)}%` : ""}`)}
+                    ? `${pendingOrders.length} 笔委托将在下一根开盘按 ${marketRules.name} 规则校验${tradingMode === "capital" ? ` · 已预留 ${(cashBalance - availableBuyingPower).toFixed(2)}` : ""}`
+                    : `${marketRules.name}：${describeBuyQuantity(marketRules)}${marketRules.tPlusOne ? " · T+1" : ""}${marketRules.priceLimitRatio ? ` · 涨跌幅 ${(marketRules.priceLimitRatio * 100).toFixed(0)}%` : ""}`)}
                 </div>
 
                 <div className="orders-board">
@@ -2373,13 +2652,13 @@ export function TrainingWorkbench() {
                               <td>{trainingDateLabel(position.entryTimestamp)}</td>
                               <td>{trainingPriceLabel(position.entryPrice)}</td>
                               <td>{trainingPriceLabel(currentBar?.close)}</td>
-                              <td><strong className={pnl >= 0 ? "up" : "down"}>{money(pnl)}</strong></td>
+                              <td><strong className={pnl >= 0 ? "up" : "down"}>{tradingMode === "capital" ? money(pnl) : percent(positionReturnPct(position, currentPrice))}</strong></td>
                               <td><button
                                 className="row-action"
-                                disabled={trainingComplete || closeQueued || !closeValidation.ok}
-                                title={closeValidation.message}
-                                onClick={() => queueClosePosition(position.id)}
-                              >{closeQueued ? "已委托" : closeValidation.ok ? "平仓" : "T+1锁定"}</button></td>
+                                disabled={trainingComplete || closeQueued || (!closeValidation.ok && closeValidation.code !== "t_plus_one_locked")}
+                                title={closeValidation.code === "t_plus_one_locked" ? "预约到下一交易日第一根K线开盘平仓" : closeValidation.message}
+                                onClick={() => closeValidation.ok ? queueClosePosition(position.id) : queueCloseNextSession(position.id)}
+                              >{closeQueued ? "已委托" : closeValidation.ok ? "平仓" : closeValidation.code === "t_plus_one_locked" ? "次日开盘平仓" : "不可平仓"}</button></td>
                             </tr>
                           );
                         }) : <tr><td className="orders-empty" colSpan={8}>暂无持仓。买入或卖出委托会在下一根 K 线开盘形成独立仓位。</td></tr>}</tbody>
@@ -2397,7 +2676,7 @@ export function TrainingWorkbench() {
                             <td>{order.qty}</td>
                             <td>{trainingDateLabel(order.createdAt)}</td>
                             <td>#{order.positionId.slice(0, 6)}</td>
-                            <td>下一根开盘 · {order.ruleVersion ?? "旧规则"}</td>
+                            <td>{order.executeAtTimestamp ? `${trainingDateLabel(order.executeAtTimestamp)} 开盘` : "下一根开盘"} · {order.ruleVersion ?? "旧规则"}</td>
                             <td><button className="row-action danger" onClick={() => cancelPendingOrder(order.id)}>撤单</button></td>
                           </tr>
                         )) : <tr><td className="orders-empty" colSpan={8}>暂无待成交委托。</td></tr>}</tbody>
@@ -2416,7 +2695,7 @@ export function TrainingWorkbench() {
                             <td>{trainingPriceLabel(position.entryPrice)}</td>
                             <td>{position.exitTimestamp ? trainingDateLabel(position.exitTimestamp) : "--"}</td>
                             <td>{trainingPriceLabel(position.exitPrice)}</td>
-                            <td><strong className={(position.realizedPnl ?? 0) >= 0 ? "up" : "down"}>{money(position.realizedPnl ?? 0)}</strong></td>
+                            <td><strong className={(position.realizedPnl ?? 0) >= 0 ? "up" : "down"}>{tradingMode === "capital" ? money(position.realizedPnl ?? 0) : percent(positionReturnPct(position, position.exitPrice ?? position.entryPrice))}</strong></td>
                           </tr>
                         )) : <tr><td className="orders-empty" colSpan={8}>平仓后，买卖点会以浅色虚线连接并保留在这里。</td></tr>}</tbody>
                       </table>
@@ -2434,11 +2713,21 @@ export function TrainingWorkbench() {
               </div>
             </section>
 
-            <aside className="decision-panel">
+            <aside className="decision-panel" ref={decisionPanelRef}>
               <div className="panel-title">
-                <div><span>事前决策卡</span><strong>{planScore}%</strong></div>
-                <p>先写计划，再揭示下一根</p>
+                <div><span>{decisionTarget ? "补写事前决策" : "事前决策卡"}</span><strong>{planScore}%</strong></div>
+                <p>{decisionTarget ? "仅补充记录，不回退行情，也不改变持仓" : "先写计划，再揭示下一根"}</p>
               </div>
+              {decisionTarget && (
+                <div className="decision-backfill-target">
+                  <div>
+                    <span>正在补写</span>
+                    <strong>{trainingTask?.hideDate ? `K线 #${decisionTarget.dataIndex + 1}` : formatDate(decisionTarget.timestamp, timeframe)}</strong>
+                    <small>{trainingTask?.hidePrice ? "参考价已隐藏" : `参考价 ${decisionTarget.referencePrice.toFixed(instrument.pricePrecision)}`}</small>
+                  </div>
+                  <button type="button" onClick={cancelDecisionBackfill}>取消</button>
+                </div>
+              )}
               <label>市场状态
                 <select value={decision.marketState} onChange={(event) => updateDecision("marketState", event.target.value)}>
                   <option>趋势</option><option>宽通道</option><option>震荡区间</option><option>突破模式</option><option>反转尝试</option>
@@ -2474,8 +2763,8 @@ export function TrainingWorkbench() {
                 <Sparkles size={18} />
                 <div><strong>{decision.reasons.length >= 2 ? "条件已成形" : "再找一个独立理由"}</strong><span>评分关注过程，不用结果倒推理由</span></div>
               </div>
-              <div className="submitted-plan-count">已提交 <strong>{decisionSubmissions.length}</strong> 份计划 · 点击盘面“计划”标记可查看</div>
-              <button className="commit-plan" disabled={trainingComplete} onClick={submitDecision}><ListChecks size={17} />{trainingComplete ? "训练已结束" : "提交决策并揭示下一根"}</button>
+              <div className="submitted-plan-count">已提交 <strong>{decisionSubmissions.length}</strong> 份计划 · 右键历史 K 线可补写</div>
+              <button className="commit-plan" disabled={trainingComplete && !decisionTarget} onClick={submitDecision}><ListChecks size={17} />{decisionTarget ? "保存补写决策" : trainingComplete ? "训练已结束" : "提交决策并揭示下一根"}</button>
             </aside>
           </div>
         )}
@@ -2623,7 +2912,7 @@ export function TrainingWorkbench() {
                       <span><strong>{summary.session.instrumentId}</strong><small>{summary.session.timeframe}</small></span>
                       <span><strong>{summary.modeLabel}</strong><small>{summary.rangeLabel}</small></span>
                       <span className={summary.task?.status === "completed" ? "session-status completed" : "session-status"}>{summary.task?.status === "completed" ? "已完成" : "可继续"}</span>
-                      <strong className={summary.pnl.total >= 0 ? "up" : "down"}>{money(summary.pnl.total)}</strong>
+                      <strong className={summary.pnl.total >= 0 ? "up" : "down"}>{summary.state.tradingMode === "capital" ? money(summary.pnl.total) : percent(summary.returnPct)}</strong>
                       <time>{new Date(summary.session.updatedAt).toLocaleString("zh-CN")}</time>
                     </button>
                   ))}
@@ -2637,7 +2926,7 @@ export function TrainingWorkbench() {
                   <div>
                     <span>已选训练</span>
                     <strong>{selectedPerformanceSession.session.instrumentId} · {selectedPerformanceSession.session.timeframe} · {selectedPerformanceSession.modeLabel}</strong>
-                    <small>{selectedPerformanceSession.rangeLabel} · 总盈亏 {money(selectedPerformanceSession.pnl.total)}</small>
+                    <small>{selectedPerformanceSession.rangeLabel} · {selectedPerformanceSession.state.tradingMode === "capital" ? `总盈亏 ${money(selectedPerformanceSession.pnl.total)}` : `总收益率 ${percent(selectedPerformanceSession.returnPct)}`}</small>
                   </div>
                   <div>
                     <button className="review-session" onClick={() => inspectSession(selectedPerformanceSession.session, true)}>
@@ -2787,7 +3076,7 @@ export function TrainingWorkbench() {
             </div>
             <div className="review-grid">
               <div className="review-hero">
-                <span>本次已实现盈亏</span><strong className={reviewRealizedPnl >= 0 ? "up" : "down"}>{money(reviewRealizedPnl)}</strong><small>{reviewClosedPositions.length} 笔已平仓 · {reviewState.executions.length} 笔成交 · 最近计划完整度 {reviewPlanScore}%</small>
+                <span>{reviewState.tradingMode === "capital" ? "本次已实现盈亏" : "本次已实现收益率"}</span><strong className={reviewRealizedPnl >= 0 ? "up" : "down"}>{reviewState.tradingMode === "capital" ? money(reviewRealizedPnl) : percent(reviewRealizedReturnPct)}</strong><small>{reviewClosedPositions.length} 笔已平仓 · {reviewState.executions.length} 笔成交 · 最近计划完整度 {reviewPlanScore}%</small>
               </div>
               <div className="metric-card"><span>胜率</span><strong>{reviewClosedPositions.length ? Math.round(reviewClosedPositions.filter((position) => (position.realizedPnl ?? 0) > 0).length / reviewClosedPositions.length * 100) : 0}%</strong><small>仅统计已平仓成交</small></div>
               <div className="metric-card"><span>已提交计划</span><strong>{reviewState.decisionSubmissions.length}</strong><small>每次提交均绑定原始K线</small></div>
@@ -2806,6 +3095,7 @@ export function TrainingWorkbench() {
                 <div className="evidence-row"><span>训练模式</span><strong>{reviewState.trainingTask ? reviewState.trainingTask.randomRun ? reviewState.trainingTask.mode === "blind" ? "随机盲测" : "随机训练" : trainingModeLabels[reviewState.trainingTask.mode] : "旧版自由训练"}</strong></div>
                 <div className="evidence-row"><span>任务状态</span><strong>{reviewState.trainingTask?.status === "completed" ? "已完成" : "进行中"}</strong></div>
                 <div className="evidence-row"><span>市场规则</span><strong>{reviewState.marketRules ? `${reviewState.marketRules.name} · ${reviewState.marketRules.version}` : "旧训练未锁定规则版本"}</strong></div>
+                <div className="evidence-row"><span>交易账户</span><strong>{reviewState.tradingMode === "capital" ? `资金账户 · 初始 ${reviewState.initialCapital.toFixed(2)} · 现金 ${reviewState.cashBalance.toFixed(2)}` : "收益率模式 · 不限制本金"}</strong></div>
                 <div className="evidence-row"><span>规则拒单</span><strong>{reviewState.orderRejections.length}</strong></div>
                 <div className="review-note"><span>计划说明</span><p>{reviewDecision.note || "未填写"}</p></div>
               </article>
@@ -2858,7 +3148,7 @@ export function TrainingWorkbench() {
                       <div className="decision-history-item" key={submission.id}>
                         <div className="decision-history-head">
                           <div>
-                            <strong>计划 {reviewState.decisionSubmissions.length - reverseIndex}</strong>
+                            <strong>计划 {reviewState.decisionSubmissions.length - reverseIndex}{submission.backfilled ? " · 补写" : ""}</strong>
                             <span>{formatDate(submission.barTimestamp, reviewedSession?.session.timeframe ?? timeframe)} · 参考价 {submission.referencePrice.toFixed(2)}</span>
                           </div>
                           <b>{decisionScore(submission.decision)}%</b>

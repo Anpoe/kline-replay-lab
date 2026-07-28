@@ -19,6 +19,8 @@
 @theme inline {
   --color-background: var(--background);
   --color-foreground: var(--foreground);
+  --font-geist-sans: "Segoe UI", "PingFang SC", "Microsoft YaHei", system-ui, sans-serif;
+  --font-geist-mono: "Cascadia Mono", "SFMono-Regular", Consolas, monospace;
   --font-sans: var(--font-geist-sans);
   --font-mono: var(--font-geist-mono);
 }
@@ -306,6 +308,16 @@ button { color: inherit; }
 .panel-title span { font-weight: 720; }
 .panel-title strong { color: var(--accent); font-family: var(--font-geist-mono), monospace; font-size: 13px; }
 .panel-title p { margin: 5px 0 0; color: var(--faint); font-size: 11px; }
+.decision-backfill-target {
+  display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 10px 11px;
+  color: #dfe8e6; background: rgba(241, 200, 106, .08); border: 1px solid rgba(241, 200, 106, .24); border-radius: 9px;
+}
+.decision-backfill-target > div { display: grid; gap: 3px; min-width: 0; }
+.decision-backfill-target span { color: #d4af5a; font-size: 8px; letter-spacing: .14em; font-weight: 750; }
+.decision-backfill-target strong { font-size: 11px; }
+.decision-backfill-target small { color: #8fa09e; font-size: 9px; }
+.decision-backfill-target button { border: 1px solid rgba(241, 200, 106, .2); border-radius: 6px; padding: 5px 8px; color: #d8be7d; background: transparent; cursor: pointer; }
+.decision-backfill-target button:hover { background: rgba(241, 200, 106, .08); }
 .decision-panel label, .decision-panel legend { color: #7f9096; font-size: 11px; display: grid; gap: 7px; }
 .decision-panel select, .decision-panel input, .decision-panel textarea {
   width: 100%; color: #dfe8e6; background: var(--surface-raised); border: 1px solid var(--line); border-radius: 8px; padding: 9px 10px; outline: none;

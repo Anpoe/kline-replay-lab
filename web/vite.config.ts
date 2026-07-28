@@ -30,9 +30,15 @@ export default defineConfig(async () => {
   const { cloudflare } = await import("@cloudflare/vite-plugin");
 
   return {
-    server: isCodexSeatbeltSandbox
-      ? { watch: { useFsEvents: false, usePolling: true } }
-      : undefined,
+    server: {
+      // Vinext/Miniflare can briefly reconnect its worker during cold start.
+      // The application already surfaces actionable request failures in-page,
+      // so do not leave Vite's developer overlay stuck over a healthy local app.
+      hmr: { overlay: false },
+      ...(isCodexSeatbeltSandbox
+        ? { watch: { useFsEvents: false, usePolling: true } }
+        : {}),
+    },
     plugins: [
       vinext(),
       cloudflare({

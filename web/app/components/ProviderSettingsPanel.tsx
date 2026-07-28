@@ -39,20 +39,37 @@ export function ProviderSettingsPanel() {
   const [tdxQuantEndpoint, setTdxQuantEndpoint] = useState("http://127.0.0.1:17709");
   const [notice, setNotice] = useState("");
   const [saving, setSaving] = useState<"" | "tushare" | "alpaca" | "tdxquant">("");
+  const [statusLoaded, setStatusLoaded] = useState(false);
 
   const loadStatus = useCallback(async () => {
-    const response = await fetch("/api/provider-settings");
-    if (!response.ok) return;
-    const data = await response.json() as ProviderSettingsResponse;
-    setStatus(data.providers);
-    if (data.providers.tdxquant.endpoint) setTdxQuantEndpoint(data.providers.tdxquant.endpoint);
+    try {
+      const response = await fetch("/api/provider-settings", { cache: "no-store" });
+      if (!response.ok) return false;
+      const data = await response.json() as ProviderSettingsResponse;
+      setStatus(data.providers);
+      setStatusLoaded(true);
+      if (data.providers.tdxquant.endpoint) setTdxQuantEndpoint(data.providers.tdxquant.endpoint);
+      return true;
+    } catch {
+      setStatusLoaded(false);
+      return false;
+    }
   }, []);
 
   useEffect(() => {
-    const timer = window.setTimeout(() => {
-      void loadStatus();
-    }, 0);
-    return () => window.clearTimeout(timer);
+    let cancelled = false;
+    let retryTimer = 0;
+    const refresh = async () => {
+      const loaded = await loadStatus();
+      if (!loaded && !cancelled) {
+        retryTimer = window.setTimeout(() => void refresh(), 1200);
+      }
+    };
+    void refresh();
+    return () => {
+      cancelled = true;
+      window.clearTimeout(retryTimer);
+    };
   }, [loadStatus]);
 
   const saveProvider = async (provider: "tushare" | "alpaca" | "tdxquant") => {
@@ -110,7 +127,8 @@ export function ProviderSettingsPanel() {
         <div className="provider-setting-title">
           <div><KeyRound size={17} /><span><strong>Alpaca</strong><small>美股历史 K 线</small></span></div>
           <span className={status.alpaca.configured ? "configured" : ""}>
-            {sourceLabel(status.alpaca.source)}{status.alpaca.keyIdHint ? ` · ${status.alpaca.keyIdHint}` : ""}
+            {statusLoaded ? sourceLabel(status.alpaca.source) : "正在读取本机凭证状态…"}
+            {statusLoaded && status.alpaca.keyIdHint ? ` · ${status.alpaca.keyIdHint}` : ""}
           </span>
         </div>
         <div className="provider-secret-fields">
@@ -130,7 +148,9 @@ export function ProviderSettingsPanel() {
       <article className="provider-setting-card">
         <div className="provider-setting-title">
           <div><Link2 size={17} /><span><strong>TdxQuant</strong><small>A 股 5m / 1h 与增强历史数据</small></span></div>
-          <span className={status.tdxquant.configured ? "configured" : ""}>{sourceLabel(status.tdxquant.source)}</span>
+          <span className={status.tdxquant.configured ? "configured" : ""}>
+            {statusLoaded ? sourceLabel(status.tdxquant.source) : "正在读取本机配置…"}
+          </span>
         </div>
         <div className="provider-secret-fields single">
           <label>本地 HTTP 端点
@@ -148,7 +168,8 @@ export function ProviderSettingsPanel() {
         <div className="provider-setting-title">
           <div><KeyRound size={17} /><span><strong>Tushare Pro</strong><small>A 股历史 K 线</small></span></div>
           <span className={status.tushare.configured ? "configured" : ""}>
-            {sourceLabel(status.tushare.source)}{status.tushare.hint ? ` · ${status.tushare.hint}` : ""}
+            {statusLoaded ? sourceLabel(status.tushare.source) : "正在读取本机凭证状态…"}
+            {statusLoaded && status.tushare.hint ? ` · ${status.tushare.hint}` : ""}
           </span>
         </div>
         <div className="provider-secret-fields single">

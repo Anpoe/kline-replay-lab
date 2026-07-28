@@ -137,12 +137,12 @@ export async function POST(request: Request) {
   }
 
   const instruments = await db.prepare(`SELECT i.id, i.symbol, i.name,
-    MAX(CASE WHEN c.timeframe = '1d' AND c.source <> 'sample' THEN c.timestamp END) AS lastRealTimestamp,
+    MAX(CASE WHEN c.timeframe = '1d' AND c.source <> 'sample' THEN c.last_timestamp END) AS lastRealTimestamp,
     (SELECT MAX(j.end_date) FROM data_download_jobs j
       WHERE j.instrument_id = i.id AND j.market = 'US' AND j.timeframe = '1d'
         AND j.status = 'completed') AS lastAttemptedDate
     FROM instruments i
-    LEFT JOIN candles c ON c.instrument_id = i.id
+    LEFT JOIN candle_coverage c ON c.instrument_id = i.id
     WHERE i.market = 'US'
     GROUP BY i.id, i.symbol, i.name
     ORDER BY i.symbol`)

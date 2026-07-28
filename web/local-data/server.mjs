@@ -3,6 +3,7 @@ import { TdxLocalStore } from "./store.mjs";
 
 const host = process.env.KLINE_DATA_HOST ?? "127.0.0.1";
 const port = Number(process.env.KLINE_DATA_PORT ?? 3100);
+const serviceVersion = 2;
 const store = await new TdxLocalStore().init();
 
 function send(response, status, value) {
@@ -39,6 +40,7 @@ const server = http.createServer(async (request, response) => {
       return send(response, 200, {
         ok: true,
         service: "kline-local-data",
+        serviceVersion,
         task: store.getTask(),
         dataset: manifest ? {
           datasetVersion: manifest.datasetVersion,

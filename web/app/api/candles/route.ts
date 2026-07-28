@@ -65,6 +65,19 @@ async function seedIfNeeded() {
       for (let index = 0; index < statements.length; index += 80) {
         await db.batch(statements.slice(index, index + 80));
       }
+      await db.prepare(`INSERT OR REPLACE INTO candle_coverage
+        (instrument_id, timeframe, adjustment_type, source, bar_count,
+         first_timestamp, last_timestamp, updated_at)
+        VALUES (?, ?, 'none', 'sample', ?, ?, ?, ?)`)
+        .bind(
+          instrument.id,
+          timeframe,
+          bars.length,
+          bars[0]?.timestamp ?? 0,
+          bars.at(-1)?.timestamp ?? 0,
+          new Date().toISOString(),
+        )
+        .run();
     }
   }
   await db.prepare("INSERT OR REPLACE INTO app_metadata (key, value) VALUES ('sample_data_seeded', '1')").run();
@@ -110,11 +123,10 @@ export async function GET(request: Request) {
   if (coverage === "1") {
     const rows = await db
       .prepare(`SELECT i.id, i.symbol, i.name, i.market, i.timezone, i.price_precision AS pricePrecision,
-        c.timeframe, COUNT(*) AS barCount, MIN(c.timestamp) AS firstTimestamp, MAX(c.timestamp) AS lastTimestamp,
-        c.adjustment_type AS adjustmentType, c.source
+        c.timeframe, c.bar_count AS barCount, c.first_timestamp AS firstTimestamp,
+        c.last_timestamp AS lastTimestamp, c.adjustment_type AS adjustmentType, c.source
         FROM instruments i
-        JOIN candles c ON c.instrument_id = i.id
-        GROUP BY i.id, c.timeframe, c.adjustment_type, c.source
+        JOIN candle_coverage c ON c.instrument_id = i.id
         ORDER BY i.market, i.symbol, c.timeframe`)
       .all();
     const page = Math.max(1, Number(url.searchParams.get("page") ?? 1));
@@ -253,6 +265,27 @@ export async function POST(request: Request) {
   for (let index = 0; index < statements.length; index += 80) {
     await db.batch(statements.slice(index, index + 80));
   }
+  const adjustmentType = payload.adjustmentType ?? "none";
+  const importedCoverage = await db.prepare(`SELECT COUNT(*) AS barCount,
+    MIN(timestamp) AS firstTimestamp, MAX(timestamp) AS lastTimestamp
+    FROM candles
+    WHERE instrument_id = ? AND timeframe = ? AND adjustment_type = ? AND source = 'csv-import'`)
+    .bind(instrument.id, payload.timeframe, adjustmentType)
+    .first<{ barCount: number; firstTimestamp: number; lastTimestamp: number }>();
+  await db.prepare(`INSERT OR REPLACE INTO candle_coverage
+    (instrument_id, timeframe, adjustment_type, source, bar_count,
+     first_timestamp, last_timestamp, updated_at)
+    VALUES (?, ?, ?, 'csv-import', ?, ?, ?, ?)`)
+    .bind(
+      instrument.id,
+      payload.timeframe,
+      adjustmentType,
+      Number(importedCoverage?.barCount ?? 0),
+      Number(importedCoverage?.firstTimestamp ?? 0),
+      Number(importedCoverage?.lastTimestamp ?? 0),
+      new Date().toISOString(),
+    )
+    .run();
   return Response.json({ imported: bars.length }, { status: 201 });
 }
 
@@ -303,6 +336,10 @@ export async function DELETE(request: Request) {
       .bind(item.id, item.timeframe, item.adjustmentType, item.source)
       .run();
     deletedRows += Number(result.meta?.changes ?? 0);
+    await db.prepare(`DELETE FROM candle_coverage
+      WHERE instrument_id = ? AND timeframe = ? AND adjustment_type = ? AND source = ?`)
+      .bind(item.id, item.timeframe, item.adjustmentType, item.source)
+      .run();
   }
   const touchedIds = [...new Set(databaseSelections.map((item) => item.id as string))];
   for (const instrumentId of touchedIds) {

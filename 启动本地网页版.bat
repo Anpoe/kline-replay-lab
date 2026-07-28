@@ -5,6 +5,7 @@ title KLine Training Camp 2.0 - Local Web
 set "KLINE_WEB_DIR=%~dp0web"
 set "KLINE_LOCAL_URL=http://localhost:3000"
 set "KLINE_DATA_URL=http://127.0.0.1:3100/health"
+set "KLINE_DATA_SERVICE_VERSION=2"
 set "KLINE_DATA_STARTED=0"
 
 if exist "%KLINE_WEB_DIR%\package.json" goto project_found
@@ -42,7 +43,7 @@ goto fatal
 if not exist ".local-data\" mkdir ".local-data"
 
 rem Check the companion service used for resumable TDX downloads.
-powershell.exe -NoProfile -Command "try { $r = Invoke-WebRequest -Uri '%KLINE_DATA_URL%' -UseBasicParsing -TimeoutSec 5; if ($r.StatusCode -eq 200 -and $r.Content -match 'kline-local-data') { exit 0 } } catch {}; exit 1" >nul 2>nul
+powershell.exe -NoProfile -Command "try { $r = Invoke-WebRequest -Uri '%KLINE_DATA_URL%' -UseBasicParsing -TimeoutSec 5; if ($r.StatusCode -eq 200 -and $r.Content -match 'kline-local-data' -and $r.Content -match 'serviceVersion.*%KLINE_DATA_SERVICE_VERSION%') { exit 0 } } catch {}; exit 1" >nul 2>nul
 if not errorlevel 1 goto data_ready
 
 rem A service may already be starting on port 3100. Give it time before treating it as a conflict.
@@ -50,8 +51,15 @@ powershell.exe -NoProfile -Command "if (Get-NetTCPConnection -LocalPort 3100 -St
 if errorlevel 1 goto start_data_service
 
 echo Local data port 3100 is active. Waiting for the service to become ready...
-powershell.exe -NoProfile -Command "$deadline = (Get-Date).AddSeconds(20); do { try { $r = Invoke-WebRequest -Uri '%KLINE_DATA_URL%' -UseBasicParsing -TimeoutSec 3; if ($r.StatusCode -eq 200 -and $r.Content -match 'kline-local-data') { exit 0 } } catch {}; Start-Sleep -Milliseconds 700 } while ((Get-Date) -lt $deadline); exit 1" >nul 2>nul
+powershell.exe -NoProfile -Command "$deadline = (Get-Date).AddSeconds(20); do { try { $r = Invoke-WebRequest -Uri '%KLINE_DATA_URL%' -UseBasicParsing -TimeoutSec 3; if ($r.StatusCode -eq 200 -and $r.Content -match 'kline-local-data' -and $r.Content -match 'serviceVersion.*%KLINE_DATA_SERVICE_VERSION%') { exit 0 } } catch {}; Start-Sleep -Milliseconds 700 } while ((Get-Date) -lt $deadline); exit 1" >nul 2>nul
 if not errorlevel 1 goto data_ready
+goto restart_stale_data_service
+
+:restart_stale_data_service
+rem A previous project version may have left its helper running. Restart only
+rem when the saved PID still belongs to this project's local data service.
+powershell.exe -NoProfile -Command "$pidFile = '%KLINE_WEB_DIR%\.local-data\service.pid'; if (!(Test-Path -LiteralPath $pidFile)) { exit 1 }; $servicePid = [int](Get-Content -LiteralPath $pidFile -Raw); $process = Get-CimInstance Win32_Process -Filter ('ProcessId=' + $servicePid); if (!$process -or $process.CommandLine -notmatch 'local-data/server\.mjs') { exit 1 }; Stop-Process -Id $servicePid -Force; Remove-Item -LiteralPath $pidFile -Force -ErrorAction SilentlyContinue; $deadline = (Get-Date).AddSeconds(10); do { if (!(Get-NetTCPConnection -LocalPort 3100 -State Listen -ErrorAction SilentlyContinue)) { exit 0 }; Start-Sleep -Milliseconds 300 } while ((Get-Date) -lt $deadline); exit 1" >nul 2>nul
+if not errorlevel 1 goto start_data_service
 goto data_port_conflict
 
 :start_data_service
@@ -60,7 +68,7 @@ powershell.exe -NoProfile -Command "$p = Start-Process -FilePath 'node.exe' -Arg
 if errorlevel 1 goto data_start_error
 set "KLINE_DATA_STARTED=1"
 
-powershell.exe -NoProfile -Command "$deadline = (Get-Date).AddSeconds(30); do { try { $r = Invoke-WebRequest -Uri '%KLINE_DATA_URL%' -UseBasicParsing -TimeoutSec 3; if ($r.StatusCode -eq 200 -and $r.Content -match 'kline-local-data') { exit 0 } } catch {}; Start-Sleep -Milliseconds 700 } while ((Get-Date) -lt $deadline); exit 1" >nul 2>nul
+powershell.exe -NoProfile -Command "$deadline = (Get-Date).AddSeconds(30); do { try { $r = Invoke-WebRequest -Uri '%KLINE_DATA_URL%' -UseBasicParsing -TimeoutSec 3; if ($r.StatusCode -eq 200 -and $r.Content -match 'kline-local-data' -and $r.Content -match 'serviceVersion.*%KLINE_DATA_SERVICE_VERSION%') { exit 0 } } catch {}; Start-Sleep -Milliseconds 700 } while ((Get-Date) -lt $deadline); exit 1" >nul 2>nul
 if not errorlevel 1 goto data_ready
 
 :data_start_error
@@ -94,7 +102,10 @@ echo Web:  %KLINE_LOCAL_URL%
 echo Data: http://127.0.0.1:3100
 echo Close this window or press Ctrl+C to stop the local web service.
 echo.
-start "" powershell.exe -NoProfile -WindowStyle Hidden -Command "Start-Sleep -Seconds 3; Start-Process '%KLINE_LOCAL_URL%'"
+rem Wait for two consecutive successful responses. The worker may briefly reload
+rem after the first cold-start response, so a fixed delay can open the browser
+rem while Vinext/Miniflare is still reconnecting internally.
+start "" powershell.exe -NoProfile -WindowStyle Hidden -Command "$deadline = (Get-Date).AddSeconds(90); $ready = 0; do { try { $r = Invoke-WebRequest -Uri '%KLINE_LOCAL_URL%' -UseBasicParsing -TimeoutSec 4; if ($r.StatusCode -eq 200) { $ready += 1 } else { $ready = 0 } } catch { $ready = 0 }; if ($ready -ge 2) { Start-Process '%KLINE_LOCAL_URL%'; exit 0 }; Start-Sleep -Milliseconds 900 } while ((Get-Date) -lt $deadline); Start-Process '%KLINE_LOCAL_URL%'"
 call npm.cmd run dev
 goto cleanup_and_exit
 

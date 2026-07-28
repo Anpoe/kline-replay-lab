@@ -5,7 +5,7 @@ import test from "node:test";
 const root = new URL("../", import.meta.url);
 
 test("ships the K-line training workbench instead of the starter", async () => {
-  const [page, layout, workbench, dataSourceManager, providerSettings, providerSettingsRoute, packageJson, replayChart, sessionsRoute, snapshotsRoute, marketRules, marketJobsRoute, dataJobsRoute] = await Promise.all([
+  const [page, layout, workbench, dataSourceManager, providerSettings, providerSettingsRoute, packageJson, replayChart, sessionsRoute, snapshotsRoute, marketRules, marketJobsRoute, dataJobsRoute, downloadRunner] = await Promise.all([
     readFile(new URL("app/page.tsx", root), "utf8"),
     readFile(new URL("app/layout.tsx", root), "utf8"),
     readFile(new URL("app/components/TrainingWorkbench.tsx", root), "utf8"),
@@ -19,6 +19,7 @@ test("ships the K-line training workbench instead of the starter", async () => {
     readFile(new URL("app/lib/marketRules.ts", root), "utf8"),
     readFile(new URL("app/api/data-jobs/market/route.ts", root), "utf8"),
     readFile(new URL("app/api/data-jobs/route.ts", root), "utf8"),
+    readFile(new URL("app/api/data-jobs/run/route.ts", root), "utf8"),
   ]);
 
   assert.match(page, /<TrainingWorkbench\s*\/>/);
@@ -69,6 +70,22 @@ test("ships the K-line training workbench instead of the starter", async () => {
   assert.match(providerSettings, /数据源设置|历史行情数据源/);
   assert.match(providerSettings, /保存 Alpaca/);
   assert.match(providerSettings, /清除本机凭证/);
+  assert.match(providerSettings, /正在读取本机凭证状态/);
+  assert.match(providerSettings, /1200/);
+  assert.match(dataSourceManager, /usDownloadConcurrency = 8/);
+  assert.match(dataSourceManager, /usRequestSpacingMs = 400/);
+  assert.match(dataSourceManager, /正在高速批量更新美股/);
+  assert.match(downloadRunner, /rowsPerStatement = 8/);
+  assert.match(downloadRunner, /candle_coverage/);
+  assert.match(workbench, /Avoid reading and serializing the same market file twice/);
+  assert.match(workbench, /const rewindLocked = Boolean\(trainingTask\?\.randomRun\)/);
+  assert.match(workbench, /随机训练为单向揭示，不允许查看上一根/);
+  assert.match(workbench, /收益率模式/);
+  assert.match(workbench, /资金账户模式/);
+  assert.match(workbench, /insufficient_cash_at_fill/);
+  assert.match(workbench, /次日开盘平仓/);
+  assert.match(workbench, /order_queued_for_next_session/);
+  assert.match(workbench, /earliestScheduledIndex - 1/);
   assert.doesNotMatch(providerSettingsRoute, /credentialsJson.*Response\.json/s);
   assert.match(replayChart, /tradeLifecycle/);
   assert.match(replayChart, /decisionSubmission/);

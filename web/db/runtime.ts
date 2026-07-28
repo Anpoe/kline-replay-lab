@@ -38,6 +38,19 @@ export async function ensureSchema() {
     )`),
     db.prepare(`CREATE INDEX IF NOT EXISTS candles_lookup_idx
       ON candles (instrument_id, timeframe, adjustment_type, timestamp)`),
+    db.prepare(`CREATE TABLE IF NOT EXISTS candle_coverage (
+      instrument_id TEXT NOT NULL,
+      timeframe TEXT NOT NULL,
+      adjustment_type TEXT NOT NULL,
+      source TEXT NOT NULL,
+      bar_count INTEGER NOT NULL,
+      first_timestamp INTEGER NOT NULL,
+      last_timestamp INTEGER NOT NULL,
+      updated_at TEXT NOT NULL,
+      PRIMARY KEY (instrument_id, timeframe, adjustment_type, source)
+    )`),
+    db.prepare(`CREATE INDEX IF NOT EXISTS candle_coverage_lookup_idx
+      ON candle_coverage (instrument_id, timeframe, adjustment_type, source)`),
     db.prepare(`CREATE TABLE IF NOT EXISTS training_sessions (
       id TEXT PRIMARY KEY,
       instrument_id TEXT NOT NULL,
@@ -131,6 +144,29 @@ export async function ensureSchema() {
   if (!snapshotColumns.results.some((column) => column.name === "stored_bar_count")) {
     await db.prepare("ALTER TABLE data_snapshots ADD COLUMN stored_bar_count INTEGER NOT NULL DEFAULT 0").run();
     await db.prepare("UPDATE data_snapshots SET stored_bar_count = bar_count WHERE stored_bar_count = 0").run();
+  }
+  const coverageBackfill = await db.prepare(
+    "SELECT value FROM app_metadata WHERE key = 'candle_coverage_backfilled_v1'",
+  ).first();
+  if (!coverageBackfill) {
+    // Existing provider jobs already contain accepted counts and first/last
+    // timestamps, so the initial index can be built without scanning millions
+    // of candle rows during application startup.
+    await db.prepare(`INSERT OR REPLACE INTO candle_coverage
+      (instrument_id, timeframe, adjustment_type, source, bar_count,
+       first_timestamp, last_timestamp, updated_at)
+      SELECT instrument_id, timeframe, adjustment_type,
+        CASE provider WHEN 'alpaca' THEN 'alpaca-iex' ELSE provider END,
+        SUM(inserted_count),
+        COALESCE(MIN(CAST(json_extract(quality_report_json, '$.firstTimestamp') AS INTEGER)), 0),
+        COALESCE(MAX(CAST(json_extract(quality_report_json, '$.lastTimestamp') AS INTEGER)), 0),
+        MAX(updated_at)
+      FROM data_download_jobs
+      WHERE status = 'completed' AND inserted_count > 0
+      GROUP BY instrument_id, timeframe, adjustment_type, provider`).run();
+    await db.prepare(
+      "INSERT OR REPLACE INTO app_metadata (key, value) VALUES ('candle_coverage_backfilled_v1', '1')",
+    ).run();
   }
   schemaReady = true;
 }

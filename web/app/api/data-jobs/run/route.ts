@@ -94,11 +94,17 @@ export async function POST(request: Request) {
         .run();
     }
 
-    const statements = chunk.candles.map((bar) => db.prepare(`INSERT OR REPLACE INTO candles
-      (instrument_id, timeframe, timestamp, open, high, low, close, volume, turnover,
-       adjustment_type, source, quality_flags)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, '[]')`)
-      .bind(
+    // Each candle contributes 11 bind variables. Local D1/SQLite accepts fewer than
+    // 100 variables per statement, so eight rows (88 variables) is the largest safe
+    // portable batch while still avoiding thousands of one-row round trips.
+    const statements = [];
+    const rowsPerStatement = 8;
+    for (let index = 0; index < chunk.candles.length; index += rowsPerStatement) {
+      const rows = chunk.candles.slice(index, index + rowsPerStatement);
+      const placeholders = rows
+        .map(() => "(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, '[]')")
+        .join(", ");
+      const values = rows.flatMap((bar) => [
         job.instrumentId,
         job.timeframe,
         bar.timestamp,
@@ -110,9 +116,38 @@ export async function POST(request: Request) {
         bar.turnover,
         job.adjustmentType,
         chunk.source,
-      ));
-    for (let index = 0; index < statements.length; index += 80) {
-      await db.batch(statements.slice(index, index + 80));
+      ]);
+      statements.push(db.prepare(`INSERT OR REPLACE INTO candles
+        (instrument_id, timeframe, timestamp, open, high, low, close, volume, turnover,
+         adjustment_type, source, quality_flags)
+        VALUES ${placeholders}`).bind(...values));
+    }
+    for (let index = 0; index < statements.length; index += 16) {
+      await db.batch(statements.slice(index, index + 16));
+    }
+
+    if (chunk.candles.length > 0) {
+      const coverage = await db.prepare(`SELECT COUNT(*) AS barCount,
+        MIN(timestamp) AS firstTimestamp, MAX(timestamp) AS lastTimestamp
+        FROM candles
+        WHERE instrument_id = ? AND timeframe = ? AND adjustment_type = ? AND source = ?`)
+        .bind(job.instrumentId, job.timeframe, job.adjustmentType, chunk.source)
+        .first<{ barCount: number; firstTimestamp: number; lastTimestamp: number }>();
+      await db.prepare(`INSERT OR REPLACE INTO candle_coverage
+        (instrument_id, timeframe, adjustment_type, source, bar_count,
+         first_timestamp, last_timestamp, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)`)
+        .bind(
+          job.instrumentId,
+          job.timeframe,
+          job.adjustmentType,
+          chunk.source,
+          Number(coverage?.barCount ?? 0),
+          Number(coverage?.firstTimestamp ?? 0),
+          Number(coverage?.lastTimestamp ?? 0),
+          new Date().toISOString(),
+        )
+        .run();
     }
 
     const priorQuality = JSON.parse(job.qualityReportJson || "{}") as Partial<QualityReport>;
