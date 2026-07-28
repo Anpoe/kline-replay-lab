@@ -7,6 +7,11 @@ set "KLINE_LOCAL_URL=http://localhost:3000"
 set "KLINE_DATA_URL=http://127.0.0.1:3100/health"
 set "KLINE_DATA_SERVICE_VERSION=2"
 set "KLINE_DATA_STARTED=0"
+set "KLINE_LAN_IP="
+set "KLINE_MOBILE_URL="
+
+for /f "usebackq delims=" %%I in (`powershell.exe -NoProfile -Command "$config = Get-NetIPConfiguration | Where-Object { $_.IPv4DefaultGateway -and $_.NetAdapter.Status -eq 'Up' } | Select-Object -First 1; if ($config.IPv4Address.IPAddress) { $config.IPv4Address.IPAddress }"`) do set "KLINE_LAN_IP=%%I"
+if defined KLINE_LAN_IP set "KLINE_MOBILE_URL=http://%KLINE_LAN_IP%:3000"
 
 if exist "%KLINE_WEB_DIR%\package.json" goto project_found
 echo [ERROR] Web project not found: %KLINE_WEB_DIR%
@@ -83,12 +88,33 @@ echo Close the program shown above and retry.
 goto fatal
 
 :data_ready
-rem If this application is already running, only open the browser.
+rem If this application is already running, open the browser and keep this
+rem information window visible. An older process may still be bound to
+rem loopback only, in which case it must be restarted once for phone access.
 powershell.exe -NoProfile -Command "try { $r = Invoke-WebRequest -Uri '%KLINE_LOCAL_URL%' -UseBasicParsing -TimeoutSec 3; if ($r.StatusCode -eq 200 -and $r.Content -match 'K') { exit 0 } } catch {}; exit 1" >nul 2>nul
 if errorlevel 1 goto check_web_port
-echo KLine Training Camp is already running. Opening the browser...
+
+powershell.exe -NoProfile -Command "$listeners = @(Get-NetTCPConnection -LocalPort 3000 -State Listen -ErrorAction SilentlyContinue); $lanListeners = @($listeners.Where({ $_.LocalAddress -eq '0.0.0.0' -or $_.LocalAddress -eq '::' })); if ($lanListeners.Count -gt 0) { exit 0 }; exit 1" >nul 2>nul
+if errorlevel 1 goto existing_local_only_web
+
+echo KLine Training Camp is already running in another window.
+echo Web:  %KLINE_LOCAL_URL%
+if defined KLINE_MOBILE_URL echo Phone: %KLINE_MOBILE_URL%
+echo.
+echo Closing this information window will not stop the existing service.
 start "" "%KLINE_LOCAL_URL%"
+pause
 exit /b 0
+
+:existing_local_only_web
+echo [NOTICE] An older local-only KLine Training Camp instance is still running.
+echo It must be restarted once before a phone can connect.
+echo.
+powershell.exe -NoProfile -Command "$owner = Get-NetTCPConnection -LocalPort 3000 -State Listen -ErrorAction SilentlyContinue | Select-Object -First 1 -ExpandProperty OwningProcess; if ($owner) { $p = Get-Process -Id $owner -ErrorAction SilentlyContinue; if ($p) { Write-Host ('Current process: ' + $p.ProcessName + ' (PID ' + $owner + ')') } }"
+echo Close the original KLine Training Camp BAT window or press Ctrl+C there.
+echo Then double-click this BAT again. The new service will show:
+if defined KLINE_MOBILE_URL echo Phone: %KLINE_MOBILE_URL%
+goto fatal
 
 :check_web_port
 powershell.exe -NoProfile -Command "if (Get-NetTCPConnection -LocalPort 3000 -State Listen -ErrorAction SilentlyContinue) { exit 0 } else { exit 1 }" >nul 2>nul
@@ -99,7 +125,9 @@ goto cleanup_and_fatal
 :start_web
 echo Starting KLine Training Camp...
 echo Web:  %KLINE_LOCAL_URL%
+if defined KLINE_MOBILE_URL echo Phone: %KLINE_MOBILE_URL%
 echo Data: http://127.0.0.1:3100
+if defined KLINE_MOBILE_URL echo Phone and PC must use the same trusted Wi-Fi. Allow Node.js through Windows Firewall if prompted.
 echo Close this window or press Ctrl+C to stop the local web service.
 echo.
 rem Wait for two consecutive successful responses. The worker may briefly reload

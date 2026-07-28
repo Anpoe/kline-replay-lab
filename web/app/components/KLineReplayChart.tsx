@@ -1,6 +1,12 @@
 "use client";
 
-import { useCallback, useEffect, useRef, type MouseEvent as ReactMouseEvent } from "react";
+import {
+  useCallback,
+  useEffect,
+  useRef,
+  type MouseEvent as ReactMouseEvent,
+  type PointerEvent as ReactPointerEvent,
+} from "react";
 import type { Chart, KLineData, Overlay, OverlayTemplate, Period, Point } from "klinecharts";
 
 type DrawingRequest = { name: string; nonce: number } | null;
@@ -340,6 +346,9 @@ export function KLineReplayChart({
   const onCandleContextMenuRef = useRef(onCandleContextMenu);
   const onDrawingsChangeRef = useRef(onDrawingsChange);
   const suppressDrawingEventsRef = useRef(false);
+  const longPressTimerRef = useRef<number | null>(null);
+  const touchStartRef = useRef<{ x: number; y: number } | null>(null);
+  const lastContextTriggerRef = useRef<{ timestamp: number; triggeredAt: number } | null>(null);
 
   const createPersistedDrawing = useCallback((chart: Chart, drawing: PersistedDrawing) => chart.createOverlay({
     id: drawing.id,
@@ -535,36 +544,86 @@ export function KLineReplayChart({
     suppressDrawingEventsRef.current = false;
   }, [clearNonce]);
 
-  const handleContextMenu = (event: ReactMouseEvent<HTMLDivElement>) => {
+  useEffect(() => () => {
+    if (longPressTimerRef.current != null) window.clearTimeout(longPressTimerRef.current);
+  }, []);
+
+  const resolveCandleAt = (clientX: number, clientY: number) => {
     const chart = chartRef.current;
     const container = containerRef.current;
-    if (!chart || !container) return;
+    if (!chart || !container) return null;
 
     const bounds = container.getBoundingClientRect();
     const candlePane = chart.getSize("candle_pane", "root");
-    const x = event.clientX - bounds.left;
-    const y = event.clientY - bounds.top;
-    if (!candlePane || y < candlePane.top || y > candlePane.top + candlePane.height) return;
+    const x = clientX - bounds.left;
+    const y = clientY - bounds.top;
+    if (!candlePane || y < candlePane.top || y > candlePane.top + candlePane.height) return null;
 
     const converted = chart.convertFromPixel([{ x, y }], { paneId: "candle_pane" });
     const point = Array.isArray(converted) ? converted[0] : converted;
     const dataIndex = Math.round(point?.dataIndex ?? Number.NaN);
     const bar = barsRef.current[dataIndex];
-    if (!bar) return;
+    if (!bar) return null;
 
-    event.preventDefault();
-    onCandleContextMenuRef.current({
+    return {
       dataIndex,
       timestamp: bar.timestamp,
       referencePrice: bar.close,
-    });
+    } satisfies CandleContextTarget;
+  };
+
+  const triggerCandleContext = (target: CandleContextTarget) => {
+    const now = Date.now();
+    const previous = lastContextTriggerRef.current;
+    if (previous?.timestamp === target.timestamp && now - previous.triggeredAt < 900) return;
+    lastContextTriggerRef.current = { timestamp: target.timestamp, triggeredAt: now };
+    onCandleContextMenuRef.current(target);
+  };
+
+  const cancelLongPress = () => {
+    if (longPressTimerRef.current != null) window.clearTimeout(longPressTimerRef.current);
+    longPressTimerRef.current = null;
+    touchStartRef.current = null;
+  };
+
+  const handleContextMenu = (event: ReactMouseEvent<HTMLDivElement>) => {
+    const target = resolveCandleAt(event.clientX, event.clientY);
+    if (!target) return;
+    event.preventDefault();
+    cancelLongPress();
+    triggerCandleContext(target);
+  };
+
+  const handlePointerDown = (event: ReactPointerEvent<HTMLDivElement>) => {
+    if (event.pointerType !== "touch") return;
+    const target = resolveCandleAt(event.clientX, event.clientY);
+    if (!target) return;
+    cancelLongPress();
+    touchStartRef.current = { x: event.clientX, y: event.clientY };
+    longPressTimerRef.current = window.setTimeout(() => {
+      longPressTimerRef.current = null;
+      touchStartRef.current = null;
+      if (typeof navigator !== "undefined" && "vibrate" in navigator) navigator.vibrate(30);
+      triggerCandleContext(target);
+    }, 520);
+  };
+
+  const handlePointerMove = (event: ReactPointerEvent<HTMLDivElement>) => {
+    const start = touchStartRef.current;
+    if (!start || Math.hypot(event.clientX - start.x, event.clientY - start.y) <= 10) return;
+    cancelLongPress();
   };
 
   return <div
     ref={containerRef}
     className="chart-canvas"
-    aria-label={symbol + " K线图，右键已揭示的 K 线可补写事前决策"}
-    title="右键已揭示的 K 线可补写事前决策"
+    aria-label={symbol + " K线图，右键或长按已揭示的 K 线可补写事前决策"}
+    title="右键或长按已揭示的 K 线可补写事前决策"
     onContextMenu={handleContextMenu}
+    onPointerDown={handlePointerDown}
+    onPointerMove={handlePointerMove}
+    onPointerUp={cancelLongPress}
+    onPointerCancel={cancelLongPress}
+    onPointerLeave={cancelLongPress}
   />;
 }

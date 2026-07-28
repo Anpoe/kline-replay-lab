@@ -460,11 +460,36 @@ function normalizeSettings(value: Partial<AppSettings>): AppSettings {
   };
 }
 
+function randomUint32() {
+  const values = new Uint32Array(1);
+  if (typeof globalThis.crypto?.getRandomValues === "function") {
+    globalThis.crypto.getRandomValues(values);
+    return values[0];
+  }
+  return Math.floor(Math.random() * 0x1_0000_0000);
+}
+
+function createUuid() {
+  const webCrypto = globalThis.crypto;
+  if (typeof webCrypto?.randomUUID === "function") return webCrypto.randomUUID();
+
+  const bytes = new Uint8Array(16);
+  if (typeof webCrypto?.getRandomValues === "function") {
+    webCrypto.getRandomValues(bytes);
+  } else {
+    for (let index = 0; index < bytes.length; index += 1) {
+      bytes[index] = Math.floor(Math.random() * 256);
+    }
+  }
+  bytes[6] = (bytes[6] & 0x0f) | 0x40;
+  bytes[8] = (bytes[8] & 0x3f) | 0x80;
+  const hex = Array.from(bytes, (value) => value.toString(16).padStart(2, "0"));
+  return `${hex.slice(0, 4).join("")}-${hex.slice(4, 6).join("")}-${hex.slice(6, 8).join("")}-${hex.slice(8, 10).join("")}-${hex.slice(10).join("")}`;
+}
+
 function randomItem<T>(items: T[]) {
   if (!items.length) return undefined;
-  const values = new Uint32Array(1);
-  crypto.getRandomValues(values);
-  return items[values[0] % items.length];
+  return items[randomUint32() % items.length];
 }
 
 function formatDate(timestamp: number, timeframe: string) {
@@ -481,7 +506,7 @@ function createTrainingEvent(
   payload: Record<string, unknown> = {},
 ): TrainingEvent {
   return {
-    id: crypto.randomUUID(),
+    id: createUuid(),
     sequence,
     type,
     barTimestamp,
@@ -564,7 +589,7 @@ function createOrderRejection(
   orderId?: string,
 ): OrderRejection {
   return {
-    id: crypto.randomUUID(),
+    id: createUuid(),
     orderId,
     code: validation.code ?? "market_rule_rejected",
     message: validation.message ?? "委托不符合当前市场规则",
@@ -605,8 +630,8 @@ export function TrainingWorkbench() {
   const [drawingsRestoreNonce, setDrawingsRestoreNonce] = useState(0);
   const [drawings, setDrawings] = useState<PersistedDrawing[]>([]);
   const [saveState, setSaveState] = useState("未保存");
-  const [sessionId, setSessionId] = useState(() => crypto.randomUUID());
-  const [randomSeed, setRandomSeed] = useState(() => crypto.randomUUID());
+  const [sessionId, setSessionId] = useState(createUuid);
+  const [randomSeed, setRandomSeed] = useState(createUuid);
   const [dataSnapshotId, setDataSnapshotId] = useState("");
   const [snapshotHash, setSnapshotHash] = useState("");
   const [marketRules, setMarketRules] = useState<MarketRuleProfile>(CN_A_MAINBOARD_RULES_V1);
@@ -796,7 +821,7 @@ export function TrainingWorkbench() {
       dataSignature: typeof state.dataSignature === "string" ? state.dataSignature : undefined,
       dataSnapshotId: typeof state.dataSnapshotId === "string" ? state.dataSnapshotId : undefined,
       snapshotHash: typeof state.snapshotHash === "string" ? state.snapshotHash : undefined,
-      randomSeed: typeof state.randomSeed === "string" ? state.randomSeed : crypto.randomUUID(),
+      randomSeed: typeof state.randomSeed === "string" ? state.randomSeed : createUuid(),
       positions: state.positions,
       pendingOrders: state.pendingOrders,
       executions: Array.isArray(state.executions) ? state.executions : [],
@@ -995,8 +1020,8 @@ export function TrainingWorkbench() {
           ? "旧训练已恢复，并从当前行情建立首份不可变快照；从本次保存开始可以跨行情版本完全复现。"
           : `已从不可变快照恢复，哈希 ${data.snapshot.contentHash.slice(0, 12)}；当前行情库后续变化不会影响本次训练。`);
       } else {
-        const nextSessionId = crypto.randomUUID();
-        const nextSeed = crypto.randomUUID();
+        const nextSessionId = createUuid();
+        const nextSeed = createUuid();
         const nextTask = resolveTrainingTask(
           newTaskRequest?.draft ?? defaultTrainingTaskDraft,
           data.candles,
@@ -1130,7 +1155,7 @@ export function TrainingWorkbench() {
           status: "open",
         });
         fills.push({
-          id: crypto.randomUUID(),
+          id: createUuid(),
           orderId: order.id,
           positionId: order.positionId,
           action: "open",
@@ -1160,7 +1185,7 @@ export function TrainingWorkbench() {
         realizedPnl: realized,
       };
       fills.push({
-        id: crypto.randomUUID(),
+        id: createUuid(),
         orderId: order.id,
         positionId: position.id,
         action: "close",
@@ -1296,12 +1321,12 @@ export function TrainingWorkbench() {
     }
     const priceBand = replayPriceBand(marketRules, bars, cursor, instrument.timezone, timeframe);
     const order: PendingOrder = {
-      id: crypto.randomUUID(),
+      id: createUuid(),
       action: "open",
       side,
       qty,
       createdAt: currentBar.timestamp,
-      positionId: crypto.randomUUID(),
+      positionId: createUuid(),
       ruleId: marketRules.id,
       ruleVersion: marketRules.version,
       priceBand,
@@ -1331,7 +1356,7 @@ export function TrainingWorkbench() {
     }
     const priceBand = replayPriceBand(marketRules, bars, cursor, instrument.timezone, timeframe);
     const order: PendingOrder = {
-      id: crypto.randomUUID(),
+      id: createUuid(),
       action: "close",
       side: position.side === "long" ? "sell" : "buy",
       qty: position.qty,
@@ -1369,7 +1394,7 @@ export function TrainingWorkbench() {
       return;
     }
     const order: PendingOrder = {
-      id: crypto.randomUUID(),
+      id: createUuid(),
       action: "close",
       side: position.side === "long" ? "sell" : "buy",
       qty: position.qty,
@@ -1426,8 +1451,8 @@ export function TrainingWorkbench() {
     if (rewindLocked) return;
     saveCompletedTrainingRef.current = false;
     setShowRandomComplete(false);
-    const nextRandomSeed = crypto.randomUUID();
-    const nextSessionId = crypto.randomUUID();
+    const nextRandomSeed = createUuid();
+    const nextSessionId = createUuid();
     const baseTask = trainingTask ?? createLegacyTrainingTask(bars, Math.max(0, Math.floor(bars.length * 0.68)));
     const nextTask: TrainingTask = {
       ...baseTask,
@@ -1560,7 +1585,7 @@ export function TrainingWorkbench() {
     const targetBar = bars[targetCursor] ?? currentBar;
     if (!targetBar) return;
     const submission: DecisionSubmission = {
-      id: crypto.randomUUID(),
+      id: createUuid(),
       barTimestamp: targetBar.timestamp,
       cursor: targetCursor,
       referencePrice: targetBar.close,
@@ -2537,6 +2562,7 @@ export function TrainingWorkbench() {
                     </div>
                   )}
                   <div className="replay-watermark">REPLAY · 未来已隐藏</div>
+                  <div className="chart-touch-hint">长按 K 线补写决策</div>
                 </div>
               </div>
 
@@ -2646,14 +2672,14 @@ export function TrainingWorkbench() {
                             : { ok: false, message: "行情未就绪" };
                           return (
                             <tr key={position.id}>
-                              <td><span className="position-id">#{position.id.slice(0, 6)}</span></td>
-                              <td><span className={position.side === "long" ? "side-long" : "side-short"}>{position.side === "long" ? "多 / 买" : "空 / 卖"}</span></td>
-                              <td>{position.qty}</td>
-                              <td>{trainingDateLabel(position.entryTimestamp)}</td>
-                              <td>{trainingPriceLabel(position.entryPrice)}</td>
-                              <td>{trainingPriceLabel(currentBar?.close)}</td>
-                              <td><strong className={pnl >= 0 ? "up" : "down"}>{tradingMode === "capital" ? money(pnl) : percent(positionReturnPct(position, currentPrice))}</strong></td>
-                              <td><button
+                              <td data-label="仓位"><span className="position-id">#{position.id.slice(0, 6)}</span></td>
+                              <td data-label="方向"><span className={position.side === "long" ? "side-long" : "side-short"}>{position.side === "long" ? "多 / 买" : "空 / 卖"}</span></td>
+                              <td data-label="数量">{position.qty}</td>
+                              <td data-label="开仓时间">{trainingDateLabel(position.entryTimestamp)}</td>
+                              <td data-label="开仓价">{trainingPriceLabel(position.entryPrice)}</td>
+                              <td data-label="现价">{trainingPriceLabel(currentBar?.close)}</td>
+                              <td data-label="浮动盈亏"><strong className={pnl >= 0 ? "up" : "down"}>{tradingMode === "capital" ? money(pnl) : percent(positionReturnPct(position, currentPrice))}</strong></td>
+                              <td data-label="操作"><button
                                 className="row-action"
                                 disabled={trainingComplete || closeQueued || (!closeValidation.ok && closeValidation.code !== "t_plus_one_locked")}
                                 title={closeValidation.code === "t_plus_one_locked" ? "预约到下一交易日第一根K线开盘平仓" : closeValidation.message}
@@ -2670,14 +2696,14 @@ export function TrainingWorkbench() {
                         <thead><tr><th>委托</th><th>动作</th><th>方向</th><th>数量</th><th>提交时间</th><th>关联仓位</th><th>成交规则</th><th>操作</th></tr></thead>
                         <tbody>{pendingOrders.length ? pendingOrders.map((order) => (
                           <tr key={order.id}>
-                            <td><span className="position-id">#{order.id.slice(0, 6)}</span></td>
-                            <td>{order.action === "open" ? "开仓" : "平仓"}</td>
-                            <td><span className={order.side === "buy" ? "side-long" : "side-short"}>{order.side === "buy" ? "买入" : "卖出"}</span></td>
-                            <td>{order.qty}</td>
-                            <td>{trainingDateLabel(order.createdAt)}</td>
-                            <td>#{order.positionId.slice(0, 6)}</td>
-                            <td>{order.executeAtTimestamp ? `${trainingDateLabel(order.executeAtTimestamp)} 开盘` : "下一根开盘"} · {order.ruleVersion ?? "旧规则"}</td>
-                            <td><button className="row-action danger" onClick={() => cancelPendingOrder(order.id)}>撤单</button></td>
+                            <td data-label="委托"><span className="position-id">#{order.id.slice(0, 6)}</span></td>
+                            <td data-label="动作">{order.action === "open" ? "开仓" : "平仓"}</td>
+                            <td data-label="方向"><span className={order.side === "buy" ? "side-long" : "side-short"}>{order.side === "buy" ? "买入" : "卖出"}</span></td>
+                            <td data-label="数量">{order.qty}</td>
+                            <td data-label="提交时间">{trainingDateLabel(order.createdAt)}</td>
+                            <td data-label="关联仓位">#{order.positionId.slice(0, 6)}</td>
+                            <td data-label="成交规则">{order.executeAtTimestamp ? `${trainingDateLabel(order.executeAtTimestamp)} 开盘` : "下一根开盘"} · {order.ruleVersion ?? "旧规则"}</td>
+                            <td data-label="操作"><button className="row-action danger" onClick={() => cancelPendingOrder(order.id)}>撤单</button></td>
                           </tr>
                         )) : <tr><td className="orders-empty" colSpan={8}>暂无待成交委托。</td></tr>}</tbody>
                       </table>
@@ -2688,14 +2714,14 @@ export function TrainingWorkbench() {
                         <thead><tr><th>仓位</th><th>方向</th><th>数量</th><th>开仓时间</th><th>开仓价</th><th>平仓时间</th><th>平仓价</th><th>已实现</th></tr></thead>
                         <tbody>{closedPositions.length ? [...closedPositions].reverse().map((position) => (
                           <tr key={position.id}>
-                            <td><span className="position-id">#{position.id.slice(0, 6)}</span></td>
-                            <td><span className={position.side === "long" ? "side-long" : "side-short"}>{position.side === "long" ? "多 / 买" : "空 / 卖"}</span></td>
-                            <td>{position.qty}</td>
-                            <td>{trainingDateLabel(position.entryTimestamp)}</td>
-                            <td>{trainingPriceLabel(position.entryPrice)}</td>
-                            <td>{position.exitTimestamp ? trainingDateLabel(position.exitTimestamp) : "--"}</td>
-                            <td>{trainingPriceLabel(position.exitPrice)}</td>
-                            <td><strong className={(position.realizedPnl ?? 0) >= 0 ? "up" : "down"}>{tradingMode === "capital" ? money(position.realizedPnl ?? 0) : percent(positionReturnPct(position, position.exitPrice ?? position.entryPrice))}</strong></td>
+                            <td data-label="仓位"><span className="position-id">#{position.id.slice(0, 6)}</span></td>
+                            <td data-label="方向"><span className={position.side === "long" ? "side-long" : "side-short"}>{position.side === "long" ? "多 / 买" : "空 / 卖"}</span></td>
+                            <td data-label="数量">{position.qty}</td>
+                            <td data-label="开仓时间">{trainingDateLabel(position.entryTimestamp)}</td>
+                            <td data-label="开仓价">{trainingPriceLabel(position.entryPrice)}</td>
+                            <td data-label="平仓时间">{position.exitTimestamp ? trainingDateLabel(position.exitTimestamp) : "--"}</td>
+                            <td data-label="平仓价">{trainingPriceLabel(position.exitPrice)}</td>
+                            <td data-label="已实现"><strong className={(position.realizedPnl ?? 0) >= 0 ? "up" : "down"}>{tradingMode === "capital" ? money(position.realizedPnl ?? 0) : percent(positionReturnPct(position, position.exitPrice ?? position.entryPrice))}</strong></td>
                           </tr>
                         )) : <tr><td className="orders-empty" colSpan={8}>平仓后，买卖点会以浅色虚线连接并保留在这里。</td></tr>}</tbody>
                       </table>
@@ -2763,7 +2789,7 @@ export function TrainingWorkbench() {
                 <Sparkles size={18} />
                 <div><strong>{decision.reasons.length >= 2 ? "条件已成形" : "再找一个独立理由"}</strong><span>评分关注过程，不用结果倒推理由</span></div>
               </div>
-              <div className="submitted-plan-count">已提交 <strong>{decisionSubmissions.length}</strong> 份计划 · 右键历史 K 线可补写</div>
+              <div className="submitted-plan-count">已提交 <strong>{decisionSubmissions.length}</strong> 份计划 · 右键或长按历史 K 线可补写</div>
               <button className="commit-plan" disabled={trainingComplete && !decisionTarget} onClick={submitDecision}><ListChecks size={17} />{decisionTarget ? "保存补写决策" : trainingComplete ? "训练已结束" : "提交决策并揭示下一根"}</button>
             </aside>
           </div>
@@ -3045,7 +3071,7 @@ export function TrainingWorkbench() {
                   const selected = selectedCoverageKeys.includes(key);
                   return (
                   <tr className={selected ? "selected" : ""} key={key}>
-                    <td className="coverage-select-cell">
+                    <td className="coverage-select-cell" data-label="选择">
                       <input
                         type="checkbox"
                         aria-label={`选择 ${item.symbol} ${item.timeframe} ${item.source}`}
@@ -3055,11 +3081,11 @@ export function TrainingWorkbench() {
                           : [...current, key])}
                       />
                     </td>
-                    <td><strong>{item.symbol}</strong><span>{item.name}</span></td>
-                    <td>{item.market}</td><td><span className="tf-badge">{item.timeframe}</span></td>
-                    <td>{Number(item.barCount).toLocaleString()}</td>
-                    <td>{new Date(item.firstTimestamp).toLocaleDateString("zh-CN")} — {new Date(item.lastTimestamp).toLocaleDateString("zh-CN")}</td>
-                    <td>{item.adjustmentType}</td><td>{item.source}</td><td><span className="healthy-dot" />完整</td>
+                    <td data-label="品种"><strong>{item.symbol}</strong><span>{item.name}</span></td>
+                    <td data-label="市场">{item.market}</td><td data-label="周期"><span className="tf-badge">{item.timeframe}</span></td>
+                    <td data-label="数量">{Number(item.barCount).toLocaleString()}</td>
+                    <td data-label="覆盖范围">{new Date(item.firstTimestamp).toLocaleDateString("zh-CN")} — {new Date(item.lastTimestamp).toLocaleDateString("zh-CN")}</td>
+                    <td data-label="复权">{item.adjustmentType}</td><td data-label="来源">{item.source}</td><td data-label="状态"><span className="healthy-dot" />完整</td>
                   </tr>
                 );})}</tbody>
               </table>

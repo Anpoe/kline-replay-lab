@@ -31,6 +31,10 @@ export default defineConfig(async () => {
 
   return {
     server: {
+      // Allow a phone on the same trusted LAN to open the local training UI.
+      // The companion market-data service remains bound to 127.0.0.1 and is
+      // reached only by the server-side API routes.
+      host: "0.0.0.0",
       // Vinext/Miniflare can briefly reconnect its worker during cold start.
       // The application already surfaces actionable request failures in-page,
       // so do not leave Vite's developer overlay stuck over a healthy local app.
