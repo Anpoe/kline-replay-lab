@@ -38,6 +38,31 @@ export function positionPnl(position: AccountPosition, currentPrice: number) {
   return (currentPrice - position.entryPrice) * position.qty * direction;
 }
 
+export function settleOpenPositionsAtPrice<
+  T extends AccountPosition & {
+    id: string;
+    exitTimestamp?: number;
+    exitOrderId?: string;
+  },
+>(
+  positions: T[],
+  price: number,
+  timestamp: number,
+  createExitOrderId: (position: T) => string,
+): T[] {
+  return positions.map((position) => {
+    if (position.status === "closed") return position;
+    return {
+      ...position,
+      status: "closed",
+      exitPrice: price,
+      exitTimestamp: timestamp,
+      exitOrderId: createExitOrderId(position),
+      realizedPnl: positionPnl(position, price),
+    } as T;
+  });
+}
+
 export function positionReturnPct(position: AccountPosition, currentPrice: number) {
   const notional = position.entryPrice * position.qty;
   return notional > 0 ? positionPnl(position, currentPrice) / notional * 100 : 0;

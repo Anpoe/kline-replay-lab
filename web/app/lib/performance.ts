@@ -21,6 +21,10 @@ export type PerformanceMetrics = {
   losingTrades: number;
   flatTrades: number;
   winRate: number;
+  winningSessions: number;
+  losingSessions: number;
+  flatSessions: number;
+  sessionWinRate: number;
   grossProfit: number;
   grossLoss: number;
   profitFactor: number | null;
@@ -35,6 +39,9 @@ export function summarizePerformance(records: PerformanceRecord[]): PerformanceM
   const winningTrades = closedTradePnls.filter((pnl) => pnl > 0).length;
   const losingTrades = closedTradePnls.filter((pnl) => pnl < 0).length;
   const flatTrades = closedTradePnls.length - winningTrades - losingTrades;
+  const winningSessions = records.filter((record) => record.totalPnl > 0).length;
+  const losingSessions = records.filter((record) => record.totalPnl < 0).length;
+  const flatSessions = records.length - winningSessions - losingSessions;
   const grossProfit = closedTradePnls
     .filter((pnl) => pnl > 0)
     .reduce((sum, pnl) => sum + pnl, 0);
@@ -69,6 +76,10 @@ export function summarizePerformance(records: PerformanceRecord[]): PerformanceM
     losingTrades,
     flatTrades,
     winRate: closedTradePnls.length ? Math.round(winningTrades / closedTradePnls.length * 100) : 0,
+    winningSessions,
+    losingSessions,
+    flatSessions,
+    sessionWinRate: records.length ? Math.round(winningSessions / records.length * 100) : 0,
     grossProfit,
     grossLoss,
     profitFactor: grossLoss > 0 ? grossProfit / grossLoss : grossProfit > 0 ? Number.POSITIVE_INFINITY : null,

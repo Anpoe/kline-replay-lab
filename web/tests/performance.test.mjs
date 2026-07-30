@@ -32,6 +32,10 @@ test("summarizes a filtered training set without mixing session and trade win ra
   assert.equal(metrics.averagePnl, 40);
   assert.equal(metrics.closedTrades, 3);
   assert.equal(metrics.winRate, 33);
+  assert.equal(metrics.winningSessions, 1);
+  assert.equal(metrics.losingSessions, 1);
+  assert.equal(metrics.flatSessions, 0);
+  assert.equal(metrics.sessionWinRate, 50);
   assert.equal(metrics.profitFactor, 150 / 90);
   assert.equal(metrics.averagePlanScore, 80);
   assert.equal(metrics.maxDrawdown, 40);

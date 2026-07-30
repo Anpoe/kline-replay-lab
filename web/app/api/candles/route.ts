@@ -110,13 +110,26 @@ export async function GET(request: Request) {
 
   if (instruments === "1") {
     const rows = await db
-      .prepare(`SELECT id, symbol, name, market, timezone, price_precision AS pricePrecision
-        FROM instruments ORDER BY market, symbol`)
+      .prepare(`SELECT i.id, i.symbol, i.name, i.market, i.timezone,
+        i.price_precision AS pricePrecision,
+        GROUP_CONCAT(DISTINCT c.timeframe) AS timeframeList
+        FROM instruments i
+        JOIN candle_coverage c ON c.instrument_id = i.id AND c.bar_count > 0
+        GROUP BY i.id, i.symbol, i.name, i.market, i.timezone, i.price_precision
+        ORDER BY i.market, i.symbol`)
       .all();
     const local = await readLocalDataJson<{ instruments: Array<Record<string, unknown>> }>("/instruments");
     const merged = new Map<string, Record<string, unknown>>();
-    for (const item of rows.results as Array<Record<string, unknown>>) merged.set(String(item.id), item);
-    for (const item of local?.instruments ?? []) merged.set(String(item.id), item);
+    for (const item of rows.results as Array<Record<string, unknown>>) {
+      merged.set(String(item.id), {
+        ...item,
+        timeframes: String(item.timeframeList ?? "").split(",").filter(Boolean),
+      });
+    }
+    for (const item of local?.instruments ?? []) {
+      if (Number(item.barCount ?? 0) <= 0) continue;
+      merged.set(String(item.id), { ...item, timeframes: ["1d", "1w"] });
+    }
     return Response.json({ instruments: [...merged.values()] });
   }
 

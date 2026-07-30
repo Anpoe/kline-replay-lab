@@ -7,6 +7,7 @@ import {
   executionCashFlow,
   portfolioReturnPct,
   positionReturnPct,
+  settleOpenPositionsAtPrice,
 } from "../app/lib/tradingAccount.ts";
 
 test("capital account reserves pending buys and tracks equity", () => {
@@ -27,4 +28,21 @@ test("return-only account reports direction-aware percentage returns", () => {
   assert.equal(positionReturnPct(long, 22), 10);
   assert.equal(positionReturnPct(short, 18), 10);
   assert.equal(portfolioReturnPct([long, short], 22), 0);
+});
+
+test("training-end settlement closes every open position at the final close", () => {
+  const positions = [
+    { id: "long", side: "long", qty: 100, entryPrice: 10, entryTimestamp: 1, entryOrderId: "open-1", status: "open" },
+    { id: "short", side: "short", qty: 50, entryPrice: 12, entryTimestamp: 2, entryOrderId: "open-2", status: "open" },
+    { id: "done", side: "long", qty: 10, entryPrice: 8, entryTimestamp: 3, entryOrderId: "open-3", status: "closed", exitPrice: 9, exitTimestamp: 4, exitOrderId: "old-close", realizedPnl: 10 },
+  ];
+
+  const settled = settleOpenPositionsAtPrice(positions, 11, 99, (position) => `close-${position.id}`);
+
+  assert.deepEqual(settled.map((position) => position.status), ["closed", "closed", "closed"]);
+  assert.deepEqual(settled.map((position) => position.realizedPnl), [100, 50, 10]);
+  assert.deepEqual(settled.map((position) => position.exitPrice), [11, 11, 9]);
+  assert.deepEqual(settled.map((position) => position.exitOrderId), ["close-long", "close-short", "old-close"]);
+  assert.equal(settled[0].exitTimestamp, 99);
+  assert.equal(settled[2], positions[2]);
 });

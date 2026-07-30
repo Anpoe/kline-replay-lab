@@ -44,6 +44,10 @@ test("ships the K-line training workbench instead of the starter", async () => {
   assert.match(workbench, /退出随机训练/);
   assert.match(workbench, /训练表现/);
   assert.match(workbench, /整体表现/);
+  assert.match(workbench, /按交易胜率/);
+  assert.match(workbench, /按训练胜率/);
+  assert.match(workbench, /训练收益率合计/);
+  assert.match(workbench, /当前仅统计/);
   assert.match(workbench, /筛选训练集/);
   assert.match(workbench, /选择具体训练/);
   assert.match(workbench, /什么是盲测/);

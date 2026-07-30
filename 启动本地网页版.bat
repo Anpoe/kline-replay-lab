@@ -9,6 +9,8 @@ set "KLINE_DATA_SERVICE_VERSION=2"
 set "KLINE_DATA_STARTED=0"
 set "KLINE_LAN_IP="
 set "KLINE_MOBILE_URL="
+set "KLINE_REMOTE_HOST=kline42.dynv6.net"
+set "KLINE_REMOTE_URL=http://%KLINE_REMOTE_HOST%:3000"
 
 for /f "usebackq delims=" %%I in (`powershell.exe -NoProfile -Command "$config = Get-NetIPConfiguration | Where-Object { $_.IPv4DefaultGateway -and $_.NetAdapter.Status -eq 'Up' } | Select-Object -First 1; if ($config.IPv4Address.IPAddress) { $config.IPv4Address.IPAddress }"`) do set "KLINE_LAN_IP=%%I"
 if defined KLINE_LAN_IP set "KLINE_MOBILE_URL=http://%KLINE_LAN_IP%:3000"
@@ -99,7 +101,8 @@ if errorlevel 1 goto existing_local_only_web
 
 echo KLine Training Camp is already running in another window.
 echo Web:  %KLINE_LOCAL_URL%
-if defined KLINE_MOBILE_URL echo Phone: %KLINE_MOBILE_URL%
+if defined KLINE_MOBILE_URL echo Phone (LAN): %KLINE_MOBILE_URL%
+echo Remote (IPv6): %KLINE_REMOTE_URL%
 echo.
 echo Closing this information window will not stop the existing service.
 start "" "%KLINE_LOCAL_URL%"
@@ -113,7 +116,8 @@ echo.
 powershell.exe -NoProfile -Command "$owner = Get-NetTCPConnection -LocalPort 3000 -State Listen -ErrorAction SilentlyContinue | Select-Object -First 1 -ExpandProperty OwningProcess; if ($owner) { $p = Get-Process -Id $owner -ErrorAction SilentlyContinue; if ($p) { Write-Host ('Current process: ' + $p.ProcessName + ' (PID ' + $owner + ')') } }"
 echo Close the original KLine Training Camp BAT window or press Ctrl+C there.
 echo Then double-click this BAT again. The new service will show:
-if defined KLINE_MOBILE_URL echo Phone: %KLINE_MOBILE_URL%
+if defined KLINE_MOBILE_URL echo Phone (LAN): %KLINE_MOBILE_URL%
+echo Remote (IPv6): %KLINE_REMOTE_URL%
 goto fatal
 
 :check_web_port
@@ -125,9 +129,12 @@ goto cleanup_and_fatal
 :start_web
 echo Starting KLine Training Camp...
 echo Web:  %KLINE_LOCAL_URL%
-if defined KLINE_MOBILE_URL echo Phone: %KLINE_MOBILE_URL%
+if defined KLINE_MOBILE_URL echo Phone (LAN): %KLINE_MOBILE_URL%
+echo Remote (IPv6): %KLINE_REMOTE_URL%
 echo Data: http://127.0.0.1:3100
-if defined KLINE_MOBILE_URL echo Phone and PC must use the same trusted Wi-Fi. Allow Node.js through Windows Firewall if prompted.
+if defined KLINE_MOBILE_URL echo LAN access requires the phone and PC to use the same trusted Wi-Fi.
+echo Remote access requires DDNS-GO, a dynv6 AAAA record, and an explicit Windows/router firewall rule for TCP 3000.
+echo This launcher does not open a public firewall port automatically.
 echo Close this window or press Ctrl+C to stop the local web service.
 echo.
 rem Wait for two consecutive successful responses. The worker may briefly reload

@@ -5,28 +5,38 @@ import {
   BarChart3,
   BookOpenCheck,
   Brush,
+  ChevronDown,
   ChevronLeft,
   ChevronRight,
   CircleStop,
   Database,
+  Eye,
   EyeOff,
   FastForward,
   FileUp,
   Gauge,
   LineChart,
+  List,
   ListChecks,
+  Lock,
+  Magnet,
+  MousePointer2,
   Pause,
   Play,
+  Redo2,
   RotateCcw,
   Save,
   Settings2,
   Shuffle,
+  Square,
   Sparkles,
   Tag,
   Target,
   Trash2,
   TrendingDown,
   TrendingUp,
+  Undo2,
+  Unlock,
   X,
 } from "lucide-react";
 import type { KLineData } from "klinecharts";
@@ -35,6 +45,7 @@ import {
   KLineReplayChart,
   type CandleContextTarget,
   type DecisionMarker,
+  type DrawingRequest,
   type PersistedDrawing,
   type TradeMarker,
 } from "./KLineReplayChart";
@@ -77,6 +88,7 @@ import {
   executionCashFlow,
   portfolioReturnPct,
   positionReturnPct,
+  settleOpenPositionsAtPrice,
   type TradingMode,
 } from "../lib/tradingAccount";
 
@@ -95,6 +107,7 @@ type AvailableInstrument = {
   short: string;
   label: string;
   market: string;
+  timeframes: string[];
 };
 function InstrumentPicker({
   value,
@@ -367,6 +380,7 @@ type AppSettings = {
 
 const LAST_DRAFT_KEY = "kline-replay-lab:last-training";
 const APP_SETTINGS_KEY = "kline-replay-lab:settings";
+const CUSTOM_REASON_TAGS_KEY = "kline-replay-lab:custom-reason-tags";
 const defaultPerformanceFilters: PerformanceFilters = {
   instrumentId: "all",
   timeframe: "all",
@@ -385,8 +399,8 @@ const defaultDecision: Decision = {
 };
 
 const defaultInstruments = [
-  { id: "600519.SH", short: "600519", label: "贵州茅台", market: "A股" },
-  { id: "AAPL.US", short: "AAPL", label: "Apple", market: "美股" },
+  { id: "600519.SH", short: "600519", label: "贵州茅台", market: "A股", timeframes: ["1d", "1w"] },
+  { id: "AAPL.US", short: "AAPL", label: "Apple", market: "美股", timeframes: ["1d"] },
 ];
 const timeframes = ["5m", "1h", "1d", "1w"];
 const coveragePageSize = 100;
@@ -407,14 +421,94 @@ const defaultAppSettings: AppSettings = {
   randomLength: 40,
 };
 const reasonOptions = ["顺势", "关键位置", "突破回踩", "失败突破", "二次入场", "信号K确认"];
-const drawingTools = [
-  { name: "horizontalStraightLine", label: "水平线", icon: LineChart },
-  { name: "rayLine", label: "趋势线", icon: TrendingUp },
-  { name: "priceChannelLine", label: "通道", icon: Gauge },
-  { name: "fibonacciLine", label: "斐波那契", icon: Target },
-  { name: "brush", label: "自由画笔", icon: Brush },
-  { name: "simpleAnnotation", label: "K线标记", icon: Tag },
+type DrawingTool = {
+  name: string;
+  label: string;
+  icon: typeof LineChart;
+  kind?: "rectangle" | "position";
+};
+
+const drawingToolGroups: Array<{
+  id: string;
+  label: string;
+  icon: typeof LineChart;
+  tools: DrawingTool[];
+}> = [
+  {
+    id: "lines",
+    label: "趋势线工具",
+    icon: TrendingUp,
+    tools: [
+      { name: "segment", label: "趋势线", icon: TrendingDown },
+      { name: "rayLine", label: "射线", icon: TrendingUp },
+      { name: "horizontalStraightLine", label: "水平线", icon: LineChart },
+    ],
+  },
+  {
+    id: "channels",
+    label: "通道工具",
+    icon: Gauge,
+    tools: [
+      { name: "parallelStraightLine", label: "二线平行通道", icon: Gauge },
+      { name: "priceChannelLine", label: "三线价格通道", icon: Gauge },
+    ],
+  },
+  {
+    id: "fibonacci",
+    label: "斐波那契工具",
+    icon: Target,
+    tools: [{ name: "fibonacciLine", label: "斐波那契回撤", icon: Target }],
+  },
+  {
+    id: "shapes",
+    label: "几何图形",
+    icon: Square,
+    tools: [{ name: "trainingRectangle", label: "矩形区域", icon: Square, kind: "rectangle" }],
+  },
+  {
+    id: "position",
+    label: "测量与预测",
+    icon: Gauge,
+    tools: [{ name: "trainingPosition", label: "多空仓位", icon: TrendingUp, kind: "position" }],
+  },
+  {
+    id: "notes",
+    label: "画笔与注释",
+    icon: Brush,
+    tools: [
+      { name: "brush", label: "画笔", icon: Brush },
+      { name: "trainingTextBox", label: "文本框", icon: Tag },
+    ],
+  },
 ];
+
+const allDrawingTools = drawingToolGroups.flatMap((group) => group.tools);
+const defaultDrawingTools = Object.fromEntries(drawingToolGroups.map((group) => [group.id, group.tools[0].name]));
+
+function drawingLabel(name: string) {
+  if (name === "trainingLongPosition") return "多头仓位（旧）";
+  if (name === "trainingShortPosition") return "空头仓位（旧）";
+  if (name === "trainingTextNote") return "文字标记（旧）";
+  return allDrawingTools.find((tool) => tool.name === name)?.label ?? name;
+}
+
+function drawingStyles(color: string, size: number) {
+  return {
+    line: { color, size, style: "solid" },
+    rect: {
+      color: `${color}24`,
+      borderColor: color,
+      borderSize: size,
+      borderStyle: "solid",
+    },
+    point: { color: "#0c1416", borderColor: color, borderSize: 2, radius: 4 },
+    text: { color, size: 12 },
+  };
+}
+
+function drawingsEqual(left: PersistedDrawing[], right: PersistedDrawing[]) {
+  return left === right || JSON.stringify(left) === JSON.stringify(right);
+}
 
 function money(value: number) {
   return `${value >= 0 ? "+" : ""}${value.toFixed(2)}`;
@@ -539,6 +633,7 @@ function eventLabel(type: string) {
     order_quantity_changed: "调整下单数量",
     order_rejected: "市场规则拒单",
     orders_rejected: "成交阶段拒单",
+    positions_settled_at_training_end: "训练结束自动平仓",
     training_completed: "训练自动结束",
     training_revealed: "解除盲测并继续观察",
   };
@@ -624,11 +719,28 @@ export function TrainingWorkbench() {
   const [decisionSubmissions, setDecisionSubmissions] = useState<DecisionSubmission[]>([]);
   const [orderQty, setOrderQty] = useState(100);
   const [orderPanelTab, setOrderPanelTab] = useState<"positions" | "pending" | "history">("positions");
+  const [mobileOrdersExpanded, setMobileOrdersExpanded] = useState(false);
+  const [mobileToolbarOpen, setMobileToolbarOpen] = useState(false);
+  const [quickRandomMode, setQuickRandomMode] = useState<"free" | "blind">("free");
   const [decision, setDecision] = useState<Decision>(defaultDecision);
-  const [drawingRequest, setDrawingRequest] = useState<{ name: string; nonce: number } | null>(null);
+  const [customReasonTags, setCustomReasonTags] = useState<string[]>([]);
+  const [customReasonInput, setCustomReasonInput] = useState("");
+  const [customReasonTagsReady, setCustomReasonTagsReady] = useState(false);
+  const [drawingRequest, setDrawingRequest] = useState<DrawingRequest>(null);
   const [clearNonce, setClearNonce] = useState(0);
   const [drawingsRestoreNonce, setDrawingsRestoreNonce] = useState(0);
   const [drawings, setDrawings] = useState<PersistedDrawing[]>([]);
+  const [drawingUndoStack, setDrawingUndoStack] = useState<PersistedDrawing[][]>([]);
+  const [drawingRedoStack, setDrawingRedoStack] = useState<PersistedDrawing[][]>([]);
+  const [drawingGroupOpen, setDrawingGroupOpen] = useState("");
+  const [groupDrawingTools, setGroupDrawingTools] = useState<Record<string, string>>(defaultDrawingTools);
+  const [drawingMagnetMode, setDrawingMagnetMode] = useState<"normal" | "weak_magnet" | "strong_magnet">("normal");
+  const [drawingColor, setDrawingColor] = useState("#2962ff");
+  const [drawingLineWidth, setDrawingLineWidth] = useState(2);
+  const [selectedDrawingId, setSelectedDrawingId] = useState("");
+  const [drawingObjectsOpen, setDrawingObjectsOpen] = useState(false);
+  const [drawingTextOpen, setDrawingTextOpen] = useState(false);
+  const [drawingText, setDrawingText] = useState("");
   const [saveState, setSaveState] = useState("未保存");
   const [sessionId, setSessionId] = useState(createUuid);
   const [randomSeed, setRandomSeed] = useState(createUuid);
@@ -669,7 +781,10 @@ export function TrainingWorkbench() {
   const [performanceFilters, setPerformanceFilters] = useState<PerformanceFilters>(defaultPerformanceFilters);
   const [selectedPerformanceSessionId, setSelectedPerformanceSessionId] = useState("");
   const [importStatus, setImportStatus] = useState("");
+  const [chartLoadError, setChartLoadError] = useState("");
   const [startupReady, setStartupReady] = useState(false);
+  const [settingsReady, setSettingsReady] = useState(false);
+  const [instrumentCatalogReady, setInstrumentCatalogReady] = useState(false);
   const [trainingReady, setTrainingReady] = useState(false);
   const [loadNonce, setLoadNonce] = useState(0);
   const [restoreNotice, setRestoreNotice] = useState("");
@@ -680,6 +795,8 @@ export function TrainingWorkbench() {
   const eventSequenceRef = useRef(0);
   const decisionPanelRef = useRef<HTMLElement | null>(null);
   const decisionDraftBeforeBackfillRef = useRef<Decision | null>(null);
+  const marketLoadRef = useRef<{ id: number; controller: AbortController | null }>({ id: 0, controller: null });
+  const startupRandomStartedRef = useRef(false);
 
   const visibleBars = useMemo(() => bars.slice(0, cursor + 1), [bars, cursor]);
   const dataMarketInstrumentCount = useMemo(() => availableInstruments.filter((item) => {
@@ -803,6 +920,15 @@ export function TrainingWorkbench() {
   const reviewClosedPositions = reviewState.positions.filter((position) => position.status === "closed");
   const reviewRealizedPnl = reviewClosedPositions.reduce((sum, position) => sum + (position.realizedPnl ?? 0), 0);
   const reviewRealizedReturnPct = portfolioReturnPct(reviewClosedPositions, 0);
+  const reviewWinningTrades = reviewClosedPositions.filter((position) => (position.realizedPnl ?? 0) > 0).length;
+  const reviewLosingTrades = reviewClosedPositions.filter((position) => (position.realizedPnl ?? 0) < 0).length;
+  const reviewFlatTrades = reviewClosedPositions.length - reviewWinningTrades - reviewLosingTrades;
+  const reviewTradeWinRate = reviewClosedPositions.length
+    ? Math.round(reviewWinningTrades / reviewClosedPositions.length * 100)
+    : 0;
+  const reviewTotalResult = reviewState.tradingMode === "capital"
+    ? reviewState.pnlSnapshot?.total ?? reviewRealizedPnl
+    : reviewState.pnlSnapshot?.returnPct ?? reviewRealizedReturnPct;
   const reviewLatestSubmission = reviewState.decisionSubmissions.at(-1);
   const reviewDecision = reviewLatestSubmission?.decision ?? reviewState.decision;
   const reviewPlanScore = decisionScore(reviewDecision);
@@ -870,10 +996,40 @@ export function TrainingWorkbench() {
         setOrderQty(nextSettings.defaultOrderQty);
       } catch {
         window.localStorage.removeItem(APP_SETTINGS_KEY);
+      } finally {
+        setSettingsReady(true);
       }
     }, 0);
     return () => window.clearTimeout(timer);
   }, []);
+
+  useEffect(() => {
+    const timer = window.setTimeout(() => {
+      try {
+        const stored = window.localStorage.getItem(CUSTOM_REASON_TAGS_KEY);
+        const parsed = stored ? JSON.parse(stored) : [];
+        if (Array.isArray(parsed)) {
+          setCustomReasonTags(parsed
+            .filter((tag): tag is string => typeof tag === "string")
+            .map((tag) => tag.trim())
+            .filter((tag, index, items) => tag && !reasonOptions.includes(tag) && items.indexOf(tag) === index)
+            .slice(0, 30));
+        }
+      } catch {
+        window.localStorage.removeItem(CUSTOM_REASON_TAGS_KEY);
+      } finally {
+        setCustomReasonTagsReady(true);
+      }
+    }, 0);
+    return () => window.clearTimeout(timer);
+  }, []);
+
+  useEffect(() => {
+    if (!customReasonTagsReady) return;
+    window.localStorage.setItem(CUSTOM_REASON_TAGS_KEY, JSON.stringify(customReasonTags));
+  }, [customReasonTags, customReasonTagsReady]);
+
+  useEffect(() => () => marketLoadRef.current.controller?.abort(), []);
 
   const appendEvent = useCallback((
     type: string,
@@ -897,52 +1053,20 @@ export function TrainingWorkbench() {
     setLoadNonce((value) => value + 1);
   }, []);
 
-  useEffect(() => {
-    let cancelled = false;
-    const findLastTraining = async () => {
-      let request: RestoreRequest | null = null;
-      try {
-        const localDraft = window.localStorage.getItem(LAST_DRAFT_KEY);
-        if (localDraft) {
-          const parsed = JSON.parse(localDraft) as Omit<RestoreRequest, "state"> & { state: unknown };
-          const state = parseTrainingState(parsed.state);
-          if (parsed.id && parsed.instrumentId && parsed.timeframe && state) request = { ...parsed, state };
-        }
-        if (!request) {
-          const response = await fetch("/api/sessions");
-          if (response.ok) {
-            const data = await response.json() as { sessions: TrainingSession[] };
-            const latest = data.sessions[0];
-            if (latest) {
-              const state = parseTrainingState(JSON.parse(latest.stateJson));
-              if (state) request = { ...latest, state };
-            }
-          }
-        }
-      } catch {
-        window.localStorage.removeItem(LAST_DRAFT_KEY);
-      }
-      if (cancelled) return;
-      if (request) {
-        restoreRequestRef.current = request;
-        setInstrumentId(request.instrumentId);
-        setTimeframe(request.timeframe);
-      }
-      setStartupReady(true);
-    };
-    void findLastTraining();
-    return () => {
-      cancelled = true;
-    };
-  }, [parseTrainingState]);
-
   const loadBars = useCallback(async () => {
     if (!startupReady) return;
+    marketLoadRef.current.controller?.abort();
+    const requestId = marketLoadRef.current.id + 1;
+    const controller = new AbortController();
+    marketLoadRef.current = { id: requestId, controller };
     const restoreRequest = restoreRequestRef.current;
     restoreRequestRef.current = null;
     const newTaskRequest = newTaskRequestRef.current;
     newTaskRequestRef.current = null;
+    const requestInstrumentId = restoreRequest?.instrumentId ?? newTaskRequest?.instrumentId ?? instrumentId;
+    const requestTimeframe = restoreRequest?.timeframe ?? newTaskRequest?.timeframe ?? timeframe;
     setLoading(true);
+    setChartLoadError("");
     setTrainingReady(false);
     setPlaying(false);
     setShowRandomComplete(false);
@@ -956,7 +1080,9 @@ export function TrainingWorkbench() {
       let data: { instrument: Instrument; candles: KLineData[]; snapshot: SnapshotMeta };
       let legacySnapshotCreated = false;
       if (requestedSnapshotId) {
-        const response = await fetch(`/api/snapshots?id=${encodeURIComponent(requestedSnapshotId)}`);
+        const response = await fetch(`/api/snapshots?id=${encodeURIComponent(requestedSnapshotId)}`, {
+          signal: controller.signal,
+        });
         if (!response.ok) throw new Error("训练绑定的数据快照不存在，无法进行确定性恢复");
         data = await response.json() as typeof data;
       } else {
@@ -965,12 +1091,17 @@ export function TrainingWorkbench() {
         const snapshotResponse = await fetch("/api/snapshots", {
           method: "POST",
           headers: { "content-type": "application/json" },
-          body: JSON.stringify({ instrumentId, timeframe, adjustmentType: "none" }),
+          body: JSON.stringify({ instrumentId: requestInstrumentId, timeframe: requestTimeframe, adjustmentType: "none" }),
+          signal: controller.signal,
         });
-        if (!snapshotResponse.ok) throw new Error("不可变行情快照创建失败");
+        if (!snapshotResponse.ok) {
+          const failure = await snapshotResponse.json().catch(() => null) as { error?: string } | null;
+          throw new Error(failure?.error ?? "不可变行情快照创建失败");
+        }
         data = await snapshotResponse.json() as typeof data;
         legacySnapshotCreated = Boolean(restoreRequest);
       }
+      if (marketLoadRef.current.id !== requestId) return;
       setInstrument(data.instrument);
       setBars(data.candles);
       setDataSnapshotId(data.snapshot.id);
@@ -998,6 +1129,8 @@ export function TrainingWorkbench() {
         setInitialCapital(restoreRequest.state.initialCapital);
         setCashBalance(restoreRequest.state.cashBalance);
         setDrawings(restoreRequest.state.drawings);
+        setDrawingUndoStack([]);
+        setDrawingRedoStack([]);
         setDrawingsRestoreNonce(Date.now());
         setSessionId(restoreRequest.id);
         setRandomSeed(restoreRequest.state.randomSeed);
@@ -1045,13 +1178,15 @@ export function TrainingWorkbench() {
         setCashBalance(appSettingsRef.current.initialCapital);
         setSpeed(appSettingsRef.current.defaultSpeed);
         setDrawings([]);
+        setDrawingUndoStack([]);
+        setDrawingRedoStack([]);
         setClearNonce(Date.now());
         setSessionId(nextSessionId);
         setRandomSeed(nextSeed);
         eventSequenceRef.current = 1;
         setEvents([createTrainingEvent(1, "session_created", data.candles[nextTask.startCursor]?.timestamp, {
-          instrumentId,
-          timeframe,
+          instrumentId: requestInstrumentId,
+          timeframe: requestTimeframe,
           snapshotId: data.snapshot.id,
           snapshotHash: data.snapshot.contentHash,
           randomSeed: nextSeed,
@@ -1075,9 +1210,16 @@ export function TrainingWorkbench() {
       setOrderPanelTab("positions");
       setTrainingReady(true);
     } catch (error) {
-      setImportStatus(error instanceof Error ? error.message : "行情加载失败");
+      if (marketLoadRef.current.id !== requestId || controller.signal.aborted) return;
+      const message = error instanceof Error ? error.message : "行情加载失败";
+      setChartLoadError(message);
+      setImportStatus(message);
+      setTrainingReady(false);
     } finally {
-      setLoading(false);
+      if (marketLoadRef.current.id === requestId) {
+        marketLoadRef.current.controller = null;
+        setLoading(false);
+      }
     }
   }, [instrumentId, startupReady, timeframe]);
 
@@ -1120,11 +1262,19 @@ export function TrainingWorkbench() {
   }, [persistTrainingState, trainingComplete, trainingReady, trainingState]);
 
   const executeOrders = useCallback((orders: PendingOrder[], bar: KLineData) => {
-    if (!orders.length) return;
     const nextPositions = [...positions];
     const fills: Execution[] = [];
     const rejections: OrderRejection[] = [];
     let nextCashBalance = cashBalance;
+
+    if (!orders.length) {
+      return {
+        positions: nextPositions,
+        cashBalance: nextCashBalance,
+        fills,
+        rejections,
+      };
+    }
 
     orders.forEach((order) => {
       const priceBand = order.priceBand
@@ -1219,7 +1369,64 @@ export function TrainingWorkbench() {
       setRuleNotice(rejections.map((rejection) => rejection.message).join("；"));
       appendEvent("orders_rejected", { rejections }, bar.timestamp);
     }
+    return {
+      positions: nextPositions,
+      cashBalance: nextCashBalance,
+      fills,
+      rejections,
+    };
   }, [appendEvent, bars, cashBalance, cursor, instrument.timezone, marketRules, positions, timeframe, tradingMode]);
+
+  const settleTrainingAtBar = useCallback((
+    basePositions: PositionLot[],
+    baseCashBalance: number,
+    bar: KLineData,
+    cancelledOrders: PendingOrder[],
+  ) => {
+    const positionsToClose = basePositions.filter((position) => position.status === "open");
+    const exitOrderIds = new Map(positionsToClose.map((position) => [position.id, createUuid()]));
+    const settledPositions = settleOpenPositionsAtPrice(
+      basePositions,
+      bar.close,
+      bar.timestamp,
+      (position) => exitOrderIds.get(position.id) ?? createUuid(),
+    );
+    const settlementFills: Execution[] = positionsToClose.map((position) => {
+      const direction = position.side === "long" ? 1 : -1;
+      return {
+        id: createUuid(),
+        orderId: exitOrderIds.get(position.id) ?? createUuid(),
+        positionId: position.id,
+        action: "close",
+        side: position.side === "long" ? "sell" : "buy",
+        qty: position.qty,
+        price: bar.close,
+        timestamp: bar.timestamp,
+        realizedPnl: (bar.close - position.entryPrice) * position.qty * direction,
+        ruleId: marketRules.id,
+        ruleVersion: marketRules.version,
+      };
+    });
+    const settledCashBalance = tradingMode === "capital"
+      ? settlementFills.reduce((balance, fill) => (
+          balance + executionCashFlow(fill.side, fill.price, fill.qty)
+        ), baseCashBalance)
+      : baseCashBalance;
+
+    setPositions(settledPositions);
+    setPendingOrders([]);
+    if (settlementFills.length) setExecutions((items) => [...items, ...settlementFills]);
+    if (tradingMode === "capital") setCashBalance(settledCashBalance);
+    appendEvent("positions_settled_at_training_end", {
+      price: bar.close,
+      timestamp: bar.timestamp,
+      closedPositionIds: positionsToClose.map((position) => position.id),
+      executionIds: settlementFills.map((fill) => fill.id),
+      cancelledOrderIds: cancelledOrders.map((order) => order.id),
+      tradingMode,
+      cashBalance: settledCashBalance,
+    }, bar.timestamp);
+  }, [appendEvent, marketRules.id, marketRules.version, tradingMode]);
 
   const revealMany = useCallback((count: number) => {
     const endCursor = trainingTask?.endCursor ?? bars.length - 1;
@@ -1244,9 +1451,10 @@ export function TrainingWorkbench() {
     const dueOrders = pendingOrders.filter((order) => (
       order.executeAtTimestamp == null || order.executeAtTimestamp <= nextBar.timestamp
     ));
-    executeOrders(dueOrders, nextBar);
+    const executionResult = executeOrders(dueOrders, nextBar);
+    const dueIds = new Set(dueOrders.map((order) => order.id));
+    const remainingOrders = pendingOrders.filter((order) => !dueIds.has(order.id));
     if (dueOrders.length) {
-      const dueIds = new Set(dueOrders.map((order) => order.id));
       setPendingOrders((orders) => orders.filter((order) => !dueIds.has(order.id)));
     }
     setCursor(nextCursor);
@@ -1257,6 +1465,12 @@ export function TrainingWorkbench() {
       executedOrderIds: dueOrders.map((order) => order.id),
     }, bars[nextCursor]?.timestamp);
     if (trainingTask && nextCursor >= trainingTask.endCursor) {
+      settleTrainingAtBar(
+        executionResult.positions,
+        executionResult.cashBalance,
+        bars[nextCursor] ?? nextBar,
+        remainingOrders,
+      );
       const completedTask = finishTask(trainingTask, nextCursor);
       setTrainingTask(completedTask);
       setPlaying(false);
@@ -1269,7 +1483,7 @@ export function TrainingWorkbench() {
       }, bars[nextCursor]?.timestamp);
     }
     setSaveState("有未保存更改");
-  }, [appendEvent, bars, cursor, executeOrders, pendingOrders, trainingTask]);
+  }, [appendEvent, bars, cursor, executeOrders, pendingOrders, settleTrainingAtBar, trainingTask]);
 
   const revealNext = useCallback(() => revealMany(1), [revealMany]);
   const revealPrevious = () => {
@@ -1476,6 +1690,8 @@ export function TrainingWorkbench() {
     setOrderQty(normalizeBuyQuantity(marketRules, appSettingsRef.current.defaultOrderQty));
     setCashBalance(initialCapital);
     setDrawings([]);
+    setDrawingUndoStack([]);
+    setDrawingRedoStack([]);
     setClearNonce(Date.now());
     setOrderPanelTab("positions");
     setSessionId(nextSessionId);
@@ -1548,6 +1764,16 @@ export function TrainingWorkbench() {
     const nextDecision = { ...decision, [field]: value } as Decision;
     setDecision(nextDecision);
     setSaveState("决策草稿已更新");
+  };
+
+  const addCustomReasonTag = () => {
+    const nextTag = customReasonInput.trim().replace(/\s+/g, " ").slice(0, 20);
+    if (!nextTag) return;
+    if (!reasonOptions.includes(nextTag)) {
+      setCustomReasonTags((tags) => tags.includes(nextTag) ? tags : [...tags, nextTag].slice(-30));
+    }
+    if (!decision.reasons.includes(nextTag)) updateDecision("reasons", [...decision.reasons, nextTag]);
+    setCustomReasonInput("");
   };
 
   const openDecisionForCandle = useCallback((target: CandleContextTarget) => {
@@ -1630,9 +1856,145 @@ export function TrainingWorkbench() {
   };
 
   const handleDrawingsChange = (nextDrawings: PersistedDrawing[]) => {
+    if (drawingsEqual(drawings, nextDrawings)) return;
+    setDrawingUndoStack((history) => [...history, drawings].slice(-60));
+    setDrawingRedoStack([]);
     setDrawings(nextDrawings);
-    appendEvent("drawings_changed", { drawings: nextDrawings });
+    if (selectedDrawingId && !nextDrawings.some((drawing) => drawing.id === selectedDrawingId)) {
+      setSelectedDrawingId("");
+    }
+    appendEvent("drawings_changed", { action: "change", drawings: nextDrawings });
   };
+
+  const beginDrawing = (tool: DrawingTool) => {
+    setDrawingGroupOpen("");
+    setSelectedDrawingId("");
+    if (tool.name === "trainingTextBox") {
+      setDrawingRequest(null);
+      setDrawingTextOpen(true);
+      return;
+    }
+    setDrawingTextOpen(false);
+    setDrawingRequest((request) => ({
+      name: tool.name,
+      nonce: (request?.nonce ?? 0) + 1,
+      mode: drawingMagnetMode,
+      styles: drawingStyles(drawingColor, drawingLineWidth),
+      extendData: { toolLabel: tool.label, toolKind: tool.kind ?? "drawing" },
+    }));
+  };
+
+  const beginTextDrawing = () => {
+    const text = drawingText.trim();
+    if (!text) return;
+    setDrawingTextOpen(false);
+    setSelectedDrawingId("");
+    setDrawingRequest((request) => ({
+      name: "trainingTextBox",
+      nonce: (request?.nonce ?? 0) + 1,
+      mode: drawingMagnetMode,
+      styles: drawingStyles(drawingColor, drawingLineWidth),
+      extendData: { toolLabel: "文本框", toolKind: "text", text },
+    }));
+  };
+
+  const updateDrawing = (drawingId: string, updates: Partial<PersistedDrawing>) => {
+    const nextDrawings = drawings.map((drawing) => drawing.id === drawingId ? { ...drawing, ...updates } : drawing);
+    handleDrawingsChange(nextDrawings);
+    setDrawingsRestoreNonce((nonce) => nonce + 1);
+  };
+
+  const removeDrawing = (drawingId: string) => {
+    handleDrawingsChange(drawings.filter((drawing) => drawing.id !== drawingId));
+    setSelectedDrawingId("");
+    setDrawingsRestoreNonce((nonce) => nonce + 1);
+  };
+
+  const updateDrawingVisualStyle = (drawingId: string, color: string, size: number) => {
+    const selected = drawings.find((drawing) => drawing.id === drawingId);
+    if (!selected) return;
+    const existing = selected.styles && typeof selected.styles === "object"
+      ? selected.styles as Record<string, unknown>
+      : {};
+    const existingLine = existing.line && typeof existing.line === "object"
+      ? existing.line as Record<string, unknown>
+      : {};
+    const existingRect = existing.rect && typeof existing.rect === "object"
+      ? existing.rect as Record<string, unknown>
+      : {};
+    const existingText = existing.text && typeof existing.text === "object"
+      ? existing.text as Record<string, unknown>
+      : {};
+    updateDrawing(drawingId, {
+      styles: {
+        ...existing,
+        line: { ...existingLine, color, size },
+        rect: { ...existingRect, color: `${color}24`, borderColor: color, borderSize: size },
+        text: { ...existingText, color },
+      },
+    });
+  };
+
+  const updateDrawingTextSize = (drawingId: string, size: number) => {
+    const selected = drawings.find((drawing) => drawing.id === drawingId);
+    if (!selected) return;
+    const existing = selected.styles && typeof selected.styles === "object"
+      ? selected.styles as Record<string, unknown>
+      : {};
+    const existingText = existing.text && typeof existing.text === "object"
+      ? existing.text as Record<string, unknown>
+      : {};
+    updateDrawing(drawingId, {
+      styles: { ...existing, text: { ...existingText, size } },
+    });
+  };
+
+  const updateDrawingTextContent = (drawingId: string, text: string) => {
+    const selected = drawings.find((drawing) => drawing.id === drawingId);
+    if (!selected) return;
+    const existing = selected.extendData && typeof selected.extendData === "object"
+      ? selected.extendData as Record<string, unknown>
+      : {};
+    updateDrawing(drawingId, { extendData: { ...existing, text } });
+  };
+
+  const undoDrawing = () => {
+    const previous = drawingUndoStack.at(-1);
+    if (!previous) return;
+    setDrawingUndoStack((history) => history.slice(0, -1));
+    setDrawingRedoStack((history) => [...history, drawings].slice(-60));
+    setDrawings(previous);
+    setDrawingsRestoreNonce((nonce) => nonce + 1);
+    appendEvent("drawings_changed", { action: "undo", drawings: previous });
+  };
+
+  const redoDrawing = () => {
+    const next = drawingRedoStack.at(-1);
+    if (!next) return;
+    setDrawingRedoStack((history) => history.slice(0, -1));
+    setDrawingUndoStack((history) => [...history, drawings].slice(-60));
+    setDrawings(next);
+    setDrawingsRestoreNonce((nonce) => nonce + 1);
+    appendEvent("drawings_changed", { action: "redo", drawings: next });
+  };
+
+  const selectedDrawing = drawings.find((drawing) => drawing.id === selectedDrawingId) ?? null;
+  const selectedDrawingStyles = selectedDrawing?.styles && typeof selectedDrawing.styles === "object"
+    ? selectedDrawing.styles as {
+      line?: { color?: string; size?: number };
+      rect?: { borderColor?: string; borderSize?: number };
+      text?: { color?: string; size?: number };
+    }
+    : {};
+  const selectedDrawingColor = selectedDrawing?.name === "trainingTextBox"
+    ? selectedDrawingStyles.text?.color ?? selectedDrawingStyles.line?.color ?? drawingColor
+    : selectedDrawingStyles.line?.color ?? selectedDrawingStyles.rect?.borderColor ?? drawingColor;
+  const selectedDrawingWidth = selectedDrawingStyles.line?.size ?? selectedDrawingStyles.rect?.borderSize ?? drawingLineWidth;
+  const selectedDrawingTextSize = selectedDrawingStyles.text?.size ?? 12;
+  const selectedDrawingText = selectedDrawing?.extendData && typeof selectedDrawing.extendData === "object"
+    ? String((selectedDrawing.extendData as { text?: unknown }).text ?? "")
+    : "";
+  const selectedDrawingInputColor = /^#[0-9a-f]{6}$/i.test(selectedDrawingColor) ? selectedDrawingColor : drawingColor;
 
   const loadCoverage = useCallback(async () => {
     setCoverageLoading(true);
@@ -1695,16 +2057,23 @@ export function TrainingWorkbench() {
   };
 
   const loadInstrumentCatalog = useCallback(async () => {
-    const response = await fetch("/api/candles?instruments=1");
-    if (!response.ok) return;
-    const data = await response.json() as { instruments: Instrument[] };
-    if (!data.instruments.length) return;
-    setAvailableInstruments(data.instruments.map((item) => ({
-      id: item.id,
-      short: item.symbol,
-      label: item.name,
-      market: item.market === "CN" ? "A股" : item.market === "US" ? "美股" : item.market,
-    })));
+    try {
+      const response = await fetch("/api/candles?instruments=1");
+      if (!response.ok) return;
+      const data = await response.json() as { instruments: Array<Instrument & { timeframes?: string[] }> };
+      const instruments = data.instruments
+        .map((item) => ({
+          id: item.id,
+          short: item.symbol,
+          label: item.name,
+          market: item.market === "CN" ? "A股" : item.market === "US" ? "美股" : item.market,
+          timeframes: (item.timeframes ?? []).filter((value) => timeframes.includes(value)),
+        }))
+        .filter((item) => item.timeframes.length > 0);
+      if (instruments.length) setAvailableInstruments(instruments);
+    } finally {
+      setInstrumentCatalogReady(true);
+    }
   }, []);
 
   const loadSessions = useCallback(async (includeAll = false) => {
@@ -1720,20 +2089,32 @@ export function TrainingWorkbench() {
       const state = parseTrainingState(JSON.parse(session.stateJson));
       if (!state) return [];
       const task = state.trainingTask;
-      const closedTradePnls = state.positions
-        .filter((position) => position.status === "closed")
-        .map((position) => position.realizedPnl ?? 0);
+      const closedSessionPositions = state.positions.filter((position) => position.status === "closed");
+      const openSessionPositions = state.positions.filter((position) => position.status === "open");
+      const closedTradePnls = closedSessionPositions.map((position) => position.realizedPnl ?? 0);
+      const closedTradeReturns = closedSessionPositions.map((position) => (
+        positionReturnPct(position, position.exitPrice ?? position.entryPrice)
+      ));
+      const winningTrades = closedTradePnls.filter((value) => value > 0).length;
+      const losingTrades = closedTradePnls.filter((value) => value < 0).length;
+      const flatTrades = closedTradePnls.length - winningTrades - losingTrades;
       const pnl = state.pnlSnapshot ?? {
         realized: closedTradePnls.reduce((sum, value) => sum + value, 0),
         floating: 0,
         total: closedTradePnls.reduce((sum, value) => sum + value, 0),
-        openPositions: state.positions.filter((position) => position.status === "open").length,
-        closedPositions: state.positions.filter((position) => position.status === "closed").length,
+        openPositions: openSessionPositions.length,
+        closedPositions: closedSessionPositions.length,
       };
       const returnPct = pnl.returnPct ?? portfolioReturnPct(
-        state.positions.filter((position) => position.status === "closed"),
+        closedSessionPositions,
         0,
       );
+      const realizedReturnPct = portfolioReturnPct(closedSessionPositions, 0);
+      const openEntryNotional = openSessionPositions.reduce(
+        (sum, position) => sum + position.entryPrice * position.qty,
+        0,
+      );
+      const floatingReturnPct = openEntryNotional > 0 ? pnl.floating / openEntryNotional * 100 : 0;
       const progressSummary = task
         ? taskProgress(task, state.cursor)
         : { revealed: 0, total: 0, percent: 0 };
@@ -1753,6 +2134,12 @@ export function TrainingWorkbench() {
           ? `${formatDate(task.startTimestamp, session.timeframe)} → ${formatDate(task.endTimestamp, session.timeframe)}`
           : `保存于 K线 ${state.cursor + 1}`,
         closedTradePnls,
+        closedTradeReturns,
+        winningTrades,
+        losingTrades,
+        flatTrades,
+        realizedReturnPct,
+        floatingReturnPct,
         planScores: state.decisionSubmissions.map((submission) => decisionScore(submission.decision)),
       }];
     } catch {
@@ -1760,9 +2147,14 @@ export function TrainingWorkbench() {
     }
   }), [parseTrainingState, sessions]);
 
+  const performanceSessionSummaries = useMemo(
+    () => sessionSummaries.filter((summary) => summary.state.tradingMode === tradingMode),
+    [sessionSummaries, tradingMode],
+  );
+
   const performanceModeOptions = useMemo(
-    () => [...new Set(sessionSummaries.map((summary) => summary.modeLabel))],
-    [sessionSummaries],
+    () => [...new Set(performanceSessionSummaries.map((summary) => summary.modeLabel))],
+    [performanceSessionSummaries],
   );
 
   const filteredSessionSummaries = useMemo(() => {
@@ -1772,7 +2164,7 @@ export function TrainingWorkbench() {
     const dateTo = performanceFilters.dateTo
       ? Date.parse(`${performanceFilters.dateTo}T23:59:59.999`)
       : Number.POSITIVE_INFINITY;
-    return sessionSummaries.filter((summary) => {
+    return performanceSessionSummaries.filter((summary) => {
       const updatedAt = Date.parse(summary.session.updatedAt);
       return (
         (performanceFilters.instrumentId === "all" || summary.session.instrumentId === performanceFilters.instrumentId)
@@ -1786,21 +2178,24 @@ export function TrainingWorkbench() {
         && updatedAt <= dateTo
       );
     });
-  }, [performanceFilters, sessionSummaries]);
+  }, [performanceFilters, performanceSessionSummaries]);
 
-  const performanceRecord = useCallback((summary: typeof sessionSummaries[number]): PerformanceRecord => ({
-    totalPnl: summary.pnl.total,
-    realizedPnl: summary.pnl.realized,
-    floatingPnl: summary.pnl.floating,
-    status: summary.task?.status === "completed" ? "completed" : "active",
-    closedTradePnls: summary.closedTradePnls,
-    planScores: summary.planScores,
-    updatedAt: summary.session.updatedAt,
-  }), []);
+  const performanceRecord = useCallback((summary: typeof sessionSummaries[number]): PerformanceRecord => {
+    const capitalMode = summary.state.tradingMode === "capital";
+    return {
+      totalPnl: capitalMode ? summary.pnl.total : summary.returnPct,
+      realizedPnl: capitalMode ? summary.pnl.realized : summary.realizedReturnPct,
+      floatingPnl: capitalMode ? summary.pnl.floating : summary.floatingReturnPct,
+      status: summary.task?.status === "completed" ? "completed" : "active",
+      closedTradePnls: capitalMode ? summary.closedTradePnls : summary.closedTradeReturns,
+      planScores: summary.planScores,
+      updatedAt: summary.session.updatedAt,
+    };
+  }, []);
 
   const overallPerformance = useMemo(
-    () => summarizePerformance(sessionSummaries.map(performanceRecord)),
-    [performanceRecord, sessionSummaries],
+    () => summarizePerformance(performanceSessionSummaries.map(performanceRecord)),
+    [performanceRecord, performanceSessionSummaries],
   );
   const filteredPerformance = useMemo(
     () => summarizePerformance(filteredSessionSummaries.map(performanceRecord)),
@@ -1809,6 +2204,8 @@ export function TrainingWorkbench() {
   const selectedPerformanceSession = filteredSessionSummaries.find(
     (summary) => summary.session.id === selectedPerformanceSessionId,
   );
+  const performanceUsesCapital = tradingMode === "capital";
+  const formatPerformanceValue = (value: number) => performanceUsesCapital ? money(value) : percent(value);
 
   const mistakeSources = useMemo<MistakeSource[]>(() => sessions.flatMap((session) => {
     try {
@@ -1912,6 +2309,10 @@ export function TrainingWorkbench() {
     draft: TrainingTaskDraft,
     snapshotId?: string,
   ) => {
+    setLoading(true);
+    setChartLoadError("");
+    setTrainingReady(false);
+    setPlaying(false);
     newTaskRequestRef.current = {
       instrumentId: requestInstrumentId,
       timeframe: requestTimeframe,
@@ -1928,21 +2329,31 @@ export function TrainingWorkbench() {
     setLoadNonce((value) => value + 1);
   };
 
-  const resolveRandomRequest = (draft: TrainingTaskDraft) => {
+  const resolveRandomRequest = useCallback((draft: TrainingTaskDraft) => {
     const instrumentCandidates = appSettings.randomInstrumentMode === "current"
       ? availableInstruments.filter((item) => item.id === instrumentId)
       : appSettings.randomInstrumentMode === "market"
         ? availableInstruments.filter((item) => item.market === appSettings.randomMarket)
         : availableInstruments;
-    const selectedInstrument = randomItem(instrumentCandidates) ?? availableInstruments[0] ?? defaultInstruments[0];
-    const selectedTimeframe = appSettings.randomTimeframeMode === "current"
-      ? timeframe
+    const requestedTimeframes = appSettings.randomTimeframeMode === "current"
+      ? [timeframe]
       : appSettings.randomTimeframeMode === "fixed"
-        ? appSettings.randomTimeframe
-        : randomItem(timeframes) ?? timeframe;
+        ? [appSettings.randomTimeframe]
+        : timeframes;
+    const createPairs = (instruments: AvailableInstrument[], allowedTimeframes?: string[]) => instruments.flatMap((item) =>
+      item.timeframes
+        .filter((candidateTimeframe) => !allowedTimeframes || allowedTimeframes.includes(candidateTimeframe))
+        .map((candidateTimeframe) => ({ instrument: item, timeframe: candidateTimeframe })));
+    const exactPairs = createPairs(instrumentCandidates, requestedTimeframes);
+    const sameScopePairs = createPairs(instrumentCandidates);
+    const allPairs = createPairs(availableInstruments);
+    const selectedPair = randomItem(exactPairs)
+      ?? randomItem(sameScopePairs)
+      ?? randomItem(allPairs)
+      ?? { instrument: defaultInstruments[0], timeframe: "1d" };
     return {
-      instrumentId: selectedInstrument.id,
-      timeframe: selectedTimeframe,
+      instrumentId: selectedPair.instrument.id,
+      timeframe: selectedPair.timeframe,
       draft: {
         ...draft,
         startMode: "random" as const,
@@ -1952,7 +2363,7 @@ export function TrainingWorkbench() {
         randomRun: true,
       },
     };
-  };
+  }, [appSettings, availableInstruments, instrumentId, timeframe]);
 
   const startConfiguredTraining = () => {
     let requestInstrumentId = setupInstrumentId;
@@ -2002,6 +2413,22 @@ export function TrainingWorkbench() {
     launchTraining(requestInstrumentId, requestTimeframe, draft, requestSnapshotId);
   };
 
+  const startQuickRandomTraining = () => {
+    const blind = quickRandomMode === "blind";
+    const request = resolveRandomRequest({
+      ...defaultTrainingTaskDraft,
+      mode: quickRandomMode,
+      startMode: "random",
+      length: appSettings.randomLength,
+      hideInstrument: blind,
+      hideDate: blind,
+      hidePrice: blind,
+      randomRun: true,
+    });
+    setMobileToolbarOpen(false);
+    launchTraining(request.instrumentId, request.timeframe, request.draft);
+  };
+
   const continueRandomTraining = () => {
     const blind = trainingTask?.mode === "blind";
     const request = resolveRandomRequest({
@@ -2031,6 +2458,30 @@ export function TrainingWorkbench() {
     }, 0);
     return () => window.clearTimeout(timer);
   }, [loadInstrumentCatalog]);
+
+  useEffect(() => {
+    if (!settingsReady || !instrumentCatalogReady || startupRandomStartedRef.current) return;
+    startupRandomStartedRef.current = true;
+    const request = resolveRandomRequest({
+      ...defaultTrainingTaskDraft,
+      mode: "free",
+      startMode: "random",
+      length: appSettingsRef.current.randomLength,
+      randomRun: true,
+    });
+    newTaskRequestRef.current = {
+      instrumentId: request.instrumentId,
+      timeframe: request.timeframe,
+      draft: request.draft,
+    };
+    restoreRequestRef.current = null;
+    setInstrumentId(request.instrumentId);
+    setTimeframe(request.timeframe);
+    setLoading(true);
+    setChartLoadError("");
+    setStartupReady(true);
+    setLoadNonce((value) => value + 1);
+  }, [instrumentCatalogReady, resolveRandomRequest, settingsReady]);
 
   const importCsv = async (event: ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0];
@@ -2141,6 +2592,43 @@ export function TrainingWorkbench() {
             <button className="ghost-button" onClick={openTaskSetup}><Play size={16} />新建 Replay 训练</button>
             <button className="primary-button" onClick={saveSession}><Save size={16} />保存训练</button>
           </div>
+          <div className="mobile-quick-actions" aria-label="训练快捷操作">
+            <button type="button" aria-label="立即开始随机训练" title="立即开始随机训练" onClick={startQuickRandomTraining}><Shuffle size={15} /></button>
+            <button type="button" aria-label="新建 Replay 训练" title="新建 Replay 训练" onClick={openTaskSetup}><Play size={15} /></button>
+            <button type="button" className="save" aria-label="保存训练" title="保存训练" onClick={saveSession}><Save size={15} /></button>
+          </div>
+          <button
+            className="mobile-toolbar-toggle"
+            type="button"
+            aria-label="周期与训练工具"
+            aria-expanded={mobileToolbarOpen}
+            aria-controls="mobile-training-toolbar"
+            onClick={() => setMobileToolbarOpen((value) => !value)}
+          >
+            <span>{timeframe}</span><ChevronDown size={15} />
+          </button>
+          {mobileToolbarOpen && (
+            <div className="mobile-toolbar-popover" id="mobile-training-toolbar">
+              <div className="mobile-toolbar-meta">
+                <span>{trainingTask ? trainingModeLabels[trainingTask.mode] : "自由训练"}</span>
+                <span>{tradingMode === "capital" ? "资金账户" : "收益率"}</span>
+              </div>
+              <div className="mobile-timeframes" aria-label="手机端周期">
+                {timeframes.map((item) => (
+                  <button key={item} className={timeframe === item ? "active" : ""} onClick={() => {
+                    setMobileToolbarOpen(false);
+                    startFreshTraining(instrumentId, item);
+                  }}>{item}</button>
+                ))}
+              </div>
+              <div className="mobile-random-mode" aria-label="随机训练方式">
+                <span>随机方式</span>
+                <button className={quickRandomMode === "free" ? "active" : ""} onClick={() => setQuickRandomMode("free")}>普通</button>
+                <button className={quickRandomMode === "blind" ? "active" : ""} onClick={() => setQuickRandomMode("blind")}>盲测</button>
+                <button onClick={() => { setMobileToolbarOpen(false); openSettingsPanel("training"); }}>规则</button>
+              </div>
+            </div>
+          )}
         </header>
 
         {restoreNotice && (
@@ -2440,7 +2928,7 @@ export function TrainingWorkbench() {
               {taskDraft.mode !== "range" && (
                 <label className="task-wide-field">训练长度（揭示 K 线数）
                   <input type="number" min="0" value={taskDraft.length} onChange={(event) => setTaskDraft((draft) => ({ ...draft, length: Math.max(0, Number(event.target.value)) }))} />
-                  <small>填 0 表示练到数据末尾；填入数量后，到达边界会自动停止并进入完成状态。</small>
+                  <small>填 0 表示练到数据末尾；填入数量后，到达边界会按最后一根收盘价自动平仓、保存并进入完成状态。</small>
                 </label>
               )}
 
@@ -2468,7 +2956,7 @@ export function TrainingWorkbench() {
               <button className="random-complete-close" aria-label="退出随机训练" onClick={() => setShowRandomComplete(false)}><X size={20} /></button>
               <span>RANDOM ROUND COMPLETE</span>
               <h2 id="random-complete-title">本局随机训练已结束</h2>
-              <p>{trainingTask.mode === "blind" ? "盲测答案现在已经解锁。" : "已到达本局设定的 K 线边界。"} 本局已经自动保存，可以继续抽取下一局或查看复盘。</p>
+              <p>{trainingTask.mode === "blind" ? "盲测答案现在已经解锁。" : "已到达本局设定的 K 线边界。"} 所有持仓已按最后一根收盘价自动平仓并保存，可以继续抽取下一局或查看复盘。</p>
               <div className="random-complete-stats">
                 <div><span>{tradingMode === "capital" ? "账户总盈亏" : "总收益率"}</span><strong className={totalPnl >= 0 ? "up" : "down"}>{tradingMode === "capital" ? money(totalPnl) : percent(totalReturnPct)}</strong></div>
                 <div><span>{tradingMode === "capital" ? "账户权益" : "已实现收益率"}</span><strong>{tradingMode === "capital" ? money(equity) : percent(realizedReturnPct)}</strong></div>
@@ -2509,17 +2997,191 @@ export function TrainingWorkbench() {
 
               <div className="chart-area">
                 <div className="drawing-rail" aria-label="画图工具">
-                  {drawingTools.map(({ name, label, icon: Icon }) => (
-                    <button key={name} title={label} aria-label={label} onClick={() => setDrawingRequest({ name, nonce: Date.now() })}><Icon size={18} /></button>
-                  ))}
+                  <button
+                    className={!selectedDrawingId && !drawingGroupOpen && !drawingRequest && !drawingTextOpen ? "active" : ""}
+                    title="光标"
+                    aria-label="光标"
+                    onClick={() => {
+                      setDrawingRequest(null);
+                      setDrawingTextOpen(false);
+                      setSelectedDrawingId("");
+                      setDrawingGroupOpen("");
+                    }}
+                  ><MousePointer2 size={18} /></button>
+                  {drawingToolGroups.map((group) => {
+                    const selectedTool = group.tools.find((tool) => tool.name === groupDrawingTools[group.id]) ?? group.tools[0];
+                    const Icon = selectedTool.icon;
+                    if (group.tools.length === 1) {
+                      return (
+                        <button
+                          key={group.id}
+                          className={drawingRequest?.name === selectedTool.name ? "active" : ""}
+                          title={selectedTool.label}
+                          aria-label={selectedTool.label}
+                          onClick={() => beginDrawing(selectedTool)}
+                        ><Icon size={18} /></button>
+                      );
+                    }
+                    return (
+                      <div className="drawing-tool-group" key={group.id}>
+                        <button
+                          className={drawingGroupOpen === group.id || drawingRequest?.name === selectedTool.name ? "active" : ""}
+                          title={selectedTool.label}
+                          aria-label={selectedTool.label}
+                          onClick={() => beginDrawing(selectedTool)}
+                        ><Icon size={18} /></button>
+                        <button
+                          className="drawing-group-trigger"
+                          aria-label={`展开${group.label}`}
+                          title={`展开${group.label}`}
+                          onClick={() => setDrawingGroupOpen((open) => open === group.id ? "" : group.id)}
+                        ><ChevronRight size={9} /></button>
+                      </div>
+                    );
+                  })}
                   <span className="tool-divider" />
+                  <button
+                    className={drawingMagnetMode !== "normal" ? "active" : ""}
+                    title={drawingMagnetMode === "normal" ? "磁吸 OHLC：关闭；开启后落点会自动对齐附近 K 线的开高低收" : drawingMagnetMode === "weak_magnet" ? "磁吸 OHLC：弱吸附" : "磁吸 OHLC：强吸附"}
+                    aria-label="切换磁吸 OHLC"
+                    onClick={() => setDrawingMagnetMode((mode) => mode === "normal" ? "weak_magnet" : mode === "weak_magnet" ? "strong_magnet" : "normal")}
+                  ><Magnet size={18} /><small>{drawingMagnetMode === "weak_magnet" ? "弱" : drawingMagnetMode === "strong_magnet" ? "强" : ""}</small></button>
+                  <button title="撤销上一笔绘图" aria-label="撤销绘图" disabled={!drawingUndoStack.length} onClick={undoDrawing}><Undo2 size={18} /></button>
+                  <button title="重做已撤销的绘图" aria-label="重做绘图" disabled={!drawingRedoStack.length} onClick={redoDrawing}><Redo2 size={18} /></button>
+                  <button className={drawingObjectsOpen ? "active" : ""} title="对象树" aria-label="绘图对象列表" onClick={() => setDrawingObjectsOpen((open) => !open)}><List size={18} /></button>
                   <button title="清除绘图" aria-label="清除绘图" onClick={() => {
                     handleDrawingsChange([]);
+                    setSelectedDrawingId("");
                     setClearNonce(Date.now());
                   }}><Trash2 size={18} /></button>
                 </div>
+
+                {drawingGroupOpen && (() => {
+                  const groupIndex = drawingToolGroups.findIndex((group) => group.id === drawingGroupOpen);
+                  const group = drawingToolGroups[groupIndex];
+                  if (!group) return null;
+                  const precedingToolRows = groupIndex;
+                  return (
+                    <div className="drawing-tool-flyout" style={{ top: `${42 + precedingToolRows * 35}px` }}>
+                      <strong>{group.label}</strong>
+                      {group.tools.map((tool) => {
+                        const Icon = tool.icon;
+                        return (
+                          <button key={tool.name} onClick={() => {
+                            setGroupDrawingTools((current) => ({ ...current, [group.id]: tool.name }));
+                            beginDrawing(tool);
+                          }}>
+                            <Icon size={17} />
+                            <span>{tool.label}</span>
+                          </button>
+                        );
+                      })}
+                    </div>
+                  );
+                })()}
+
+                {drawingTextOpen && (
+                  <form className="drawing-text-editor" aria-label="文本框输入" onSubmit={(event) => {
+                    event.preventDefault();
+                    beginTextDrawing();
+                  }}>
+                    <input
+                      autoFocus
+                      value={drawingText}
+                      aria-label="图表文字"
+                      placeholder="输入要写在图表上的文字"
+                      onChange={(event) => setDrawingText(event.target.value)}
+                      onKeyDown={(event) => {
+                        if (event.key === "Escape") setDrawingTextOpen(false);
+                      }}
+                    />
+                    <button type="submit" disabled={!drawingText.trim()}>放置</button>
+                    <button type="button" aria-label="取消文本框" onClick={() => setDrawingTextOpen(false)}><X size={15} /></button>
+                    <small>输入后点“放置”，再在图上确定文本框的两个角点。</small>
+                  </form>
+                )}
+
+                {selectedDrawing && (
+                  <div className={`drawing-property-bar ${selectedDrawing.name === "trainingTextBox" ? "text-box-properties" : ""}`} aria-label="绘图属性">
+                    <span className="drawing-selected-name">{drawingLabel(selectedDrawing.name)}</span>
+                    {selectedDrawing.name === "trainingTextBox" && (
+                      <input
+                        className="drawing-text-content"
+                        value={selectedDrawingText}
+                        aria-label="文本框内容"
+                        title="文本框内容"
+                        onChange={(event) => updateDrawingTextContent(selectedDrawing.id, event.target.value)}
+                      />
+                    )}
+                    <label className="drawing-color-control" title={selectedDrawing.name === "trainingTextBox" ? "文字与边框颜色" : "线条颜色"}>
+                      <input
+                        type="color"
+                        value={selectedDrawingInputColor}
+                        aria-label={selectedDrawing.name === "trainingTextBox" ? "文字与边框颜色" : "线条颜色"}
+                        onChange={(event) => {
+                          setDrawingColor(event.target.value);
+                          updateDrawingVisualStyle(selectedDrawing.id, event.target.value, selectedDrawingWidth);
+                        }}
+                      />
+                    </label>
+                    <select
+                      value={selectedDrawingWidth}
+                      aria-label="线条粗细"
+                      title="线条粗细"
+                      onChange={(event) => {
+                        const size = Number(event.target.value);
+                        setDrawingLineWidth(size);
+                        updateDrawingVisualStyle(selectedDrawing.id, selectedDrawingInputColor, size);
+                      }}
+                    >
+                      {[1, 2, 3, 4].map((size) => <option key={size} value={size}>{size}px</option>)}
+                    </select>
+                    {selectedDrawing.name === "trainingTextBox" && (
+                      <select
+                        value={selectedDrawingTextSize}
+                        aria-label="文字大小"
+                        title="文字大小"
+                        onChange={(event) => updateDrawingTextSize(selectedDrawing.id, Number(event.target.value))}
+                      >
+                        {[10, 12, 14, 16, 18, 22, 28].map((size) => <option key={size} value={size}>{size}px</option>)}
+                      </select>
+                    )}
+                    <button title={selectedDrawing.lock ? "解锁绘图" : "锁定绘图"} aria-label={selectedDrawing.lock ? "解锁绘图" : "锁定绘图"} onClick={() => updateDrawing(selectedDrawing.id, { lock: !selectedDrawing.lock })}>
+                      {selectedDrawing.lock ? <Unlock size={16} /> : <Lock size={16} />}
+                    </button>
+                    <button title={selectedDrawing.visible ? "隐藏绘图" : "显示绘图"} aria-label={selectedDrawing.visible ? "隐藏绘图" : "显示绘图"} onClick={() => updateDrawing(selectedDrawing.id, { visible: !selectedDrawing.visible })}>
+                      {selectedDrawing.visible ? <Eye size={16} /> : <EyeOff size={16} />}
+                    </button>
+                    <button className="danger" title="删除绘图" aria-label="删除当前绘图" onClick={() => removeDrawing(selectedDrawing.id)}><Trash2 size={16} /></button>
+                    <button title="关闭属性栏" aria-label="关闭绘图属性" onClick={() => setSelectedDrawingId("")}><X size={15} /></button>
+                  </div>
+                )}
+
+                {drawingObjectsOpen && (
+                  <aside className="drawing-object-panel" aria-label="绘图对象列表">
+                    <header><strong>对象树</strong><button aria-label="关闭对象树" onClick={() => setDrawingObjectsOpen(false)}><X size={15} /></button></header>
+                    <div className="drawing-object-list">
+                      {drawings.length ? [...drawings].reverse().map((drawing, index) => (
+                        <div className={drawing.id === selectedDrawingId ? "active" : ""} key={drawing.id}>
+                          <button className="drawing-object-name" onClick={() => setSelectedDrawingId(drawing.id)}>
+                            <span>{drawingLabel(drawing.name)}</span><small>#{drawings.length - index}</small>
+                          </button>
+                          <button aria-label={drawing.visible ? "隐藏对象" : "显示对象"} onClick={() => updateDrawing(drawing.id, { visible: !drawing.visible })}>{drawing.visible ? <Eye size={14} /> : <EyeOff size={14} />}</button>
+                          <button aria-label={drawing.lock ? "解锁对象" : "锁定对象"} onClick={() => updateDrawing(drawing.id, { lock: !drawing.lock })}>{drawing.lock ? <Lock size={14} /> : <Unlock size={14} />}</button>
+                          <button className="danger" aria-label="删除对象" onClick={() => removeDrawing(drawing.id)}><Trash2 size={14} /></button>
+                        </div>
+                      )) : <p>还没有绘图对象。</p>}
+                    </div>
+                  </aside>
+                )}
                 <div className="chart-wrap">
-                  {loading ? <div className="chart-loading">正在准备历史 K 线…</div> : (
+                  {loading ? <div className="chart-loading">正在准备历史 K 线…</div> : chartLoadError ? (
+                    <div className="chart-loading" role="alert">
+                      <strong>这组行情无法开始训练</strong>
+                      <span>{chartLoadError}</span>
+                      <button type="button" className="ghost-button" onClick={startQuickRandomTraining}>重新随机</button>
+                    </div>
+                  ) : (
                     <KLineReplayChart
                       bars={visibleBars}
                       symbol={trainingTask?.hideInstrument ? "BLIND" : instrument.symbol}
@@ -2537,6 +3199,7 @@ export function TrainingWorkbench() {
                       onDecisionSelect={setSelectedDecisionId}
                       onCandleContextMenu={openDecisionForCandle}
                       onDrawingsChange={handleDrawingsChange}
+                      onDrawingSelect={(id) => setSelectedDrawingId(id ?? "")}
                     />
                   )}
                   {selectedDecision && (
@@ -2598,7 +3261,7 @@ export function TrainingWorkbench() {
                   <div>
                     <span>TRAINING COMPLETE</span>
                     <strong>{trainingTask ? `${trainingModeLabels[trainingTask.mode]}已自动结束` : "训练已结束"}</strong>
-                    <small>已到达设定边界，未来 K 线不会继续揭示。</small>
+                    <small>已到达设定边界，所有持仓已按最后一根收盘价自动平仓并保存。</small>
                   </div>
                   <button className="ghost-button" onClick={resetTraining}><RotateCcw size={15} />按原条件重练</button>
                   <button className="primary-button" onClick={() => setView("review")}><BookOpenCheck size={15} />查看复盘</button>
@@ -2624,7 +3287,7 @@ export function TrainingWorkbench() {
                   )}
                 </div>
                 <div className="order-entry">
-                  <label>数量<input type="number" min={minimumBuyQuantity(marketRules)} value={orderQty} onChange={(event) => {
+                  <label><span className="quantity-label">数量</span><input aria-label="下单数量" type="number" min={minimumBuyQuantity(marketRules)} value={orderQty} onChange={(event) => {
                     const quantity = Math.max(1, Number(event.target.value));
                     setOrderQty(quantity);
                     appendEvent("order_quantity_changed", { quantity });
@@ -2634,29 +3297,32 @@ export function TrainingWorkbench() {
                     disabled={trainingComplete || !marketRules.tradingEnabled || !marketRules.allowShort}
                     title={!marketRules.allowShort ? `${marketRules.name}禁止卖出开仓` : ""}
                     onClick={() => queueOpenOrder("sell")}
-                  ><TrendingDown size={16} />{marketRules.allowShort ? "卖出开仓" : "A股禁做空"}</button>
+                  ><TrendingDown size={16} /><span className="desktop-order-label">{marketRules.allowShort ? "卖出开仓" : "A股禁做空"}</span><span className="mobile-order-label">{marketRules.allowShort ? "卖出" : "禁做空"}</span></button>
                   <button
                     className="buy-button"
                     disabled={trainingComplete || !marketRules.tradingEnabled}
                     onClick={() => queueOpenOrder("buy")}
-                  ><TrendingUp size={16} />买入开仓</button>
+                  ><TrendingUp size={16} /><span className="desktop-order-label">买入开仓</span><span className="mobile-order-label">买入</span></button>
                   <button className="flat-button" disabled={trainingComplete || !openPositions.some((position) => !pendingOrders.some((order) => order.action === "close" && order.positionId === position.id))} onClick={queueCloseAll}>
-                    <CircleStop size={16} />{openPositions.length && !closablePositions.length ? "次日开盘全平" : "全部平仓"}
+                    <CircleStop size={16} /><span className="desktop-order-label">{openPositions.length && !closablePositions.length ? "次日开盘全平" : "全部平仓"}</span><span className="mobile-order-label">{openPositions.length && !closablePositions.length ? "次日全平" : "全平"}</span>
                   </button>
                 </div>
-                <div className={`pending-note ${ruleNotice ? "rule-warning" : ""}`}>
+                <div className={`pending-note ${ruleNotice ? "rule-warning" : ""} ${ruleNotice || pendingOrders.length ? "has-message" : ""}`}>
                   {ruleNotice || (pendingOrders.length
                     ? `${pendingOrders.length} 笔委托将在下一根开盘按 ${marketRules.name} 规则校验${tradingMode === "capital" ? ` · 已预留 ${(cashBalance - availableBuyingPower).toFixed(2)}` : ""}`
                     : `${marketRules.name}：${describeBuyQuantity(marketRules)}${marketRules.tPlusOne ? " · T+1" : ""}${marketRules.priceLimitRatio ? ` · 涨跌幅 ${(marketRules.priceLimitRatio * 100).toFixed(0)}%` : ""}`)}
                 </div>
 
-                <div className="orders-board">
+                <div className={`orders-board ${mobileOrdersExpanded ? "mobile-expanded" : ""}`}>
                   <div className="orders-board-head">
-                    <strong>订单与持仓</strong>
+                    <div className="orders-board-title">
+                      <strong>订单与持仓</strong>
+                      <button className="orders-mobile-toggle" aria-expanded={mobileOrdersExpanded} onClick={() => setMobileOrdersExpanded((value) => !value)}>{mobileOrdersExpanded ? "收起" : "明细"}</button>
+                    </div>
                     <div className="orders-tabs">
-                      <button className={orderPanelTab === "positions" ? "active" : ""} onClick={() => setOrderPanelTab("positions")}>当前持仓 <span>{openPositions.length}</span></button>
-                      <button className={orderPanelTab === "pending" ? "active" : ""} onClick={() => setOrderPanelTab("pending")}>待成交 <span>{pendingOrders.length}</span></button>
-                      <button className={orderPanelTab === "history" ? "active" : ""} onClick={() => setOrderPanelTab("history")}>已平仓 <span>{closedPositions.length}</span></button>
+                      <button className={orderPanelTab === "positions" ? "active" : ""} onClick={() => { setOrderPanelTab("positions"); setMobileOrdersExpanded(true); }}>当前持仓 <span>{openPositions.length}</span></button>
+                      <button className={orderPanelTab === "pending" ? "active" : ""} onClick={() => { setOrderPanelTab("pending"); setMobileOrdersExpanded(true); }}>待成交 <span>{pendingOrders.length}</span></button>
+                      <button className={orderPanelTab === "history" ? "active" : ""} onClick={() => { setOrderPanelTab("history"); setMobileOrdersExpanded(true); }}>已平仓 <span>{closedPositions.length}</span></button>
                     </div>
                   </div>
 
@@ -2767,16 +3433,29 @@ export function TrainingWorkbench() {
               <fieldset>
                 <legend>交易理由 <small>至少 2 个</small></legend>
                 <div className="reason-chips">
-                  {reasonOptions.map((reason) => {
+                  {[...reasonOptions, ...customReasonTags].map((reason) => {
                     const selected = decision.reasons.includes(reason);
                     return (
-                      <button key={reason} className={selected ? "selected" : ""} onClick={() => updateDecision(
+                      <button type="button" key={reason} className={selected ? "selected" : ""} onClick={() => updateDecision(
                         "reasons",
                         selected ? decision.reasons.filter((item) => item !== reason) : [...decision.reasons, reason],
                       )}>{selected ? "✓ " : "+ "}{reason}</button>
                     );
                   })}
                 </div>
+                <form className="custom-reason-tag" onSubmit={(event) => {
+                  event.preventDefault();
+                  addCustomReasonTag();
+                }}>
+                  <input
+                    aria-label="自定义交易理由标签"
+                    maxLength={20}
+                    placeholder="输入自定义 Tag"
+                    value={customReasonInput}
+                    onChange={(event) => setCustomReasonInput(event.target.value)}
+                  />
+                  <button type="submit" disabled={!customReasonInput.trim()}>添加</button>
+                </form>
               </fieldset>
               <div className="price-plan">
                 <label>失效 / 止损<input inputMode="decimal" placeholder="价格" value={decision.stop} onChange={(event) => updateDecision("stop", event.target.value)} /></label>
@@ -2810,13 +3489,15 @@ export function TrainingWorkbench() {
                 <span className="section-label">全部训练</span>
                 <h2>整体表现</h2>
               </div>
-              <small>统计 {overallPerformance.sessions} 场已保存训练，未保存的临时训练不计入。</small>
+              <small>当前仅统计{performanceUsesCapital ? "资金账户" : "收益率"}模式：{overallPerformance.sessions} 场已保存训练，未保存的临时训练不计入。</small>
             </div>
             <div className="performance-overview">
               <div className="performance-hero">
-                <span>累计总盈亏</span>
-                <strong className={overallPerformance.totalPnl >= 0 ? "up" : "down"}>{money(overallPerformance.totalPnl)}</strong>
-                <small>已实现 {money(overallPerformance.realizedPnl)} · 浮动 {money(overallPerformance.floatingPnl)}</small>
+                <span>{performanceUsesCapital ? "累计总盈亏" : "训练收益率合计"}</span>
+                <strong className={overallPerformance.totalPnl >= 0 ? "up" : "down"}>{formatPerformanceValue(overallPerformance.totalPnl)}</strong>
+                <small>{performanceUsesCapital
+                  ? `已实现 ${money(overallPerformance.realizedPnl)} · 浮动 ${money(overallPerformance.floatingPnl)}`
+                  : `已实现收益率合计 ${percent(overallPerformance.realizedPnl)} · 浮动收益率合计 ${percent(overallPerformance.floatingPnl)}`}</small>
               </div>
               <div className="performance-metric">
                 <span>训练场次</span>
@@ -2824,19 +3505,24 @@ export function TrainingWorkbench() {
                 <small>{overallPerformance.completedSessions} 场完成 · 完成率 {overallPerformance.completionRate}%</small>
               </div>
               <div className="performance-metric">
-                <span>交易胜率</span>
+                <span>按交易胜率</span>
                 <strong>{overallPerformance.winRate}%</strong>
-                <small>{overallPerformance.winningTrades} 胜 / {overallPerformance.losingTrades} 负 / {overallPerformance.flatTrades} 平</small>
+                <small>跨全部训练共 {overallPerformance.closedTrades} 笔已平仓交易：{overallPerformance.winningTrades} 胜 / {overallPerformance.losingTrades} 负 / {overallPerformance.flatTrades} 平</small>
               </div>
               <div className="performance-metric">
-                <span>平均每场</span>
-                <strong className={overallPerformance.averagePnl >= 0 ? "up" : "down"}>{money(overallPerformance.averagePnl)}</strong>
-                <small>最大回撤 {overallPerformance.maxDrawdown.toFixed(2)}</small>
+                <span>按训练胜率</span>
+                <strong>{overallPerformance.sessionWinRate}%</strong>
+                <small>{overallPerformance.winningSessions} 胜 / {overallPerformance.losingSessions} 负 / {overallPerformance.flatSessions} 平 · 每场已保存训练</small>
+              </div>
+              <div className="performance-metric">
+                <span>{performanceUsesCapital ? "平均每场盈亏" : "平均每场收益率"}</span>
+                <strong className={overallPerformance.averagePnl >= 0 ? "up" : "down"}>{formatPerformanceValue(overallPerformance.averagePnl)}</strong>
+                <small>最大回撤 {formatPerformanceValue(-overallPerformance.maxDrawdown)}</small>
               </div>
               <div className="performance-metric">
                 <span>Profit Factor</span>
                 <strong>{profitFactorLabel(overallPerformance.profitFactor)}</strong>
-                <small>总盈利 ÷ 总亏损</small>
+                <small>{performanceUsesCapital ? "交易总盈利 ÷ 交易总亏损" : "盈利收益率合计 ÷ 亏损收益率合计"}</small>
               </div>
             </div>
 
@@ -2855,7 +3541,7 @@ export function TrainingWorkbench() {
                 <label>品种
                   <select value={performanceFilters.instrumentId} onChange={(event) => setPerformanceFilters((filters) => ({ ...filters, instrumentId: event.target.value }))}>
                     <option value="all">全部品种</option>
-                    {[...new Set(sessionSummaries.map((summary) => summary.session.instrumentId))].map((value) => <option key={value} value={value}>{value}</option>)}
+                    {[...new Set(performanceSessionSummaries.map((summary) => summary.session.instrumentId))].map((value) => <option key={value} value={value}>{value}</option>)}
                   </select>
                 </label>
                 <label>周期
@@ -2894,17 +3580,18 @@ export function TrainingWorkbench() {
               <small>指标会随上方筛选条件即时更新。</small>
             </div>
             <div className="filtered-performance-grid">
-              <div><span>组合总盈亏</span><strong className={filteredPerformance.totalPnl >= 0 ? "up" : "down"}>{money(filteredPerformance.totalPnl)}</strong></div>
-              <div><span>交易胜率</span><strong>{filteredPerformance.winRate}%</strong><small>{filteredPerformance.closedTrades} 笔已平仓</small></div>
-              <div><span>Profit Factor</span><strong>{profitFactorLabel(filteredPerformance.profitFactor)}</strong><small>总盈利 {filteredPerformance.grossProfit.toFixed(2)}</small></div>
-              <div><span>最大回撤</span><strong className="down">-{filteredPerformance.maxDrawdown.toFixed(2)}</strong><small>按训练保存顺序计算</small></div>
+              <div><span>{performanceUsesCapital ? "组合总盈亏" : "训练集收益率合计"}</span><strong className={filteredPerformance.totalPnl >= 0 ? "up" : "down"}>{formatPerformanceValue(filteredPerformance.totalPnl)}</strong></div>
+              <div><span>按交易胜率</span><strong>{filteredPerformance.winRate}%</strong><small>跨所选训练共 {filteredPerformance.closedTrades} 笔：{filteredPerformance.winningTrades} 胜 / {filteredPerformance.losingTrades} 负 / {filteredPerformance.flatTrades} 平</small></div>
+              <div><span>按训练胜率</span><strong>{filteredPerformance.sessionWinRate}%</strong><small>{filteredPerformance.winningSessions} 胜 / {filteredPerformance.losingSessions} 负 / {filteredPerformance.flatSessions} 平 · {filteredPerformance.sessions} 场</small></div>
+              <div><span>Profit Factor</span><strong>{profitFactorLabel(filteredPerformance.profitFactor)}</strong><small>{performanceUsesCapital ? `交易总盈利 ${money(filteredPerformance.grossProfit)}` : `盈利收益率合计 ${percent(filteredPerformance.grossProfit)}`}</small></div>
+              <div><span>最大回撤</span><strong className="down">{formatPerformanceValue(-filteredPerformance.maxDrawdown)}</strong><small>按训练保存顺序计算</small></div>
               <div><span>计划完整度</span><strong>{filteredPerformance.averagePlanScore}%</strong><small>{filteredPerformance.planCount} 份正式计划</small></div>
             </div>
 
             <div className="performance-distribution">
               <div className="performance-section-head">
                 <div><span className="section-label">交易结果</span><h2>胜负分布</h2></div>
-                <small>{filteredPerformance.closedTrades ? "仅统计已平仓交易" : "筛选范围内还没有已平仓交易"}</small>
+                <small>{filteredPerformance.closedTrades ? "已汇总所选训练内的每一笔已平仓交易；未平仓浮盈亏不计入交易胜率" : "筛选范围内还没有已平仓交易"}</small>
               </div>
               <div className="distribution-track" aria-label="已平仓交易胜负分布">
                 <span className="wins" style={{ width: `${filteredPerformance.closedTrades ? filteredPerformance.winningTrades / filteredPerformance.closedTrades * 100 : 0}%` }} />
@@ -2926,7 +3613,7 @@ export function TrainingWorkbench() {
               {filteredSessionSummaries.length ? (
                 <div className="performance-session-list">
                   <div className="performance-session-header">
-                    <span>训练</span><span>模式 / 区间</span><span>状态</span><span>总盈亏</span><span>保存时间</span>
+                    <span>训练</span><span>模式 / 区间</span><span>状态</span><span>{performanceUsesCapital ? "总盈亏" : "总收益率"}</span><span>保存时间</span>
                   </div>
                   {filteredSessionSummaries.map((summary) => (
                     <button
@@ -2938,7 +3625,10 @@ export function TrainingWorkbench() {
                       <span><strong>{summary.session.instrumentId}</strong><small>{summary.session.timeframe}</small></span>
                       <span><strong>{summary.modeLabel}</strong><small>{summary.rangeLabel}</small></span>
                       <span className={summary.task?.status === "completed" ? "session-status completed" : "session-status"}>{summary.task?.status === "completed" ? "已完成" : "可继续"}</span>
-                      <strong className={summary.pnl.total >= 0 ? "up" : "down"}>{summary.state.tradingMode === "capital" ? money(summary.pnl.total) : percent(summary.returnPct)}</strong>
+                      <span className="performance-session-result">
+                        <strong className={(summary.state.tradingMode === "capital" ? summary.pnl.total : summary.returnPct) >= 0 ? "up" : "down"}>{summary.state.tradingMode === "capital" ? money(summary.pnl.total) : percent(summary.returnPct)}</strong>
+                        <small>{summary.closedTradePnls.length} 笔已平仓 · {summary.winningTrades}胜/{summary.losingTrades}负/{summary.flatTrades}平</small>
+                      </span>
                       <time>{new Date(summary.session.updatedAt).toLocaleString("zh-CN")}</time>
                     </button>
                   ))}
@@ -3104,9 +3794,9 @@ export function TrainingWorkbench() {
               <div className="review-hero">
                 <span>{reviewState.tradingMode === "capital" ? "本次已实现盈亏" : "本次已实现收益率"}</span><strong className={reviewRealizedPnl >= 0 ? "up" : "down"}>{reviewState.tradingMode === "capital" ? money(reviewRealizedPnl) : percent(reviewRealizedReturnPct)}</strong><small>{reviewClosedPositions.length} 笔已平仓 · {reviewState.executions.length} 笔成交 · 最近计划完整度 {reviewPlanScore}%</small>
               </div>
-              <div className="metric-card"><span>胜率</span><strong>{reviewClosedPositions.length ? Math.round(reviewClosedPositions.filter((position) => (position.realizedPnl ?? 0) > 0).length / reviewClosedPositions.length * 100) : 0}%</strong><small>仅统计已平仓成交</small></div>
+              <div className="metric-card"><span>本场按交易胜率</span><strong>{reviewTradeWinRate}%</strong><small>{reviewWinningTrades} 胜 / {reviewLosingTrades} 负 / {reviewFlatTrades} 平 · 盈利仓位 ÷ 已平仓仓位</small></div>
               <div className="metric-card"><span>已提交计划</span><strong>{reviewState.decisionSubmissions.length}</strong><small>每次提交均绑定原始K线</small></div>
-              <div className="metric-card"><span>成交记录</span><strong>{reviewState.executions.length}</strong><small>{reviewState.snapshotHash ? `快照 ${reviewState.snapshotHash.slice(0, 8)}` : "旧训练待建立快照"}</small></div>
+              <div className="metric-card"><span>本场训练结果</span><strong className={reviewTotalResult >= 0 ? "up" : "down"}>{reviewState.tradingMode === "capital" ? money(reviewTotalResult) : percent(reviewTotalResult)}</strong><small>{reviewTotalResult > 0 ? "本场计为训练胜" : reviewTotalResult < 0 ? "本场计为训练负" : "本场计为训练平"} · {reviewState.executions.length} 笔成交</small></div>
             </div>
             <div className="review-columns">
               <article className="insight-card">
@@ -3142,10 +3832,11 @@ export function TrainingWorkbench() {
                         {summary.task && <span>进度 {summary.progressSummary.revealed}/{summary.progressSummary.total}</span>}
                       </div>
                       <div className="session-pnl">
-                        <span>总盈亏<strong className={summary.pnl.total >= 0 ? "up" : "down"}>{money(summary.pnl.total)}</strong></span>
-                        <span>已实现<strong>{money(summary.pnl.realized)}</strong></span>
-                        <span>浮动<strong>{money(summary.pnl.floating)}</strong></span>
+                        <span>{summary.state.tradingMode === "capital" ? "总盈亏" : "总收益率"}<strong className={(summary.state.tradingMode === "capital" ? summary.pnl.total : summary.returnPct) >= 0 ? "up" : "down"}>{summary.state.tradingMode === "capital" ? money(summary.pnl.total) : percent(summary.returnPct)}</strong></span>
+                        <span>{summary.state.tradingMode === "capital" ? "已实现" : "已实现收益率"}<strong>{summary.state.tradingMode === "capital" ? money(summary.pnl.realized) : percent(summary.realizedReturnPct)}</strong></span>
+                        <span>{summary.state.tradingMode === "capital" ? "浮动" : "浮动收益率"}<strong>{summary.state.tradingMode === "capital" ? money(summary.pnl.floating) : percent(summary.floatingReturnPct)}</strong></span>
                         <span>{summary.pnl.openPositions} 笔持仓 · {summary.pnl.closedPositions} 笔平仓</span>
+                        <span>已平仓交易 {summary.winningTrades} 胜 / {summary.losingTrades} 负 / {summary.flatTrades} 平</span>
                       </div>
                       <small>保存时间 {new Date(summary.session.updatedAt).toLocaleString("zh-CN")}</small>
                     </div>

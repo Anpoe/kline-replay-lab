@@ -4,12 +4,19 @@ import {
   useCallback,
   useEffect,
   useRef,
+  useState,
   type MouseEvent as ReactMouseEvent,
   type PointerEvent as ReactPointerEvent,
 } from "react";
 import type { Chart, KLineData, Overlay, OverlayTemplate, Period, Point } from "klinecharts";
 
-type DrawingRequest = { name: string; nonce: number } | null;
+export type DrawingRequest = {
+  name: string;
+  nonce: number;
+  mode?: "normal" | "weak_magnet" | "strong_magnet";
+  styles?: unknown;
+  extendData?: unknown;
+} | null;
 
 export type PersistedDrawing = {
   id: string;
@@ -56,8 +63,315 @@ type DecisionOverlayData = DecisionMarker & { onSelect?: (id: string) => void };
 const USER_DRAWING_GROUP = "user-drawings";
 const TRADE_MARKER_GROUP = "trade-markers";
 const DECISION_MARKER_GROUP = "decision-markers";
+const MOBILE_CHART_QUERY = "(max-width: 600px)";
+const MOBILE_REPLAY_RIGHT_OFFSET = 16;
+const MOBILE_REPLAY_BAR_SPACE = 8;
 let tradeOverlayRegistered = false;
 let decisionOverlayRegistered = false;
+let trainingDrawingOverlaysRegistered = false;
+
+type FigureStyleBag = {
+  line?: { color?: string; size?: number; style?: string; dashedValue?: number[] };
+  rect?: {
+    color?: string;
+    borderColor?: string;
+    borderSize?: number;
+    borderStyle?: string;
+    borderDashedValue?: number[];
+  };
+  text?: { color?: string; size?: number };
+};
+
+const overlayIgnoreEvents = [
+  "onClick",
+  "onDoubleClick",
+  "onRightClick",
+  "onPressedMoveStart",
+  "onPressedMoving",
+  "onPressedMoveEnd",
+  "onSelected",
+  "onDeselected",
+];
+
+function rgbaFromHex(hex: string, alpha: number) {
+  const value = hex.replace("#", "");
+  if (!/^[0-9a-f]{6}$/i.test(value)) return `rgba(41, 98, 255, ${alpha})`;
+  const red = Number.parseInt(value.slice(0, 2), 16);
+  const green = Number.parseInt(value.slice(2, 4), 16);
+  const blue = Number.parseInt(value.slice(4, 6), 16);
+  return `rgba(${red}, ${green}, ${blue}, ${alpha})`;
+}
+
+function ensureTrainingDrawingOverlays(registerOverlay: (template: OverlayTemplate) => void) {
+  if (trainingDrawingOverlaysRegistered) return;
+
+  registerOverlay({
+    name: "trainingRectangle",
+    totalStep: 3,
+    needDefaultPointFigure: true,
+    needDefaultXAxisFigure: true,
+    needDefaultYAxisFigure: true,
+    createPointFigures: ({ overlay, coordinates }) => {
+      if (coordinates.length < 2) return [];
+      const start = coordinates[0];
+      const end = coordinates[1];
+      const styles = (overlay.styles ?? {}) as FigureStyleBag;
+      const lineColor = styles.line?.color ?? styles.rect?.borderColor ?? "#2962ff";
+      return [{
+        type: "rect",
+        attrs: {
+          x: Math.min(start.x, end.x),
+          y: Math.min(start.y, end.y),
+          width: Math.abs(end.x - start.x),
+          height: Math.abs(end.y - start.y),
+        },
+        styles: {
+          style: "stroke_fill",
+          color: styles.rect?.color ?? rgbaFromHex(lineColor, 0.14),
+          borderColor: styles.rect?.borderColor ?? lineColor,
+          borderSize: styles.rect?.borderSize ?? styles.line?.size ?? 2,
+          borderStyle: styles.rect?.borderStyle ?? "solid",
+          borderDashedValue: styles.rect?.borderDashedValue ?? [4, 4],
+        },
+        ignoreEvent: overlayIgnoreEvents,
+      }];
+    },
+  });
+
+  const registerPositionOverlay = (name: string, direction: "long" | "short" | "auto") => {
+    registerOverlay({
+      name,
+      totalStep: 4,
+      needDefaultPointFigure: true,
+      needDefaultXAxisFigure: true,
+      needDefaultYAxisFigure: true,
+      createPointFigures: ({ overlay, coordinates }) => {
+        const entryPoint = coordinates[0];
+        const targetPoint = coordinates[1];
+        if (!entryPoint || !targetPoint) return [];
+        const stopPoint = coordinates[2];
+        const entryValue = Number(overlay.points[0]?.value ?? 0);
+        const rawTargetValue = Number(overlay.points[1]?.value ?? entryValue);
+        const rawStopValue = Number(overlay.points[2]?.value ?? entryValue);
+        const resolvedDirection = direction === "auto"
+          ? (rawTargetValue >= entryValue ? "long" : "short")
+          : direction;
+        const targetDistance = Math.abs(rawTargetValue - entryValue);
+        const stopDistance = Math.abs(rawStopValue - entryValue);
+        const targetValue = direction === "auto"
+          ? rawTargetValue
+          : resolvedDirection === "long" ? entryValue + targetDistance : entryValue - targetDistance;
+        const stopValue = direction === "auto"
+          ? rawStopValue
+          : resolvedDirection === "long" ? entryValue - stopDistance : entryValue + stopDistance;
+        const visualTargetPoint = direction === "auto" ? targetPoint : {
+          ...targetPoint,
+          y: resolvedDirection === "long"
+            ? entryPoint.y - Math.abs(targetPoint.y - entryPoint.y)
+            : entryPoint.y + Math.abs(targetPoint.y - entryPoint.y),
+        };
+        const visualStopPoint = !stopPoint ? undefined : direction === "auto" ? stopPoint : {
+          ...stopPoint,
+          y: resolvedDirection === "long"
+            ? entryPoint.y + Math.abs(stopPoint.y - entryPoint.y)
+            : entryPoint.y - Math.abs(stopPoint.y - entryPoint.y),
+        };
+        const rightX = Math.max(entryPoint.x, targetPoint.x, stopPoint?.x ?? targetPoint.x);
+        const leftX = Math.min(entryPoint.x, rightX);
+        const width = Math.max(1, Math.abs(rightX - entryPoint.x));
+        const styles = (overlay.styles ?? {}) as FigureStyleBag;
+        const accent = styles.line?.color ?? "#2962ff";
+        const lineSize = styles.line?.size ?? 1;
+        const figures: Array<Record<string, unknown>> = [
+          {
+            type: "rect",
+            attrs: {
+              x: leftX,
+              y: Math.min(entryPoint.y, visualTargetPoint.y),
+              width,
+              height: Math.abs(visualTargetPoint.y - entryPoint.y),
+            },
+            styles: {
+              style: "stroke_fill",
+              color: "rgba(38, 166, 154, 0.20)",
+              borderColor: "rgba(38, 166, 154, 0.88)",
+              borderSize: 1,
+            },
+            ignoreEvent: overlayIgnoreEvents,
+          },
+          {
+            type: "line",
+            attrs: { coordinates: [{ x: entryPoint.x, y: entryPoint.y }, { x: rightX, y: entryPoint.y }] },
+            styles: { style: "solid", size: lineSize, color: accent },
+            ignoreEvent: overlayIgnoreEvents,
+          },
+        ];
+
+        const reward = resolvedDirection === "long" ? targetValue - entryValue : entryValue - targetValue;
+        const rewardPct = entryValue ? (reward / entryValue) * 100 : 0;
+        figures.push({
+          type: "text",
+          attrs: {
+            x: rightX - 5,
+            y: visualTargetPoint.y,
+            text: `目标 ${rewardPct >= 0 ? "+" : ""}${rewardPct.toFixed(2)}%`,
+            align: "right",
+            baseline: "middle",
+          },
+          styles: { color: "#dff8f0", size: 10, backgroundColor: "#168a73", borderRadius: 3, paddingLeft: 4, paddingRight: 4, paddingTop: 2, paddingBottom: 2 },
+          ignoreEvent: overlayIgnoreEvents,
+        });
+
+        if (visualStopPoint) {
+          figures.push({
+            type: "rect",
+            attrs: {
+              x: leftX,
+              y: Math.min(entryPoint.y, visualStopPoint.y),
+              width,
+              height: Math.abs(visualStopPoint.y - entryPoint.y),
+            },
+            styles: {
+              style: "stroke_fill",
+              color: "rgba(239, 83, 80, 0.18)",
+              borderColor: "rgba(239, 83, 80, 0.88)",
+              borderSize: 1,
+            },
+            ignoreEvent: overlayIgnoreEvents,
+          });
+          const risk = resolvedDirection === "long" ? entryValue - stopValue : stopValue - entryValue;
+          const riskPct = entryValue ? (risk / entryValue) * 100 : 0;
+          const ratio = risk > 0 ? Math.max(0, reward / risk) : 0;
+          figures.push(
+            {
+              type: "text",
+              attrs: {
+                x: rightX - 5,
+                y: visualStopPoint.y,
+                text: `止损 ${riskPct >= 0 ? "-" : "+"}${Math.abs(riskPct).toFixed(2)}%`,
+                align: "right",
+                baseline: "middle",
+              },
+              styles: { color: "#fff0ef", size: 10, backgroundColor: "#b84040", borderRadius: 3, paddingLeft: 4, paddingRight: 4, paddingTop: 2, paddingBottom: 2 },
+              ignoreEvent: overlayIgnoreEvents,
+            },
+            {
+              type: "text",
+              attrs: {
+                x: rightX - 5,
+                y: entryPoint.y,
+                text: `${resolvedDirection === "long" ? "多" : "空"} · 盈亏比 1:${ratio.toFixed(2)}`,
+                align: "right",
+                baseline: "bottom",
+              },
+              styles: { color: "#ecf3f1", size: 10, backgroundColor: "rgba(15, 24, 27, .88)", borderColor: accent, borderSize: 1, borderRadius: 3, paddingLeft: 4, paddingRight: 4, paddingTop: 2, paddingBottom: 2 },
+              ignoreEvent: overlayIgnoreEvents,
+            },
+          );
+        }
+        return figures;
+      },
+    });
+  };
+
+  registerPositionOverlay("trainingPosition", "auto");
+  registerPositionOverlay("trainingLongPosition", "long");
+  registerPositionOverlay("trainingShortPosition", "short");
+  registerOverlay({
+    name: "trainingTextNote",
+    totalStep: 2,
+    needDefaultPointFigure: true,
+    needDefaultXAxisFigure: false,
+    needDefaultYAxisFigure: false,
+    createPointFigures: ({ overlay, coordinates }) => {
+      const point = coordinates[0];
+      const extendData = overlay.extendData as { text?: string } | null;
+      const text = extendData?.text?.trim();
+      if (!point || !text) return [];
+      const styles = (overlay.styles ?? {}) as FigureStyleBag;
+      return [{
+        type: "text",
+        attrs: { x: point.x + 7, y: point.y - 7, text, align: "left", baseline: "bottom" },
+        styles: {
+          color: styles.text?.color ?? styles.line?.color ?? "#dce9e6",
+          size: styles.text?.size ?? 12,
+          weight: 600,
+        },
+        ignoreEvent: overlayIgnoreEvents,
+      }];
+    },
+  });
+  registerOverlay({
+    name: "trainingTextBox",
+    totalStep: 3,
+    needDefaultPointFigure: true,
+    needDefaultXAxisFigure: true,
+    needDefaultYAxisFigure: true,
+    createPointFigures: ({ overlay, coordinates }) => {
+      const start = coordinates[0];
+      const end = coordinates[1];
+      const extendData = overlay.extendData as { text?: string } | null;
+      const text = extendData?.text?.trim();
+      if (!start || !end || !text) return [];
+
+      const styles = (overlay.styles ?? {}) as FigureStyleBag;
+      const textColor = styles.text?.color ?? styles.line?.color ?? "#dce9e6";
+      const fontSize = styles.text?.size ?? 12;
+      const borderColor = styles.rect?.borderColor ?? styles.line?.color ?? "#2962ff";
+      const left = Math.min(start.x, end.x);
+      const top = Math.min(start.y, end.y);
+      const width = Math.max(20, Math.abs(end.x - start.x));
+      const height = Math.max(fontSize + 12, Math.abs(end.y - start.y));
+      const lineHeight = Math.max(12, Math.round(fontSize * 1.35));
+      const maxCharacters = Math.max(2, Math.floor((width - 12) / Math.max(5, fontSize * 0.62)));
+      const maxLines = Math.max(1, Math.floor((height - 12) / lineHeight));
+      const wrappedLines = text.split("\n").flatMap((paragraph) => {
+        if (!paragraph) return [""];
+        const chunks: string[] = [];
+        for (let offset = 0; offset < paragraph.length; offset += maxCharacters) {
+          chunks.push(paragraph.slice(offset, offset + maxCharacters));
+        }
+        return chunks;
+      }).slice(0, maxLines);
+
+      const figures: Array<Record<string, unknown>> = [{
+        type: "rect",
+        attrs: { x: left, y: top, width, height },
+        styles: {
+          style: "stroke_fill",
+          color: styles.rect?.color ?? "rgba(12, 20, 22, 0.70)",
+          borderColor,
+          borderSize: styles.rect?.borderSize ?? styles.line?.size ?? 1,
+          borderStyle: styles.rect?.borderStyle ?? "solid",
+        },
+        ignoreEvent: overlayIgnoreEvents,
+      }];
+      wrappedLines.forEach((line, index) => {
+        figures.push({
+          type: "text",
+          attrs: {
+            x: left + 6,
+            y: top + 6 + index * lineHeight,
+            text: line,
+            align: "left",
+            baseline: "top",
+          },
+          styles: { color: textColor, size: fontSize, weight: 500 },
+          ignoreEvent: overlayIgnoreEvents,
+        });
+      });
+      return figures;
+    },
+  });
+  trainingDrawingOverlaysRegistered = true;
+}
+
+function alignLatestCandle(chart: Chart) {
+  chart.scrollToRealTime();
+  if (window.matchMedia(MOBILE_CHART_QUERY).matches) {
+    chart.setOffsetRightDistance(MOBILE_REPLAY_RIGHT_OFFSET);
+  }
+}
 
 function ensureTradeOverlay(registerOverlay: (template: OverlayTemplate<TradeOverlayData>) => void) {
   if (tradeOverlayRegistered) return;
@@ -318,6 +632,7 @@ export function KLineReplayChart({
   onDecisionSelect,
   onCandleContextMenu,
   onDrawingsChange,
+  onDrawingSelect,
 }: {
   bars: KLineData[];
   symbol: string;
@@ -335,9 +650,12 @@ export function KLineReplayChart({
   onDecisionSelect: (id: string) => void;
   onCandleContextMenu: (target: CandleContextTarget) => void;
   onDrawingsChange: (drawings: PersistedDrawing[]) => void;
+  onDrawingSelect: (id: string | null) => void;
 }) {
   const containerRef = useRef<HTMLDivElement>(null);
   const chartRef = useRef<Chart | null>(null);
+  const preservedBarSpaceRef = useRef<number | null>(null);
+  const mobileRefreshZoomAppliedRef = useRef(false);
   const barsRef = useRef<KLineData[]>(bars);
   const tradeMarkersRef = useRef<TradeMarker[]>(tradeMarkers);
   const decisionMarkersRef = useRef<DecisionMarker[]>(decisionMarkers);
@@ -345,10 +663,29 @@ export function KLineReplayChart({
   const onDecisionSelectRef = useRef(onDecisionSelect);
   const onCandleContextMenuRef = useRef(onCandleContextMenu);
   const onDrawingsChangeRef = useRef(onDrawingsChange);
+  const onDrawingSelectRef = useRef(onDrawingSelect);
   const suppressDrawingEventsRef = useRef(false);
   const longPressTimerRef = useRef<number | null>(null);
   const touchStartRef = useRef<{ x: number; y: number } | null>(null);
   const lastContextTriggerRef = useRef<{ timestamp: number; triggeredAt: number } | null>(null);
+  const [drawingActive, setDrawingActive] = useState(false);
+
+  const setDrawingInteraction = useCallback((active: boolean, chart = chartRef.current) => {
+    setDrawingActive(active);
+    chart?.setScrollEnabled(!active);
+    chart?.setZoomEnabled(!active);
+  }, []);
+
+  const applyResponsiveViewport = useCallback((chart: Chart, applyRefreshDefault = false) => {
+    const mobile = window.matchMedia(MOBILE_CHART_QUERY).matches;
+    if (mobile && applyRefreshDefault && !mobileRefreshZoomAppliedRef.current) {
+      chart.setBarSpace(MOBILE_REPLAY_BAR_SPACE);
+      mobileRefreshZoomAppliedRef.current = true;
+    } else if (preservedBarSpaceRef.current != null) {
+      chart.setBarSpace(preservedBarSpaceRef.current);
+    }
+    alignLatestCandle(chart);
+  }, []);
 
   const createPersistedDrawing = useCallback((chart: Chart, drawing: PersistedDrawing) => chart.createOverlay({
     id: drawing.id,
@@ -368,6 +705,8 @@ export function KLineReplayChart({
     onPressedMoveEnd: ({ chart: eventChart }) => {
       if (!suppressDrawingEventsRef.current) onDrawingsChangeRef.current(getPersistedDrawings(eventChart));
     },
+    onSelected: ({ overlay }) => onDrawingSelectRef.current(overlay.id),
+    onDeselected: () => onDrawingSelectRef.current(null),
     onRemoved: ({ chart: eventChart }) => {
       if (suppressDrawingEventsRef.current) return;
       queueMicrotask(() => onDrawingsChangeRef.current(getPersistedDrawings(eventChart)));
@@ -390,6 +729,7 @@ export function KLineReplayChart({
       if (cancelled || !containerRef.current) return;
       ensureTradeOverlay(registerOverlay);
       ensureDecisionOverlay(registerOverlay);
+      ensureTrainingDrawingOverlays(registerOverlay);
       const chart = init(containerRef.current, {
         locale: "zh-CN",
         timezone,
@@ -464,8 +804,17 @@ export function KLineReplayChart({
       syncTradeMarkers(chart, tradeMarkersRef.current);
       syncDecisionMarkers(chart, decisionMarkersRef.current, (id) => onDecisionSelectRef.current(id));
       restoreDrawings(chart, drawingsRef.current);
+      const preserveCurrentZoom = () => {
+        preservedBarSpaceRef.current = chart.getBarSpace().bar;
+      };
+      chart.subscribeAction("onZoom", preserveCurrentZoom);
+      requestAnimationFrame(() => applyResponsiveViewport(chart, true));
 
-      disposeChart = () => dispose(chart);
+      disposeChart = () => {
+        preservedBarSpaceRef.current = chart.getBarSpace().bar;
+        chart.unsubscribeAction("onZoom", preserveCurrentZoom);
+        dispose(chart);
+      };
     });
 
     return () => {
@@ -473,7 +822,7 @@ export function KLineReplayChart({
       disposeChart?.();
       chartRef.current = null;
     };
-  }, [hideDate, hidePrice, pricePrecision, restoreDrawings, symbol, timeframe, timezone]);
+  }, [applyResponsiveViewport, hideDate, hidePrice, pricePrecision, restoreDrawings, symbol, timeframe, timezone]);
 
   useEffect(() => {
     barsRef.current = bars;
@@ -482,13 +831,32 @@ export function KLineReplayChart({
     chart.setTimezone(timezone);
     chart.setSymbol({ ticker: symbol, pricePrecision, volumePrecision: 0 });
     chart.setPeriod(periods[timeframe] ?? periods["1d"]);
+    const barSpaceBeforeReset = chart.getBarSpace().bar;
+    preservedBarSpaceRef.current = barSpaceBeforeReset;
     chart.resetData();
     requestAnimationFrame(() => {
-      chart.scrollToRealTime();
+      chart.setBarSpace(barSpaceBeforeReset);
+      alignLatestCandle(chart);
       syncTradeMarkers(chart, tradeMarkersRef.current);
       syncDecisionMarkers(chart, decisionMarkersRef.current, (id) => onDecisionSelectRef.current(id));
+      requestAnimationFrame(() => {
+        chart.setBarSpace(barSpaceBeforeReset);
+        alignLatestCandle(chart);
+      });
     });
   }, [bars, pricePrecision, symbol, timeframe, timezone]);
+
+  useEffect(() => {
+    const mobileQuery = window.matchMedia(MOBILE_CHART_QUERY);
+    const handleViewportChange = () => {
+      const chart = chartRef.current;
+      if (!chart) return;
+      requestAnimationFrame(() => alignLatestCandle(chart));
+    };
+
+    mobileQuery.addEventListener("change", handleViewportChange);
+    return () => mobileQuery.removeEventListener("change", handleViewportChange);
+  }, []);
 
   useEffect(() => {
     tradeMarkersRef.current = tradeMarkers;
@@ -511,6 +879,10 @@ export function KLineReplayChart({
   }, [onDrawingsChange]);
 
   useEffect(() => {
+    onDrawingSelectRef.current = onDrawingSelect;
+  }, [onDrawingSelect]);
+
+  useEffect(() => {
     onDecisionSelectRef.current = onDecisionSelect;
   }, [onDecisionSelect]);
 
@@ -520,17 +892,33 @@ export function KLineReplayChart({
 
   useEffect(() => {
     if (!drawingRequest || !chartRef.current) return;
-    chartRef.current.createOverlay({
+    const chart = chartRef.current;
+    setDrawingInteraction(true, chart);
+    const finishDrawing = () => setDrawingInteraction(false, chart);
+    const overlayId = chart.createOverlay({
       name: drawingRequest.name,
       groupId: USER_DRAWING_GROUP,
-      onDrawEnd: ({ chart }) => onDrawingsChangeRef.current(getPersistedDrawings(chart)),
-      onPressedMoveEnd: ({ chart }) => onDrawingsChangeRef.current(getPersistedDrawings(chart)),
-      onRemoved: ({ chart }) => {
-        if (suppressDrawingEventsRef.current) return;
-        queueMicrotask(() => onDrawingsChangeRef.current(getPersistedDrawings(chart)));
+      mode: drawingRequest.mode ?? "normal",
+      modeSensitivity: 8,
+      styles: drawingRequest.styles,
+      extendData: drawingRequest.extendData,
+      onDrawEnd: ({ chart: eventChart, overlay }) => {
+        onDrawingsChangeRef.current(getPersistedDrawings(eventChart));
+        onDrawingSelectRef.current(overlay.id);
+        finishDrawing();
+      },
+      onPressedMoveEnd: ({ chart: eventChart }) => onDrawingsChangeRef.current(getPersistedDrawings(eventChart)),
+      onSelected: ({ overlay }) => onDrawingSelectRef.current(overlay.id),
+      onDeselected: () => onDrawingSelectRef.current(null),
+      onRemoved: ({ chart: eventChart }) => {
+        if (!suppressDrawingEventsRef.current) {
+          queueMicrotask(() => onDrawingsChangeRef.current(getPersistedDrawings(eventChart)));
+        }
+        finishDrawing();
       },
     });
-  }, [drawingRequest]);
+    if (!overlayId) finishDrawing();
+  }, [drawingRequest, setDrawingInteraction]);
 
   useEffect(() => {
     if (!drawingsRestoreNonce || !chartRef.current) return;
@@ -542,7 +930,18 @@ export function KLineReplayChart({
     suppressDrawingEventsRef.current = true;
     chartRef.current.removeOverlay({ groupId: USER_DRAWING_GROUP });
     suppressDrawingEventsRef.current = false;
-  }, [clearNonce]);
+    setDrawingInteraction(false);
+  }, [clearNonce, setDrawingInteraction]);
+
+  useEffect(() => {
+    if (!drawingActive || !containerRef.current) return;
+    const container = containerRef.current;
+    const preventTouchScroll = (event: TouchEvent) => {
+      if (event.cancelable) event.preventDefault();
+    };
+    container.addEventListener("touchmove", preventTouchScroll, { passive: false, capture: true });
+    return () => container.removeEventListener("touchmove", preventTouchScroll, { capture: true });
+  }, [drawingActive]);
 
   useEffect(() => () => {
     if (longPressTimerRef.current != null) window.clearTimeout(longPressTimerRef.current);
@@ -587,6 +986,10 @@ export function KLineReplayChart({
   };
 
   const handleContextMenu = (event: ReactMouseEvent<HTMLDivElement>) => {
+    if (drawingActive) {
+      event.preventDefault();
+      return;
+    }
     const target = resolveCandleAt(event.clientX, event.clientY);
     if (!target) return;
     event.preventDefault();
@@ -595,6 +998,7 @@ export function KLineReplayChart({
   };
 
   const handlePointerDown = (event: ReactPointerEvent<HTMLDivElement>) => {
+    if (drawingActive) return;
     if (event.pointerType !== "touch") return;
     const target = resolveCandleAt(event.clientX, event.clientY);
     if (!target) return;
@@ -616,9 +1020,9 @@ export function KLineReplayChart({
 
   return <div
     ref={containerRef}
-    className="chart-canvas"
-    aria-label={symbol + " K线图，右键或长按已揭示的 K 线可补写事前决策"}
-    title="右键或长按已揭示的 K 线可补写事前决策"
+    className={`chart-canvas${drawingActive ? " drawing-active" : ""}`}
+    aria-label={drawingActive ? `${symbol} K线图，正在绘图` : symbol + " K线图，右键或长按已揭示的 K 线可补写事前决策"}
+    title={drawingActive ? "正在绘图：拖动手指不会滚动页面或平移图表" : "右键或长按已揭示的 K 线可补写事前决策"}
     onContextMenu={handleContextMenu}
     onPointerDown={handlePointerDown}
     onPointerMove={handlePointerMove}
