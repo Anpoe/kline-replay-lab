@@ -43,15 +43,16 @@ test("supports touch long-press decision backfill without disabling chart draggi
   assert.match(chart, /右键或长按已揭示的 K 线/);
 });
 
-test("locks mobile gestures only while drawing and applies a mobile-only default zoom", async () => {
+test("locks mobile gestures while drawing and preserves refresh-scoped chart zoom", async () => {
   const [chart, styles] = await Promise.all([
     readFile(new URL("app/components/KLineReplayChart.tsx", root), "utf8"),
     readFile(new URL("app/globals.css", root), "utf8"),
   ]);
 
   assert.match(chart, /MOBILE_REPLAY_BAR_SPACE = 8/);
-  assert.match(chart, /chart\.setBarSpace\(MOBILE_REPLAY_BAR_SPACE\)/);
-  assert.match(chart, /mobileRefreshZoomAppliedRef/);
+  assert.match(chart, /DESKTOP_REPLAY_BAR_SPACE = 16/);
+  assert.match(chart, /mobile \? MOBILE_REPLAY_BAR_SPACE : DESKTOP_REPLAY_BAR_SPACE/);
+  assert.match(chart, /refreshZoomAppliedRef/);
   assert.match(chart, /subscribeAction\("onZoom", preserveCurrentZoom\)/);
   assert.match(chart, /const barSpaceBeforeReset = chart\.getBarSpace\(\)\.bar/);
   assert.match(chart, /chart\.resetData\(\);[\s\S]*chart\.setBarSpace\(barSpaceBeforeReset\)/);
@@ -78,13 +79,12 @@ test("supports TradingView-style drawing groups, object management and drawing h
   assert.match(workbench, /name: "priceChannelLine", label: "三线价格通道"/);
   assert.match(workbench, /group\.tools\.length === 1/);
   assert.doesNotMatch(workbench, /group\.id === "position"/);
-  assert.match(workbench, /name: "trainingTextBox", label: "文本框"/);
+  assert.match(workbench, /name: "trainingTextBox", label: "文字标记"/);
   assert.match(workbench, /aria-label="图表文字"/);
-  assert.match(workbench, /aria-label="文本框内容"/);
+  assert.match(workbench, /aria-label="文字内容"/);
   assert.match(workbench, /aria-label="文字大小"/);
   assert.match(workbench, /aria-label="切换磁吸 OHLC"/);
   assert.match(workbench, /aria-label="绘图对象列表"/);
-  assert.match(workbench, /文字与边框颜色/);
   assert.match(workbench, /aria-label="线条粗细"/);
   assert.match(workbench, /lock: !selectedDrawing\.lock/);
   assert.match(workbench, /aria-label="撤销绘图"/);
@@ -117,6 +117,14 @@ test("starts a fresh random round and only samples available instrument-timefram
   assert.doesNotMatch(workbench, /const findLastTraining/);
   assert.match(workbench, /startupRandomStartedRef/);
   assert.match(workbench, /createPairs\(instrumentCandidates, requestedTimeframes\)/);
+  assert.match(workbench, /isRandomInstrumentAllowed\(item, config\.includeIndices\)/);
+  assert.match(workbench, /randomIncludeIndices: false/);
+  assert.match(workbench, /completedTask\.randomConfig \?\? currentRandomConfig\(\)/);
+  assert.match(workbench, /patternPresetId: "all"/);
+  assert.match(workbench, /形态筛选/);
+  assert.match(workbench, /纳入指数（只看盘）/);
+  assert.match(workbench, /指数仅供看盘训练，不能直接模拟买卖/);
+  assert.match(workbench, /currentAssetType === "index" \? "指数不可交易"/);
   assert.match(workbench, /item\.timeframes[\s\S]*candidateTimeframe/);
   assert.match(workbench, /chartLoadError[\s\S]*这组行情无法开始训练/);
   assert.match(candlesRoute, /GROUP_CONCAT\(DISTINCT c\.timeframe\)/);
@@ -139,9 +147,13 @@ test("uses mobile cards for wide training and data tables", async () => {
   assert.match(styles, /\.chart-area \{[\s\S]*height: clamp\(380px, 52svh, 500px\)/);
   assert.match(styles, /\.orders-board\.mobile-expanded \.orders-table-wrap \{ display: block; \}/);
   assert.match(workbench, /className="mobile-order-label"/);
-  assert.match(workbench, /aria-label="立即开始随机训练"[\s\S]*onClick=\{startQuickRandomTraining\}/);
+  assert.match(workbench, /aria-label=\{startingTraining \? "正在筛选随机训练" : "立即开始随机训练"\}/);
+  assert.match(workbench, /onClick=\{\(\) => void startQuickRandomTraining\(\)\}/);
   assert.match(workbench, /className="mobile-toolbar-toggle"/);
   assert.match(workbench, /id="mobile-training-toolbar"/);
+  assert.match(workbench, /QUICK_RANDOM_PATTERN_KEY/);
+  assert.match(workbench, /aria-label="一键随机训练形态"/);
+  assert.match(workbench, /没有找到“\$\{patternPresets\.find/);
   assert.match(workbench, /aria-label="下单数量"/);
   assert.match(workbench, /data-label="覆盖范围"/);
   assert.match(workbench, /长按 K 线补写决策/);

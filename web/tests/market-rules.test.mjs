@@ -46,6 +46,12 @@ test("resolves and trades the STAR Market, ChiNext and Beijing exchange", () => 
   assert.equal(validateOpenOrder(CN_BEIJING_RULES_V1, "buy", 101).ok, true);
 });
 
+test("keeps A-share indices in read-only training mode", () => {
+  const rules = resolveMarketRules("CN", "399965.SZ");
+  assert.equal(rules.tradingEnabled, false);
+  assert.equal(validateOpenOrder(rules, "buy", 100).code, "market_rule_not_implemented");
+});
+
 test("uses board-specific price limits and skips IPO no-limit sessions", () => {
   assert.equal(createPriceBand(CN_STAR_MARKET_RULES_V1, 10, 5), null);
   assert.deepEqual(createPriceBand(CN_STAR_MARKET_RULES_V1, 10, 6), {

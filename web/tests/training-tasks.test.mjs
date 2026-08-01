@@ -91,3 +91,48 @@ test("keeps random training inside the configured historical window", () => {
   assert.equal(task.endCursor - task.startCursor, 5);
   assert.equal(task.randomRun, true);
 });
+
+test("persists the pattern filter reason on the resolved task", () => {
+  const task = resolveTrainingTask({
+    ...defaultTrainingTaskDraft,
+    startMode: "bar",
+    startBar: 25,
+    patternPresetIds: ["breakout", "long-lower-wick"],
+    patternPresetNames: ["区间突破", "长下影线"],
+    patternMatchedPresetIds: ["breakout"],
+    patternMatchTimestamp: bars[24].timestamp,
+  }, bars, "Asia/Shanghai", "pattern-seed");
+
+  assert.deepEqual(task.patternFilter, {
+    presetIds: ["breakout", "long-lower-wick"],
+    presetNames: ["区间突破", "长下影线"],
+    matchedPresetIds: ["breakout"],
+    matchTimestamp: bars[24].timestamp,
+  });
+});
+
+test("persists the complete random setup for the next round", () => {
+  const randomConfig = {
+    instrumentMode: "market",
+    anchorInstrumentId: "600519.SH",
+    market: "A股",
+    timeframeMode: "fixed",
+    anchorTimeframe: "1d",
+    fixedTimeframe: "1w",
+    dateMode: "range",
+    startDate: "2025-02-01",
+    endDate: "2025-03-31",
+    length: 40,
+    includeIndices: false,
+  };
+  const task = resolveTrainingTask({
+    ...defaultTrainingTaskDraft,
+    startMode: "random",
+    length: 20,
+    randomRun: true,
+    randomConfig,
+  }, bars, "Asia/Shanghai", "random-config-seed");
+
+  assert.deepEqual(task.randomConfig, randomConfig);
+  assert.notEqual(task.randomConfig, randomConfig);
+});

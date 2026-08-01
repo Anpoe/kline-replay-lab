@@ -9,6 +9,7 @@ import {
   type PointerEvent as ReactPointerEvent,
 } from "react";
 import type { Chart, KLineData, Overlay, OverlayTemplate, Period, Point } from "klinecharts";
+import type { MovingAverageSettings } from "../lib/chartIndicators";
 
 export type DrawingRequest = {
   name: string;
@@ -66,9 +67,38 @@ const DECISION_MARKER_GROUP = "decision-markers";
 const MOBILE_CHART_QUERY = "(max-width: 600px)";
 const MOBILE_REPLAY_RIGHT_OFFSET = 16;
 const MOBILE_REPLAY_BAR_SPACE = 8;
+const DESKTOP_REPLAY_BAR_SPACE = 16;
+const PRICE_INDICATOR_PANE = "candle_pane";
+const PRICE_INDICATOR_STYLES = {
+  MA: ["#f2a93b", "#8f6ee8", "#2f80ed", "#20c997", "#ef6a68", "#e1c57f"],
+  EMA: ["#ff7a45", "#b37feb", "#36cfc9", "#73d13d", "#ff85c0", "#69c0ff"],
+} as const;
+
+function syncMovingAverageIndicators(chart: Chart, settings: MovingAverageSettings) {
+  (["MA", "EMA"] as const).forEach((name) => {
+    const config = name === "MA" ? settings.ma : settings.ema;
+    const existing = chart.getIndicators({ paneId: PRICE_INDICATOR_PANE, name });
+    if (!config.enabled) {
+      if (existing.length) chart.removeIndicator({ paneId: PRICE_INDICATOR_PANE, name });
+      return;
+    }
+
+    const override = {
+      name,
+      paneId: PRICE_INDICATOR_PANE,
+      calcParams: config.periods,
+      styles: {
+        lines: PRICE_INDICATOR_STYLES[name].map((color) => ({ color, size: 1.2 })),
+      },
+    };
+    if (existing.length) chart.overrideIndicator(override);
+    else chart.createIndicator(override, true);
+  });
+}
 let tradeOverlayRegistered = false;
 let decisionOverlayRegistered = false;
 let trainingDrawingOverlaysRegistered = false;
+let selectedTrainingTextId = "";
 
 type FigureStyleBag = {
   line?: { color?: string; size?: number; style?: string; dashedValue?: number[] };
@@ -304,9 +334,9 @@ function ensureTrainingDrawingOverlays(registerOverlay: (template: OverlayTempla
   registerOverlay({
     name: "trainingTextBox",
     totalStep: 3,
-    needDefaultPointFigure: true,
-    needDefaultXAxisFigure: true,
-    needDefaultYAxisFigure: true,
+    needDefaultPointFigure: false,
+    needDefaultXAxisFigure: false,
+    needDefaultYAxisFigure: false,
     createPointFigures: ({ overlay, coordinates }) => {
       const start = coordinates[0];
       const end = coordinates[1];
@@ -316,14 +346,15 @@ function ensureTrainingDrawingOverlays(registerOverlay: (template: OverlayTempla
 
       const styles = (overlay.styles ?? {}) as FigureStyleBag;
       const textColor = styles.text?.color ?? styles.line?.color ?? "#dce9e6";
-      const fontSize = styles.text?.size ?? 12;
+      const fontSize = styles.text?.size ?? 18;
       const borderColor = styles.rect?.borderColor ?? styles.line?.color ?? "#2962ff";
+      const selected = overlay.id === selectedTrainingTextId;
       const left = Math.min(start.x, end.x);
       const top = Math.min(start.y, end.y);
-      const width = Math.max(20, Math.abs(end.x - start.x));
-      const height = Math.max(fontSize + 12, Math.abs(end.y - start.y));
-      const lineHeight = Math.max(12, Math.round(fontSize * 1.35));
-      const maxCharacters = Math.max(2, Math.floor((width - 12) / Math.max(5, fontSize * 0.62)));
+      const width = Math.max(36, Math.abs(end.x - start.x));
+      const height = Math.max(fontSize + 16, Math.abs(end.y - start.y));
+      const lineHeight = Math.max(14, Math.round(fontSize * 1.35));
+      const maxCharacters = Math.max(2, Math.floor((width - 14) / Math.max(5, fontSize * 0.62)));
       const maxLines = Math.max(1, Math.floor((height - 12) / lineHeight));
       const wrappedLines = text.split("\n").flatMap((paragraph) => {
         if (!paragraph) return [""];
@@ -334,30 +365,43 @@ function ensureTrainingDrawingOverlays(registerOverlay: (template: OverlayTempla
         return chunks;
       }).slice(0, maxLines);
 
-      const figures: Array<Record<string, unknown>> = [{
+      const figures: Array<Record<string, unknown>> = selected ? [{
         type: "rect",
         attrs: { x: left, y: top, width, height },
         styles: {
-          style: "stroke_fill",
-          color: styles.rect?.color ?? "rgba(12, 20, 22, 0.70)",
+          style: "stroke",
+          color: "rgba(0, 0, 0, 0)",
           borderColor,
           borderSize: styles.rect?.borderSize ?? styles.line?.size ?? 1,
           borderStyle: styles.rect?.borderStyle ?? "solid",
         },
         ignoreEvent: overlayIgnoreEvents,
-      }];
+      }] : [];
       wrappedLines.forEach((line, index) => {
         figures.push({
           type: "text",
           attrs: {
-            x: left + 6,
+            x: left + 7,
             y: top + 6 + index * lineHeight,
             text: line,
             align: "left",
             baseline: "top",
           },
-          styles: { color: textColor, size: fontSize, weight: 500 },
-          ignoreEvent: overlayIgnoreEvents,
+          styles: {
+            style: "fill",
+            color: textColor,
+            size: fontSize,
+            weight: 600,
+            family: "Helvetica Neue",
+            backgroundColor: "transparent",
+            borderColor: "transparent",
+            borderSize: 0,
+            borderRadius: 0,
+            paddingLeft: 0,
+            paddingTop: 0,
+            paddingRight: 0,
+            paddingBottom: 0,
+          },
         });
       });
       return figures;
@@ -604,6 +648,94 @@ function serializeDrawing(overlay: Overlay): PersistedDrawing {
   };
 }
 
+type TrainingTextBoxData = Record<string, unknown> & {
+  text?: string;
+  textBaseWidth?: number;
+  textBaseHeight?: number;
+  textBaseSize?: number;
+};
+
+function positiveNumber(value: unknown) {
+  const number = Number(value);
+  return Number.isFinite(number) && number > 0 ? number : null;
+}
+
+/**
+ * Keep the text size tied to the drawn box. KLineCharts moves the overlay
+ * points when a handle is dragged, but it does not resize custom figures for
+ * us, so we persist the original box as a baseline and derive a new font size
+ * from the new box dimensions after each drag.
+ */
+function syncTrainingTextBoxScale(chart: Chart, overlay: Overlay, initializeBase = false) {
+  if (overlay.name !== "trainingTextBox" || overlay.points.length < 2) return;
+
+  const converted = chart.convertToPixel(overlay.points, { paneId: overlay.paneId });
+  const coordinates = (Array.isArray(converted) ? converted : [converted]) as Array<Partial<{ x: number; y: number }> >;
+  const start = coordinates[0];
+  const end = coordinates[1];
+  if (start?.x == null || start.y == null || end?.x == null || end.y == null) return;
+
+  const width = Math.max(36, Math.abs(end.x - start.x));
+  const height = Math.max(24, Math.abs(end.y - start.y));
+  const rawStyles = overlay.styles && typeof overlay.styles === "object"
+    ? overlay.styles as Record<string, unknown>
+    : {};
+  const rawTextStyles = rawStyles.text && typeof rawStyles.text === "object"
+    ? rawStyles.text as Record<string, unknown>
+    : {};
+  const currentSize = positiveNumber(rawTextStyles.size) ?? 18;
+  const data = overlay.extendData && typeof overlay.extendData === "object"
+    ? { ...(overlay.extendData as Record<string, unknown>) } as TrainingTextBoxData
+    : {} as TrainingTextBoxData;
+  const text = typeof data.text === "string" ? data.text : "";
+  const baseSize = positiveNumber(data.textBaseSize);
+  const baseWidth = positiveNumber(data.textBaseWidth);
+  const baseHeight = positiveNumber(data.textBaseHeight);
+  const inferredWidth = Math.max(36, text.length * currentSize * 0.62 + 14);
+  const inferredHeight = Math.max(24, currentSize + 16);
+  const effectiveBaseWidth = baseWidth ?? (initializeBase ? width : inferredWidth);
+  const effectiveBaseHeight = baseHeight ?? (initializeBase ? height : inferredHeight);
+  const effectiveBaseSize = baseSize ?? currentSize;
+  const shouldScale = !initializeBase && baseWidth != null && baseHeight != null && baseSize != null;
+
+  let nextSize = currentSize;
+  if (shouldScale) {
+    const scaleX = width / effectiveBaseWidth;
+    const scaleY = height / effectiveBaseHeight;
+    const xChanged = Math.abs(scaleX - 1) > 0.02;
+    const yChanged = Math.abs(scaleY - 1) > 0.02;
+    const scale = xChanged && yChanged
+      ? Math.sqrt(scaleX * scaleY)
+      : xChanged ? scaleX : scaleY;
+    nextSize = Math.max(10, Math.min(96, Math.round(effectiveBaseSize * scale)));
+  }
+
+  const nextStyles = {
+    ...rawStyles,
+    text: {
+      ...rawTextStyles,
+      size: nextSize,
+      backgroundColor: "transparent",
+      borderColor: "transparent",
+      borderSize: 0,
+      paddingLeft: 0,
+      paddingTop: 0,
+      paddingRight: 0,
+      paddingBottom: 0,
+    },
+  };
+  const nextData: TrainingTextBoxData = {
+    ...data,
+    textBaseWidth: effectiveBaseWidth,
+    textBaseHeight: effectiveBaseHeight,
+    textBaseSize: effectiveBaseSize,
+  };
+  const missingBaseline = baseWidth == null || baseHeight == null || baseSize == null;
+  if (missingBaseline || nextSize !== currentSize) {
+    chart.overrideOverlay({ id: overlay.id, styles: nextStyles, extendData: nextData });
+  }
+}
+
 function getPersistedDrawings(chart: Chart) {
   return chart.getOverlays({ groupId: USER_DRAWING_GROUP }).map(serializeDrawing);
 }
@@ -621,11 +753,13 @@ export function KLineReplayChart({
   timezone,
   timeframe,
   pricePrecision,
+  movingAverageSettings,
   drawingRequest,
   clearNonce,
   tradeMarkers,
   decisionMarkers,
   drawings,
+  selectedDrawingId,
   drawingsRestoreNonce,
   hideDate,
   hidePrice,
@@ -639,11 +773,13 @@ export function KLineReplayChart({
   timezone: string;
   timeframe: string;
   pricePrecision: number;
+  movingAverageSettings: MovingAverageSettings;
   drawingRequest: DrawingRequest;
   clearNonce: number;
   tradeMarkers: TradeMarker[];
   decisionMarkers: DecisionMarker[];
   drawings: PersistedDrawing[];
+  selectedDrawingId: string;
   drawingsRestoreNonce: number;
   hideDate: boolean;
   hidePrice: boolean;
@@ -655,11 +791,12 @@ export function KLineReplayChart({
   const containerRef = useRef<HTMLDivElement>(null);
   const chartRef = useRef<Chart | null>(null);
   const preservedBarSpaceRef = useRef<number | null>(null);
-  const mobileRefreshZoomAppliedRef = useRef(false);
+  const refreshZoomAppliedRef = useRef(false);
   const barsRef = useRef<KLineData[]>(bars);
   const tradeMarkersRef = useRef<TradeMarker[]>(tradeMarkers);
   const decisionMarkersRef = useRef<DecisionMarker[]>(decisionMarkers);
   const drawingsRef = useRef<PersistedDrawing[]>(drawings);
+  const movingAverageSettingsRef = useRef(movingAverageSettings);
   const onDecisionSelectRef = useRef(onDecisionSelect);
   const onCandleContextMenuRef = useRef(onCandleContextMenu);
   const onDrawingsChangeRef = useRef(onDrawingsChange);
@@ -678,9 +815,11 @@ export function KLineReplayChart({
 
   const applyResponsiveViewport = useCallback((chart: Chart, applyRefreshDefault = false) => {
     const mobile = window.matchMedia(MOBILE_CHART_QUERY).matches;
-    if (mobile && applyRefreshDefault && !mobileRefreshZoomAppliedRef.current) {
-      chart.setBarSpace(MOBILE_REPLAY_BAR_SPACE);
-      mobileRefreshZoomAppliedRef.current = true;
+    if (applyRefreshDefault && !refreshZoomAppliedRef.current) {
+      const refreshBarSpace = mobile ? MOBILE_REPLAY_BAR_SPACE : DESKTOP_REPLAY_BAR_SPACE;
+      chart.setBarSpace(refreshBarSpace);
+      preservedBarSpaceRef.current = refreshBarSpace;
+      refreshZoomAppliedRef.current = true;
     } else if (preservedBarSpaceRef.current != null) {
       chart.setBarSpace(preservedBarSpaceRef.current);
     }
@@ -693,20 +832,40 @@ export function KLineReplayChart({
     groupId: USER_DRAWING_GROUP,
     paneId: drawing.paneId,
     points: drawing.points,
+    needDefaultPointFigure: drawing.name === "trainingTextBox"
+      ? drawing.id === selectedTrainingTextId
+      : undefined,
     lock: drawing.lock,
     visible: drawing.visible,
     zLevel: drawing.zLevel,
     mode: drawing.mode,
     styles: drawing.styles,
     extendData: drawing.extendData,
-    onDrawEnd: ({ chart: eventChart }) => {
+    onDrawEnd: ({ chart: eventChart, overlay }) => {
+      syncTrainingTextBoxScale(eventChart, overlay, true);
       if (!suppressDrawingEventsRef.current) onDrawingsChangeRef.current(getPersistedDrawings(eventChart));
     },
-    onPressedMoveEnd: ({ chart: eventChart }) => {
+    onPressedMoveEnd: ({ chart: eventChart, overlay }) => {
+      syncTrainingTextBoxScale(eventChart, overlay);
       if (!suppressDrawingEventsRef.current) onDrawingsChangeRef.current(getPersistedDrawings(eventChart));
     },
-    onSelected: ({ overlay }) => onDrawingSelectRef.current(overlay.id),
-    onDeselected: () => onDrawingSelectRef.current(null),
+    onSelected: ({ chart, overlay }) => {
+      selectedTrainingTextId = overlay.name === "trainingTextBox" ? overlay.id : "";
+      syncTrainingTextBoxScale(chart, overlay, true);
+      chart.overrideOverlay({
+        id: overlay.id,
+        ...(overlay.name === "trainingTextBox" ? { needDefaultPointFigure: true } : {}),
+      });
+      onDrawingSelectRef.current(overlay.id);
+    },
+    onDeselected: ({ chart, overlay }) => {
+      selectedTrainingTextId = "";
+      chart.overrideOverlay({
+        id: overlay.id,
+        ...(overlay.name === "trainingTextBox" ? { needDefaultPointFigure: false } : {}),
+      });
+      onDrawingSelectRef.current(null);
+    },
     onRemoved: ({ chart: eventChart }) => {
       if (suppressDrawingEventsRef.current) return;
       queueMicrotask(() => onDrawingsChangeRef.current(getPersistedDrawings(eventChart)));
@@ -801,6 +960,7 @@ export function KLineReplayChart({
         getBars: ({ callback }) => callback(barsRef.current, false),
       });
       chart.createIndicator("VOL", false);
+      syncMovingAverageIndicators(chart, movingAverageSettingsRef.current);
       syncTradeMarkers(chart, tradeMarkersRef.current);
       syncDecisionMarkers(chart, decisionMarkersRef.current, (id) => onDecisionSelectRef.current(id));
       restoreDrawings(chart, drawingsRef.current);
@@ -847,6 +1007,11 @@ export function KLineReplayChart({
   }, [bars, pricePrecision, symbol, timeframe, timezone]);
 
   useEffect(() => {
+    movingAverageSettingsRef.current = movingAverageSettings;
+    if (chartRef.current) syncMovingAverageIndicators(chartRef.current, movingAverageSettings);
+  }, [movingAverageSettings]);
+
+  useEffect(() => {
     const mobileQuery = window.matchMedia(MOBILE_CHART_QUERY);
     const handleViewportChange = () => {
       const chart = chartRef.current;
@@ -875,6 +1040,21 @@ export function KLineReplayChart({
   }, [drawings]);
 
   useEffect(() => {
+    const selectedText = selectedDrawingId && drawings.some((drawing) => drawing.id === selectedDrawingId && drawing.name === "trainingTextBox")
+      ? selectedDrawingId
+      : "";
+    selectedTrainingTextId = selectedText;
+    const chart = chartRef.current;
+    if (!chart) return;
+    chart.getOverlays({ groupId: USER_DRAWING_GROUP }).forEach((overlay) => {
+      chart.overrideOverlay({
+        id: overlay.id,
+        ...(overlay.name === "trainingTextBox" ? { needDefaultPointFigure: overlay.id === selectedText } : {}),
+      });
+    });
+  }, [drawings, selectedDrawingId]);
+
+  useEffect(() => {
     onDrawingsChangeRef.current = onDrawingsChange;
   }, [onDrawingsChange]);
 
@@ -898,18 +1078,43 @@ export function KLineReplayChart({
     const overlayId = chart.createOverlay({
       name: drawingRequest.name,
       groupId: USER_DRAWING_GROUP,
+      needDefaultPointFigure: drawingRequest.name === "trainingTextBox" ? false : undefined,
       mode: drawingRequest.mode ?? "normal",
       modeSensitivity: 8,
       styles: drawingRequest.styles,
       extendData: drawingRequest.extendData,
       onDrawEnd: ({ chart: eventChart, overlay }) => {
+        syncTrainingTextBoxScale(eventChart, overlay, true);
+        selectedTrainingTextId = overlay.name === "trainingTextBox" ? overlay.id : "";
+        eventChart.overrideOverlay({
+          id: overlay.id,
+          ...(overlay.name === "trainingTextBox" ? { needDefaultPointFigure: true } : {}),
+        });
         onDrawingsChangeRef.current(getPersistedDrawings(eventChart));
         onDrawingSelectRef.current(overlay.id);
         finishDrawing();
       },
-      onPressedMoveEnd: ({ chart: eventChart }) => onDrawingsChangeRef.current(getPersistedDrawings(eventChart)),
-      onSelected: ({ overlay }) => onDrawingSelectRef.current(overlay.id),
-      onDeselected: () => onDrawingSelectRef.current(null),
+      onPressedMoveEnd: ({ chart: eventChart, overlay }) => {
+        syncTrainingTextBoxScale(eventChart, overlay);
+        onDrawingsChangeRef.current(getPersistedDrawings(eventChart));
+      },
+      onSelected: ({ chart, overlay }) => {
+        selectedTrainingTextId = overlay.name === "trainingTextBox" ? overlay.id : "";
+        syncTrainingTextBoxScale(chart, overlay, true);
+        chart.overrideOverlay({
+          id: overlay.id,
+          ...(overlay.name === "trainingTextBox" ? { needDefaultPointFigure: true } : {}),
+        });
+        onDrawingSelectRef.current(overlay.id);
+      },
+      onDeselected: ({ chart, overlay }) => {
+        selectedTrainingTextId = "";
+        chart.overrideOverlay({
+          id: overlay.id,
+          ...(overlay.name === "trainingTextBox" ? { needDefaultPointFigure: false } : {}),
+        });
+        onDrawingSelectRef.current(null);
+      },
       onRemoved: ({ chart: eventChart }) => {
         if (!suppressDrawingEventsRef.current) {
           queueMicrotask(() => onDrawingsChangeRef.current(getPersistedDrawings(eventChart)));

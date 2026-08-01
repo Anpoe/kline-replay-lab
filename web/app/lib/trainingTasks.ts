@@ -1,6 +1,20 @@
 export type TrainingMode = "free" | "blind" | "range" | "mistake";
 export type TrainingStartMode = "default" | "date" | "bar" | "random";
 
+export type RandomTrainingConfig = {
+  instrumentMode: "current" | "all" | "market";
+  anchorInstrumentId: string;
+  market: string;
+  timeframeMode: "current" | "all" | "fixed";
+  anchorTimeframe: string;
+  fixedTimeframe: string;
+  dateMode: "all" | "range";
+  startDate?: string;
+  endDate?: string;
+  length: number;
+  includeIndices: boolean;
+};
+
 export type TrainingTaskDraft = {
   mode: TrainingMode;
   startMode: TrainingStartMode;
@@ -16,6 +30,11 @@ export type TrainingTaskDraft = {
   randomStartDate?: string;
   randomEndDate?: string;
   randomRun?: boolean;
+  patternPresetIds?: string[];
+  patternPresetNames?: string[];
+  patternMatchTimestamp?: number;
+  patternMatchedPresetIds?: string[];
+  randomConfig?: RandomTrainingConfig;
 };
 
 export type TrainingTask = {
@@ -32,6 +51,13 @@ export type TrainingTask = {
   sourceSessionId?: string;
   sourceLabel?: string;
   randomRun?: boolean;
+  randomConfig?: RandomTrainingConfig;
+  patternFilter?: {
+    presetIds: string[];
+    presetNames: string[];
+    matchedPresetIds: string[];
+    matchTimestamp: number;
+  };
   status: "active" | "completed";
   completedAt?: string;
 };
@@ -163,6 +189,15 @@ export function resolveTrainingTask(
     sourceSessionId: draft.sourceSessionId,
     sourceLabel: draft.sourceLabel,
     randomRun: draft.randomRun,
+    randomConfig: draft.randomConfig ? { ...draft.randomConfig } : undefined,
+    patternFilter: draft.patternPresetIds?.length && draft.patternMatchTimestamp != null
+      ? {
+          presetIds: [...draft.patternPresetIds],
+          presetNames: [...(draft.patternPresetNames ?? [])],
+          matchedPresetIds: [...(draft.patternMatchedPresetIds ?? [])],
+          matchTimestamp: draft.patternMatchTimestamp,
+        }
+      : undefined,
     status: endCursor === startCursor ? "completed" : "active",
     completedAt: endCursor === startCursor ? new Date().toISOString() : undefined,
   };
