@@ -608,9 +608,9 @@ const defaultReviewSessionFilters: ReviewSessionFilters = {
   status: "all",
 };
 const defaultDecision: Decision = {
-  marketState: "趋势",
-  location: "回调位置",
-  reasons: ["顺势", "关键位置"],
+  marketState: "",
+  location: "",
+  reasons: [],
   stop: "",
   target: "",
   note: "",
@@ -699,12 +699,6 @@ const drawingToolGroups: Array<{
     tools: [{ name: "trainingRectangle", label: "矩形区域", icon: Square, kind: "rectangle" }],
   },
   {
-    id: "position",
-    label: "测量与预测",
-    icon: Gauge,
-    tools: [{ name: "trainingPosition", label: "多空仓位", icon: TrendingUp, kind: "position" }],
-  },
-  {
     id: "notes",
     label: "画笔与注释",
     icon: Brush,
@@ -715,7 +709,8 @@ const drawingToolGroups: Array<{
   },
 ];
 
-const allDrawingTools = drawingToolGroups.flatMap((group) => group.tools);
+const trainingPositionTool: DrawingTool = { name: "trainingPosition", label: "多空仓位", icon: TrendingUp, kind: "position" };
+const allDrawingTools = [...drawingToolGroups.flatMap((group) => group.tools), trainingPositionTool];
 const defaultDrawingTools = Object.fromEntries(drawingToolGroups.map((group) => [group.id, group.tools[0].name]));
 
 function drawingLabel(name: string) {
@@ -1027,6 +1022,7 @@ export function TrainingWorkbench() {
   const [customReasonInput, setCustomReasonInput] = useState("");
   const [editingReasonTag, setEditingReasonTag] = useState("");
   const [editingReasonInput, setEditingReasonInput] = useState("");
+  const [reasonTagActionMode, setReasonTagActionMode] = useState<"edit" | "delete" | "">("");
   const [reasonTagsReady, setReasonTagsReady] = useState(false);
   const [customReasonTagsReady, setCustomReasonTagsReady] = useState(false);
   const [drawingRequest, setDrawingRequest] = useState<DrawingRequest>(null);
@@ -2574,6 +2570,20 @@ export function TrainingWorkbench() {
 
   const handleDrawingsChange = (nextDrawings: PersistedDrawing[]) => {
     if (drawingsEqual(drawings, nextDrawings)) return;
+    const hadPositionDrawing = drawings.some((drawing) => drawing.name === "trainingPosition");
+    const positionDrawing = [...nextDrawings].reverse().find((drawing) => (
+      drawing.name === "trainingPosition" && drawing.points.length >= 3
+    ));
+    if (positionDrawing || hadPositionDrawing) {
+      const targetValue = positionDrawing ? Number(positionDrawing.points[1]?.value) : NaN;
+      const stopValue = positionDrawing ? Number(positionDrawing.points[2]?.value) : NaN;
+      setDecision((current) => ({
+        ...current,
+        target: Number.isFinite(targetValue) ? targetValue.toFixed(instrument.pricePrecision) : "",
+        stop: Number.isFinite(stopValue) ? stopValue.toFixed(instrument.pricePrecision) : "",
+      }));
+      setSaveState(positionDrawing ? "图表仓位目标与止损已同步" : "图表仓位已删除，目标与止损已清空");
+    }
     setDrawingUndoStack((history) => [...history, drawings].slice(-60));
     setDrawingRedoStack([]);
     setDrawings(nextDrawings);
@@ -4825,16 +4835,44 @@ export function TrainingWorkbench() {
               )}
               <label>市场状态
                 <select value={decision.marketState} onChange={(event) => updateDecision("marketState", event.target.value)}>
-                  <option>趋势</option><option>宽通道</option><option>震荡区间</option><option>突破模式</option><option>反转尝试</option>
+                  <option value="">请选择市场状态</option><option>趋势</option><option>宽通道</option><option>震荡区间</option><option>突破模式</option><option>反转尝试</option>
                 </select>
               </label>
               <label>当前位置
                 <select value={decision.location} onChange={(event) => updateDecision("location", event.target.value)}>
-                  <option>回调位置</option><option>区间上沿</option><option>区间中部</option><option>区间下沿</option><option>关键突破位</option>
+                  <option value="">请选择当前位置</option><option>回调位置</option><option>区间上沿</option><option>区间中部</option><option>区间下沿</option><option>关键突破位</option>
                 </select>
               </label>
               <fieldset>
-                <legend>交易理由 <small>至少 2 个</small></legend>
+                <legend>
+                  <span>交易理由 <small>至少 2 个</small></span>
+                  <span className="reason-tag-management" aria-label="交易理由标签管理">
+                    <button
+                      type="button"
+                      className={reasonTagActionMode === "edit" ? "active" : ""}
+                      aria-label="编辑交易理由标签"
+                      aria-pressed={reasonTagActionMode === "edit"}
+                      title="编辑标签：再点击一个标签"
+                      onClick={() => {
+                        setReasonTagActionMode((mode) => mode === "edit" ? "" : "edit");
+                        setEditingReasonTag("");
+                        setEditingReasonInput("");
+                      }}
+                    ><Pencil size={12} /></button>
+                    <button
+                      type="button"
+                      className={reasonTagActionMode === "delete" ? "active danger" : ""}
+                      aria-label="删除交易理由标签"
+                      aria-pressed={reasonTagActionMode === "delete"}
+                      title="删除标签：再点击标签右上角的 X"
+                      onClick={() => {
+                        setReasonTagActionMode((mode) => mode === "delete" ? "" : "delete");
+                        setEditingReasonTag("");
+                        setEditingReasonInput("");
+                      }}
+                    ><Trash2 size={12} /></button>
+                  </span>
+                </legend>
                 <div className="reason-chips">
                   {reasonTags.map((reason) => {
                     const selected = decision.reasons.includes(reason);
@@ -4857,21 +4895,34 @@ export function TrainingWorkbench() {
                       );
                     }
                     return (
-                      <span className="reason-chip-wrap" key={reason}>
-                        <button type="button" className={selected ? "selected" : ""} onClick={() => updateDecision(
-                          "reasons",
-                          selected ? decision.reasons.filter((item) => item !== reason) : [...decision.reasons, reason],
-                        )}>{selected ? "✓ " : "+ "}{reason}</button>
-                        <span className="reason-chip-actions">
-                            <button type="button" aria-label={`编辑交易理由标签 ${reason}`} title="编辑" onClick={(event) => {
-                              event.stopPropagation();
+                      <span className={`reason-chip-wrap${reasonTagActionMode === "delete" ? " delete-mode" : ""}`} key={reason}>
+                        <button
+                          type="button"
+                          className={selected ? "selected" : ""}
+                          onClick={() => {
+                            if (reasonTagActionMode === "edit") {
                               startEditReasonTag(reason);
-                            }}><Pencil size={11} /></button>
-                            <button type="button" aria-label={`删除交易理由标签 ${reason}`} title="删除" onClick={(event) => {
+                              return;
+                            }
+                            if (reasonTagActionMode === "delete") return;
+                            updateDecision(
+                              "reasons",
+                              selected ? decision.reasons.filter((item) => item !== reason) : [...decision.reasons, reason],
+                            );
+                          }}
+                        >{selected ? "✓ " : "+ "}{reason}</button>
+                        {reasonTagActionMode === "delete" && (
+                          <button
+                            type="button"
+                            className="reason-chip-delete"
+                            aria-label={`删除交易理由标签 ${reason}`}
+                            title="删除标签"
+                            onClick={(event) => {
                               event.stopPropagation();
                               deleteReasonTag(reason);
-                            }}><Trash2 size={11} /></button>
-                        </span>
+                            }}
+                          ><X size={10} /></button>
+                        )}
                       </span>
                     );
                   })}
@@ -4891,8 +4942,13 @@ export function TrainingWorkbench() {
                 </form>
               </fieldset>
               <div className="price-plan">
-                <label>失效 / 止损<input inputMode="decimal" placeholder="价格" value={decision.stop} onChange={(event) => updateDecision("stop", event.target.value)} /></label>
-                <label>第一目标<input inputMode="decimal" placeholder="价格" value={decision.target} onChange={(event) => updateDecision("target", event.target.value)} /></label>
+                <div className="decision-price-level"><span>失效 / 止损</span><strong>{trainingTask?.hidePrice ? "已隐藏" : decision.stop || "图表取点"}</strong></div>
+                <div className="decision-price-level"><span>第一目标</span><strong>{trainingTask?.hidePrice ? "已隐藏" : decision.target || "图表取点"}</strong></div>
+                <button
+                  type="button"
+                  className={`decision-position-draw${drawings.some((drawing) => drawing.name === "trainingPosition") ? " active" : ""}`}
+                  onClick={() => beginDrawing(trainingPositionTool)}
+                ><TrendingUp size={14} /> 在图表绘制止损 / 目标</button>
               </div>
               <label>计划说明
                 <textarea placeholder="我在等待什么？什么情况放弃？" value={decision.note} onChange={(event) => updateDecision("note", event.target.value)} />

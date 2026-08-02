@@ -473,14 +473,14 @@ button { color: inherit; }
 .reason-chips { display: flex; flex-wrap: wrap; gap: 6px; }
 .reason-chips button { font-size: 10px; color: #7e8e93; background: var(--surface-raised); border: 1px solid var(--line); border-radius: 99px; padding: 6px 8px; cursor: pointer; }
 .reason-chips button.selected { color: var(--accent-strong); background: var(--accent-soft); border-color: rgba(32, 201, 151, .28); }
-.reason-chip-wrap { display: inline-flex; align-items: stretch; }
-.reason-chip-wrap > button:first-child { border-top-right-radius: 0; border-bottom-right-radius: 0; }
-.reason-chip-actions { display: inline-flex; align-items: stretch; }
-.reason-chip-actions button { display: grid; place-items: center; width: 23px; padding: 0; border-left: 0; border-radius: 0; color: #809196; background: var(--surface-raised); }
-.reason-chip-actions button:first-child { border-top-right-radius: 0; border-bottom-right-radius: 0; }
-.reason-chip-actions button:last-child { border-top-right-radius: 99px; border-bottom-right-radius: 99px; }
-.reason-chip-actions button:hover { color: #e7f0ee; background: #253337; }
-.reason-chip-actions button:last-child:hover { color: #ff9a96; }
+.reason-tag-management { display: inline-flex; align-items: center; gap: 4px; }
+.reason-tag-management button { display: grid; place-items: center; width: 24px; height: 24px; padding: 0; color: #91a1a4; background: var(--surface-raised); border: 1px solid var(--line); border-radius: 6px; cursor: pointer; }
+.reason-tag-management button:hover, .reason-tag-management button.active { color: var(--accent-strong); background: var(--accent-soft); border-color: rgba(32, 201, 151, .36); }
+.reason-tag-management button.active.danger { color: #ff9a96; background: rgba(239, 106, 104, .12); border-color: rgba(239, 106, 104, .32); }
+.reason-chip-wrap { position: relative; display: inline-flex; align-items: stretch; }
+.reason-chip-wrap.delete-mode > button:first-child { opacity: .72; cursor: default; }
+.reason-chip-delete { position: absolute; top: -6px; right: -6px; z-index: 2; display: grid !important; place-items: center; width: 16px !important; height: 16px !important; padding: 0 !important; color: #fff !important; background: #ef6a68 !important; border: 1px solid #0c1416 !important; border-radius: 50% !important; font-size: 0 !important; cursor: pointer !important; }
+.reason-chip-delete:hover { background: #ff8582 !important; }
 .reason-tag-editor { display: inline-flex; align-items: center; gap: 3px; padding: 2px 3px 2px 7px; background: var(--surface-raised); border: 1px solid rgba(32, 201, 151, .36); border-radius: 99px; }
 .reason-tag-editor input { width: 92px; padding: 4px 2px; color: #dfe8e5; background: transparent; border: 0; outline: 0; font: inherit; font-size: 10px; }
 .reason-tag-editor button { display: grid; place-items: center; width: 20px; height: 20px; padding: 0; border-radius: 50%; }
@@ -494,6 +494,11 @@ button { color: inherit; }
 }
 .custom-reason-tag button:disabled { opacity: .35; cursor: not-allowed; }
 .price-plan { display: grid; grid-template-columns: 1fr 1fr; gap: 9px; }
+.decision-price-level { display: grid; gap: 6px; min-width: 0; padding: 9px 10px; color: #7f9096; background: var(--surface-raised); border: 1px solid var(--line); border-radius: 8px; }
+.decision-price-level span { font-size: 11px; }
+.decision-price-level strong { overflow: hidden; color: #dfe8e6; font: 600 12px var(--font-geist-mono), monospace; text-overflow: ellipsis; white-space: nowrap; }
+.decision-position-draw { grid-column: 1 / -1; display: inline-flex; align-items: center; justify-content: center; gap: 6px; padding: 8px 10px; color: var(--accent-strong); background: var(--accent-soft); border: 1px solid rgba(32, 201, 151, .24); border-radius: 8px; cursor: pointer; font-size: 10px; }
+.decision-position-draw:hover, .decision-position-draw.active { background: rgba(32, 201, 151, .2); border-color: rgba(32, 201, 151, .42); }
 .discipline-card { display: flex; gap: 10px; color: var(--accent); background: var(--accent-soft); border: 1px solid rgba(32, 201, 151, .18); border-radius: 10px; padding: 11px; }
 .discipline-card div { display: grid; gap: 3px; }
 .discipline-card strong { font-size: 11px; color: #bfe6d9; }
