@@ -119,6 +119,9 @@ test("starts a fresh random round and only samples available instrument-timefram
   assert.match(workbench, /createPairs\(instrumentCandidates, requestedTimeframes\)/);
   assert.match(workbench, /isRandomInstrumentAllowed\(item, config\.includeIndices\)/);
   assert.match(workbench, /randomIncludeIndices: false/);
+  assert.match(workbench, /randomUsLiquidityFilter: true/);
+  assert.match(workbench, /randomUsMinAverageDailyDollarVolume: 1000000/);
+  assert.match(workbench, /过滤低流动性美股/);
   assert.match(workbench, /completedTask\.randomConfig \?\? currentRandomConfig\(\)/);
   assert.match(workbench, /patternPresetId: "all"/);
   assert.match(workbench, /形态筛选/);

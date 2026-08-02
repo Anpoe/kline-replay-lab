@@ -260,7 +260,10 @@ export async function fetchProviderChunk(
     end: request.endDate,
     limit: "10000",
     adjustment: "raw",
-    feed: "iex",
+    // Historical SIP bars older than 15 minutes are available to Alpaca's
+    // free accounts. Unlike IEX, SIP consolidates trades from all US venues,
+    // which keeps thinly traded symbols usable for replay training.
+    feed: "sip",
     sort: "asc",
   });
   if (request.cursor.pageToken) params.set("page_token", request.cursor.pageToken);
@@ -282,6 +285,6 @@ export async function fetchProviderChunk(
     quality: normalized.report,
     cursor: pageToken ? { pageToken } : {},
     complete: !pageToken,
-    source: "alpaca-iex",
+    source: "alpaca-sip",
   };
 }

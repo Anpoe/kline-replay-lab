@@ -13,6 +13,8 @@ export type RandomTrainingConfig = {
   endDate?: string;
   length: number;
   includeIndices: boolean;
+  usLiquidityFilter?: boolean;
+  usMinAverageDailyDollarVolume?: number;
 };
 
 export type TrainingTaskDraft = {

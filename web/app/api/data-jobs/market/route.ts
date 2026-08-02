@@ -9,8 +9,7 @@ type MarketInstrumentRow = {
   id: string;
   symbol: string;
   name: string;
-  lastRealTimestamp: number | null;
-  lastAttemptedDate: string | null;
+  lastSipTimestamp: number | null;
 };
 
 type AlpacaCalendarDay = {
@@ -137,10 +136,7 @@ export async function POST(request: Request) {
   }
 
   const instruments = await db.prepare(`SELECT i.id, i.symbol, i.name,
-    MAX(CASE WHEN c.timeframe = '1d' AND c.source <> 'sample' THEN c.last_timestamp END) AS lastRealTimestamp,
-    (SELECT MAX(j.end_date) FROM data_download_jobs j
-      WHERE j.instrument_id = i.id AND j.market = 'US' AND j.timeframe = '1d'
-        AND j.status = 'completed') AS lastAttemptedDate
+    MAX(CASE WHEN c.timeframe = '1d' AND c.source = 'alpaca-sip' THEN c.last_timestamp END) AS lastSipTimestamp
     FROM instruments i
     LEFT JOIN candle_coverage c ON c.instrument_id = i.id
     WHERE i.market = 'US'
@@ -151,12 +147,23 @@ export async function POST(request: Request) {
     return Response.json({ error: "美股品种目录为空，请先执行市场初始化" }, { status: 400 });
   }
 
-  const activeJobs = await db.prepare(`SELECT id, instrument_id AS instrumentId
-    FROM data_download_jobs
-    WHERE market = 'US' AND timeframe = '1d'
+  const activeJobs = await db.prepare(`SELECT j.id, j.instrument_id AS instrumentId,
+      EXISTS(SELECT 1 FROM candle_coverage c
+        WHERE c.instrument_id = j.instrument_id AND c.timeframe = j.timeframe
+          AND c.adjustment_type = j.adjustment_type AND c.source = 'alpaca-sip') AS hasSipCoverage
+    FROM data_download_jobs j
+    WHERE j.market = 'US' AND j.timeframe = '1d'
       AND status IN ('queued', 'running', 'paused', 'failed')
-    ORDER BY created_at ASC, instrument_id ASC`)
-    .all<{ id: string; instrumentId: string }>();
+    ORDER BY j.created_at ASC, j.instrument_id ASC`)
+    .all<{ id: string; instrumentId: string; hasSipCoverage: number }>();
+  const legacyActiveJobs = activeJobs.results.filter((job) => !job.hasSipCoverage);
+  for (let index = 0; index < legacyActiveJobs.length; index += 80) {
+    const statements = legacyActiveJobs.slice(index, index + 80).map((job) => db.prepare(`UPDATE data_download_jobs
+      SET start_date = '2016-01-01', cursor_json = '{}', inserted_count = 0,
+        quality_report_json = '{}', status = 'queued', last_error = NULL, updated_at = ?
+      WHERE id = ?`).bind(new Date().toISOString(), job.id));
+    if (statements.length) await db.batch(statements);
+  }
   await db.prepare(`UPDATE data_download_jobs SET status = 'queued', updated_at = ?
     , last_error = NULL
     WHERE market = 'US' AND timeframe = '1d' AND status IN ('paused', 'failed')`)
@@ -177,11 +184,12 @@ export async function POST(request: Request) {
     for (const instrument of instruments.results.slice(index, index + 80)) {
       const existingId = activeByInstrument.get(instrument.id);
       if (existingId || resumeOnly) continue;
-      const startDate = instrument.lastRealTimestamp
-        ? dateAfter(Number(instrument.lastRealTimestamp))
-        : instrument.lastAttemptedDate
-          ? dateOffset(instrument.lastAttemptedDate, 1)
-          : "2016-01-01";
+      // Existing IEX coverage is intentionally ignored here. The first SIP
+      // update backfills from 2016 and replaces live candles by primary key;
+      // immutable training snapshots live in data_snapshots and are untouched.
+      const startDate = instrument.lastSipTimestamp
+        ? dateAfter(Number(instrument.lastSipTimestamp))
+        : "2016-01-01";
       if (startDate > endDate) continue;
       const id = crypto.randomUUID();
       jobIds.push(id);

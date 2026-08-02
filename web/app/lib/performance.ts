@@ -36,6 +36,13 @@ export type PerformanceMetrics = {
 export type HabitTrade = {
   result: number;
   holdingBars: number;
+  instrument?: {
+    market: string;
+    entryPrice: number;
+    averageDailyVolume?: number;
+    averageDailyTurnover?: number;
+    marketCap?: number;
+  };
   decision?: {
     marketState: string;
     location: string;
@@ -71,6 +78,10 @@ export type PerformanceHabitAnalysis = {
   reasons: PerformanceBreakdown[];
   planTraits: PerformanceBreakdown[];
   patterns: PerformanceBreakdown[];
+  priceRanges: PerformanceBreakdown[];
+  volumeRanges: PerformanceBreakdown[];
+  turnoverRanges: PerformanceBreakdown[];
+  marketCapRanges: PerformanceBreakdown[];
   combinations: PerformanceBreakdown[];
   attributedTrades: number;
   pretradeAttributedTrades: number;
@@ -85,6 +96,52 @@ function holdingPeriodLabel(holdingBars: number) {
   if (holdingBars <= 10) return "约 4–10 根 K 线";
   if (holdingBars <= 20) return "约 11–20 根 K 线";
   return "约 21 根 K 线以上";
+}
+
+function marketPrefix(market: string) {
+  if (market === "美股" || market.toUpperCase() === "US") return "美股 $";
+  if (market === "A股" || market.toUpperCase() === "CN") return "A股 ¥";
+  return `${market} `;
+}
+
+function priceRangeLabel(price: number, market: string) {
+  const prefix = marketPrefix(market);
+  if (price < 5) return `${prefix}5 以下`;
+  if (price < 10) return `${prefix}5–10`;
+  if (price < 30) return `${prefix}10–30`;
+  if (price < 100) return `${prefix}30–100`;
+  if (price < 300) return `${prefix}100–300`;
+  return `${prefix}300 以上`;
+}
+
+function volumeRangeLabel(volume: number) {
+  if (volume < 100000) return "日均成交量 10 万股以下";
+  if (volume < 500000) return "日均成交量 10–50 万股";
+  if (volume < 2000000) return "日均成交量 50–200 万股";
+  if (volume < 10000000) return "日均成交量 200–1000 万股";
+  return "日均成交量 1000 万股以上";
+}
+
+function amountLabel(value: number, market: string, kind: "turnover" | "market-cap") {
+  const us = market === "美股" || market.toUpperCase() === "US";
+  if (kind === "turnover") {
+    const unit = us ? "美元" : "元";
+    if (value < 1000000) return `日均成交额 100 万${unit}以下`;
+    if (value < 10000000) return `日均成交额 100–1000 万${unit}`;
+    if (value < 100000000) return `日均成交额 1000 万–1 亿${unit}`;
+    if (value < 1000000000) return `日均成交额 1–10 亿${unit}`;
+    return `日均成交额 10 亿${unit}以上`;
+  }
+  if (us) {
+    if (value < 2e9) return "美股市值 20 亿美元以下";
+    if (value < 10e9) return "美股市值 20–100 亿美元";
+    if (value < 50e9) return "美股市值 100–500 亿美元";
+    return "美股市值 500 亿美元以上";
+  }
+  if (value < 5e9) return "A股市值 50 亿元以下";
+  if (value < 20e9) return "A股市值 50–200 亿元";
+  if (value < 100e9) return "A股市值 200–1000 亿元";
+  return "A股市值 1000 亿元以上";
 }
 
 function summarizeBreakdown(
@@ -177,6 +234,30 @@ export function analyzePerformanceHabits(trades: HabitTrade[]): PerformanceHabit
     patterns: summarizeBreakdown(trades, (trade) => (
       trade.patterns.map((pattern) => ({ key: pattern, label: pattern }))
     )),
+    priceRanges: summarizeBreakdown(trades, (trade) => {
+      const context = trade.instrument;
+      if (!context || !Number.isFinite(context.entryPrice) || context.entryPrice <= 0) return [];
+      const label = priceRangeLabel(context.entryPrice, context.market);
+      return [{ key: label, label }];
+    }),
+    volumeRanges: summarizeBreakdown(trades, (trade) => {
+      const volume = trade.instrument?.averageDailyVolume;
+      if (!volume || !Number.isFinite(volume)) return [];
+      const label = volumeRangeLabel(volume);
+      return [{ key: label, label }];
+    }),
+    turnoverRanges: summarizeBreakdown(trades, (trade) => {
+      const context = trade.instrument;
+      if (!context?.averageDailyTurnover || !Number.isFinite(context.averageDailyTurnover)) return [];
+      const label = amountLabel(context.averageDailyTurnover, context.market, "turnover");
+      return [{ key: label, label }];
+    }),
+    marketCapRanges: summarizeBreakdown(trades, (trade) => {
+      const context = trade.instrument;
+      if (!context?.marketCap || !Number.isFinite(context.marketCap)) return [];
+      const label = amountLabel(context.marketCap, context.market, "market-cap");
+      return [{ key: label, label }];
+    }),
     combinations: summarizeBreakdown(withDecision, (trade) => {
       const decision = trade.decision;
       if (!decision) return [];

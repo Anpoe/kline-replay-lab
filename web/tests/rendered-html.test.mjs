@@ -35,7 +35,16 @@ test("ships the K-line training workbench instead of the starter", async () => {
   assert.match(workbench, /drawingsRestoreNonce/);
   assert.match(workbench, /session_created/);
   assert.match(workbench, /decision_submitted/);
+  assert.match(workbench, /decision_updated/);
+  assert.match(workbench, /decision_deleted/);
+  assert.match(workbench, /编辑事前决策/);
+  assert.match(workbench, /删除这份决策吗/);
+  assert.match(workbench, /编辑交易理由标签/);
+  assert.match(workbench, /删除交易理由标签/);
+  assert.match(workbench, /已同步 .* 份历史决策/);
   assert.match(workbench, /decisionSubmissions/);
+  assert.match(workbench, /reasonTags/);
+  assert.match(workbench, /REASON_TAGS_KEY/);
   assert.match(workbench, /事前决策记录/);
   assert.match(workbench, /查看复盘/);
   assert.match(workbench, /全部可恢复训练，可滚动浏览/);
@@ -55,6 +64,10 @@ test("ships the K-line training workbench instead of the starter", async () => {
   assert.match(workbench, /默认展示全部已保存训练/);
   assert.match(workbench, /最优持仓时长/);
   assert.match(workbench, /最优交易形态/);
+  assert.match(workbench, /最优价格区间/);
+  assert.match(workbench, /最优平均成交量区间/);
+  assert.match(workbench, /最优平均成交额区间/);
+  assert.match(workbench, /最优市值区间/);
   assert.match(workbench, /最优习惯组合/);
   assert.match(workbench, /筛选训练集/);
   assert.match(workbench, /选择具体训练/);
@@ -117,6 +130,9 @@ test("ships the K-line training workbench instead of the starter", async () => {
   assert.match(marketJobsRoute, /filterTradableUsAssets/);
   assert.match(marketJobsRoute, /loadLatestClosedUsSession/);
   assert.match(marketJobsRoute, /resumeOnly/);
+  assert.match(marketJobsRoute, /c\.source = 'alpaca-sip'/);
+  assert.match(downloadRunner, /chunk\.source === "alpaca-sip"/);
+  assert.doesNotMatch(downloadRunner, /DELETE FROM data_snapshots/);
   assert.match(dataJobsRoute, /WITH instrument_status AS/);
   assert.doesNotMatch(packageJson, /react-loading-skeleton/);
 });

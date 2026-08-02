@@ -86,11 +86,12 @@ test("Alpaca 下载使用免费历史行情接口、认证头和分页游标", a
   assert.equal(url.hostname, "data.alpaca.markets");
   assert.equal(url.pathname, "/v2/stocks/AAPL/bars");
   assert.equal(url.searchParams.get("timeframe"), "5Min");
-  assert.equal(url.searchParams.get("feed"), "iex");
+  assert.equal(url.searchParams.get("feed"), "sip");
   assert.equal(url.searchParams.get("page_token"), "next-token");
   assert.equal(capturedHeaders["APCA-API-KEY-ID"], "local-key");
   assert.deepEqual(result.cursor, { pageToken: "page-2" });
   assert.equal(result.complete, false);
+  assert.equal(result.source, "alpaca-sip");
 });
 
 test("数据源缺少本地凭证时不会发出网络请求", async () => {

@@ -158,3 +158,29 @@ test("does not crown a single observation as a reliable best habit", () => {
   assert.equal(analysis.patterns[0].eligible, false);
   assert.equal(analysis.marketStates.length, 0);
 });
+
+test("ranks entry price, liquidity and optional market-cap ranges", () => {
+  const baseInstrument = {
+    market: "美股",
+    entryPrice: 24,
+    averageDailyVolume: 1500000,
+    averageDailyTurnover: 36000000,
+    marketCap: 8000000000,
+  };
+  const analysis = analyzePerformanceHabits([
+    { result: 8, holdingBars: 2, patterns: [], instrument: baseInstrument },
+    { result: 4, holdingBars: 3, patterns: [], instrument: { ...baseInstrument, entryPrice: 28 } },
+    { result: -2, holdingBars: 4, patterns: [], instrument: {
+      market: "A股",
+      entryPrice: 120,
+      averageDailyVolume: 12000000,
+      averageDailyTurnover: 1400000000,
+    } },
+  ]);
+
+  assert.equal(analysis.priceRanges[0].label, "美股 $10–30");
+  assert.equal(analysis.priceRanges[0].samples, 2);
+  assert.equal(analysis.volumeRanges[0].label, "日均成交量 50–200 万股");
+  assert.equal(analysis.turnoverRanges[0].label, "日均成交额 1000 万–1 亿美元");
+  assert.equal(analysis.marketCapRanges[0].label, "美股市值 20–100 亿美元");
+});

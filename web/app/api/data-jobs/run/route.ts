@@ -158,6 +158,19 @@ export async function POST(request: Request) {
       .first<{ status: string }>();
     const status = latest?.status === "paused" ? "paused" : chunk.complete ? "completed" : "queued";
     const insertedCount = Number(job.insertedCount) + chunk.candles.length;
+    if (chunk.complete && chunk.source === "alpaca-sip" && insertedCount > 0) {
+      // SIP backfills replace the mutable US candle library only. Immutable
+      // snapshots are stored separately in data_snapshots, so old training
+      // sessions continue to reproduce their original market data exactly.
+      await db.prepare(`DELETE FROM candles
+        WHERE instrument_id = ? AND timeframe = ? AND adjustment_type = ? AND source = 'alpaca-iex'`)
+        .bind(job.instrumentId, job.timeframe, job.adjustmentType)
+        .run();
+      await db.prepare(`DELETE FROM candle_coverage
+        WHERE instrument_id = ? AND timeframe = ? AND adjustment_type = ? AND source = 'alpaca-iex'`)
+        .bind(job.instrumentId, job.timeframe, job.adjustmentType)
+        .run();
+    }
     await db.prepare(`UPDATE data_download_jobs SET status = ?, cursor_json = ?,
       inserted_count = ?, quality_report_json = ?, last_error = NULL, updated_at = ? WHERE id = ?`)
       .bind(

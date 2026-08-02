@@ -23,6 +23,7 @@ import {
   Magnet,
   MousePointer2,
   Pause,
+  Pencil,
   Play,
   Plus,
   Redo2,
@@ -110,6 +111,11 @@ import {
   type MovingAverageSettings,
 } from "../lib/chartIndicators";
 import {
+  isUsMarket,
+  randomEligibleStartIndices,
+  trailingAverageDailyDollarVolume,
+} from "../lib/randomLiquidity";
+import {
   accountEquity,
   accountMarketValue,
   availableCash as calculateAvailableCash,
@@ -180,6 +186,11 @@ function instrumentAssetLabel(item: Pick<AvailableInstrument, "market" | "assetT
 function isRandomInstrumentAllowed(item: AvailableInstrument, includeIndices: boolean) {
   if (item.assetType === "index") return includeIndices;
   return resolveMarketRules(marketRuleCode(item.market), item.id).tradingEnabled;
+}
+
+function isLowLiquidityUsSecurityByName(item: AvailableInstrument) {
+  if (!isUsMarket(item.market)) return false;
+  return /\b(rights?|warrants?|units?)\b/i.test(item.label);
 }
 function InstrumentPicker({
   value,
@@ -361,6 +372,12 @@ type SnapshotMeta = {
   lastTimestamp: number;
   createdAt: string;
 };
+type SnapshotTradeContext = {
+  averageDailyVolume?: number;
+  averageDailyTurnover?: number;
+  marketCap?: number;
+};
+type SnapshotTradeContextMap = Record<string, Record<string, SnapshotTradeContext>>;
 type TrainingState = {
   version: 7;
   cursor: number;
@@ -456,6 +473,8 @@ type AppSettings = {
   randomEndDate: string;
   randomLength: number;
   randomIncludeIndices: boolean;
+  randomUsLiquidityFilter: boolean;
+  randomUsMinAverageDailyDollarVolume: number;
   patternCooldownBars: number;
   patternScanAttempts: number;
 };
@@ -467,6 +486,7 @@ type SyncedPreferences = {
   quickRandomMode: "free" | "blind";
   quickRandomPatternPresetId: string;
   randomTrainingPatternPresetIds: string[];
+  reasonTags?: string[];
   customReasonTags: string[];
   drawingPreferences: {
     magnetMode: "normal" | "weak_magnet" | "strong_magnet";
@@ -478,6 +498,7 @@ type SyncedPreferences = {
 
 const LAST_DRAFT_KEY = "kline-replay-lab:last-training";
 const APP_SETTINGS_KEY = "kline-replay-lab:settings";
+const REASON_TAGS_KEY = "kline-replay-lab:reason-tags-v1";
 const CUSTOM_REASON_TAGS_KEY = "kline-replay-lab:custom-reason-tags";
 const PATTERN_PRESETS_KEY = "kline-replay-lab:pattern-presets-v1";
 const QUICK_RANDOM_PATTERN_KEY = "kline-replay-lab:quick-random-pattern-v1";
@@ -617,10 +638,22 @@ const defaultAppSettings: AppSettings = {
   randomEndDate: "",
   randomLength: 40,
   randomIncludeIndices: false,
+  randomUsLiquidityFilter: true,
+  randomUsMinAverageDailyDollarVolume: 1000000,
   patternCooldownBars: 10,
   patternScanAttempts: 12,
 };
 const reasonOptions = ["顺势", "关键位置", "突破回踩", "失败突破", "二次入场", "信号K确认"];
+
+function normalizeReasonTags(value: unknown, fallback: string[] = reasonOptions) {
+  const source = Array.isArray(value) ? value : fallback;
+  const normalized = source
+    .filter((tag): tag is string => typeof tag === "string")
+    .map((tag) => tag.trim().replace(/\s+/g, " ").slice(0, 20))
+    .filter((tag, index, items) => Boolean(tag) && items.indexOf(tag) === index)
+    .slice(0, 30);
+  return Array.isArray(value) ? normalized : [...fallback];
+}
 type DrawingTool = {
   name: string;
   label: string;
@@ -741,12 +774,14 @@ function PerformanceInsightCard({
   items,
   formatResult,
   wide = false,
+  emptyText = "当前筛选范围还没有可用于此项分析的数据。",
 }: {
   title: string;
   description: string;
   items: PerformanceBreakdown[];
   formatResult: (value: number) => string;
   wide?: boolean;
+  emptyText?: string;
 }) {
   const best = items.find((item) => item.eligible);
   return (
@@ -765,7 +800,7 @@ function PerformanceInsightCard({
             </div>
           ))}
         </div>
-      ) : <div className="performance-analysis-empty">当前筛选范围还没有可用于此项分析的数据。</div>}
+      ) : <div className="performance-analysis-empty">{emptyText}</div>}
     </article>
   );
 }
@@ -798,6 +833,11 @@ function normalizeSettings(value: Partial<AppSettings>): AppSettings {
     randomDateMode: merged.randomDateMode === "range" ? "range" : "all",
     randomLength: Math.max(0, Math.round(Number(merged.randomLength) || 0)),
     randomIncludeIndices: merged.randomIncludeIndices === true,
+    randomUsLiquidityFilter: merged.randomUsLiquidityFilter !== false,
+    randomUsMinAverageDailyDollarVolume: Math.max(
+      0,
+      Math.round(Number(merged.randomUsMinAverageDailyDollarVolume) || defaultAppSettings.randomUsMinAverageDailyDollarVolume),
+    ),
     patternCooldownBars: Math.max(0, Math.min(100, Math.round(Number(merged.patternCooldownBars) || 0))),
     patternScanAttempts: Math.max(1, Math.min(50, Math.round(Number(merged.patternScanAttempts) || defaultAppSettings.patternScanAttempts))),
   };
@@ -869,6 +909,10 @@ function eventLabel(type: string) {
     session_restored: "恢复训练",
     session_manually_saved: "手动保存",
     decision_submitted: "提交事前决策",
+    decision_updated: "编辑事前决策",
+    decision_deleted: "删除事前决策",
+    reason_tag_updated: "编辑交易理由标签",
+    reason_tag_deleted: "删除交易理由标签",
     decision_changed: "编辑决策草稿（旧版）",
     replay_advanced: "推进K线",
     replay_rewound: "回看上一根",
@@ -978,8 +1022,12 @@ export function TrainingWorkbench() {
   const [randomTrainingPatternPresetIds, setRandomTrainingPatternPresetIds] = useState<string[]>([]);
   const [quickRandomError, setQuickRandomError] = useState("");
   const [decision, setDecision] = useState<Decision>(defaultDecision);
+  const [reasonTags, setReasonTags] = useState<string[]>(reasonOptions);
   const [customReasonTags, setCustomReasonTags] = useState<string[]>([]);
   const [customReasonInput, setCustomReasonInput] = useState("");
+  const [editingReasonTag, setEditingReasonTag] = useState("");
+  const [editingReasonInput, setEditingReasonInput] = useState("");
+  const [reasonTagsReady, setReasonTagsReady] = useState(false);
   const [customReasonTagsReady, setCustomReasonTagsReady] = useState(false);
   const [drawingRequest, setDrawingRequest] = useState<DrawingRequest>(null);
   const [clearNonce, setClearNonce] = useState(0);
@@ -1029,6 +1077,7 @@ export function TrainingWorkbench() {
   const [events, setEvents] = useState<TrainingEvent[]>([]);
   const [selectedDecisionId, setSelectedDecisionId] = useState("");
   const [decisionTarget, setDecisionTarget] = useState<CandleContextTarget | null>(null);
+  const [editingDecisionId, setEditingDecisionId] = useState("");
   const [reviewedSession, setReviewedSession] = useState<{ session: TrainingSession; state: TrainingState } | null>(null);
   const [coverage, setCoverage] = useState<Coverage[]>([]);
   const [coveragePage, setCoveragePage] = useState(1);
@@ -1040,6 +1089,7 @@ export function TrainingWorkbench() {
   const [selectedCoverageKeys, setSelectedCoverageKeys] = useState<string[]>([]);
   const [dataMarket, setDataMarket] = useState<DataMarket>("CN");
   const [sessions, setSessions] = useState<TrainingSession[]>([]);
+  const [snapshotTradeContexts, setSnapshotTradeContexts] = useState<SnapshotTradeContextMap>({});
   const [performanceFilters, setPerformanceFilters] = useState<PerformanceFilters>(defaultPerformanceFilters);
   const [reviewSessionFilters, setReviewSessionFilters] = useState<ReviewSessionFilters>(defaultReviewSessionFilters);
   const [selectedPerformanceSessionId, setSelectedPerformanceSessionId] = useState("");
@@ -1313,15 +1363,17 @@ export function TrainingWorkbench() {
       setQuickRandomMode(stored.quickRandomMode);
       window.localStorage.setItem(QUICK_RANDOM_MODE_KEY, stored.quickRandomMode);
     }
-    if (Array.isArray(stored.customReasonTags)) {
-      const nextTags = stored.customReasonTags
-        .filter((tag): tag is string => typeof tag === "string")
-        .map((tag) => tag.trim())
-        .filter((tag, index, items) => tag && !reasonOptions.includes(tag) && items.indexOf(tag) === index)
-        .slice(0, 30);
-      setCustomReasonTags(nextTags);
-      window.localStorage.setItem(CUSTOM_REASON_TAGS_KEY, JSON.stringify(nextTags));
-    }
+    const syncedReasonTags = Array.isArray(stored.reasonTags)
+      ? normalizeReasonTags(stored.reasonTags)
+      : normalizeReasonTags([
+        ...reasonOptions,
+        ...(Array.isArray(stored.customReasonTags) ? stored.customReasonTags : []),
+      ]);
+    setReasonTags(syncedReasonTags);
+    const syncedCustomReasonTags = syncedReasonTags.filter((tag) => !reasonOptions.includes(tag));
+    setCustomReasonTags(syncedCustomReasonTags);
+    window.localStorage.setItem(REASON_TAGS_KEY, JSON.stringify(syncedReasonTags));
+    window.localStorage.setItem(CUSTOM_REASON_TAGS_KEY, JSON.stringify(syncedCustomReasonTags));
     const drawingPreferences = stored.drawingPreferences;
     if (drawingPreferences && typeof drawingPreferences === "object") {
       if (["normal", "weak_magnet", "strong_magnet"].includes(drawingPreferences.magnetMode)) {
@@ -1399,18 +1451,21 @@ export function TrainingWorkbench() {
   useEffect(() => {
     const timer = window.setTimeout(() => {
       try {
-        const stored = window.localStorage.getItem(CUSTOM_REASON_TAGS_KEY);
-        const parsed = stored ? JSON.parse(stored) : [];
-        if (Array.isArray(parsed)) {
-          setCustomReasonTags(parsed
-            .filter((tag): tag is string => typeof tag === "string")
-            .map((tag) => tag.trim())
-            .filter((tag, index, items) => tag && !reasonOptions.includes(tag) && items.indexOf(tag) === index)
-            .slice(0, 30));
-        }
+        const storedReasonTags = window.localStorage.getItem(REASON_TAGS_KEY);
+        const storedCustomTags = window.localStorage.getItem(CUSTOM_REASON_TAGS_KEY);
+        const legacyCustomTags = storedCustomTags ? JSON.parse(storedCustomTags) : [];
+        const nextTags = normalizeReasonTags(
+          storedReasonTags ? JSON.parse(storedReasonTags) : [...reasonOptions, ...(Array.isArray(legacyCustomTags) ? legacyCustomTags : [])],
+        );
+        setReasonTags(nextTags);
+        setCustomReasonTags(nextTags.filter((tag) => !reasonOptions.includes(tag)));
       } catch {
+        setReasonTags(reasonOptions);
+        setCustomReasonTags([]);
+        window.localStorage.removeItem(REASON_TAGS_KEY);
         window.localStorage.removeItem(CUSTOM_REASON_TAGS_KEY);
       } finally {
+        setReasonTagsReady(true);
         setCustomReasonTagsReady(true);
       }
     }, 0);
@@ -1418,9 +1473,12 @@ export function TrainingWorkbench() {
   }, []);
 
   useEffect(() => {
-    if (!customReasonTagsReady) return;
-    window.localStorage.setItem(CUSTOM_REASON_TAGS_KEY, JSON.stringify(customReasonTags));
-  }, [customReasonTags, customReasonTagsReady]);
+    if (!reasonTagsReady) return;
+    const nextTags = normalizeReasonTags(reasonTags);
+    const nextCustomTags = nextTags.filter((tag) => !reasonOptions.includes(tag));
+    window.localStorage.setItem(REASON_TAGS_KEY, JSON.stringify(nextTags));
+    window.localStorage.setItem(CUSTOM_REASON_TAGS_KEY, JSON.stringify(nextCustomTags));
+  }, [reasonTags, reasonTagsReady]);
 
   useEffect(() => {
     const timer = window.setTimeout(() => {
@@ -1458,6 +1516,7 @@ export function TrainingWorkbench() {
     if (
       !settingsReady
       || !patternPresetsReady
+      || !reasonTagsReady
       || !customReasonTagsReady
       || !movingAverageSettingsReady
       || syncedPreferencesLoadStartedRef.current
@@ -1475,7 +1534,7 @@ export function TrainingWorkbench() {
         if (!cancelled) setSyncedPreferencesReady(true);
       });
     return () => { cancelled = true; };
-  }, [applySyncedPreferences, customReasonTagsReady, movingAverageSettingsReady, patternPresetsReady, settingsReady]);
+  }, [applySyncedPreferences, customReasonTagsReady, movingAverageSettingsReady, patternPresetsReady, reasonTagsReady, settingsReady]);
 
   useEffect(() => {
     if (!syncedPreferencesReady) return;
@@ -1488,6 +1547,7 @@ export function TrainingWorkbench() {
         quickRandomMode,
         quickRandomPatternPresetId,
         randomTrainingPatternPresetIds,
+        reasonTags,
         customReasonTags,
         drawingPreferences: {
           magnetMode: drawingMagnetMode,
@@ -1515,6 +1575,7 @@ export function TrainingWorkbench() {
     quickRandomMode,
     quickRandomPatternPresetId,
     randomTrainingPatternPresetIds,
+    reasonTags,
     syncedPreferencesReady,
   ]);
 
@@ -1583,6 +1644,7 @@ export function TrainingWorkbench() {
     setPlaying(false);
     setShowRandomComplete(false);
     setDecisionTarget(null);
+    setEditingDecisionId("");
     decisionDraftBeforeBackfillRef.current = null;
     saveCompletedTrainingRef.current = false;
     try {
@@ -1634,6 +1696,7 @@ export function TrainingWorkbench() {
         setDecisionSubmissions(restoreRequest.state.decisionSubmissions);
         setSelectedDecisionId("");
         setDecisionTarget(null);
+        setEditingDecisionId("");
         setOrderQty(restoreRequest.state.orderQty);
         setTradingMode(restoreRequest.state.tradingMode);
         setInitialCapital(restoreRequest.state.initialCapital);
@@ -1679,6 +1742,7 @@ export function TrainingWorkbench() {
         setDecisionSubmissions([]);
         setSelectedDecisionId("");
         setDecisionTarget(null);
+        setEditingDecisionId("");
         setOrderQty(normalizeBuyQuantity(loadedMarketRules, appSettingsRef.current.defaultOrderQty));
         setTradingMode(appSettingsRef.current.tradingMode);
         setInitialCapital(appSettingsRef.current.initialCapital);
@@ -2001,6 +2065,7 @@ export function TrainingWorkbench() {
       if (decisionDraftBeforeBackfillRef.current) setDecision(decisionDraftBeforeBackfillRef.current);
       decisionDraftBeforeBackfillRef.current = null;
       setDecisionTarget(null);
+      setEditingDecisionId("");
     }
     setCursor(nextCursor);
     appendEvent("replay_rewound", { fromCursor: cursor, toCursor: nextCursor }, bars[nextCursor]?.timestamp);
@@ -2193,6 +2258,7 @@ export function TrainingWorkbench() {
     setDecisionSubmissions([]);
     setSelectedDecisionId("");
     setDecisionTarget(null);
+    setEditingDecisionId("");
     decisionDraftBeforeBackfillRef.current = null;
     setOrderQty(normalizeBuyQuantity(marketRules, appSettingsRef.current.defaultOrderQty));
     setCashBalance(initialCapital);
@@ -2272,14 +2338,88 @@ export function TrainingWorkbench() {
     setSaveState("决策草稿已更新");
   };
 
+  const commitReasonTags = (value: string[]) => {
+    const nextTags = normalizeReasonTags(value);
+    setReasonTags(nextTags);
+    setCustomReasonTags(nextTags.filter((tag) => !reasonOptions.includes(tag)));
+  };
+
   const addCustomReasonTag = () => {
     const nextTag = customReasonInput.trim().replace(/\s+/g, " ").slice(0, 20);
     if (!nextTag) return;
-    if (!reasonOptions.includes(nextTag)) {
-      setCustomReasonTags((tags) => tags.includes(nextTag) ? tags : [...tags, nextTag].slice(-30));
-    }
+    if (!reasonTags.includes(nextTag)) commitReasonTags([...reasonTags, nextTag].slice(-30));
     if (!decision.reasons.includes(nextTag)) updateDecision("reasons", [...decision.reasons, nextTag]);
     setCustomReasonInput("");
+  };
+
+  const startEditReasonTag = (tag: string) => {
+    setEditingReasonTag(tag);
+    setEditingReasonInput(tag);
+  };
+
+  const cancelEditReasonTag = () => {
+    setEditingReasonTag("");
+    setEditingReasonInput("");
+  };
+
+  const saveReasonTagEdit = () => {
+    const previousTag = editingReasonTag;
+    const nextTag = editingReasonInput.trim().replace(/\s+/g, " ").slice(0, 20);
+    if (!previousTag || !nextTag) return;
+    if (reasonTags.some((tag) => tag !== previousTag && tag === nextTag)) {
+      setSaveState("标签不能为空，也不能与已有标签重名");
+      return;
+    }
+    if (nextTag === previousTag) {
+      cancelEditReasonTag();
+      return;
+    }
+    commitReasonTags(reasonTags.map((tag) => tag === previousTag ? nextTag : tag));
+    setDecision((current) => ({
+      ...current,
+      reasons: current.reasons.map((reason) => reason === previousTag ? nextTag : reason),
+    }));
+    if (decisionDraftBeforeBackfillRef.current) {
+      decisionDraftBeforeBackfillRef.current = {
+        ...decisionDraftBeforeBackfillRef.current,
+        reasons: decisionDraftBeforeBackfillRef.current.reasons.map((reason) => reason === previousTag ? nextTag : reason),
+      };
+    }
+    const affectedSubmissionCount = decisionSubmissions.filter((submission) => submission.decision.reasons.includes(previousTag)).length;
+    setDecisionSubmissions((items) => items.map((submission) => submission.decision.reasons.includes(previousTag)
+      ? {
+        ...submission,
+        decision: {
+          ...submission.decision,
+          reasons: submission.decision.reasons.map((reason) => reason === previousTag ? nextTag : reason),
+        },
+      }
+      : submission));
+    appendEvent("reason_tag_updated", {
+      previousTag,
+      nextTag,
+      affectedSubmissionCount,
+    });
+    cancelEditReasonTag();
+    setSaveState(`交易理由标签已改为“${nextTag}” · 已同步 ${affectedSubmissionCount} 份历史决策`);
+  };
+
+  const deleteReasonTag = (tag: string) => {
+    if (!window.confirm(`确定删除交易理由标签“${tag}”吗？历史决策会保留原文字，不会被篡改。`)) return;
+    commitReasonTags(reasonTags.filter((item) => item !== tag));
+    setDecision((current) => ({
+      ...current,
+      reasons: current.reasons.filter((reason) => reason !== tag),
+    }));
+    if (decisionDraftBeforeBackfillRef.current) {
+      decisionDraftBeforeBackfillRef.current = {
+        ...decisionDraftBeforeBackfillRef.current,
+        reasons: decisionDraftBeforeBackfillRef.current.reasons.filter((reason) => reason !== tag),
+      };
+    }
+    if (editingReasonTag === tag) cancelEditReasonTag();
+    appendEvent("reason_tag_deleted", { tag });
+    setSaveState(`交易理由标签“${tag}”已删除 · 历史决策保留原记录`);
   };
 
   const openDecisionForCandle = useCallback((target: CandleContextTarget) => {
@@ -2293,6 +2433,7 @@ export function TrainingWorkbench() {
       };
       setDecision(defaultDecision);
     }
+    setEditingDecisionId("");
     setDecisionTarget({
       dataIndex: targetCursor,
       timestamp: targetBar.timestamp,
@@ -2308,14 +2449,84 @@ export function TrainingWorkbench() {
     if (decisionDraftBeforeBackfillRef.current) setDecision(decisionDraftBeforeBackfillRef.current);
     decisionDraftBeforeBackfillRef.current = null;
     setDecisionTarget(null);
+    setEditingDecisionId("");
     setSaveState("已取消补写，原决策草稿已恢复");
   };
 
+  const editDecision = useCallback((submission: DecisionSubmission) => {
+    const targetBar = bars[submission.cursor] ?? bars.find((bar) => bar.timestamp === submission.barTimestamp);
+    const targetCursor = targetBar ? bars.indexOf(targetBar) : submission.cursor;
+    if (!targetBar || targetCursor < 0 || targetCursor > cursor) {
+      setSaveState("这份决策对应的 K 线当前不可见，暂时无法编辑");
+      return;
+    }
+    decisionDraftBeforeBackfillRef.current = {
+      ...decision,
+      reasons: [...decision.reasons],
+    };
+    setEditingDecisionId(submission.id);
+    setDecision({ ...submission.decision, reasons: [...submission.decision.reasons] });
+    setDecisionTarget({
+      dataIndex: targetCursor,
+      timestamp: targetBar.timestamp,
+      referencePrice: targetBar.close,
+    });
+    setSelectedDecisionId("");
+    setPlaying(false);
+    setSaveState("正在编辑事前决策");
+    requestAnimationFrame(() => decisionPanelRef.current?.scrollIntoView({ behavior: "smooth", block: "nearest" }));
+  }, [bars, cursor, decision]);
+
+  const deleteDecision = (submission: DecisionSubmission) => {
+    if (!window.confirm("确定删除这份决策吗？删除后会从盘面标记和复盘记录中移除，但删除事件仍会保留在训练审计日志中。")) return;
+    setDecisionSubmissions((items) => items.filter((item) => item.id !== submission.id));
+    if (editingDecisionId === submission.id) {
+      if (decisionDraftBeforeBackfillRef.current) setDecision(decisionDraftBeforeBackfillRef.current);
+      decisionDraftBeforeBackfillRef.current = null;
+      setDecisionTarget(null);
+      setEditingDecisionId("");
+    }
+    setSelectedDecisionId("");
+    appendEvent("decision_deleted", {
+      submissionId: submission.id,
+      cursor: submission.cursor,
+      decision: submission.decision,
+      submittedAt: submission.submittedAt,
+      backfilled: Boolean(submission.backfilled),
+    }, submission.barTimestamp);
+    setSaveState("决策已删除 · 请保存训练");
+  };
+
   const submitDecision = () => {
-    const backfillTarget = decisionTarget && decisionTarget.dataIndex <= cursor ? decisionTarget : null;
+    const editingSubmission = editingDecisionId
+      ? decisionSubmissions.find((submission) => submission.id === editingDecisionId)
+      : undefined;
+    const backfillTarget = !editingSubmission && decisionTarget && decisionTarget.dataIndex <= cursor ? decisionTarget : null;
     const targetCursor = backfillTarget?.dataIndex ?? cursor;
     const targetBar = bars[targetCursor] ?? currentBar;
     if (!targetBar) return;
+    if (editingSubmission) {
+      const nextDecision: Decision = {
+        ...decision,
+        reasons: [...decision.reasons],
+      };
+      setDecisionSubmissions((items) => items.map((item) => item.id === editingSubmission.id
+        ? { ...item, decision: nextDecision }
+        : item));
+      setSelectedDecisionId(editingSubmission.id);
+      appendEvent("decision_updated", {
+        submissionId: editingSubmission.id,
+        cursor: editingSubmission.cursor,
+        previousDecision: editingSubmission.decision,
+        decision: nextDecision,
+        backfilled: Boolean(editingSubmission.backfilled),
+      }, editingSubmission.barTimestamp);
+      decisionDraftBeforeBackfillRef.current = null;
+      setDecisionTarget(null);
+      setEditingDecisionId("");
+      setSaveState("决策已更新 · 请保存训练");
+      return;
+    }
     const submission: DecisionSubmission = {
       id: createUuid(),
       barTimestamp: targetBar.timestamp,
@@ -2674,6 +2885,10 @@ export function TrainingWorkbench() {
           pnl: position.realizedPnl ?? 0,
           returnPct: positionReturnPct(position, position.exitPrice ?? position.entryPrice),
           holdingBars: estimatedHoldingBars(session.timeframe, position.entryTimestamp, position.exitTimestamp),
+          entryTimestamp: position.entryTimestamp,
+          entryPrice: position.entryPrice,
+          market: availableInstruments.find((item) => item.id === session.instrumentId)?.market
+            ?? (/\.(SH|SZ|BJ)$/i.test(session.instrumentId) ? "A股" : "美股"),
           patterns: attributedPatternNames,
           decision: attributedDecision ? {
             marketState: attributedDecision.decision.marketState,
@@ -2716,7 +2931,38 @@ export function TrainingWorkbench() {
     } catch {
       return [];
     }
-  }), [parseTrainingState, sessions]);
+  }), [availableInstruments, parseTrainingState, sessions]);
+
+  useEffect(() => {
+    if (view !== "performance" || !sessionSummaries.length) return;
+    const groupedEntries = new Map<string, number[]>();
+    sessionSummaries.forEach((summary) => {
+      const snapshotId = summary.state.dataSnapshotId ?? summary.session.dataSnapshotId;
+      if (!snapshotId || !summary.habitTrades.length) return;
+      groupedEntries.set(snapshotId, [
+        ...(groupedEntries.get(snapshotId) ?? []),
+        ...summary.habitTrades.map((trade) => trade.entryTimestamp),
+      ]);
+    });
+    const requestItems = [...groupedEntries.entries()].map(([snapshotId, entryTimestamps]) => ({
+      snapshotId,
+      entryTimestamps: [...new Set(entryTimestamps)],
+    }));
+    if (!requestItems.length) return;
+    const controller = new AbortController();
+    void fetch("/api/snapshots/analysis", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ items: requestItems }),
+      signal: controller.signal,
+    })
+      .then((response) => response.ok ? response.json() : null)
+      .then((data: { contexts?: SnapshotTradeContextMap } | null) => {
+        if (data?.contexts) setSnapshotTradeContexts(data.contexts);
+      })
+      .catch(() => undefined);
+    return () => controller.abort();
+  }, [sessionSummaries, view]);
 
   const performanceSessionSummaries = useMemo(
     () => sessionSummaries.filter((summary) => summary.state.tradingMode === tradingMode),
@@ -2805,13 +3051,22 @@ export function TrainingWorkbench() {
     });
   }, [reviewSessionFilters, sessionSummaries]);
   const performanceHabitTrades = useMemo<HabitTrade[]>(() => filteredSessionSummaries.flatMap((summary) => (
-    summary.habitTrades.map((trade) => ({
-      result: summary.state.tradingMode === "capital" ? trade.pnl : trade.returnPct,
-      holdingBars: trade.holdingBars,
-      decision: trade.decision,
-      patterns: trade.patterns,
-    }))
-  )), [filteredSessionSummaries]);
+    summary.habitTrades.map((trade) => {
+      const snapshotId = summary.state.dataSnapshotId ?? summary.session.dataSnapshotId ?? "";
+      const context = snapshotTradeContexts[snapshotId]?.[String(trade.entryTimestamp)];
+      return {
+        result: summary.state.tradingMode === "capital" ? trade.pnl : trade.returnPct,
+        holdingBars: trade.holdingBars,
+        decision: trade.decision,
+        patterns: trade.patterns,
+        instrument: {
+          market: trade.market,
+          entryPrice: trade.entryPrice,
+          ...context,
+        },
+      };
+    })
+  )), [filteredSessionSummaries, snapshotTradeContexts]);
   const performanceHabitAnalysis = useMemo(
     () => analyzePerformanceHabits(performanceHabitTrades),
     [performanceHabitTrades],
@@ -2961,11 +3216,14 @@ export function TrainingWorkbench() {
     endDate: appSettings.randomDateMode === "range" ? appSettings.randomEndDate : undefined,
     length: appSettings.randomLength,
     includeIndices: appSettings.randomIncludeIndices,
+    usLiquidityFilter: appSettings.randomUsLiquidityFilter,
+    usMinAverageDailyDollarVolume: appSettings.randomUsMinAverageDailyDollarVolume,
   }), [appSettings, instrumentId, timeframe]);
 
   const randomCandidatePairs = useCallback((config: RandomTrainingConfig = currentRandomConfig()) => {
     const allowedInstruments = availableInstruments.filter((item) =>
-      isRandomInstrumentAllowed(item, config.includeIndices));
+      isRandomInstrumentAllowed(item, config.includeIndices)
+      && !(config.usLiquidityFilter !== false && isLowLiquidityUsSecurityByName(item)));
     const instrumentCandidates = config.instrumentMode === "current"
       ? allowedInstruments.filter((item) => item.id === config.anchorInstrumentId)
       : config.instrumentMode === "market"
@@ -3007,6 +3265,7 @@ export function TrainingWorkbench() {
   const findCandidatePatternMatch = useCallback(async (
     requestInstrumentId: string,
     requestTimeframe: string,
+    requestMarket: string,
     draft: TrainingTaskDraft,
     applyRandomDateRange: boolean,
     randomConfig: RandomTrainingConfig = currentRandomConfig(),
@@ -3021,10 +3280,20 @@ export function TrainingWorkbench() {
       maximumIndex,
     }).filter((match) => {
       if (match.index < 40) return false;
-      if (!applyRandomDateRange || randomConfig.dateMode !== "range") return true;
-      const date = tradingDate(match.timestamp, loaded.timezone);
-      return (!randomConfig.startDate || date >= randomConfig.startDate)
-        && (!randomConfig.endDate || date <= randomConfig.endDate);
+      if (applyRandomDateRange && randomConfig.dateMode === "range") {
+        const date = tradingDate(match.timestamp, loaded.timezone);
+        if ((randomConfig.startDate && date < randomConfig.startDate)
+          || (randomConfig.endDate && date > randomConfig.endDate)) return false;
+      }
+      if (applyRandomDateRange && isUsMarket(requestMarket) && randomConfig.usLiquidityFilter !== false) {
+        return trailingAverageDailyDollarVolume(
+          loaded.candles,
+          match.index,
+          loaded.timezone,
+          requestTimeframe,
+        ) >= (randomConfig.usMinAverageDailyDollarVolume ?? 1000000);
+      }
+      return true;
     });
     return randomItem(matches) ?? null;
   }, [appSettings.patternCooldownBars, currentRandomConfig, loadPatternCandles, patternPresets]);
@@ -3070,26 +3339,45 @@ export function TrainingWorkbench() {
     setLoadNonce((value) => value + 1);
   };
 
-  const resolveRandomRequest = useCallback((
+  const resolveRandomRequest = useCallback(async (
     draft: TrainingTaskDraft,
     randomConfig: RandomTrainingConfig = currentRandomConfig(),
   ) => {
-    const selectedPair = randomItem(randomCandidatePairs(randomConfig))
-      ?? { instrument: defaultInstruments[0], timeframe: "1d" };
-    return {
-      instrumentId: selectedPair.instrument.id,
-      timeframe: selectedPair.timeframe,
-      draft: {
-        ...draft,
-        startMode: "random" as const,
-        length: draft.length > 0 ? draft.length : randomConfig.length,
-        randomStartDate: randomConfig.dateMode === "range" ? randomConfig.startDate : undefined,
-        randomEndDate: randomConfig.dateMode === "range" ? randomConfig.endDate : undefined,
-        randomRun: true,
-        randomConfig,
-      },
-    };
-  }, [currentRandomConfig, randomCandidatePairs]);
+    const pairs = randomCandidatePairs(randomConfig);
+    const requestedLength = draft.length > 0 ? draft.length : randomConfig.length;
+    const attemptLimit = Math.min(pairs.length, Math.max(24, appSettings.patternScanAttempts));
+    for (let index = 0; index < attemptLimit; index += 1) {
+      const pair = pairs[index];
+      try {
+        const loaded = await loadPatternCandles(pair.instrument.id, pair.timeframe);
+        const eligibleStarts = randomEligibleStartIndices(
+          loaded.candles,
+          loaded.timezone,
+          pair.timeframe,
+          requestedLength,
+          randomConfig,
+          pair.instrument.market,
+        );
+        const selectedStart = randomItem(eligibleStarts);
+        if (selectedStart == null) continue;
+        return {
+          instrumentId: pair.instrument.id,
+          timeframe: pair.timeframe,
+          draft: {
+            ...draft,
+            startMode: "bar" as const,
+            startBar: selectedStart + 1,
+            length: requestedLength,
+            randomRun: true,
+            randomConfig,
+          },
+        };
+      } catch {
+        // Skip unavailable or incomplete local partitions and keep looking.
+      }
+    }
+    return null;
+  }, [appSettings.patternScanAttempts, currentRandomConfig, loadPatternCandles, randomCandidatePairs]);
 
   const resolvePatternRandomRequest = useCallback(async (
     draft: TrainingTaskDraft,
@@ -3101,7 +3389,7 @@ export function TrainingWorkbench() {
       const pair = pairs[index];
       setPatternScanStatus(`正在检查候选 ${index + 1}/${attemptLimit}：${pair.instrument.short} · ${pair.timeframe}`);
       try {
-        const match = await findCandidatePatternMatch(pair.instrument.id, pair.timeframe, draft, true, randomConfig);
+        const match = await findCandidatePatternMatch(pair.instrument.id, pair.timeframe, pair.instrument.market, draft, true, randomConfig);
         if (!match) continue;
         const selectedPresets = patternPresets.filter((preset) => draft.patternPresetIds?.includes(preset.id));
         return {
@@ -3184,7 +3472,8 @@ export function TrainingWorkbench() {
         draft = request.draft;
       } else if (selectedPatternIds.length) {
         setPatternScanStatus(`正在扫描 ${requestInstrumentId} · ${requestTimeframe} 的历史形态…`);
-        const match = await findCandidatePatternMatch(requestInstrumentId, requestTimeframe, draft, false);
+        const requestMarket = availableInstruments.find((item) => item.id === requestInstrumentId)?.market ?? instrument.market;
+        const match = await findCandidatePatternMatch(requestInstrumentId, requestTimeframe, requestMarket, draft, false);
         if (!match) {
           setSetupError("当前品种和周期没有找到符合所选形态的可训练历史位置。请调整形态或参数。");
           return;
@@ -3199,7 +3488,11 @@ export function TrainingWorkbench() {
           patternMatchTimestamp: match.timestamp,
         };
       } else if (draft.startMode === "random" && draft.mode !== "range" && draft.mode !== "mistake") {
-        const request = resolveRandomRequest(draft, randomConfig);
+        const request = await resolveRandomRequest(draft, randomConfig);
+        if (!request) {
+          setSetupError("没有找到满足历史范围和流动性门槛的训练片段，请降低美股成交额门槛或扩大随机范围。");
+          return;
+        }
         requestInstrumentId = request.instrumentId;
         requestTimeframe = request.timeframe;
         draft = request.draft;
@@ -3254,9 +3547,11 @@ export function TrainingWorkbench() {
     try {
       const request = selectedPatternIds.length
         ? await resolvePatternRandomRequest(draft, randomConfig)
-        : resolveRandomRequest(draft, randomConfig);
+        : await resolveRandomRequest(draft, randomConfig);
       if (!request) {
-        setQuickRandomError(`没有找到“${patternPresets.find((preset) => preset.id === quickRandomPatternPresetId)?.name ?? "所选形态"}”的可训练历史位置，请换一个形态或调整形态参数。`);
+        setQuickRandomError(selectedPatternIds.length
+          ? `没有找到“${patternPresets.find((preset) => preset.id === quickRandomPatternPresetId)?.name ?? "所选形态"}”的可训练历史位置，请换一个形态或调整形态参数。`
+          : "没有找到满足历史范围和流动性门槛的训练片段，请调整随机训练规则。");
         setMobileToolbarOpen(true);
         return;
       }
@@ -3286,7 +3581,7 @@ export function TrainingWorkbench() {
     };
     const request = draft.patternPresetIds?.length
       ? await resolvePatternRandomRequest(draft, randomConfig)
-      : resolveRandomRequest(draft, randomConfig);
+      : await resolveRandomRequest(draft, randomConfig);
     if (!request) {
       setShowRandomComplete(false);
       openRandomTraining();
@@ -3314,25 +3609,35 @@ export function TrainingWorkbench() {
   useEffect(() => {
     if (!settingsReady || !instrumentCatalogReady || startupRandomStartedRef.current) return;
     startupRandomStartedRef.current = true;
-    const request = resolveRandomRequest({
-      ...defaultTrainingTaskDraft,
-      mode: "free",
-      startMode: "random",
-      length: appSettingsRef.current.randomLength,
-      randomRun: true,
-    });
-    newTaskRequestRef.current = {
-      instrumentId: request.instrumentId,
-      timeframe: request.timeframe,
-      draft: request.draft,
-    };
-    restoreRequestRef.current = null;
-    setInstrumentId(request.instrumentId);
-    setTimeframe(request.timeframe);
-    setLoading(true);
-    setChartLoadError("");
-    setStartupReady(true);
-    setLoadNonce((value) => value + 1);
+    let cancelled = false;
+    void resolveRandomRequest({
+        ...defaultTrainingTaskDraft,
+        mode: "free",
+        startMode: "random",
+        length: appSettingsRef.current.randomLength,
+        randomRun: true,
+      })
+      .then((request) => {
+        if (cancelled) return;
+        if (!request) {
+          setChartLoadError("没有找到满足随机规则的训练片段，请在设置中调整市场范围或美股流动性门槛。");
+          setStartupReady(true);
+          return;
+        }
+        newTaskRequestRef.current = {
+          instrumentId: request.instrumentId,
+          timeframe: request.timeframe,
+          draft: request.draft,
+        };
+        restoreRequestRef.current = null;
+        setInstrumentId(request.instrumentId);
+        setTimeframe(request.timeframe);
+        setLoading(true);
+        setChartLoadError("");
+        setStartupReady(true);
+        setLoadNonce((value) => value + 1);
+      });
+    return () => { cancelled = true; };
   }, [instrumentCatalogReady, resolveRandomRequest, settingsReady]);
 
   const importCsv = async (event: ChangeEvent<HTMLInputElement>) => {
@@ -3656,6 +3961,31 @@ export function TrainingWorkbench() {
                       >纳入指数（只看盘）</button>
                     </div>
                     <small>默认排除指数、基金、可转债等当前未开放交易的 A 股品种；纳入指数后，抽到指数的训练局只提供看盘、标记和决策功能。</small>
+                    <div className="task-start-options" aria-label="美股流动性过滤">
+                      <button
+                        className={settingsDraft.randomUsLiquidityFilter ? "active" : ""}
+                        onClick={() => setSettingsDraft((draft) => ({ ...draft, randomUsLiquidityFilter: true }))}
+                      >过滤低流动性美股</button>
+                      <button
+                        className={!settingsDraft.randomUsLiquidityFilter ? "active" : ""}
+                        onClick={() => setSettingsDraft((draft) => ({ ...draft, randomUsLiquidityFilter: false }))}
+                      >不过滤</button>
+                    </div>
+                    {settingsDraft.randomUsLiquidityFilter && (
+                      <label>最低 20 日平均成交额（美元）
+                        <input
+                          type="number"
+                          min="0"
+                          step="100000"
+                          value={settingsDraft.randomUsMinAverageDailyDollarVolume}
+                          onChange={(event) => setSettingsDraft((draft) => ({
+                            ...draft,
+                            randomUsMinAverageDailyDollarVolume: Math.max(0, Number(event.target.value)),
+                          }))}
+                        />
+                      </label>
+                    )}
+                    <small>默认门槛为 100 万美元。按训练起点之前 20 个交易日计算，只影响随机选样；不会删除已下载行情或不可变快照。</small>
                   </div>
 
                   <div className="settings-rule">
@@ -4288,6 +4618,10 @@ export function TrainingWorkbench() {
                         <span>目标 <strong>{trainingTask?.hidePrice ? "训练结束后揭示" : selectedDecision.decision.target || "未填写"}</strong></span>
                       </div>
                       <p>{selectedDecision.decision.note || "没有填写计划说明"}</p>
+                      <div className="decision-chart-actions">
+                        <button type="button" className="ghost-button" onClick={() => editDecision(selectedDecision)}><Pencil size={14} />编辑</button>
+                        <button type="button" className="danger-button" onClick={() => deleteDecision(selectedDecision)}><Trash2 size={14} />删除</button>
+                      </div>
                     </div>
                   )}
                   <div className="replay-watermark">REPLAY · 未来已隐藏</div>
@@ -4476,13 +4810,13 @@ export function TrainingWorkbench() {
 
             <aside className="decision-panel" ref={decisionPanelRef}>
               <div className="panel-title">
-                <div><span>{decisionTarget ? "补写事前决策" : "事前决策卡"}</span><strong>{planScore}%</strong></div>
-                <p>{decisionTarget ? "仅补充记录，不回退行情，也不改变持仓" : "先写计划，再揭示下一根"}</p>
+                <div><span>{editingDecisionId ? "编辑事前决策" : decisionTarget ? "补写事前决策" : "事前决策卡"}</span><strong>{planScore}%</strong></div>
+                <p>{editingDecisionId ? "修改后会替换原记录，并保留原 K 线绑定" : decisionTarget ? "仅补充记录，不回退行情，也不改变持仓" : "先写计划，再揭示下一根"}</p>
               </div>
               {decisionTarget && (
                 <div className="decision-backfill-target">
                   <div>
-                    <span>正在补写</span>
+                    <span>{editingDecisionId ? "正在编辑" : "正在补写"}</span>
                     <strong>{trainingTask?.hideDate ? `K线 #${decisionTarget.dataIndex + 1}` : formatDate(decisionTarget.timestamp, timeframe)}</strong>
                     <small>{trainingTask?.hidePrice ? "参考价已隐藏" : `参考价 ${decisionTarget.referencePrice.toFixed(instrument.pricePrecision)}`}</small>
                   </div>
@@ -4502,13 +4836,43 @@ export function TrainingWorkbench() {
               <fieldset>
                 <legend>交易理由 <small>至少 2 个</small></legend>
                 <div className="reason-chips">
-                  {[...reasonOptions, ...customReasonTags].map((reason) => {
+                  {reasonTags.map((reason) => {
                     const selected = decision.reasons.includes(reason);
+                    if (editingReasonTag === reason) {
+                      return (
+                        <form className="reason-tag-editor" key={reason} onSubmit={(event) => {
+                          event.preventDefault();
+                          saveReasonTagEdit();
+                        }}>
+                          <input
+                            aria-label={`编辑交易理由标签 ${reason}`}
+                            maxLength={20}
+                            autoFocus
+                            value={editingReasonInput}
+                            onChange={(event) => setEditingReasonInput(event.target.value)}
+                          />
+                          <button type="submit" aria-label="保存交易理由标签" title="保存"><Save size={12} /></button>
+                          <button type="button" aria-label="取消编辑交易理由标签" title="取消" onClick={cancelEditReasonTag}><X size={12} /></button>
+                        </form>
+                      );
+                    }
                     return (
-                      <button type="button" key={reason} className={selected ? "selected" : ""} onClick={() => updateDecision(
-                        "reasons",
-                        selected ? decision.reasons.filter((item) => item !== reason) : [...decision.reasons, reason],
-                      )}>{selected ? "✓ " : "+ "}{reason}</button>
+                      <span className="reason-chip-wrap" key={reason}>
+                        <button type="button" className={selected ? "selected" : ""} onClick={() => updateDecision(
+                          "reasons",
+                          selected ? decision.reasons.filter((item) => item !== reason) : [...decision.reasons, reason],
+                        )}>{selected ? "✓ " : "+ "}{reason}</button>
+                        <span className="reason-chip-actions">
+                            <button type="button" aria-label={`编辑交易理由标签 ${reason}`} title="编辑" onClick={(event) => {
+                              event.stopPropagation();
+                              startEditReasonTag(reason);
+                            }}><Pencil size={11} /></button>
+                            <button type="button" aria-label={`删除交易理由标签 ${reason}`} title="删除" onClick={(event) => {
+                              event.stopPropagation();
+                              deleteReasonTag(reason);
+                            }}><Trash2 size={11} /></button>
+                        </span>
+                      </span>
                     );
                   })}
                 </div>
@@ -4538,7 +4902,7 @@ export function TrainingWorkbench() {
                 <div><strong>{decision.reasons.length >= 2 ? "条件已成形" : "再找一个独立理由"}</strong><span>评分关注过程，不用结果倒推理由</span></div>
               </div>
               <div className="submitted-plan-count">已提交 <strong>{decisionSubmissions.length}</strong> 份计划 · 右键或长按历史 K 线可补写</div>
-              <button className="commit-plan" disabled={trainingComplete && !decisionTarget} onClick={submitDecision}><ListChecks size={17} />{decisionTarget ? "保存补写决策" : trainingComplete ? "训练已结束" : "提交决策并揭示下一根"}</button>
+              <button className="commit-plan" disabled={trainingComplete && !decisionTarget} onClick={submitDecision}><ListChecks size={17} />{editingDecisionId ? "保存编辑" : decisionTarget ? "保存补写决策" : trainingComplete ? "训练已结束" : "提交决策并揭示下一根"}</button>
             </aside>
           </div>
         )}
@@ -4660,6 +5024,16 @@ export function TrainingWorkbench() {
                 <PerformanceInsightCard title="最优交易理由" description="每个理由标签独立统计" items={performanceHabitAnalysis.reasons} formatResult={formatPerformanceValue} />
                 <PerformanceInsightCard title="最优计划习惯" description="完整度及止损、目标、说明填写习惯" items={performanceHabitAnalysis.planTraits} formatResult={formatPerformanceValue} />
                 <PerformanceInsightCard title="最优交易形态" description="使用实际命中的训练形态" items={performanceHabitAnalysis.patterns} formatResult={formatPerformanceValue} />
+                <PerformanceInsightCard title="最优价格区间" description="按每笔交易的实际开仓价格分组，并区分 A 股与美股币种" items={performanceHabitAnalysis.priceRanges} formatResult={formatPerformanceValue} />
+                <PerformanceInsightCard title="最优平均成交量区间" description="按开仓前 20 个交易日的日均成交股数分组" items={performanceHabitAnalysis.volumeRanges} formatResult={formatPerformanceValue} />
+                <PerformanceInsightCard title="最优平均成交额区间" description="按开仓前 20 个交易日的日均成交额分组" items={performanceHabitAnalysis.turnoverRanges} formatResult={formatPerformanceValue} />
+                <PerformanceInsightCard
+                  title="最优市值区间"
+                  description="按开仓时可获得的证券市值资料分组"
+                  items={performanceHabitAnalysis.marketCapRanges}
+                  formatResult={formatPerformanceValue}
+                  emptyText="当前 K 线和证券目录没有提供流通股本或市值，接入基础资料后会自动参与统计。"
+                />
                 <PerformanceInsightCard title="最优习惯组合" description={`形态 + 市场状态 + 位置 + 理由；已归因 ${performanceHabitAnalysis.attributedTrades} 笔（严格事前 ${performanceHabitAnalysis.pretradeAttributedTrades}，补写兼容 ${performanceHabitAnalysis.backfilledAttributedTrades}）`} items={performanceHabitAnalysis.combinations} formatResult={formatPerformanceValue} wide />
               </div>
             </section>

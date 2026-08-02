@@ -631,8 +631,8 @@ export function DataSourceManager({
       return;
     }
     const message = mode === "initialize"
-      ? "初始化会读取 Alpaca 的活跃可交易美股目录，并从 2016 年开始低速批量下载免费 IEX 日线。任务可能较多，可以随时暂停，确定继续吗？"
-      : "检查所有已初始化美股，从各品种最后一个交易日之后拉取更新，确定继续吗？";
+      ? "初始化会读取 Alpaca 的活跃可交易美股目录，并从 2016 年开始批量下载免费延迟 SIP 日线。任务可能较多，可以随时暂停，确定继续吗？"
+      : "检查所有已初始化美股，使用免费延迟 SIP 补齐或更新历史日线。首次从 IEX 切换时会从 2016 年重新覆盖可变行情库，但不会删除旧训练快照。确定继续吗？";
     if (!window.confirm(message)) return;
     setNotice(mode === "initialize" ? "正在读取美股品种目录并建立批量任务……" : "正在建立美股市场增量任务……");
     const response = await fetch("/api/data-jobs/market", {
@@ -983,7 +983,7 @@ export function DataSourceManager({
     US: {
       label: "美股",
       title: "美股数据维护",
-      description: "使用 Alpaca 免费 IEX 行情批量初始化活跃可交易美股，之后从每个品种最后日期继续更新。",
+      description: "使用 Alpaca 免费延迟 SIP 行情批量初始化活跃可交易美股，之后从每个品种最后日期继续更新。",
     },
     FX: {
       label: "外汇",
@@ -1137,7 +1137,7 @@ export function DataSourceManager({
         <div className={`market-maintenance-card ${configured.alpaca ? "ready" : ""}`}>
           <div className="market-maintenance-icon"><Database size={22} /></div>
           <div>
-            <span>ALPACA · 免费 IEX 历史行情</span>
+            <span>ALPACA · 免费延迟 SIP 历史行情</span>
             <strong>{usInitialized
               ? "美股市场库已建立"
               : usStarted ? `初始化未完成：还剩 ${usRemaining.toLocaleString()} 个品种` : "美股市场库尚未初始化"}</strong>
@@ -1202,7 +1202,7 @@ export function DataSourceManager({
                     ? "无新增 K 线"
                     : `${Number(job.insertedCount).toLocaleString()} 根`}</strong>
                   <small>{job.status === "completed" && Number(job.insertedCount) === 0
-                    ? "休市、免费 IEX 无历史或当前已是最新"
+                    ? "休市、免费 SIP 无历史或当前已是最新"
                     : `无效 ${quality.invalid ?? 0} · 重复 ${quality.duplicates ?? 0}`}</small>
                 </span>
                 <span><i className={`job-status ${job.status}`} />{statusLabel(job.status)}{job.lastError && <small title={job.lastError}>{job.lastError}</small>}</span>
