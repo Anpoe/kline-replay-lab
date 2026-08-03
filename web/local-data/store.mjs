@@ -23,6 +23,7 @@ import {
   parseTdxDayBuffer,
   TDX_DAY_RECORD_SIZE,
 } from "./tdx-day.mjs";
+import { screenLatestCandles } from "./pattern-scan.mjs";
 
 const moduleDir = path.dirname(fileURLToPath(import.meta.url));
 const DEFAULT_SOURCE_URL = "https://data.tdx.com.cn/vipdoc/hsjday.zip";
@@ -1087,6 +1088,69 @@ export class TdxLocalStore {
       source: overlays.length ? "tdx-official+tushare" : "tdx-official",
       datasetVersion: manifest.datasetVersion,
       candles: timeframe === "1w" ? aggregateWeekly(effectiveDaily) : effectiveDaily,
+    };
+  }
+
+  async scanLatest({ presets = [], filters = {}, limit = 100, sort = "turnover" } = {}) {
+    const manifest = await this.getManifest();
+    if (!manifest) throw new Error("请先完成 A 股全市场日线初始化");
+    const stocks = manifest.instruments.filter((instrument) => instrument.assetType === "stock");
+    const latestTimestamp = stocks.reduce(
+      (maximum, instrument) => Math.max(maximum, Number(instrument.lastTimestamp) || 0),
+      0,
+    );
+    const overlayRows = (await exists(this.overlayDbFile))
+      ? this.ensureOverlayDb().prepare(`SELECT instrument_id, timestamp, open, high, low, close, volume, turnover
+          FROM daily_overlay WHERE timestamp >= ? ORDER BY instrument_id, timestamp`)
+        .all(latestTimestamp - 420 * DAY_MS)
+      : [];
+    const overlays = new Map();
+    for (const row of overlayRows) {
+      const list = overlays.get(row.instrument_id) ?? [];
+      list.push({
+        timestamp: Number(row.timestamp), open: Number(row.open), high: Number(row.high),
+        low: Number(row.low), close: Number(row.close), volume: row.volume == null ? null : Number(row.volume),
+        turnover: row.turnover == null ? null : Number(row.turnover),
+      });
+      overlays.set(row.instrument_id, list);
+    }
+    const results = [];
+    for (const instrument of stocks) {
+      if (Number(instrument.lastTimestamp) < latestTimestamp - 3 * DAY_MS) continue;
+      const target = path.resolve(this.root, instrument.relativePath);
+      if (!target.startsWith(this.root) || !(await exists(target))) continue;
+      const info = await stat(target);
+      const recordCount = Math.min(340, Math.trunc(info.size / TDX_DAY_RECORD_SIZE));
+      if (!recordCount) continue;
+      const byteLength = recordCount * TDX_DAY_RECORD_SIZE;
+      const buffer = Buffer.allocUnsafe(byteLength);
+      const handle = await open(target, "r");
+      try {
+        await handle.read(buffer, 0, byteLength, Math.max(0, info.size - byteLength));
+      } finally {
+        await handle.close();
+      }
+      const merged = new Map(parseTdxDayBuffer(buffer).map((bar) => [bar.timestamp, bar]));
+      for (const overlay of overlays.get(instrument.id) ?? []) merged.set(overlay.timestamp, overlay);
+      const candles = [...merged.values()].sort((left, right) => left.timestamp - right.timestamp);
+      const match = screenLatestCandles(candles, presets, filters);
+      if (!match || match.timestamp !== latestTimestamp) continue;
+      results.push({
+        instrumentId: instrument.id,
+        symbol: instrument.symbol,
+        name: instrument.name,
+        market: "CN",
+        ...match,
+      });
+    }
+    const sortKey = sort === "change" ? "changePct" : sort === "volume" ? "averageVolume" : "averageTurnover";
+    results.sort((left, right) => Number(right[sortKey]) - Number(left[sortKey]));
+    return {
+      market: "CN",
+      latestTimestamp,
+      scannedCount: stocks.length,
+      matchedCount: results.length,
+      results: results.slice(0, Math.min(500, Math.max(1, Number(limit) || 100))),
     };
   }
 }

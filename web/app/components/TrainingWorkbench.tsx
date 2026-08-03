@@ -372,6 +372,30 @@ type SnapshotMeta = {
   lastTimestamp: number;
   createdAt: string;
 };
+type LiveScanMarket = "CN" | "US";
+type LiveScanResult = {
+  instrumentId: string;
+  symbol: string;
+  name: string;
+  market: LiveScanMarket;
+  timestamp: number;
+  close: number;
+  changePct: number;
+  volume: number;
+  turnover: number;
+  averageVolume: number;
+  averageTurnover: number;
+  presetIds: string[];
+  presetNames: string[];
+};
+type LiveScanResponse = {
+  market: LiveScanMarket;
+  latestTimestamp: number;
+  scannedCount: number;
+  matchedCount: number;
+  results: LiveScanResult[];
+  error?: string;
+};
 type SnapshotTradeContext = {
   averageDailyVolume?: number;
   averageDailyTurnover?: number;
@@ -1051,6 +1075,18 @@ export function TrainingWorkbench() {
   const [cashBalance, setCashBalance] = useState(defaultAppSettings.initialCapital);
   const [trainingTask, setTrainingTask] = useState<TrainingTask | null>(null);
   const [showTaskSetup, setShowTaskSetup] = useState(false);
+  const [showLiveScan, setShowLiveScan] = useState(false);
+  const [liveScanMarket, setLiveScanMarket] = useState<LiveScanMarket>("CN");
+  const [liveScanPresetIds, setLiveScanPresetIds] = useState<string[]>([]);
+  const [liveScanMinPrice, setLiveScanMinPrice] = useState("");
+  const [liveScanMaxPrice, setLiveScanMaxPrice] = useState("");
+  const [liveScanMinVolume, setLiveScanMinVolume] = useState("");
+  const [liveScanSort, setLiveScanSort] = useState<"turnover" | "volume" | "change">("turnover");
+  const [liveScanLimit, setLiveScanLimit] = useState(100);
+  const [liveScanStatus, setLiveScanStatus] = useState("");
+  const [liveScanError, setLiveScanError] = useState("");
+  const [liveScanRunning, setLiveScanRunning] = useState(false);
+  const [liveScanData, setLiveScanData] = useState<LiveScanResponse | null>(null);
   const [taskSetupKind, setTaskSetupKind] = useState<TaskSetupKind>("configured");
   const [showRandomComplete, setShowRandomComplete] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
@@ -2226,6 +2262,128 @@ export function TrainingWorkbench() {
     };
     setInstrumentId(nextInstrumentId);
     setTimeframe(nextTimeframe);
+    setLoadNonce((value) => value + 1);
+  };
+
+  const waitForCnLiveUpdate = async () => {
+    const start = await fetch("/api/cn-maintenance", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ action: "start", mode: "incremental" }),
+    });
+    const started = await start.json() as { maintenanceTask?: { status?: string; message?: string; error?: string }; error?: string };
+    if (!start.ok && !/正在运行/.test(started.error ?? "")) throw new Error(started.error ?? "A 股增量更新启动失败");
+    for (let attempt = 0; attempt < 600; attempt += 1) {
+      const response = await fetch("/api/cn-maintenance", { cache: "no-store" });
+      const payload = await response.json() as { maintenanceTask?: { status?: string; message?: string; error?: string }; error?: string };
+      const task = payload.maintenanceTask;
+      setLiveScanStatus(task?.message ?? "正在核对 A 股最新交易日……");
+      if (!response.ok) throw new Error(payload.error ?? "无法读取 A 股更新进度");
+      if (!task || task.status === "completed") return;
+      if (task.status === "failed" || task.status === "paused") throw new Error(task.error ?? task.message ?? "A 股增量更新未完成");
+      await new Promise((resolve) => window.setTimeout(resolve, 700));
+    }
+    throw new Error("A 股增量更新等待超时，请到数据页查看任务状态");
+  };
+
+  const runUsLiveUpdate = async () => {
+    const response = await fetch("/api/data-jobs/market", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ market: "US", mode: "update" }),
+    });
+    const payload = await response.json() as { jobIds?: string[]; error?: string };
+    if (!response.ok || !payload.jobIds) throw new Error(payload.error ?? "美股增量任务创建失败");
+    const jobIds = payload.jobIds;
+    if (!jobIds.length) return;
+    let nextIndex = 0;
+    let completed = 0;
+    let failed = 0;
+    const worker = async () => {
+      while (nextIndex < jobIds.length) {
+        const index = nextIndex;
+        nextIndex += 1;
+        const id = jobIds[index];
+        let done = false;
+        for (let chunk = 0; chunk < 1000 && !done; chunk += 1) {
+          const jobResponse = await fetch("/api/data-jobs/run", {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({ id }),
+          });
+          const job = await jobResponse.json() as { complete?: boolean; status?: string; error?: string };
+          if (!jobResponse.ok || job.status === "failed") {
+            failed += 1;
+            done = true;
+          } else if (job.complete || job.status === "completed" || job.status === "paused") {
+            done = true;
+          } else {
+            await new Promise((resolve) => window.setTimeout(resolve, 160));
+          }
+        }
+        completed += 1;
+        setLiveScanStatus(`正在更新美股最新日线：${completed.toLocaleString()} / ${jobIds.length.toLocaleString()}${failed ? `，${failed} 个失败` : ""}`);
+      }
+    };
+    await Promise.all(Array.from({ length: Math.min(8, jobIds.length) }, () => worker()));
+    if (failed === jobIds.length) throw new Error("美股最新日线全部更新失败，请检查 Alpaca 凭证或网络");
+  };
+
+  const startLiveScan = async (skipUpdate = false) => {
+    setLiveScanRunning(true);
+    setLiveScanError("");
+    setLiveScanData(null);
+    try {
+      if (!skipUpdate) {
+        setLiveScanStatus(liveScanMarket === "CN" ? "正在检查并拉取 A 股最新交易日……" : "正在检查并拉取美股最新交易日……");
+        if (liveScanMarket === "CN") await waitForCnLiveUpdate();
+        else await runUsLiveUpdate();
+      }
+      setLiveScanStatus("行情已就绪，正在本机扫描最新一根日 K……");
+      const response = await fetch("/api/live-scan", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          market: liveScanMarket,
+          presetIds: liveScanPresetIds,
+          presets: patternPresets,
+          filters: {
+            ...(liveScanMinPrice ? { minPrice: Number(liveScanMinPrice) } : {}),
+            ...(liveScanMaxPrice ? { maxPrice: Number(liveScanMaxPrice) } : {}),
+            ...(liveScanMinVolume ? { minAverageVolume: Number(liveScanMinVolume) } : {}),
+          },
+          sort: liveScanSort,
+          limit: liveScanLimit,
+        }),
+      });
+      const result = await response.json() as LiveScanResponse;
+      if (!response.ok) throw new Error(result.error ?? "实盘筛选失败");
+      setLiveScanData(result);
+      setLiveScanStatus(`已扫描 ${result.scannedCount.toLocaleString()} 个品种，命中 ${result.matchedCount.toLocaleString()} 个。`);
+    } catch (error) {
+      setLiveScanError(error instanceof Error ? error.message : "实盘筛选失败");
+      setLiveScanStatus("");
+    } finally {
+      setLiveScanRunning(false);
+    }
+  };
+
+  const openLiveScanResult = (result: LiveScanResult) => {
+    setShowLiveScan(false);
+    restoreRequestRef.current = null;
+    newTaskRequestRef.current = {
+      instrumentId: result.instrumentId,
+      timeframe: "1d",
+      draft: {
+        ...defaultTrainingTaskDraft,
+        startMode: "bar",
+        startBar: Number.MAX_SAFE_INTEGER,
+        length: 0,
+      },
+    };
+    setInstrumentId(result.instrumentId);
+    setTimeframe("1d");
+    setView("replay");
     setLoadNonce((value) => value + 1);
   };
 
@@ -3790,11 +3948,19 @@ export function TrainingWorkbench() {
           </div>
           <div className="top-actions">
             <span className={`save-state ${saveState.includes("已") ? "saved" : ""}`}>{saveState}</span>
+            <button className="ghost-button live-scan-button" onClick={() => {
+              setLiveScanError("");
+              setShowLiveScan(true);
+            }}><Activity size={16} />实盘筛选</button>
             <button className="ghost-button" onClick={openRandomTraining}><Shuffle size={16} />随机训练</button>
             <button className="ghost-button" onClick={openTaskSetup}><Play size={16} />新建 Replay 训练</button>
             <button className="primary-button" onClick={saveSession}><Save size={16} />保存训练</button>
           </div>
           <div className="mobile-quick-actions" aria-label="训练快捷操作">
+            <button type="button" aria-label="实盘筛选" title="实盘筛选" onClick={() => {
+              setLiveScanError("");
+              setShowLiveScan(true);
+            }}><Activity size={15} /></button>
             <button
               type="button"
               aria-label={startingTraining ? "正在筛选随机训练" : "立即开始随机训练"}
@@ -4157,6 +4323,88 @@ export function TrainingWorkbench() {
                 <span />
                 <button className="ghost-button" onClick={() => setShowPatternFilters(false)}>取消</button>
                 <button className="primary-button" onClick={savePatternFilters}><Save size={16} />保存形态预设</button>
+              </div>
+            </section>
+          </div>
+        )}
+
+        {showLiveScan && (
+          <div className="task-modal-backdrop" role="presentation" onMouseDown={(event) => {
+            if (event.target === event.currentTarget && !liveScanRunning) setShowLiveScan(false);
+          }}>
+            <section className="task-modal live-scan-modal" role="dialog" aria-modal="true" aria-labelledby="live-scan-title">
+              <div className="task-modal-head">
+                <div>
+                  <span>LIVE MARKET SCREENER</span>
+                  <h2 id="live-scan-title">实盘筛选</h2>
+                  <p>只判断所选市场最近一个已收盘交易日；缺少当日数据时先自动增量更新。</p>
+                </div>
+                <button aria-label="关闭实盘筛选" disabled={liveScanRunning} onClick={() => setShowLiveScan(false)}><X size={19} /></button>
+              </div>
+
+              <div className="live-scan-market" role="group" aria-label="筛选市场">
+                {(["CN", "US"] as LiveScanMarket[]).map((market) => (
+                  <button key={market} className={liveScanMarket === market ? "active" : ""} onClick={() => {
+                    setLiveScanMarket(market);
+                    setLiveScanData(null);
+                    setLiveScanError("");
+                  }}>{market === "CN" ? "A 股" : "美股"}<small>{market === "CN" ? "Tushare 增量" : "Alpaca SIP"}</small></button>
+                ))}
+              </div>
+
+              <fieldset className="task-pattern-filter">
+                <legend>当日形态（可选，多个条件任一命中）</legend>
+                <div className="task-pattern-head">
+                  <span>{liveScanPresetIds.length ? `已选择 ${liveScanPresetIds.length} 个形态` : "不选择形态时仅使用价格和流动性条件"}</span>
+                  {liveScanPresetIds.length > 0 && <button type="button" onClick={() => setLiveScanPresetIds([])}>清除形态</button>}
+                </div>
+                <div className="task-pattern-options">
+                  {patternPresets.map((preset) => {
+                    const selected = liveScanPresetIds.includes(preset.id);
+                    return <button type="button" key={preset.id} className={selected ? "active" : ""} title={preset.description} onClick={() => {
+                      setLiveScanPresetIds((ids) => selected ? ids.filter((id) => id !== preset.id) : [...ids, preset.id]);
+                    }}>{selected ? "✓ " : "+ "}{preset.name}</button>;
+                  })}
+                </div>
+              </fieldset>
+
+              <div className="live-scan-filter-grid">
+                <label>最低收盘价<input type="number" min="0" step="0.01" placeholder="不限" value={liveScanMinPrice} onChange={(event) => setLiveScanMinPrice(event.target.value)} /></label>
+                <label>最高收盘价<input type="number" min="0" step="0.01" placeholder="不限" value={liveScanMaxPrice} onChange={(event) => setLiveScanMaxPrice(event.target.value)} /></label>
+                <label>20 日平均成交量<input type="number" min="0" step="1000" placeholder="不限" value={liveScanMinVolume} onChange={(event) => setLiveScanMinVolume(event.target.value)} /></label>
+                <label>排序<select value={liveScanSort} onChange={(event) => setLiveScanSort(event.target.value as typeof liveScanSort)}><option value="turnover">平均成交额从高到低</option><option value="volume">平均成交量从高到低</option><option value="change">当日涨幅从高到低</option></select></label>
+                <label>最多显示<select value={liveScanLimit} onChange={(event) => setLiveScanLimit(Number(event.target.value))}><option value={50}>50 个</option><option value={100}>100 个</option><option value={200}>200 个</option><option value={500}>500 个</option></select></label>
+              </div>
+
+              {liveScanStatus && <div className="pattern-scan-status"><Activity size={14} />{liveScanStatus}</div>}
+              {liveScanError && <div className="task-error">
+                <strong>{liveScanError}</strong>
+                <button type="button" onClick={() => void startLiveScan(true)}>使用本地现有最新数据筛选</button>
+              </div>}
+
+              {liveScanData && (
+                <div className="live-scan-results">
+                  <header>
+                    <div><strong>筛选结果</strong><span>行情日期 {new Date(liveScanData.latestTimestamp).toLocaleDateString("zh-CN")} · 命中 {liveScanData.matchedCount.toLocaleString()} 个</span></div>
+                    <small>点击一行打开该标的最新日线</small>
+                  </header>
+                  <div className="live-scan-result-list">
+                    {liveScanData.results.length ? liveScanData.results.map((result) => (
+                      <button type="button" key={result.instrumentId} onClick={() => openLiveScanResult(result)}>
+                        <span><strong>{result.symbol}</strong><small>{result.name}</small></span>
+                        <span>{result.presetNames.join("、") || "基础条件"}</span>
+                        <span className={result.changePct >= 0 ? "up" : "down"}>{result.changePct >= 0 ? "+" : ""}{result.changePct.toFixed(2)}%</span>
+                        <span>{result.close.toLocaleString(undefined, { maximumFractionDigits: 4 })}</span>
+                        <span>{result.averageVolume.toLocaleString(undefined, { maximumFractionDigits: 0 })}</span>
+                      </button>
+                    )) : <div className="live-scan-empty">当前条件没有命中品种，请减少形态或放宽价格、成交量条件。</div>}
+                  </div>
+                </div>
+              )}
+
+              <div className="task-modal-actions">
+                <button className="ghost-button" disabled={liveScanRunning} onClick={() => setShowLiveScan(false)}>关闭</button>
+                <button className="primary-button" disabled={liveScanRunning} onClick={() => void startLiveScan(false)}><Activity size={16} />{liveScanRunning ? "正在更新并筛选…" : "更新数据并开始筛选"}</button>
               </div>
             </section>
           </div>

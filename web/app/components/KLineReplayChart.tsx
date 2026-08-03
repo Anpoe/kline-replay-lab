@@ -212,6 +212,10 @@ function ensureTrainingDrawingOverlays(registerOverlay: (template: OverlayTempla
         const styles = (overlay.styles ?? {}) as FigureStyleBag;
         const accent = styles.line?.color ?? "#2962ff";
         const lineSize = styles.line?.size ?? 1;
+        const positionData = overlay.extendData && typeof overlay.extendData === "object"
+          ? overlay.extendData as Record<string, unknown>
+          : {};
+        const labelsVisible = positionData.hovered === true;
         const figures: Array<Record<string, unknown>> = [
           {
             type: "rect",
@@ -248,7 +252,7 @@ function ensureTrainingDrawingOverlays(registerOverlay: (template: OverlayTempla
             align: "right",
             baseline: "middle",
           },
-          styles: { color: "#dff8f0", size: 10, backgroundColor: "#168a73", borderRadius: 3, paddingLeft: 4, paddingRight: 4, paddingTop: 2, paddingBottom: 2 },
+          styles: { color: labelsVisible ? "#dff8f0" : "rgba(0, 0, 0, 0)", size: 10, backgroundColor: labelsVisible ? "#168a73" : "rgba(0, 0, 0, 0)", borderRadius: 3, paddingLeft: 4, paddingRight: 4, paddingTop: 2, paddingBottom: 2 },
           ignoreEvent: overlayIgnoreEvents,
         });
 
@@ -282,7 +286,7 @@ function ensureTrainingDrawingOverlays(registerOverlay: (template: OverlayTempla
                 align: "right",
                 baseline: "middle",
               },
-              styles: { color: "#fff0ef", size: 10, backgroundColor: "#b84040", borderRadius: 3, paddingLeft: 4, paddingRight: 4, paddingTop: 2, paddingBottom: 2 },
+              styles: { color: labelsVisible ? "#fff0ef" : "rgba(0, 0, 0, 0)", size: 10, backgroundColor: labelsVisible ? "#b84040" : "rgba(0, 0, 0, 0)", borderRadius: 3, paddingLeft: 4, paddingRight: 4, paddingTop: 2, paddingBottom: 2 },
               ignoreEvent: overlayIgnoreEvents,
             },
             {
@@ -294,12 +298,26 @@ function ensureTrainingDrawingOverlays(registerOverlay: (template: OverlayTempla
                 align: "right",
                 baseline: "bottom",
               },
-              styles: { color: "#ecf3f1", size: 10, backgroundColor: "rgba(15, 24, 27, .88)", borderColor: accent, borderSize: 1, borderRadius: 3, paddingLeft: 4, paddingRight: 4, paddingTop: 2, paddingBottom: 2 },
+              styles: { color: labelsVisible ? "#ecf3f1" : "rgba(0, 0, 0, 0)", size: 10, backgroundColor: labelsVisible ? "rgba(15, 24, 27, .88)" : "rgba(0, 0, 0, 0)", borderColor: labelsVisible ? accent : "rgba(0, 0, 0, 0)", borderSize: 1, borderRadius: 3, paddingLeft: 4, paddingRight: 4, paddingTop: 2, paddingBottom: 2 },
               ignoreEvent: overlayIgnoreEvents,
             },
           );
         }
         return figures;
+      },
+      onMouseEnter: ({ chart, overlay }) => {
+        const data = overlay.extendData && typeof overlay.extendData === "object"
+          ? overlay.extendData as Record<string, unknown>
+          : {};
+        if (data.hovered === true) return;
+        chart.overrideOverlay({ id: overlay.id, extendData: { ...data, hovered: true } });
+      },
+      onMouseLeave: ({ chart, overlay }) => {
+        const data = overlay.extendData && typeof overlay.extendData === "object"
+          ? overlay.extendData as Record<string, unknown>
+          : {};
+        if (data.hovered !== true) return;
+        chart.overrideOverlay({ id: overlay.id, extendData: { ...data, hovered: false } });
       },
     });
   };
@@ -630,6 +648,11 @@ function syncDecisionMarkers(
 }
 
 function serializeDrawing(overlay: Overlay): PersistedDrawing {
+  const rawExtendData = overlay.extendData ?? undefined;
+  const extendData = ["trainingPosition", "trainingLongPosition", "trainingShortPosition"].includes(overlay.name)
+    && rawExtendData && typeof rawExtendData === "object"
+    ? Object.fromEntries(Object.entries(rawExtendData).filter(([key]) => key !== "hovered"))
+    : rawExtendData;
   return {
     id: overlay.id,
     name: overlay.name,
@@ -644,7 +667,7 @@ function serializeDrawing(overlay: Overlay): PersistedDrawing {
     zLevel: overlay.zLevel,
     mode: overlay.mode,
     styles: overlay.styles ?? undefined,
-    extendData: overlay.extendData ?? undefined,
+    extendData,
   };
 }
 

@@ -117,6 +117,9 @@ const server = http.createServer(async (request, response) => {
       );
       return result ? send(response, 200, result) : send(response, 404, { error: "本机 TDX 数据中未找到该品种或周期" });
     }
+    if (request.method === "POST" && url.pathname === "/scan/latest") {
+      return send(response, 200, await store.scanLatest(await readJson(request)));
+    }
     return send(response, 404, { error: "接口不存在" });
   } catch (error) {
     return send(response, 500, { error: error instanceof Error ? error.message : String(error) });
