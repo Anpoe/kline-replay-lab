@@ -1,7 +1,10 @@
 import { ensureSchema, getRawDb } from "../../../db/runtime";
 
 const PREFERENCES_KEY = "training_preferences_v1";
-const MAX_PREFERENCES_BYTES = 256 * 1024;
+// Live screener results and the separate live-performance ledger are synced
+// with the rest of the local preferences. Keep enough room for the configured
+// 500-result watch list without silently dropping the whole preferences write.
+const MAX_PREFERENCES_BYTES = 2 * 1024 * 1024;
 
 export async function GET() {
   await ensureSchema();

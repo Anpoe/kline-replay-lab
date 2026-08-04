@@ -113,6 +113,16 @@ function finite(value: unknown, fallback: number) {
   return Number.isFinite(parsed) ? parsed : fallback;
 }
 
+function normalizePresetText(value: unknown, fallback: string, maxLength: number) {
+  if (typeof value !== "string") return fallback;
+  const text = value.trim().slice(0, maxLength);
+  if (!text || text.includes("\uFFFD") || [...text].some((character) => {
+    const codePoint = character.codePointAt(0) ?? 0;
+    return codePoint >= 0x80 && codePoint <= 0x9f;
+  })) return fallback;
+  return text;
+}
+
 export function normalizePatternPresets(value: unknown): PatternPreset[] {
   if (!Array.isArray(value)) return defaultPatternPresets.map((preset) => ({ ...preset, parameters: { ...preset.parameters } }));
   const defaultsById = new Map(defaultPatternPresets.map((preset) => [preset.id, preset]));
@@ -130,8 +140,8 @@ export function normalizePatternPresets(value: unknown): PatternPreset[] {
     return [{
       id: String(item.id),
       kind: item.kind,
-      name: typeof item.name === "string" && item.name.trim() ? item.name.trim().slice(0, 30) : fallback.name,
-      description: typeof item.description === "string" && item.description.trim() ? item.description.trim().slice(0, 160) : fallback.description,
+      name: normalizePresetText(item.name, fallback.name, 30),
+      description: normalizePresetText(item.description, fallback.description, 160),
       builtIn: Boolean(item.builtIn && defaultsById.has(item.id)),
       parameters,
     }];

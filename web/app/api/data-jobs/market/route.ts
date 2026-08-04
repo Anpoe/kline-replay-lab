@@ -4,16 +4,23 @@ import {
   filterTradableUsAssets,
   type AlpacaAsset,
 } from "../../../lib/marketDataProviders";
+import {
+  latestClosedUsSession,
+  newYorkDate,
+  type AlpacaCalendarDay,
+} from "../../../lib/usMarketSessions";
 
 type MarketInstrumentRow = {
   id: string;
   symbol: string;
   name: string;
-  lastSipTimestamp: number | null;
+  lastAlpacaTimestamp: number | null;
 };
 
-type AlpacaCalendarDay = {
-  date?: string;
+type ActiveJobRow = {
+  id: string;
+  instrumentId: string;
+  hasAlpacaCoverage: number;
 };
 
 function dateAfter(timestamp: number) {
@@ -22,34 +29,14 @@ function dateAfter(timestamp: number) {
   return date.toISOString().slice(0, 10);
 }
 
-function newYorkDate(now = new Date()) {
-  const parts = new Intl.DateTimeFormat("en-CA", {
-    timeZone: "America/New_York",
-    year: "numeric",
-    month: "2-digit",
-    day: "2-digit",
-  }).formatToParts(now);
-  const values = Object.fromEntries(parts.map((part) => [part.type, part.value]));
-  return `${values.year}-${values.month}-${values.day}`;
-}
-
 function dateOffset(value: string, days: number) {
   const date = new Date(`${value}T12:00:00Z`);
   date.setUTCDate(date.getUTCDate() + days);
   return date.toISOString().slice(0, 10);
 }
 
-function previousWeekday(value: string) {
-  let date = dateOffset(value, -1);
-  while ([0, 6].includes(new Date(`${date}T12:00:00Z`).getUTCDay())) {
-    date = dateOffset(date, -1);
-  }
-  return date;
-}
-
 async function loadLatestClosedUsSession(keyId: string, secretKey: string) {
   const today = newYorkDate();
-  const fallback = previousWeekday(today);
   const headers = {
     "APCA-API-KEY-ID": keyId,
     "APCA-API-SECRET-KEY": secretKey,
@@ -57,21 +44,17 @@ async function loadLatestClosedUsSession(keyId: string, secretKey: string) {
   for (const origin of ["https://paper-api.alpaca.markets", "https://api.alpaca.markets"]) {
     try {
       const response = await fetch(
-        `${origin}/v2/calendar?start=${dateOffset(today, -16)}&end=${fallback}`,
+        `${origin}/v2/calendar?start=${dateOffset(today, -16)}&end=${today}`,
         { headers },
       );
       if (!response.ok) continue;
       const calendar = await response.json() as AlpacaCalendarDay[];
-      const dates = calendar
-        .map((item) => String(item.date ?? ""))
-        .filter((date) => /^\d{4}-\d{2}-\d{2}$/.test(date) && date <= fallback)
-        .sort();
-      if (dates.length) return dates.at(-1) as string;
+      return latestClosedUsSession(calendar);
     } catch {
       // Fall back to the previous weekday if Alpaca's calendar is temporarily unavailable.
     }
   }
-  return fallback;
+  return latestClosedUsSession([]);
 }
 
 async function loadAlpacaAssets(keyId: string, secretKey: string) {
@@ -94,6 +77,7 @@ export async function POST(request: Request) {
   const payload = await request.json() as {
     market?: string;
     mode?: "initialize" | "update";
+    instrumentIds?: string[];
   };
   if (payload.market !== "US") {
     return Response.json({ error: "当前批量目录初始化仅支持美股" }, { status: 400 });
@@ -105,6 +89,20 @@ export async function POST(request: Request) {
   }
 
   const db = getRawDb();
+  const requestedInstrumentIds = Array.isArray(payload.instrumentIds)
+    ? [...new Set(payload.instrumentIds.map((value) => String(value).trim()).filter(Boolean))].slice(0, 500)
+    : null;
+  if (requestedInstrumentIds && !requestedInstrumentIds.length) {
+    return Response.json({
+      market: "US",
+      mode: payload.mode ?? "update",
+      catalogCount: 0,
+      instrumentCount: 0,
+      resumedJobs: 0,
+      createdJobs: 0,
+      jobIds: [],
+    }, { status: 201 });
+  }
   let catalogCount = 0;
   if (payload.mode === "initialize") {
     try {
@@ -135,28 +133,42 @@ export async function POST(request: Request) {
     }
   }
 
-  const instruments = await db.prepare(`SELECT i.id, i.symbol, i.name,
-    MAX(CASE WHEN c.timeframe = '1d' AND c.source = 'alpaca-sip' THEN c.last_timestamp END) AS lastSipTimestamp
+  const instrumentScope = requestedInstrumentIds
+    ? ` AND i.id IN (${requestedInstrumentIds.map(() => "?").join(",")})`
+    : "";
+  const instrumentQuery = db.prepare(`SELECT i.id, i.symbol, i.name,
+    MAX(CASE WHEN c.timeframe = '1d' AND c.source IN ('alpaca-sip', 'alpaca-iex') THEN c.last_timestamp END) AS lastAlpacaTimestamp
     FROM instruments i
     LEFT JOIN candle_coverage c ON c.instrument_id = i.id
-    WHERE i.market = 'US'
+    WHERE i.market = 'US'${instrumentScope}
     GROUP BY i.id, i.symbol, i.name
-    ORDER BY i.symbol`)
-    .all<MarketInstrumentRow>();
+    ORDER BY i.symbol`);
+  const instruments = requestedInstrumentIds
+    ? await instrumentQuery.bind(...requestedInstrumentIds).all<MarketInstrumentRow>()
+    : await instrumentQuery.all<MarketInstrumentRow>();
   if (!instruments.results.length) {
     return Response.json({ error: "美股品种目录为空，请先执行市场初始化" }, { status: 400 });
   }
 
-  const activeJobs = await db.prepare(`SELECT j.id, j.instrument_id AS instrumentId,
+  const jobScope = requestedInstrumentIds
+    ? ` AND j.instrument_id IN (${requestedInstrumentIds.map(() => "?").join(",")})`
+    : "";
+  const jobUpdateScope = requestedInstrumentIds
+    ? ` AND instrument_id IN (${requestedInstrumentIds.map(() => "?").join(",")})`
+    : "";
+  const activeJobQuery = db.prepare(`SELECT j.id, j.instrument_id AS instrumentId,
       EXISTS(SELECT 1 FROM candle_coverage c
         WHERE c.instrument_id = j.instrument_id AND c.timeframe = j.timeframe
-          AND c.adjustment_type = j.adjustment_type AND c.source = 'alpaca-sip') AS hasSipCoverage
+          AND c.adjustment_type = j.adjustment_type AND c.source IN ('alpaca-sip', 'alpaca-iex')) AS hasAlpacaCoverage
     FROM data_download_jobs j
     WHERE j.market = 'US' AND j.timeframe = '1d'
-      AND status IN ('queued', 'running', 'paused', 'failed')
+      AND status IN ('queued', 'running', 'paused', 'failed')${jobScope}
     ORDER BY j.created_at ASC, j.instrument_id ASC`)
-    .all<{ id: string; instrumentId: string; hasSipCoverage: number }>();
-  const legacyActiveJobs = activeJobs.results.filter((job) => !job.hasSipCoverage);
+  const activeJobs = requestedInstrumentIds
+    ? await activeJobQuery.bind(...requestedInstrumentIds).all<{ id: string; instrumentId: string; hasAlpacaCoverage: number }>()
+    : await activeJobQuery.all<{ id: string; instrumentId: string; hasAlpacaCoverage: number }>();
+  const activeJobRows = activeJobs.results as ActiveJobRow[];
+  const legacyActiveJobs = activeJobRows.filter((job) => !job.hasAlpacaCoverage);
   for (let index = 0; index < legacyActiveJobs.length; index += 80) {
     const statements = legacyActiveJobs.slice(index, index + 80).map((job) => db.prepare(`UPDATE data_download_jobs
       SET start_date = '2016-01-01', cursor_json = '{}', inserted_count = 0,
@@ -164,31 +176,40 @@ export async function POST(request: Request) {
       WHERE id = ?`).bind(new Date().toISOString(), job.id));
     if (statements.length) await db.batch(statements);
   }
-  await db.prepare(`UPDATE data_download_jobs SET status = 'queued', updated_at = ?
-    , last_error = NULL
-    WHERE market = 'US' AND timeframe = '1d' AND status IN ('paused', 'failed')`)
-    .bind(new Date().toISOString())
-    .run();
-  const activeByInstrument = new Map(activeJobs.results.map((job) => [job.instrumentId, job.id]));
-  const resumeOnly = activeJobs.results.length > 0;
+  const activeByInstrument = new Map(activeJobRows.map((job) => [job.instrumentId, job.id]));
+  const resumeOnly = activeJobRows.length > 0;
   const endDate = await loadLatestClosedUsSession(
     secrets.alpacaKeyId,
     secrets.alpacaSecretKey,
   );
   const now = new Date().toISOString();
+  // Extend unfinished jobs when a new session becomes available. This also
+  // repairs jobs created before the calendar cutoff was corrected.
+  const extendJobsQuery = db.prepare(`UPDATE data_download_jobs SET
+      end_date = CASE WHEN end_date < ? THEN ? ELSE end_date END,
+      status = CASE WHEN status IN ('paused', 'failed') THEN 'queued' ELSE status END,
+      last_error = CASE WHEN status IN ('paused', 'failed') THEN NULL ELSE last_error END,
+      updated_at = ?
+    WHERE market = 'US' AND timeframe = '1d'
+      AND status IN ('queued', 'running', 'paused', 'failed')${jobUpdateScope}`);
+  if (requestedInstrumentIds) {
+    await extendJobsQuery.bind(endDate, endDate, now, ...requestedInstrumentIds).run();
+  } else {
+    await extendJobsQuery.bind(endDate, endDate, now).run();
+  }
   // Resume unfinished initialization jobs before checking already-downloaded symbols.
-  const jobIds: string[] = activeJobs.results.map((job) => job.id);
+  const jobIds: string[] = activeJobRows.map((job) => job.id);
   let createdJobs = 0;
   for (let index = 0; index < instruments.results.length; index += 80) {
     const statements = [];
     for (const instrument of instruments.results.slice(index, index + 80)) {
       const existingId = activeByInstrument.get(instrument.id);
-      if (existingId || resumeOnly) continue;
-      // Existing IEX coverage is intentionally ignored here. The first SIP
-      // update backfills from 2016 and replaces live candles by primary key;
-      // immutable training snapshots live in data_snapshots and are untouched.
-      const startDate = instrument.lastSipTimestamp
-        ? dateAfter(Number(instrument.lastSipTimestamp))
+      if (existingId) continue;
+      // Continue from whichever Alpaca feed last supplied coverage. When SIP
+      // is unavailable for recent data, the provider falls back to IEX;
+      // immutable training snapshots remain untouched.
+      const startDate = instrument.lastAlpacaTimestamp
+        ? dateAfter(Number(instrument.lastAlpacaTimestamp))
         : "2016-01-01";
       if (startDate > endDate) continue;
       const id = crypto.randomUUID();
@@ -220,6 +241,7 @@ export async function POST(request: Request) {
     mode: payload.mode ?? "update",
     catalogCount,
     instrumentCount: instruments.results.length,
+    resumedJobs: resumeOnly ? activeJobRows.length : 0,
     createdJobs,
     jobIds,
   }, { status: 201 });

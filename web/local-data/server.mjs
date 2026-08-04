@@ -117,6 +117,13 @@ const server = http.createServer(async (request, response) => {
       );
       return result ? send(response, 200, result) : send(response, 404, { error: "本机 TDX 数据中未找到该品种或周期" });
     }
+    if (request.method === "POST" && url.pathname === "/prices/latest") {
+      const payload = await readJson(request);
+      return send(response, 200, { prices: await store.getLatestCandles(
+        Array.isArray(payload.instrumentIds) ? payload.instrumentIds : [],
+        payload.entryAfter && typeof payload.entryAfter === "object" ? payload.entryAfter : {},
+      ) });
+    }
     if (request.method === "POST" && url.pathname === "/scan/latest") {
       return send(response, 200, await store.scanLatest(await readJson(request)));
     }

@@ -396,6 +396,117 @@ type LiveScanResponse = {
   results: LiveScanResult[];
   error?: string;
 };
+type LivePortfolioRecord = {
+  id: string;
+  instrumentId: string;
+  symbol: string;
+  name: string;
+  market: LiveScanMarket;
+  latestTimestamp: number;
+  latestClose: number;
+  scanTimestamp: number;
+  presetIds: string[];
+  presetNames: string[];
+  positions: PositionLot[];
+  pendingOrders: PendingOrder[];
+  executions: Execution[];
+  orderRejections: OrderRejection[];
+  tradingMode: TradingMode;
+  initialCapital: number;
+  cashBalance: number;
+  /** The decision card belongs to the live ledger when the user is observing a symbol. */
+  decision?: Decision;
+  decisionSubmissions?: DecisionSubmission[];
+  updatedAt: string;
+};
+type LiveWatchRecord = {
+  id: string;
+  instrumentId: string;
+  symbol: string;
+  name: string;
+  market: LiveScanMarket;
+  latestTimestamp: number;
+  latestClose: number;
+  /** Price captured when the symbol was added to the observation list. */
+  observationTimestamp?: number;
+  observationClose?: number;
+  /** Simulated fill at the first trading session after the observation day. */
+  entryTimestamp?: number;
+  entryPrice?: number;
+  scanTimestamp: number;
+  presetIds: string[];
+  presetNames: string[];
+  updatedAt: string;
+};
+
+type LiveNavigatorSource = "scan" | "portfolio" | "watch";
+
+function livePortfolioResult(portfolio: LivePortfolioRecord): LiveScanResult {
+  return {
+    instrumentId: portfolio.instrumentId,
+    symbol: portfolio.symbol,
+    name: portfolio.name,
+    market: portfolio.market,
+    timestamp: portfolio.latestTimestamp,
+    close: portfolio.latestClose,
+    changePct: 0,
+    volume: 0,
+    turnover: 0,
+    averageVolume: 0,
+    averageTurnover: 0,
+    presetIds: portfolio.presetIds,
+    presetNames: portfolio.presetNames,
+  };
+}
+
+function liveWatchResult(watch: LiveWatchRecord): LiveScanResult {
+  return {
+    instrumentId: watch.instrumentId,
+    symbol: watch.symbol,
+    name: watch.name,
+    market: watch.market,
+    timestamp: watch.latestTimestamp,
+    close: watch.latestClose,
+    changePct: 0,
+    volume: 0,
+    turnover: 0,
+    averageVolume: 0,
+    averageTurnover: 0,
+    presetIds: watch.presetIds,
+    presetNames: watch.presetNames,
+  };
+}
+
+function liveWatchObservationClose(watch: LiveWatchRecord) {
+  return typeof watch.observationClose === "number"
+    && Number.isFinite(watch.observationClose)
+    && watch.observationClose > 0
+    ? watch.observationClose
+    : watch.latestClose;
+}
+
+function liveWatchObservationTimestamp(watch: LiveWatchRecord) {
+  // `scanTimestamp` is the signal/observation day.  Older records may have
+  // had `observationTimestamp` backfilled from the latest price, so prefer the
+  // original scan day whenever it is available.
+  if (typeof watch.scanTimestamp === "number" && Number.isFinite(watch.scanTimestamp) && watch.scanTimestamp > 0) {
+    return watch.scanTimestamp;
+  }
+  return typeof watch.observationTimestamp === "number"
+    && Number.isFinite(watch.observationTimestamp)
+    ? watch.observationTimestamp
+    : watch.latestTimestamp;
+}
+
+function liveWatchEntry(watch: LiveWatchRecord) {
+  if (typeof watch.entryPrice !== "number" || !Number.isFinite(watch.entryPrice) || watch.entryPrice <= 0) return null;
+  const entryTimestamp = typeof watch.entryTimestamp === "number" && Number.isFinite(watch.entryTimestamp)
+    ? watch.entryTimestamp
+    : watch.latestTimestamp;
+  return entryTimestamp > liveWatchObservationTimestamp(watch)
+    ? { timestamp: entryTimestamp, price: watch.entryPrice }
+    : null;
+}
 type SnapshotTradeContext = {
   averageDailyVolume?: number;
   averageDailyTurnover?: number;
@@ -518,7 +629,122 @@ type SyncedPreferences = {
     lineWidth: number;
     groupTools: Record<string, string>;
   };
+  liveScanSettings?: {
+    market: LiveScanMarket;
+    presetIds: string[];
+    minPrice: string;
+    maxPrice: string;
+    minVolume: string;
+    sort: "turnover" | "volume" | "change";
+    limit: number;
+  };
+  liveScanData?: LiveScanResponse | null;
+  liveNavigatorResume?: {
+    source: "scan" | "portfolio" | "watch";
+    index: number;
+    instrumentId?: string;
+  };
+  liveScanResume?: {
+    index: number;
+    instrumentId?: string;
+  };
+  livePortfolios?: LivePortfolioRecord[];
+  liveWatchlist?: LiveWatchRecord[];
 };
+
+/**
+ * The live ledger is shared by all screens, so a symbol switch must never
+ * make one symbol's orders appear in another symbol.  Older builds could
+ * persist the same position/order ids into several portfolios.  Remove
+ * those ambiguous records instead of attributing them to an arbitrary
+ * symbol; a pending order with no duplicate id is still retained.
+ */
+function sanitizeLivePortfolios(value: unknown): LivePortfolioRecord[] {
+  if (!Array.isArray(value)) return [];
+  const candidates = value.filter((item): item is LivePortfolioRecord => (
+    Boolean(item)
+    && typeof item === "object"
+    && typeof (item as LivePortfolioRecord).instrumentId === "string"
+    && Boolean((item as LivePortfolioRecord).instrumentId)
+  ));
+  const countIds = (items: Array<{ id?: unknown }>) => {
+    const counts = new Map<string, number>();
+    for (const item of items) {
+      if (typeof item.id !== "string" || !item.id) continue;
+      counts.set(item.id, (counts.get(item.id) ?? 0) + 1);
+    }
+    return counts;
+  };
+  const positionCounts = countIds(candidates.flatMap((portfolio) => Array.isArray(portfolio.positions) ? portfolio.positions : []));
+  const pendingCounts = countIds(candidates.flatMap((portfolio) => Array.isArray(portfolio.pendingOrders) ? portfolio.pendingOrders : []));
+  const executionCounts = countIds(candidates.flatMap((portfolio) => Array.isArray(portfolio.executions) ? portfolio.executions : []));
+  const seenPortfolios = new Set<string>();
+
+  return candidates.flatMap((raw) => {
+    const instrumentId = raw.instrumentId;
+    if (seenPortfolios.has(instrumentId)) return [];
+    seenPortfolios.add(instrumentId);
+    const positions = (Array.isArray(raw.positions) ? raw.positions : []).filter((item): item is PositionLot => {
+      const position = item as Partial<PositionLot>;
+      return typeof position.id === "string"
+        && position.id.length > 0
+        && positionCounts.get(position.id) === 1
+        && (position.side === "long" || position.side === "short")
+        && (position.status === "open" || position.status === "closed")
+        && Number.isFinite(position.qty) && Number(position.qty) > 0
+        && Number.isFinite(position.entryPrice) && Number(position.entryPrice) > 0
+        && Number.isFinite(position.entryTimestamp)
+        && typeof position.entryOrderId === "string" && position.entryOrderId.length > 0
+        && (position.status !== "closed" || (Number.isFinite(position.exitPrice) && Number.isFinite(position.exitTimestamp)));
+    });
+    const positionIds = new Set(positions.map((position) => position.id));
+    const pendingOrders = (Array.isArray(raw.pendingOrders) ? raw.pendingOrders : []).filter((item): item is PendingOrder => {
+      const order = item as Partial<PendingOrder>;
+      return typeof order.id === "string"
+        && order.id.length > 0
+        && pendingCounts.get(order.id) === 1
+        && (order.action === "open" || order.action === "close")
+        && (order.side === "buy" || order.side === "sell")
+        && Number.isFinite(order.qty) && Number(order.qty) > 0
+        && Number.isFinite(order.createdAt)
+        && typeof order.positionId === "string" && order.positionId.length > 0
+        // A close order without its open lot is an orphan from the old bug.
+        && (order.action === "open" || positionIds.has(order.positionId));
+    });
+    const executions = (Array.isArray(raw.executions) ? raw.executions : []).filter((item): item is Execution => {
+      const execution = item as Partial<Execution>;
+      return typeof execution.id === "string"
+        && execution.id.length > 0
+        && executionCounts.get(execution.id) === 1
+        && typeof execution.orderId === "string" && execution.orderId.length > 0
+        && typeof execution.positionId === "string" && positionIds.has(execution.positionId)
+        && (execution.action === "open" || execution.action === "close")
+        && (execution.side === "buy" || execution.side === "sell")
+        && Number.isFinite(execution.qty) && Number(execution.qty) > 0
+        && Number.isFinite(execution.price) && Number.isFinite(execution.timestamp)
+        && Number.isFinite(execution.realizedPnl);
+    });
+    const decision = normalizePersistedDecision(raw.decision);
+    const decisionSubmissions = cloneDecisionSubmissions(raw.decisionSubmissions);
+    const hasPendingOrder = pendingOrders.length > 0;
+    // Drop empty ledgers so an old zero-result row cannot reappear.  A
+    // legitimate break-even closed trade is still a real trade and must be
+    // kept when its ids are unique; only the duplicate/orphan records above
+    // are removed by this migration.
+    if (!positions.length && !hasPendingOrder && !hasDecisionContent(decision, decisionSubmissions)) return [];
+    return [{
+      ...raw,
+      id: instrumentId,
+      instrumentId,
+      positions,
+      pendingOrders,
+      executions,
+      orderRejections: Array.isArray(raw.orderRejections) ? raw.orderRejections : [],
+      ...(decision ? { decision } : {}),
+      ...(decisionSubmissions.length ? { decisionSubmissions } : {}),
+    }];
+  }).slice(0, 500);
+}
 
 const LAST_DRAFT_KEY = "kline-replay-lab:last-training";
 const APP_SETTINGS_KEY = "kline-replay-lab:settings";
@@ -640,6 +866,51 @@ const defaultDecision: Decision = {
   note: "",
 };
 
+function normalizePersistedDecision(value: unknown): Decision | undefined {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
+  const raw = value as Partial<Decision>;
+  return {
+    marketState: typeof raw.marketState === "string" ? raw.marketState : "",
+    location: typeof raw.location === "string" ? raw.location : "",
+    reasons: Array.isArray(raw.reasons) ? raw.reasons.filter((reason): reason is string => typeof reason === "string") : [],
+    stop: typeof raw.stop === "string" ? raw.stop : "",
+    target: typeof raw.target === "string" ? raw.target : "",
+    note: typeof raw.note === "string" ? raw.note : "",
+  };
+}
+
+function hasDecisionContent(value: unknown, submissions?: unknown): boolean {
+  if (Array.isArray(submissions) && submissions.length > 0) return true;
+  const decision = normalizePersistedDecision(value);
+  return Boolean(decision && (
+    decision.marketState
+    || decision.location
+    || decision.reasons.length
+    || decision.stop
+    || decision.target
+    || decision.note.trim()
+  ));
+}
+
+function cloneDecisionSubmissions(value: unknown): DecisionSubmission[] {
+  if (!Array.isArray(value)) return [];
+  return value.filter((item): item is DecisionSubmission => (
+    Boolean(item)
+    && typeof item === "object"
+    && typeof (item as DecisionSubmission).id === "string"
+    && typeof (item as DecisionSubmission).barTimestamp === "number"
+    && typeof (item as DecisionSubmission).cursor === "number"
+    && typeof (item as DecisionSubmission).referencePrice === "number"
+    && Boolean(normalizePersistedDecision((item as DecisionSubmission).decision))
+  )).map((item) => {
+    const normalized = normalizePersistedDecision(item.decision) ?? { ...defaultDecision };
+    return {
+      ...item,
+      decision: { ...normalized, reasons: [...normalized.reasons] },
+    };
+  });
+}
+
 const defaultInstruments = [
   { id: "600519.SH", short: "600519", label: "贵州茅台", market: "A股", assetType: "stock" as const, timeframes: ["1d", "1w"] },
   { id: "AAPL.US", short: "AAPL", label: "Apple", market: "美股", assetType: "stock" as const, timeframes: ["1d"] },
@@ -669,11 +940,27 @@ const defaultAppSettings: AppSettings = {
 };
 const reasonOptions = ["顺势", "关键位置", "突破回踩", "失败突破", "二次入场", "信号K确认"];
 
+function normalizeReasonTagText(value: string) {
+  const text = value.trim().replace(/\s+/g, " ").slice(0, 20);
+  if (!text) return "";
+  const characters = [...text];
+  const badIndexes = characters
+    .map((character, index) => ({ character, index }))
+    .filter(({ character }) => character === "\uFFFD" || ((character.codePointAt(0) ?? 0) >= 0x80 && (character.codePointAt(0) ?? 0) <= 0x9f))
+    .map(({ index }) => index);
+  if (!badIndexes.length) return text;
+  const firstBad = badIndexes[0];
+  const lastBad = badIndexes.at(-1) ?? firstBad;
+  const prefix = characters.slice(0, firstBad).join("");
+  const suffix = characters.slice(lastBad + 1).join("");
+  return reasonOptions.find((option) => option.startsWith(prefix) && option.endsWith(suffix)) ?? "";
+}
+
 function normalizeReasonTags(value: unknown, fallback: string[] = reasonOptions) {
   const source = Array.isArray(value) ? value : fallback;
   const normalized = source
     .filter((tag): tag is string => typeof tag === "string")
-    .map((tag) => tag.trim().replace(/\s+/g, " ").slice(0, 20))
+    .map(normalizeReasonTagText)
     .filter((tag, index, items) => Boolean(tag) && items.indexOf(tag) === index)
     .slice(0, 30);
   return Array.isArray(value) ? normalized : [...fallback];
@@ -768,6 +1055,10 @@ function money(value: number) {
 
 function percent(value: number) {
   return `${value >= 0 ? "+" : ""}${value.toFixed(2)}%`;
+}
+
+function priceDelta(value: number) {
+  return `${value >= 0 ? "+" : ""}${value.toFixed(4)}`;
 }
 
 function profitFactorLabel(value: number | null) {
@@ -1008,7 +1299,7 @@ function createOrderRejection(
 
 export function TrainingWorkbench() {
   const [view, setView] = useState<View>("replay");
-  const [availableInstruments, setAvailableInstruments] = useState(defaultInstruments);
+  const [availableInstruments, setAvailableInstruments] = useState<AvailableInstrument[]>(defaultInstruments);
   const [instrumentId, setInstrumentId] = useState("600519.SH");
   const [timeframe, setTimeframe] = useState("1d");
   const [instrument, setInstrument] = useState<Instrument>({
@@ -1086,7 +1377,19 @@ export function TrainingWorkbench() {
   const [liveScanStatus, setLiveScanStatus] = useState("");
   const [liveScanError, setLiveScanError] = useState("");
   const [liveScanRunning, setLiveScanRunning] = useState(false);
+  const [livePriceRefreshRunning, setLivePriceRefreshRunning] = useState(false);
+  const [livePriceRefreshStatus, setLivePriceRefreshStatus] = useState("");
   const [liveScanData, setLiveScanData] = useState<LiveScanResponse | null>(null);
+  const [liveMode, setLiveMode] = useState(false);
+  const [liveContext, setLiveContext] = useState<LiveScanResult | null>(null);
+  const [livePortfolios, setLivePortfolios] = useState<LivePortfolioRecord[]>([]);
+  const [liveWatchlist, setLiveWatchlist] = useState<LiveWatchRecord[]>([]);
+  const [liveScanIndex, setLiveScanIndex] = useState(0);
+  const [liveNavigatorSource, setLiveNavigatorSource] = useState<LiveNavigatorSource>("scan");
+  const [liveNavigatorResume, setLiveNavigatorResume] = useState<NonNullable<SyncedPreferences["liveNavigatorResume"]>>({ source: "scan", index: 0 });
+  const [liveScanResume, setLiveScanResume] = useState<NonNullable<SyncedPreferences["liveScanResume"]>>({ index: 0 });
+  const [liveBarOffset, setLiveBarOffset] = useState({ x: 0, y: 0 });
+  const [performanceSection, setPerformanceSection] = useState<"training" | "live" | "watch">("training");
   const [taskSetupKind, setTaskSetupKind] = useState<TaskSetupKind>("configured");
   const [showRandomComplete, setShowRandomComplete] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
@@ -1141,8 +1444,21 @@ export function TrainingWorkbench() {
   const decisionPanelRef = useRef<HTMLElement | null>(null);
   const decisionDraftBeforeBackfillRef = useRef<Decision | null>(null);
   const marketLoadRef = useRef<{ id: number; controller: AbortController | null }>({ id: 0, controller: null });
+  const liveRequestRef = useRef<LiveScanResult | null>(null);
+  const livePortfoliosRef = useRef<LivePortfolioRecord[]>([]);
+  const liveWatchlistRef = useRef<LiveWatchRecord[]>([]);
+  const livePersistSignatureRef = useRef("");
+  const liveBarDragRef = useRef<{ pointerId: number; startX: number; startY: number; offsetX: number; offsetY: number } | null>(null);
   const startupRandomStartedRef = useRef(false);
   const syncedPreferencesLoadStartedRef = useRef(false);
+
+  useEffect(() => {
+    livePortfoliosRef.current = livePortfolios;
+  }, [livePortfolios]);
+
+  useEffect(() => {
+    liveWatchlistRef.current = liveWatchlist;
+  }, [liveWatchlist]);
 
   const visibleBars = useMemo(() => bars.slice(0, cursor + 1), [bars, cursor]);
   const selectedCatalogInstrument = availableInstruments.find((item) => item.id === instrumentId);
@@ -1279,6 +1595,93 @@ export function TrainingWorkbench() {
       cashBalance,
     },
   }), [cashBalance, closedPositions.length, cursor, currentBar?.timestamp, dataSignature, dataSnapshotId, decision, decisionSubmissions, drawings, equity, events, executions, initialCapital, marketRules, openPnl, openPositions.length, orderQty, orderRejections, pendingOrders, positions, randomSeed, realizedPnl, snapshotHash, totalPnl, totalReturnPct, tradingMode, trainingTask]);
+
+  useEffect(() => {
+    // During a live-symbol switch React may briefly render the previous
+    // instrument's bar together with the new live context.  Never persist
+    // that mixed state under the new symbol; the live ledger is restored only
+    // after the requested instrument has finished loading.
+    if (!liveMode || !liveContext || !currentBar || instrument.id !== liveContext.instrumentId) return;
+    // Opening a result only starts an observation.  Keep the live performance
+    // list focused on symbols where the user actually attempted a trade.
+    const hasLiveActivity = positions.length > 0
+      || pendingOrders.length > 0
+      || executions.length > 0
+      || hasDecisionContent(decision, decisionSubmissions);
+    if (!hasLiveActivity) {
+      livePersistSignatureRef.current = "";
+      setLivePortfolios((items) => items.some((item) => item.id === liveContext.instrumentId)
+        ? items.filter((item) => item.id !== liveContext.instrumentId)
+        : items);
+      return;
+    }
+    const nextRecord: LivePortfolioRecord = {
+      id: liveContext.instrumentId,
+      instrumentId: liveContext.instrumentId,
+      symbol: liveContext.symbol,
+      name: liveContext.name,
+      market: liveContext.market,
+      latestTimestamp: currentBar.timestamp,
+      latestClose: currentBar.close,
+      scanTimestamp: liveContext.timestamp,
+      presetIds: liveContext.presetIds,
+      presetNames: liveContext.presetNames,
+      positions,
+      pendingOrders,
+      executions,
+      orderRejections,
+      tradingMode,
+      initialCapital,
+      cashBalance,
+      ...(hasDecisionContent(decision, decisionSubmissions)
+        ? {
+          decision: { ...decision, reasons: [...decision.reasons] },
+          decisionSubmissions: decisionSubmissions.map((submission) => ({
+            ...submission,
+            decision: { ...submission.decision, reasons: [...submission.decision.reasons] },
+          })),
+        }
+        : {}),
+      updatedAt: new Date().toISOString(),
+    };
+    const signature = JSON.stringify(nextRecord);
+    if (signature === livePersistSignatureRef.current) return;
+    livePersistSignatureRef.current = signature;
+    setLivePortfolios((items) => {
+      const previousIndex = items.findIndex((item) => item.id === nextRecord.id);
+      const previous = previousIndex >= 0 ? items[previousIndex] : undefined;
+      if (previous && JSON.stringify(previous) === signature) return items;
+      // Opening a portfolio restores its ledger and reaches this effect even
+      // when the user has not traded.  Replace it in place so merely viewing
+      // a symbol does not reorder the navigator and make it look like index 0.
+      if (previousIndex < 0) return [nextRecord, ...items].slice(0, 500);
+      const next = [...items];
+      next[previousIndex] = nextRecord;
+      return next;
+    });
+  }, [cashBalance, currentBar, decision, decisionSubmissions, executions, initialCapital, instrument.id, liveContext, liveMode, orderRejections, pendingOrders, positions, tradingMode]);
+
+  useEffect(() => {
+    const move = (event: PointerEvent) => {
+      const drag = liveBarDragRef.current;
+      if (!drag || event.pointerId !== drag.pointerId) return;
+      setLiveBarOffset({
+        x: drag.offsetX + event.clientX - drag.startX,
+        y: drag.offsetY + event.clientY - drag.startY,
+      });
+    };
+    const end = (event: PointerEvent) => {
+      if (liveBarDragRef.current?.pointerId === event.pointerId) liveBarDragRef.current = null;
+    };
+    window.addEventListener("pointermove", move);
+    window.addEventListener("pointerup", end);
+    window.addEventListener("pointercancel", end);
+    return () => {
+      window.removeEventListener("pointermove", move);
+      window.removeEventListener("pointerup", end);
+      window.removeEventListener("pointercancel", end);
+    };
+  }, []);
   const reviewState = reviewedSession?.state ?? trainingState;
   const reviewClosedPositions = reviewState.positions.filter((position) => position.status === "closed");
   const reviewRealizedPnl = reviewClosedPositions.reduce((sum, position) => sum + (position.realizedPnl ?? 0), 0);
@@ -1421,6 +1824,49 @@ export function TrainingWorkbench() {
         setGroupDrawingTools({ ...defaultDrawingTools, ...drawingPreferences.groupTools });
       }
     }
+    if (stored.liveScanSettings && typeof stored.liveScanSettings === "object") {
+      const settings = stored.liveScanSettings;
+      if (settings.market === "CN" || settings.market === "US") setLiveScanMarket(settings.market);
+      if (Array.isArray(settings.presetIds)) setLiveScanPresetIds(settings.presetIds.filter((id): id is string => typeof id === "string"));
+      if (typeof settings.minPrice === "string") setLiveScanMinPrice(settings.minPrice);
+      if (typeof settings.maxPrice === "string") setLiveScanMaxPrice(settings.maxPrice);
+      if (typeof settings.minVolume === "string") setLiveScanMinVolume(settings.minVolume);
+      if (settings.sort === "turnover" || settings.sort === "volume" || settings.sort === "change") setLiveScanSort(settings.sort);
+      if (Number.isFinite(settings.limit)) setLiveScanLimit(Math.min(500, Math.max(50, Math.round(settings.limit))));
+    }
+    if (stored.liveScanData && typeof stored.liveScanData === "object") setLiveScanData(stored.liveScanData);
+    if (stored.liveNavigatorResume && typeof stored.liveNavigatorResume === "object") {
+      const resume = stored.liveNavigatorResume;
+      const source = resume.source === "scan" || resume.source === "portfolio" || resume.source === "watch"
+        ? resume.source
+        : "scan";
+      const index = Number.isFinite(resume.index) ? Math.max(0, Math.round(resume.index)) : 0;
+      const nextResume = {
+        source,
+        index,
+        ...(typeof resume.instrumentId === "string" && resume.instrumentId ? { instrumentId: resume.instrumentId } : {}),
+      } as NonNullable<SyncedPreferences["liveNavigatorResume"]>;
+      setLiveNavigatorResume(nextResume);
+      setLiveNavigatorSource(source);
+      setLiveScanIndex(index);
+    }
+    if (stored.liveScanResume && typeof stored.liveScanResume === "object") {
+      const resume = stored.liveScanResume;
+      const index = Number.isFinite(resume.index) ? Math.max(0, Math.round(resume.index)) : 0;
+      setLiveScanResume({
+        index,
+        ...(typeof resume.instrumentId === "string" && resume.instrumentId ? { instrumentId: resume.instrumentId } : {}),
+      });
+    } else if (stored.liveNavigatorResume?.source === "scan" && typeof stored.liveNavigatorResume.index === "number") {
+      setLiveScanResume({
+        index: Math.max(0, Math.round(stored.liveNavigatorResume.index)),
+        ...(typeof stored.liveNavigatorResume.instrumentId === "string" && stored.liveNavigatorResume.instrumentId
+          ? { instrumentId: stored.liveNavigatorResume.instrumentId }
+          : {}),
+      });
+    }
+    if (Array.isArray(stored.livePortfolios)) setLivePortfolios(sanitizeLivePortfolios(stored.livePortfolios));
+    if (Array.isArray(stored.liveWatchlist)) setLiveWatchlist(stored.liveWatchlist.slice(0, 500));
   }, []);
 
   useEffect(() => {
@@ -1587,6 +2033,23 @@ export function TrainingWorkbench() {
           lineWidth: drawingLineWidth,
           groupTools: groupDrawingTools,
         },
+        liveScanSettings: {
+          market: liveScanMarket,
+          presetIds: liveScanPresetIds,
+          minPrice: liveScanMinPrice,
+          maxPrice: liveScanMaxPrice,
+          minVolume: liveScanMinVolume,
+          sort: liveScanSort,
+          limit: liveScanLimit,
+        },
+        liveScanData,
+        liveNavigatorResume,
+        liveScanResume,
+        // Run the same migration on every write as well as on load.  This
+        // prevents an already-open tab carrying an old duplicated ledger from
+        // writing the bad records back over the cleaned local database.
+        livePortfolios: sanitizeLivePortfolios(livePortfolios),
+        liveWatchlist,
       };
       void fetch("/api/preferences", {
         method: "PUT",
@@ -1602,6 +2065,18 @@ export function TrainingWorkbench() {
     drawingLineWidth,
     drawingMagnetMode,
     groupDrawingTools,
+    livePortfolios,
+    liveWatchlist,
+    liveScanData,
+    liveNavigatorResume,
+    liveScanResume,
+    liveScanLimit,
+    liveScanMarket,
+    liveScanMaxPrice,
+    liveScanMinPrice,
+    liveScanMinVolume,
+    liveScanPresetIds,
+    liveScanSort,
     movingAverageSettings,
     patternPresets,
     quickRandomMode,
@@ -1650,6 +2125,23 @@ export function TrainingWorkbench() {
   }, [currentBar?.timestamp]);
 
   const queueRestore = useCallback((request: RestoreRequest) => {
+    liveRequestRef.current = null;
+    setLiveMode(false);
+    setLiveContext(null);
+    livePersistSignatureRef.current = "";
+    setPositions([]);
+    setPendingOrders([]);
+    setExecutions([]);
+    setOrderRejections([]);
+    setDrawings([]);
+    setDrawingUndoStack([]);
+    setDrawingRedoStack([]);
+    setClearNonce(Date.now());
+    setTradingMode(appSettingsRef.current.tradingMode);
+    setInitialCapital(appSettingsRef.current.initialCapital);
+    setCashBalance(appSettingsRef.current.initialCapital);
+    eventSequenceRef.current = 0;
+    setEvents([]);
     restoreRequestRef.current = request;
     newTaskRequestRef.current = null;
     setInstrumentId(request.instrumentId);
@@ -1668,8 +2160,13 @@ export function TrainingWorkbench() {
     restoreRequestRef.current = null;
     const newTaskRequest = newTaskRequestRef.current;
     newTaskRequestRef.current = null;
-    const requestInstrumentId = restoreRequest?.instrumentId ?? newTaskRequest?.instrumentId ?? instrumentId;
-    const requestTimeframe = restoreRequest?.timeframe ?? newTaskRequest?.timeframe ?? timeframe;
+    const liveRequest = liveRequestRef.current;
+    liveRequestRef.current = null;
+    // Keep the restore/new-task precedence explicit so a newer random round
+    // still invalidates an older load, while live observation can override it.
+    let requestInstrumentId = restoreRequest?.instrumentId ?? newTaskRequest?.instrumentId ?? instrumentId;
+    if (liveRequest) requestInstrumentId = liveRequest.instrumentId;
+    const requestTimeframe = liveRequest ? "1d" : restoreRequest?.timeframe ?? newTaskRequest?.timeframe ?? timeframe;
     setLoading(true);
     setChartLoadError("");
     setTrainingReady(false);
@@ -1681,7 +2178,6 @@ export function TrainingWorkbench() {
     saveCompletedTrainingRef.current = false;
     try {
       const requestedSnapshotId = restoreRequest?.state.dataSnapshotId
-        ?? restoreRequest?.dataSnapshotId
         ?? newTaskRequest?.snapshotId;
       let data: { instrument: Instrument; candles: KLineData[]; snapshot: SnapshotMeta };
       if (requestedSnapshotId) {
@@ -1714,7 +2210,43 @@ export function TrainingWorkbench() {
         ?? resolveMarketRules(data.instrument.market, data.instrument.id);
       setMarketRules(loadedMarketRules);
       setRuleNotice("");
-      if (restoreRequest) {
+      if (liveRequest) {
+        const savedPortfolio = livePortfoliosRef.current.find((portfolio) => portfolio.instrumentId === liveRequest.instrumentId);
+        const liveCursor = data.candles.length - 1;
+        setLiveMode(true);
+        setLiveContext({ ...liveRequest, timestamp: data.candles[liveCursor]?.timestamp ?? liveRequest.timestamp, close: data.candles[liveCursor]?.close ?? liveRequest.close });
+        setCursor(Math.max(0, liveCursor));
+        setTrainingTask(null);
+        setPositions(savedPortfolio?.positions ?? []);
+        setPendingOrders(savedPortfolio?.pendingOrders ?? []);
+        setExecutions(savedPortfolio?.executions ?? []);
+        setOrderRejections(savedPortfolio?.orderRejections ?? []);
+        setDecision(savedPortfolio?.decision
+          ? { ...defaultDecision, ...savedPortfolio.decision, reasons: [...savedPortfolio.decision.reasons] }
+          : defaultDecision);
+        setDecisionSubmissions(savedPortfolio?.decisionSubmissions?.map((submission) => ({
+          ...submission,
+          decision: { ...submission.decision, reasons: [...submission.decision.reasons] },
+        })) ?? []);
+        setSelectedDecisionId("");
+        setDecisionTarget(null);
+        setEditingDecisionId("");
+        setOrderQty(normalizeBuyQuantity(loadedMarketRules, appSettingsRef.current.defaultOrderQty));
+        setTradingMode(savedPortfolio?.tradingMode ?? appSettingsRef.current.tradingMode);
+        setInitialCapital(savedPortfolio?.initialCapital ?? appSettingsRef.current.initialCapital);
+        setCashBalance(savedPortfolio?.cashBalance ?? savedPortfolio?.initialCapital ?? appSettingsRef.current.initialCapital);
+        setDrawings([]);
+        setDrawingUndoStack([]);
+        setDrawingRedoStack([]);
+        setClearNonce(Date.now());
+        setSessionId(createUuid());
+        setRandomSeed(createUuid());
+        eventSequenceRef.current = 0;
+        setEvents([]);
+        setSaveState("Live observation · not saved as training");
+      } else if (restoreRequest) {
+        setLiveMode(false);
+        setLiveContext(null);
         const timestampCursor = restoreRequest.state.cursorTimestamp == null
           ? -1
           : data.candles.findIndex((bar) => bar.timestamp === restoreRequest.state.cursorTimestamp);
@@ -1755,6 +2287,8 @@ export function TrainingWorkbench() {
         ]);
         setSaveState("已恢复保存点");
       } else {
+        setLiveMode(false);
+        setLiveContext(null);
         const nextSessionId = createUuid();
         const nextSeed = createUuid();
         const nextTask = resolveTrainingTask(
@@ -1880,9 +2414,12 @@ export function TrainingWorkbench() {
     }
 
     orders.forEach((order) => {
-      const priceBand = order.priceBand
-        ?? replayPriceBand(marketRules, bars, cursor, instrument.timezone, timeframe);
-      const fillValidation = validateMarketFill(marketRules, order.side, bar.open, priceBand);
+      const priceBand = liveMode
+        ? null
+        : order.priceBand ?? replayPriceBand(marketRules, bars, cursor, instrument.timezone, timeframe);
+      const fillValidation: RuleValidation = liveMode
+        ? { ok: true }
+        : validateMarketFill(marketRules, order.side, bar.open, priceBand);
       if (!fillValidation.ok) {
         rejections.push(createOrderRejection(fillValidation, marketRules, bar.timestamp, order.id));
         return;
@@ -1978,7 +2515,7 @@ export function TrainingWorkbench() {
       fills,
       rejections,
     };
-  }, [appendEvent, bars, cashBalance, cursor, instrument.timezone, marketRules, positions, timeframe, tradingMode]);
+  }, [appendEvent, bars, cashBalance, cursor, instrument.timezone, liveMode, marketRules, positions, timeframe, tradingMode]);
 
   const settleTrainingAtBar = useCallback((
     basePositions: PositionLot[],
@@ -2122,7 +2659,7 @@ export function TrainingWorkbench() {
   };
 
   const queueOpenOrder = (side: "buy" | "sell", qty = orderQty) => {
-    if (!currentBar || qty <= 0 || cursor >= (trainingTask?.endCursor ?? bars.length - 1) || trainingComplete) return;
+    if (!currentBar || qty <= 0 || (!liveMode && (cursor >= (trainingTask?.endCursor ?? bars.length - 1) || trainingComplete))) return;
     const validation = validateOpenOrder(marketRules, side, qty);
     if (!validation.ok) {
       rejectOrderAttempt(validation, { action: "open", side, qty });
@@ -2150,6 +2687,21 @@ export function TrainingWorkbench() {
       priceBand,
       reservedCash,
     };
+    if (liveMode) {
+      setRuleNotice("");
+      setPendingOrders((items) => [...items, order]);
+      appendEvent("order_queued", {
+        order,
+        marketRuleId: marketRules.id,
+        marketRuleVersion: marketRules.version,
+        tradingMode,
+        initialCapital,
+        liveFillRule: "next_session_open",
+      }, currentBar.timestamp);
+      setOrderPanelTab("pending");
+      setSaveState("实盘委托已挂出，下一交易日开盘成交");
+      return;
+    }
     setPendingOrders((items) => [...items, order]);
     setRuleNotice("");
     appendEvent("order_queued", {
@@ -2164,7 +2716,7 @@ export function TrainingWorkbench() {
   };
 
   const queueClosePosition = (positionId: string) => {
-    if (!currentBar || cursor >= (trainingTask?.endCursor ?? bars.length - 1) || trainingComplete) return;
+    if (!currentBar || (!liveMode && (cursor >= (trainingTask?.endCursor ?? bars.length - 1) || trainingComplete))) return;
     const position = openPositions.find((item) => item.id === positionId);
     if (!position || pendingOrders.some((order) => order.action === "close" && order.positionId === positionId)) return;
     const validation = validateCloseOrder(marketRules, position, currentBar.timestamp, instrument.timezone);
@@ -2184,6 +2736,20 @@ export function TrainingWorkbench() {
       ruleVersion: marketRules.version,
       priceBand,
     };
+    if (liveMode) {
+      setRuleNotice("");
+      setPendingOrders((items) => [...items, order]);
+      appendEvent("order_queued", {
+        order,
+        position,
+        marketRuleId: marketRules.id,
+        marketRuleVersion: marketRules.version,
+        liveFillRule: "next_session_open",
+      }, currentBar.timestamp);
+      setOrderPanelTab("pending");
+      setSaveState("平仓委托已挂出，下一交易日开盘成交");
+      return;
+    }
     setPendingOrders((items) => [...items, order]);
     setRuleNotice("");
     appendEvent("order_queued", {
@@ -2197,6 +2763,36 @@ export function TrainingWorkbench() {
 
   const queueCloseNextSession = (positionId: string) => {
     if (!currentBar || trainingComplete) return;
+    if (liveMode) {
+      const position = openPositions.find((item) => item.id === positionId);
+      if (!position || pendingOrders.some((order) => order.action === "close" && order.positionId === positionId)) return;
+      // A locked A-share lot cannot be sold on the current session, but it
+      // can still be queued now for the next session's opening auction.
+      const order: PendingOrder = {
+        id: createUuid(),
+        action: "close",
+        side: position.side === "long" ? "sell" : "buy",
+        qty: position.qty,
+        createdAt: currentBar.timestamp,
+        positionId,
+        ruleId: marketRules.id,
+        ruleVersion: marketRules.version,
+        priceBand: replayPriceBand(marketRules, bars, cursor, instrument.timezone, timeframe),
+      };
+      setRuleNotice("");
+      setPendingOrders((items) => [...items, order]);
+      appendEvent("order_queued", {
+        order,
+        position,
+        marketRuleId: marketRules.id,
+        marketRuleVersion: marketRules.version,
+        liveFillRule: "next_session_open",
+        deferredBecause: "t_plus_one_locked",
+      }, currentBar.timestamp);
+      setOrderPanelTab("pending");
+      setSaveState("已挂出次日开盘平仓委托，可在成交前撤单");
+      return;
+    }
     const position = openPositions.find((item) => item.id === positionId);
     if (!position || pendingOrders.some((order) => order.action === "close" && order.positionId === positionId)) return;
     const targetIndex = findNextTradingSessionIndex(bars, cursor, instrument.timezone);
@@ -2254,6 +2850,23 @@ export function TrainingWorkbench() {
   };
 
   const startFreshTraining = (nextInstrumentId: string, nextTimeframe: string) => {
+    liveRequestRef.current = null;
+    setLiveMode(false);
+    setLiveContext(null);
+    livePersistSignatureRef.current = "";
+    setPositions([]);
+    setPendingOrders([]);
+    setExecutions([]);
+    setOrderRejections([]);
+    setDrawings([]);
+    setDrawingUndoStack([]);
+    setDrawingRedoStack([]);
+    setClearNonce(Date.now());
+    setTradingMode(appSettingsRef.current.tradingMode);
+    setInitialCapital(appSettingsRef.current.initialCapital);
+    setCashBalance(appSettingsRef.current.initialCapital);
+    eventSequenceRef.current = 0;
+    setEvents([]);
     restoreRequestRef.current = null;
     newTaskRequestRef.current = {
       instrumentId: nextInstrumentId,
@@ -2286,47 +2899,233 @@ export function TrainingWorkbench() {
     throw new Error("A 股增量更新等待超时，请到数据页查看任务状态");
   };
 
-  const runUsLiveUpdate = async () => {
-    const response = await fetch("/api/data-jobs/market", {
+  const runUsLiveUpdate = async (instrumentIds?: string[]) => {
+    const response = await fetch("/api/data-jobs/market/sync", {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ market: "US", mode: "update" }),
+      body: JSON.stringify({
+        market: "US",
+        ...(instrumentIds?.length ? { instrumentIds } : {}),
+      }),
     });
-    const payload = await response.json() as { jobIds?: string[]; error?: string };
-    if (!response.ok || !payload.jobIds) throw new Error(payload.error ?? "美股增量任务创建失败");
-    const jobIds = payload.jobIds;
-    if (!jobIds.length) return;
-    let nextIndex = 0;
-    let completed = 0;
-    let failed = 0;
-    const worker = async () => {
-      while (nextIndex < jobIds.length) {
-        const index = nextIndex;
-        nextIndex += 1;
-        const id = jobIds[index];
-        let done = false;
-        for (let chunk = 0; chunk < 1000 && !done; chunk += 1) {
-          const jobResponse = await fetch("/api/data-jobs/run", {
+    const payload = await response.json() as {
+      updatedCount?: number;
+      insertedCount?: number;
+      pendingCount?: number;
+      failedCount?: number;
+      missingHistoryCount?: number;
+      firstError?: string;
+      error?: string;
+    };
+    if (!response.ok) throw new Error(payload.error ?? "美股最新日线批量同步失败");
+    setLiveScanStatus(`美股最新日线批量同步完成：处理 ${Number(payload.pendingCount ?? 0).toLocaleString()} 个品种，写入 ${Number(payload.insertedCount ?? 0).toLocaleString()} 根${payload.failedCount ? `，${Number(payload.failedCount).toLocaleString()} 个品种未更新` : ""}${payload.missingHistoryCount ? `；${Number(payload.missingHistoryCount).toLocaleString()} 个尚未建立历史库` : ""}${payload.firstError ? `（${payload.firstError}）` : ""}`);
+  };
+
+  const refreshLivePortfolioPrices = async () => {
+    const portfolios = livePortfoliosRef.current;
+    const watchlist = liveWatchlistRef.current;
+    const tracked = [...portfolios, ...watchlist];
+    if (!tracked.length) {
+      setLivePriceRefreshStatus("暂无可同步的实盘标的");
+      return;
+    }
+    setLivePriceRefreshRunning(true);
+    setLivePriceRefreshStatus("正在读取最新价…");
+    try {
+      const pricesById = new Map<string, { timestamp: number; open: number; close: number; entryTimestamp?: number; entryOpen?: number }>();
+      const errors: string[] = [];
+      const entryAfter = Object.fromEntries(
+        watchlist
+          .filter((watch) => !liveWatchEntry(watch))
+          .map((watch) => [watch.instrumentId, liveWatchObservationTimestamp(watch)]),
+      );
+      const usInstrumentIds = [...new Set(
+        tracked.filter((item) => item.market === "US").map((item) => item.instrumentId),
+      )];
+      if (usInstrumentIds.length) {
+        setLivePriceRefreshStatus("姝ｅ湪鏇存柊缇庤偂鏈€鏂颁氦鏄撴棩鈥︹€?");
+        try {
+          await runUsLiveUpdate(usInstrumentIds);
+        } catch (error) {
+          errors.push(error instanceof Error ? error.message : "缇庤偂鏈€鏂版棩绾挎洿鏂板け璐?");
+        }
+      }
+      for (const market of ["CN", "US"] as LiveScanMarket[]) {
+        const instrumentIds = [...new Set(tracked.filter((item) => item.market === market).map((item) => item.instrumentId))];
+        if (!instrumentIds.length) continue;
+        try {
+          const response = await fetch("/api/live-scan", {
             method: "POST",
             headers: { "content-type": "application/json" },
-            body: JSON.stringify({ id }),
+            body: JSON.stringify({
+              action: "refresh",
+              market,
+              instrumentIds,
+              ...(Object.keys(entryAfter).length ? { entryAfter } : {}),
+            }),
           });
-          const job = await jobResponse.json() as { complete?: boolean; status?: string; error?: string };
-          if (!jobResponse.ok || job.status === "failed") {
-            failed += 1;
-            done = true;
-          } else if (job.complete || job.status === "completed" || job.status === "paused") {
-            done = true;
-          } else {
-            await new Promise((resolve) => window.setTimeout(resolve, 160));
+          if (!response.ok) {
+            const failure = await response.json().catch(() => null) as { error?: unknown } | null;
+            errors.push(typeof failure?.error === "string"
+              ? failure.error
+              : `${market === "CN" ? "A 股" : "美股"}最新价同步失败`);
+            continue;
           }
+          const payload = await response.json() as { prices?: Array<{ instrumentId: string; timestamp: number; open: number; close: number; entryTimestamp?: number; entryOpen?: number }> };
+          for (const price of payload.prices ?? []) {
+            if (Number.isFinite(price.timestamp) && Number.isFinite(price.open) && Number.isFinite(price.close)) {
+              pricesById.set(price.instrumentId, {
+                timestamp: Number(price.timestamp),
+                open: Number(price.open),
+                close: Number(price.close),
+                ...(Number.isFinite(price.entryTimestamp) && Number.isFinite(price.entryOpen)
+                  ? { entryTimestamp: Number(price.entryTimestamp), entryOpen: Number(price.entryOpen) }
+                  : {}),
+              });
+            }
+          }
+        } catch (error) {
+          errors.push(error instanceof Error
+            ? error.message
+            : `${market === "CN" ? "A 股" : "美股"}最新价同步失败`);
         }
-        completed += 1;
-        setLiveScanStatus(`正在更新美股最新日线：${completed.toLocaleString()} / ${jobIds.length.toLocaleString()}${failed ? `，${failed} 个失败` : ""}`);
       }
-    };
-    await Promise.all(Array.from({ length: Math.min(8, jobIds.length) }, () => worker()));
-    if (failed === jobIds.length) throw new Error("美股最新日线全部更新失败，请检查 Alpaca 凭证或网络");
+      if (!pricesById.size) {
+        setLivePriceRefreshStatus(errors.length ? `同步失败：${errors.join("；")}` : "暂无可用的更新行情");
+        return;
+      }
+      const syncedInstrumentIds = new Set<string>();
+      const nextPortfolios = portfolios.map((portfolio) => {
+        const price = pricesById.get(portfolio.instrumentId);
+        if (!price) return portfolio;
+        syncedInstrumentIds.add(portfolio.instrumentId);
+        const isNewBar = price.timestamp > portfolio.latestTimestamp;
+        let nextPositions = portfolio.positions;
+        let nextPendingOrders = portfolio.pendingOrders;
+        let nextExecutions = portfolio.executions;
+        let nextRejections = portfolio.orderRejections;
+        let nextCashBalance = portfolio.cashBalance;
+        if (isNewBar && portfolio.pendingOrders.length) {
+          const fills: Execution[] = [];
+          const rejections: OrderRejection[] = [];
+          nextPositions = [...portfolio.positions];
+          nextPendingOrders = [];
+          nextExecutions = [...portfolio.executions];
+          nextRejections = [...portfolio.orderRejections];
+          for (const order of portfolio.pendingOrders) {
+            if (order.createdAt >= price.timestamp) {
+              nextPendingOrders.push(order);
+              continue;
+            }
+            if (order.action === "open") {
+              const cashFlow = executionCashFlow(order.side, price.open, order.qty);
+              if (portfolio.tradingMode === "capital" && cashFlow < 0 && nextCashBalance + cashFlow < -0.000001) {
+                rejections.push(createOrderRejection({
+                  ok: false,
+                  code: "insufficient_cash_at_fill",
+                  message: `下一交易日开盘需要 ${Math.abs(cashFlow).toFixed(2)}，可用资金仅 ${nextCashBalance.toFixed(2)}`,
+                }, marketRules, price.timestamp, order.id));
+                continue;
+              }
+              nextPositions.push({
+                id: order.positionId,
+                side: order.side === "buy" ? "long" : "short",
+                qty: order.qty,
+                entryPrice: price.open,
+                entryTimestamp: price.timestamp,
+                entryOrderId: order.id,
+                status: "open",
+              });
+              fills.push({
+                id: createUuid(), orderId: order.id, positionId: order.positionId,
+                action: "open", side: order.side, qty: order.qty, price: price.open,
+                timestamp: price.timestamp, realizedPnl: 0,
+                ruleId: order.ruleId ?? marketRules.id,
+                ruleVersion: order.ruleVersion ?? marketRules.version,
+              });
+              if (portfolio.tradingMode === "capital") nextCashBalance += cashFlow;
+              continue;
+            }
+            const positionIndex = nextPositions.findIndex((position) => position.id === order.positionId && position.status === "open");
+            if (positionIndex < 0) continue;
+            const position = nextPositions[positionIndex];
+            const realized = (price.open - position.entryPrice) * position.qty * (position.side === "long" ? 1 : -1);
+            nextPositions[positionIndex] = {
+              ...position,
+              status: "closed",
+              exitPrice: price.open,
+              exitTimestamp: price.timestamp,
+              exitOrderId: order.id,
+              realizedPnl: realized,
+            };
+            fills.push({
+              id: createUuid(), orderId: order.id, positionId: position.id,
+              action: "close", side: order.side, qty: position.qty, price: price.open,
+              timestamp: price.timestamp, realizedPnl: realized,
+              ruleId: order.ruleId ?? marketRules.id,
+              ruleVersion: order.ruleVersion ?? marketRules.version,
+            });
+            if (portfolio.tradingMode === "capital") nextCashBalance += executionCashFlow(order.side, price.open, position.qty);
+          }
+          nextExecutions.push(...fills);
+          nextRejections.push(...rejections);
+        }
+        return {
+          ...portfolio,
+          latestTimestamp: price.timestamp,
+          latestClose: price.close,
+          positions: nextPositions,
+          pendingOrders: nextPendingOrders,
+          executions: nextExecutions,
+          orderRejections: nextRejections,
+          cashBalance: nextCashBalance,
+          updatedAt: new Date().toISOString(),
+        };
+      });
+      livePortfoliosRef.current = nextPortfolios;
+      setLivePortfolios(nextPortfolios);
+      const nextWatchlist = watchlist.map((watch) => {
+        // Reconcile legacy records with their original signal day.  The
+        // simulated fill is always looked up after that day, never after the
+        // latest cached quote.
+        const observationClose = liveWatchObservationClose(watch);
+        const observationTimestamp = liveWatchObservationTimestamp(watch);
+        const price = pricesById.get(watch.instrumentId);
+        const existingEntry = liveWatchEntry(watch);
+        const fetchedEntry = price
+          && Number.isFinite(price.entryTimestamp)
+          && Number.isFinite(price.entryOpen)
+          && Number(price.entryTimestamp) > observationTimestamp
+          ? { timestamp: Number(price.entryTimestamp), price: Number(price.entryOpen) }
+          : null;
+        const entry = existingEntry ?? fetchedEntry;
+        const migratedWatch = {
+          ...watch,
+          observationTimestamp,
+          observationClose,
+          ...(entry ? { entryTimestamp: entry.timestamp, entryPrice: entry.price } : {}),
+        };
+        return price
+          ? (syncedInstrumentIds.add(watch.instrumentId), { ...migratedWatch, latestTimestamp: price.timestamp, latestClose: price.close, updatedAt: new Date().toISOString() })
+          : migratedWatch;
+      });
+      liveWatchlistRef.current = nextWatchlist;
+      setLiveWatchlist(nextWatchlist);
+      if (liveMode && liveContext) {
+        const price = pricesById.get(liveContext.instrumentId);
+        if (price && (price.timestamp !== liveContext.timestamp || price.close !== liveContext.close)) {
+          const updated = { ...liveContext, timestamp: price.timestamp, close: price.close };
+          setLiveContext(updated);
+          liveRequestRef.current = updated;
+          setLoadNonce((value) => value + 1);
+        }
+      }
+      setLivePriceRefreshStatus(`已同步 ${syncedInstrumentIds.size} 个标的${errors.length ? `；${errors.join("；")}` : ""}`);
+    } catch (error) {
+      setLivePriceRefreshStatus(error instanceof Error ? `同步失败：${error.message}` : "同步失败");
+    } finally {
+      setLivePriceRefreshRunning(false);
+    }
   };
 
   const startLiveScan = async (skipUpdate = false) => {
@@ -2359,6 +3158,21 @@ export function TrainingWorkbench() {
       const result = await response.json() as LiveScanResponse;
       if (!response.ok) throw new Error(result.error ?? "实盘筛选失败");
       setLiveScanData(result);
+      await refreshLivePortfolioPrices();
+      setLivePortfolios((items) => items.map((portfolio) => {
+        const updated = result.results.find((item) => item.instrumentId === portfolio.instrumentId);
+        return updated
+          ? { ...portfolio, latestTimestamp: updated.timestamp, latestClose: updated.close, presetIds: updated.presetIds, presetNames: updated.presetNames, updatedAt: new Date().toISOString() }
+          : portfolio;
+      }));
+      if (liveMode && liveContext) {
+        const updated = result.results.find((item) => item.instrumentId === liveContext.instrumentId);
+        if (updated) {
+          setLiveContext((current) => current
+            ? { ...current, presetIds: updated.presetIds, presetNames: updated.presetNames }
+            : current);
+        }
+      }
       setLiveScanStatus(`已扫描 ${result.scannedCount.toLocaleString()} 个品种，命中 ${result.matchedCount.toLocaleString()} 个。`);
     } catch (error) {
       setLiveScanError(error instanceof Error ? error.message : "实盘筛选失败");
@@ -2368,23 +3182,139 @@ export function TrainingWorkbench() {
     }
   };
 
-  const openLiveScanResult = (result: LiveScanResult) => {
+  const getLiveNavigatorResults = (source: LiveNavigatorSource): LiveScanResult[] => {
+    // Use the same render-order lists as the performance page.  The refs can
+    // briefly lag a state update, which makes an opened row look like index 0
+    // even when it is not the first visible row.
+    if (source === "portfolio") return livePortfolios.map(livePortfolioResult);
+    if (source === "watch") return liveWatchlist.map(liveWatchResult);
+    return liveScanData?.results ?? [];
+  };
+
+  const openLiveScanResult = (result: LiveScanResult, index?: number, source: LiveNavigatorSource = "scan") => {
+    const switchingInstrument = !liveMode || liveContext?.instrumentId !== result.instrumentId;
+    if (switchingInstrument) {
+      // Do not let the previous replay/live symbol remain visible while its
+      // snapshot is loading. The live portfolio for the target symbol is
+      // restored by loadBars from the symbol-keyed ledger.
+      setPositions([]);
+      setPendingOrders([]);
+      setExecutions([]);
+      setOrderRejections([]);
+      setDrawings([]);
+      setDrawingUndoStack([]);
+      setDrawingRedoStack([]);
+      setClearNonce(Date.now());
+      setTradingMode(appSettingsRef.current.tradingMode);
+      setInitialCapital(appSettingsRef.current.initialCapital);
+      setCashBalance(appSettingsRef.current.initialCapital);
+      eventSequenceRef.current = 0;
+      setEvents([]);
+      setDecision(defaultDecision);
+      setDecisionSubmissions([]);
+      setSelectedDecisionId("");
+      setDecisionTarget(null);
+      setEditingDecisionId("");
+      setOrderPanelTab("positions");
+    }
+    livePersistSignatureRef.current = "";
     setShowLiveScan(false);
+    const sourceResults = getLiveNavigatorResults(source);
+    // Instrument identity is authoritative.  A numeric index can come from
+    // another view whose ordering has changed since the row was rendered.
+    const identityIndex = sourceResults.findIndex((item) => item.instrumentId === result.instrumentId);
+    const resolvedIndex = identityIndex >= 0 ? identityIndex : (index ?? -1);
+    const nextIndex = sourceResults.length
+      ? Math.min(sourceResults.length - 1, Math.max(0, resolvedIndex >= 0 ? resolvedIndex : 0))
+      : Math.max(0, resolvedIndex >= 0 ? resolvedIndex : 0);
+    setLiveNavigatorSource(source);
+    setLiveScanIndex(nextIndex);
+    setLiveNavigatorResume({ source, index: nextIndex, instrumentId: result.instrumentId });
+    if (source === "scan") setLiveScanResume({ index: nextIndex, instrumentId: result.instrumentId });
     restoreRequestRef.current = null;
-    newTaskRequestRef.current = {
-      instrumentId: result.instrumentId,
-      timeframe: "1d",
-      draft: {
-        ...defaultTrainingTaskDraft,
-        startMode: "bar",
-        startBar: Number.MAX_SAFE_INTEGER,
-        length: 0,
-      },
-    };
+    newTaskRequestRef.current = null;
+    liveRequestRef.current = result;
     setInstrumentId(result.instrumentId);
     setTimeframe("1d");
+    setLiveMode(true);
+    setLiveContext(result);
     setView("replay");
     setLoadNonce((value) => value + 1);
+  };
+
+  const openLivePortfolio = (portfolio: LivePortfolioRecord) => {
+    const index = livePortfolios.findIndex((item) => item.instrumentId === portfolio.instrumentId);
+    openLiveScanResult(livePortfolioResult(portfolio), index >= 0 ? index : undefined, "portfolio");
+  };
+
+  const reviewLivePortfolios = () => {
+    const results = livePortfolios.map(livePortfolioResult);
+    if (!results.length) {
+      setRuleNotice("暂无可审阅的实盘观察标的");
+      return;
+    }
+    const currentIndex = liveContext
+      ? results.findIndex((result) => result.instrumentId === liveContext.instrumentId)
+      : -1;
+    const nextIndex = currentIndex >= 0 ? currentIndex : 0;
+    openLiveScanResult(results[nextIndex], nextIndex, "portfolio");
+  };
+
+  const liveWatchExists = Boolean(liveContext && liveWatchlist.some((item) => item.instrumentId === liveContext.instrumentId));
+  const addLiveWatch = () => {
+    if (!liveMode || !liveContext || !currentBar) return;
+    const nextRecord: LiveWatchRecord = {
+      id: `watch:${liveContext.instrumentId}`,
+      instrumentId: liveContext.instrumentId,
+      symbol: liveContext.symbol,
+      name: liveContext.name,
+      market: liveContext.market,
+      latestTimestamp: currentBar.timestamp,
+      latestClose: currentBar.close,
+      observationTimestamp: currentBar.timestamp,
+      observationClose: currentBar.close,
+      scanTimestamp: liveContext.timestamp,
+      presetIds: liveContext.presetIds,
+      presetNames: liveContext.presetNames,
+      updatedAt: new Date().toISOString(),
+    };
+    setLiveWatchlist((items) => [nextRecord, ...items.filter((item) => item.instrumentId !== nextRecord.instrumentId)].slice(0, 500));
+    setRuleNotice("已加入实盘观望，不会计入训练或实盘交易表现");
+    setSaveState("实盘观望已记录");
+  };
+
+  const removeLiveWatch = (instrumentId: string) => {
+    setLiveWatchlist((items) => items.filter((item) => item.instrumentId !== instrumentId));
+  };
+
+  const moveLiveScanResult = (direction: -1 | 1) => {
+    const results = getLiveNavigatorResults(liveNavigatorSource);
+    if (!results.length) return;
+    const activeInstrumentId = liveContext?.instrumentId
+      ?? (liveNavigatorResume.source === liveNavigatorSource ? liveNavigatorResume.instrumentId : undefined);
+    const savedIndex = activeInstrumentId
+      ? results.findIndex((result) => result.instrumentId === activeInstrumentId)
+      : -1;
+    const currentIndex = savedIndex >= 0
+      ? savedIndex
+      : Math.min(results.length - 1, Math.max(0, liveScanIndex));
+    const nextIndex = (currentIndex + direction + results.length) % results.length;
+    openLiveScanResult(results[nextIndex], nextIndex, liveNavigatorSource);
+  };
+
+  const restoreLiveScan = () => {
+    const results = liveScanData?.results ?? [];
+    if (!results.length) {
+      setLiveScanStatus("暂无可恢复的筛选结果，请先运行一次筛选");
+      return;
+    }
+    const savedIndex = liveScanResume.instrumentId
+      ? results.findIndex((result) => result.instrumentId === liveScanResume.instrumentId)
+      : -1;
+    const nextIndex = savedIndex >= 0
+      ? savedIndex
+      : Math.min(results.length - 1, Math.max(0, liveScanResume.index));
+    openLiveScanResult(results[nextIndex], nextIndex, "scan");
   };
 
   const resetTraining = () => {
@@ -2443,6 +3373,44 @@ export function TrainingWorkbench() {
   };
 
   const saveSession = async () => {
+    if (liveMode) {
+      const hasContent = hasDecisionContent(decision, decisionSubmissions);
+      if (liveContext && currentBar && hasContent) {
+        const savedAt = new Date().toISOString();
+        const nextRecord: LivePortfolioRecord = {
+          id: liveContext.instrumentId,
+          instrumentId: liveContext.instrumentId,
+          symbol: liveContext.symbol,
+          name: liveContext.name,
+          market: liveContext.market,
+          latestTimestamp: currentBar.timestamp,
+          latestClose: currentBar.close,
+          scanTimestamp: liveContext.timestamp,
+          presetIds: liveContext.presetIds,
+          presetNames: liveContext.presetNames,
+          positions,
+          pendingOrders,
+          executions,
+          orderRejections,
+          tradingMode,
+          initialCapital,
+          cashBalance,
+          decision: { ...decision, reasons: [...decision.reasons] },
+          decisionSubmissions: decisionSubmissions.map((submission) => ({
+            ...submission,
+            decision: { ...submission.decision, reasons: [...submission.decision.reasons] },
+          })),
+          updatedAt: savedAt,
+        };
+        livePersistSignatureRef.current = JSON.stringify(nextRecord);
+        setLivePortfolios((items) => [
+          nextRecord,
+          ...items.filter((item) => item.instrumentId !== nextRecord.instrumentId),
+        ].slice(0, 500));
+      }
+      setSaveState(hasContent ? "实盘决策已保存" : "实盘观察已保存");
+      return;
+    }
     setSaveState("保存中…");
     const savedEvent = appendEvent("session_manually_saved");
     await persistTrainingState({
@@ -3198,6 +4166,136 @@ export function TrainingWorkbench() {
     [filteredSessionSummaries, performanceRecord],
   );
 
+  const livePerformanceRows = useMemo(() => livePortfolios
+    .filter((portfolio) => {
+      // A pending order is part of the live observation until it is filled or
+      // explicitly cancelled.  Canceled orders are removed from
+      // `pendingOrders`, so they naturally never enter this list.
+      const hasOpenPosition = portfolio.positions.some((position) => position.status === "open");
+      const hasNonFlatClosedTrade = portfolio.positions.some(
+        (position) => position.status === "closed"
+          && (Math.abs(position.realizedPnl ?? 0) > 0.000001
+            || Math.abs((position.exitPrice ?? position.entryPrice) - position.entryPrice) > 0.000001),
+      );
+      return hasOpenPosition || hasNonFlatClosedTrade || portfolio.pendingOrders.length > 0;
+    })
+    .map((portfolio) => {
+    const open = portfolio.positions.filter((position) => position.status === "open");
+    const closed = portfolio.positions.filter((position) => position.status === "closed");
+    const pending = portfolio.pendingOrders;
+    const realized = closed.reduce((sum, position) => sum + (position.realizedPnl ?? 0), 0);
+    const floating = open.reduce((sum, position) => sum + (portfolio.latestClose - position.entryPrice) * position.qty * (position.side === "long" ? 1 : -1), 0);
+    const total = realized + floating;
+    const closedReturns = closed.map((position) => positionReturnPct(position, position.exitPrice ?? position.entryPrice));
+    const values = portfolio.tradingMode === "capital" ? [realized, floating, total] : [
+      portfolioReturnPct(closed, portfolio.latestClose),
+      open.length ? floating / open.reduce((sum, position) => sum + position.entryPrice * position.qty, 0) * 100 : 0,
+      portfolioReturnPct(portfolio.positions, portfolio.latestClose),
+    ];
+    const winning = (portfolio.tradingMode === "capital" ? closed.map((position) => position.realizedPnl ?? 0) : closedReturns).filter((value) => value > 0).length;
+    const losing = (portfolio.tradingMode === "capital" ? closed.map((position) => position.realizedPnl ?? 0) : closedReturns).filter((value) => value < 0).length;
+    const flats = closed.length - winning - losing;
+    return {
+      portfolio,
+      open,
+      closed,
+      pending,
+      realized: values[0],
+      floating: values[1],
+      total: values[2],
+      winning,
+      losing,
+      flats,
+    };
+    }), [livePortfolios]);
+  const livePerformanceSummary = useMemo(() => {
+    const closedTrades = livePerformanceRows.reduce((sum, row) => sum + row.closed.length, 0);
+    const winning = livePerformanceRows.reduce((sum, row) => sum + row.winning, 0);
+    const losing = livePerformanceRows.reduce((sum, row) => sum + row.losing, 0);
+    const flats = closedTrades - winning - losing;
+    const decisive = winning + losing;
+    return {
+      instruments: livePerformanceRows.length,
+      openPositions: livePerformanceRows.reduce((sum, row) => sum + row.open.length, 0),
+      pendingOrders: livePerformanceRows.reduce((sum, row) => sum + row.pending.length, 0),
+      closedTrades,
+      winning,
+      losing,
+      flats,
+      winRate: decisive ? Math.round(winning / decisive * 100) : 0,
+      total: livePerformanceRows.reduce((sum, row) => sum + row.total, 0),
+      realized: livePerformanceRows.reduce((sum, row) => sum + row.realized, 0),
+      floating: livePerformanceRows.reduce((sum, row) => sum + row.floating, 0),
+    };
+  }, [livePerformanceRows]);
+
+  const liveWatchPerformanceRows = useMemo(() => liveWatchlist.map((watch) => {
+    const observationClose = liveWatchObservationClose(watch);
+    const entry = liveWatchEntry(watch);
+    const change = entry ? watch.latestClose - entry.price : null;
+    const returnPct = entry ? (watch.latestClose - entry.price) / entry.price * 100 : null;
+    return {
+      watch,
+      observationClose,
+      observationTimestamp: liveWatchObservationTimestamp(watch),
+      entryTimestamp: entry?.timestamp ?? null,
+      entryPrice: entry?.price ?? null,
+      change,
+      returnPct,
+    };
+  }), [liveWatchlist]);
+  const liveWatchPerformanceSummary = useMemo(() => {
+    const pricedRows = liveWatchPerformanceRows.filter((row) => row.returnPct !== null);
+    const winning = pricedRows.filter((row) => row.returnPct !== null && row.returnPct > 0.000001).length;
+    const losing = pricedRows.filter((row) => row.returnPct !== null && row.returnPct < -0.000001).length;
+    const flats = pricedRows.length - winning - losing;
+    const decisive = winning + losing;
+    const total = pricedRows.length
+      ? pricedRows.reduce((sum, row) => sum + (row.returnPct ?? 0), 0) / pricedRows.length
+      : null;
+    const totalEntryValue = pricedRows.reduce((sum, row) => sum + (row.entryPrice ?? 0), 0);
+    const totalLatestValue = pricedRows.reduce((sum, row) => sum + row.watch.latestClose, 0);
+    const totalReturn = totalEntryValue > 0
+      ? (totalLatestValue - totalEntryValue) / totalEntryValue * 100
+      : null;
+    return {
+      instruments: liveWatchPerformanceRows.length,
+      priced: pricedRows.length,
+      pending: liveWatchPerformanceRows.length - pricedRows.length,
+      winning,
+      losing,
+      flats,
+      winRate: decisive ? Math.round(winning / decisive * 100) : null,
+      total,
+      totalReturn,
+      realized: 0,
+      floating: total,
+    };
+  }, [liveWatchPerformanceRows]);
+
+  const liveNavigatorResults = useMemo(() => {
+    if (liveNavigatorSource === "portfolio") return livePortfolios.map(livePortfolioResult);
+    if (liveNavigatorSource === "watch") return liveWatchlist.map(liveWatchResult);
+    return liveScanData?.results ?? [];
+  }, [liveNavigatorSource, livePortfolios, liveScanData, liveWatchlist]);
+
+  // Result ordering can change after a refresh.  Prefer the saved instrument
+  // identity over the old numeric index so the floating navigator resumes on
+  // the same symbol whenever it is still present in the list.  This is derived
+  // during render, so restoring a result never causes an effect-driven render
+  // cascade.
+  const liveNavigatorDisplayIndex = useMemo(() => {
+    if (!liveNavigatorResults.length) return 0;
+    const activeInstrumentId = liveContext?.instrumentId
+      ?? (liveNavigatorResume.source === liveNavigatorSource ? liveNavigatorResume.instrumentId : undefined);
+    const savedIndex = activeInstrumentId
+      ? liveNavigatorResults.findIndex((result) => result.instrumentId === activeInstrumentId)
+      : -1;
+    return savedIndex >= 0
+      ? savedIndex
+      : Math.min(liveNavigatorResults.length - 1, Math.max(0, liveScanIndex));
+  }, [liveContext, liveNavigatorResults, liveNavigatorResume, liveNavigatorSource, liveScanIndex]);
+
   const reviewModeOptions = useMemo(
     () => [...new Set(sessionSummaries.map((summary) => summary.modeLabel))],
     [sessionSummaries],
@@ -3225,7 +4323,12 @@ export function TrainingWorkbench() {
       return {
         result: summary.state.tradingMode === "capital" ? trade.pnl : trade.returnPct,
         holdingBars: trade.holdingBars,
-        decision: trade.decision,
+        decision: trade.decision
+          ? {
+              ...trade.decision,
+              source: trade.decision.source === "backfilled" ? "backfilled" : "pretrade",
+            }
+          : undefined,
         patterns: trade.patterns,
         instrument: {
           market: trade.market,
@@ -4348,7 +5451,7 @@ export function TrainingWorkbench() {
                     setLiveScanMarket(market);
                     setLiveScanData(null);
                     setLiveScanError("");
-                  }}>{market === "CN" ? "A 股" : "美股"}<small>{market === "CN" ? "Tushare 增量" : "Alpaca SIP"}</small></button>
+                  }}>{market === "CN" ? "A 股" : "美股"}<small>{market === "CN" ? "Tushare 增量" : "Alpaca SIP/IEX"}</small></button>
                 ))}
               </div>
 
@@ -4389,8 +5492,8 @@ export function TrainingWorkbench() {
                     <small>点击一行打开该标的最新日线</small>
                   </header>
                   <div className="live-scan-result-list">
-                    {liveScanData.results.length ? liveScanData.results.map((result) => (
-                      <button type="button" key={result.instrumentId} onClick={() => openLiveScanResult(result)}>
+                    {liveScanData.results.length ? liveScanData.results.map((result, resultIndex) => (
+                      <button type="button" key={result.instrumentId} onClick={() => openLiveScanResult(result, resultIndex)}>
                         <span><strong>{result.symbol}</strong><small>{result.name}</small></span>
                         <span>{result.presetNames.join("、") || "基础条件"}</span>
                         <span className={result.changePct >= 0 ? "up" : "down"}>{result.changePct >= 0 ? "+" : ""}{result.changePct.toFixed(2)}%</span>
@@ -4404,6 +5507,7 @@ export function TrainingWorkbench() {
 
               <div className="task-modal-actions">
                 <button className="ghost-button" disabled={liveScanRunning} onClick={() => setShowLiveScan(false)}>关闭</button>
+                <button className="ghost-button" disabled={liveScanRunning || !liveScanData?.results.length} title="恢复上次筛选结果和浮动导航位置" onClick={restoreLiveScan}><RotateCcw size={15} />恢复筛选</button>
                 <button className="primary-button" disabled={liveScanRunning} onClick={() => void startLiveScan(false)}><Activity size={16} />{liveScanRunning ? "正在更新并筛选…" : "更新数据并开始筛选"}</button>
               </div>
             </section>
@@ -4965,6 +6069,11 @@ export function TrainingWorkbench() {
                   <button className="flat-button" disabled={trainingComplete || !openPositions.some((position) => !pendingOrders.some((order) => order.action === "close" && order.positionId === position.id))} onClick={queueCloseAll}>
                     <CircleStop size={16} /><span className="desktop-order-label">{openPositions.length && !closablePositions.length ? "次日开盘全平" : "全部平仓"}</span><span className="mobile-order-label">{openPositions.length && !closablePositions.length ? "次日全平" : "全平"}</span>
                   </button>
+                  {liveMode && (
+                    <button className={`live-watch-button${liveWatchExists ? " active" : ""}`} disabled={liveWatchExists || !currentBar} onClick={addLiveWatch} title="加入实盘观望，不计入实盘交易表现">
+                      <Eye size={16} /><span className="desktop-order-label">{liveWatchExists ? "已观望" : "观望"}</span><span className="mobile-order-label">{liveWatchExists ? "已观望" : "观望"}</span>
+                    </button>
+                  )}
                 </div>
                 <div className={`pending-note ${ruleNotice || !marketRules.tradingEnabled ? "rule-warning" : ""} ${ruleNotice || pendingOrders.length || !marketRules.tradingEnabled ? "has-message" : ""}`}>
                   {ruleNotice || (!marketRules.tradingEnabled
@@ -5211,6 +6320,50 @@ export function TrainingWorkbench() {
           </div>
         )}
 
+        {view === "replay" && liveMode && liveNavigatorResults.length ? (
+          <div
+            className="live-scan-navigator"
+            style={{ transform: `translate(calc(-50% + ${liveBarOffset.x}px), ${liveBarOffset.y}px)` }}
+            onPointerDown={(event) => {
+              if (event.button !== 0) return;
+              liveBarDragRef.current = {
+                pointerId: event.pointerId,
+                startX: event.clientX,
+                startY: event.clientY,
+                offsetX: liveBarOffset.x,
+                offsetY: liveBarOffset.y,
+              };
+              event.currentTarget.setPointerCapture?.(event.pointerId);
+            }}
+            onPointerUp={(event) => {
+              if (liveBarDragRef.current?.pointerId === event.pointerId) liveBarDragRef.current = null;
+            }}
+            role="region"
+            aria-label="实盘筛选结果导航"
+          >
+            <button type="button" aria-label="上一个筛选结果" title="上一个" onPointerDown={(event) => event.stopPropagation()} onClick={() => moveLiveScanResult(-1)}><ChevronLeft size={16} /></button>
+            <div className="live-scan-navigator-label">
+              <span>{liveNavigatorSource === "portfolio" ? "实盘观察" : liveNavigatorSource === "watch" ? "实盘观望" : "实盘筛选"}</span>
+              <strong>{liveContext?.symbol ?? "--"}</strong>
+              <small>{liveNavigatorDisplayIndex + 1} / {liveNavigatorResults.length}</small>
+            </div>
+            <button type="button" aria-label="下一个筛选结果" title="下一个" onPointerDown={(event) => event.stopPropagation()} onClick={() => moveLiveScanResult(1)}><ChevronRight size={16} /></button>
+            <button
+              type="button"
+              className="live-scan-navigator-exit"
+              aria-label="退出实盘观察"
+              title="退出实盘观察"
+              onPointerDown={(event) => event.stopPropagation()}
+              onClick={() => {
+                liveRequestRef.current = null;
+                setLiveMode(false);
+                setLiveContext(null);
+                startFreshTraining(instrumentId, timeframe);
+              }}
+            ><X size={14} /></button>
+          </div>
+        ) : null}
+
         {view === "performance" && (
           <section className="content-page performance-page">
             <div className="page-heading">
@@ -5221,6 +6374,95 @@ export function TrainingWorkbench() {
               </div>
             </div>
 
+            <div className="performance-view-tabs" role="tablist" aria-label="表现视图">
+              <button type="button" role="tab" aria-selected={performanceSection === "training"} className={performanceSection === "training" ? "active" : ""} onClick={() => setPerformanceSection("training")}>训练表现</button>
+              <button type="button" role="tab" aria-selected={performanceSection === "live"} className={performanceSection === "live" ? "active" : ""} onClick={() => setPerformanceSection("live")}>实盘表现 <span>{livePerformanceRows.length}</span></button>
+              <button type="button" role="tab" aria-selected={performanceSection === "watch"} className={performanceSection === "watch" ? "active" : ""} onClick={() => setPerformanceSection("watch")}>实盘观望 <span>{liveWatchlist.length}</span></button>
+            </div>
+
+            {performanceSection === "live" ? (
+              <section className="live-performance-panel">
+                <div className="performance-section-head">
+                  <div><span className="section-label">LIVE PERFORMANCE</span><h2>实盘观察</h2></div>
+                  <div className="live-performance-actions">
+                    <small>实盘筛选标的不会进入训练表现；待成交不计入收益/胜率，撤单不保留。</small>
+                    <button
+                      type="button"
+                      className="ghost-button"
+                      disabled={livePriceRefreshRunning || (!livePortfolios.length && !liveWatchlist.length)}
+                      onClick={() => void refreshLivePortfolioPrices()}
+                    >
+                      <RotateCcw size={13} />{livePriceRefreshRunning ? "同步中…" : "同步最新价"}
+                    </button>
+                  </div>
+                </div>
+                <div className="performance-overview live-performance-overview">
+                  <div className="performance-hero"><span>实盘观察收益</span><strong className={livePerformanceSummary.total >= 0 ? "up" : "down"}>{livePerformanceRows.some((row) => row.portfolio.tradingMode === "capital") ? money(livePerformanceSummary.total) : percent(livePerformanceSummary.total)}</strong><small>{livePerformanceSummary.instruments} 个品种，{livePerformanceSummary.openPositions} 个持仓，{livePerformanceSummary.pendingOrders} 笔待成交，{livePerformanceSummary.closedTrades} 笔已平仓</small></div>
+                  <div className="performance-metric"><span>观察品种</span><strong>{livePerformanceSummary.instruments}</strong><small>来自实盘筛选结果；待成交也会保留</small></div>
+                  <div className="performance-metric"><span>按成交的胜率</span><strong>{livePerformanceSummary.winRate}%</strong><small>{livePerformanceSummary.winning} 胜 / {livePerformanceSummary.losing} 负 / {livePerformanceSummary.flats} 平局</small></div>
+                  <div className="performance-metric"><span>已实现收益</span><strong className={livePerformanceSummary.realized >= 0 ? "up" : "down"}>{livePerformanceRows.some((row) => row.portfolio.tradingMode === "capital") ? money(livePerformanceSummary.realized) : percent(livePerformanceSummary.realized)}</strong><small>已平仓交易合计</small></div>
+                  <div className="performance-metric"><span>浮动收益</span><strong className={livePerformanceSummary.floating >= 0 ? "up" : "down"}>{livePerformanceRows.some((row) => row.portfolio.tradingMode === "capital") ? money(livePerformanceSummary.floating) : percent(livePerformanceSummary.floating)}</strong><small>按最新价重算</small></div>
+                  <div className="performance-metric"><span>数据同步</span><strong>{livePerformanceRows.length ? "已同步" : "--"}</strong><small>不影响训练统计</small></div>
+                </div>
+                <div className="performance-sessions live-performance-sessions">
+                  <div className="performance-section-head"><div><span className="section-label">WATCHLIST</span><h2>实盘观察标的</h2></div><div className="live-performance-actions"><small>点击打开标的，继续观察或交易</small><button type="button" className="ghost-button live-review-button" disabled={!livePortfolios.length} onClick={reviewLivePortfolios}><BookOpenCheck size={13} />审阅</button></div></div>
+                  {livePerformanceRows.length ? (
+                    <div className="live-performance-list">
+                      {livePerformanceRows.map((row) => {
+                        const capital = row.portfolio.tradingMode === "capital";
+                        return (
+                          <div className="live-performance-row" key={row.portfolio.id}>
+                            <span className="live-performance-instrument"><strong>{row.portfolio.symbol}</strong><small>{row.portfolio.name}</small></span>
+                            <span><strong>{row.portfolio.market === "CN" ? "A股" : "美股"}</strong><small>{new Date(row.portfolio.latestTimestamp).toLocaleDateString("zh-CN")}</small></span>
+                            <span><strong>{row.open.length} 个持仓</strong><small>{row.pending.length} 笔待成交 · {row.closed.length} 笔已平</small></span>
+                            <span className="live-performance-result"><strong className={row.total >= 0 ? "up" : "down"}>{capital ? money(row.total) : percent(row.total)}</strong><small>已实现 {capital ? money(row.realized) : percent(row.realized)} · 浮动 {capital ? money(row.floating) : percent(row.floating)}</small></span>
+                            <button type="button" className="ghost-button" onClick={() => openLivePortfolio(row.portfolio)}><BarChart3 size={14} />打开实盘</button>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  ) : <div className="empty-state">还没有实盘订单或持仓。已撤单的委托不会出现在这里。</div>}
+                </div>
+              </section>
+            ) : performanceSection === "watch" ? (
+              <section className="live-performance-panel">
+                <div className="performance-section-head">
+                  <div><span className="section-label">LIVE WATCH</span><h2>实盘观望</h2></div>
+                  <small>观望记录不会进入实盘交易表现或训练表现；当天记录，下一交易日开盘模拟买入</small>
+                </div>
+                <div className="performance-overview live-performance-overview live-watch-performance-overview">
+                  <div className="performance-hero"><span>观望收益率</span><strong className={liveWatchPerformanceSummary.total === null || liveWatchPerformanceSummary.total >= 0 ? "up" : "down"}>{liveWatchPerformanceSummary.total === null ? "--" : percent(liveWatchPerformanceSummary.total)}</strong><small>{liveWatchPerformanceSummary.instruments} 个品种，{liveWatchPerformanceSummary.winning} 个上涨，{liveWatchPerformanceSummary.losing} 个下跌，{liveWatchPerformanceSummary.flats} 个持平，{liveWatchPerformanceSummary.pending} 个待次日开盘</small></div>
+                  <div className="performance-metric"><span>观望品种</span><strong>{liveWatchPerformanceSummary.instruments}</strong><small>按加入观望时价格记录</small></div>
+                  <div className="performance-metric"><span>价格胜率</span><strong>{liveWatchPerformanceSummary.winRate === null ? "--" : `${liveWatchPerformanceSummary.winRate}%`}</strong><small>{liveWatchPerformanceSummary.winning} 上涨 / {liveWatchPerformanceSummary.losing} 下跌 / {liveWatchPerformanceSummary.flats} 持平</small></div>
+                  <div className="performance-metric"><span>浮动收益率</span><strong className={liveWatchPerformanceSummary.floating === null || liveWatchPerformanceSummary.floating >= 0 ? "up" : "down"}>{liveWatchPerformanceSummary.floating === null ? "--" : percent(liveWatchPerformanceSummary.floating)}</strong><small>按次日开盘买入价重算，等权平均</small></div>
+                  <div className="performance-metric"><span>总收益率</span><strong className={liveWatchPerformanceSummary.totalReturn === null || liveWatchPerformanceSummary.totalReturn >= 0 ? "up" : "down"}>{liveWatchPerformanceSummary.totalReturn === null ? "--" : percent(liveWatchPerformanceSummary.totalReturn)}</strong><small>当前总价 ÷ 模拟买入总价 − 1，按已完成模拟计算</small></div>
+                  <div className="performance-metric"><span>已实现收益</span><strong>--</strong><small>观望不产生买卖成交</small></div>
+                  <div className="performance-metric"><span>数据同步</span><strong>{liveWatchPerformanceSummary.instruments ? "已同步" : "--"}</strong><small>{liveWatchPerformanceSummary.priced}/{liveWatchPerformanceSummary.instruments} 个已完成次日开盘模拟</small></div>
+                </div>
+                <div className="performance-sessions live-performance-sessions">
+                  <div className="performance-section-head"><div><span className="section-label">WATCHLIST</span><h2>观望列表</h2></div><button type="button" className="ghost-button" disabled={livePriceRefreshRunning || !liveWatchlist.length} onClick={() => void refreshLivePortfolioPrices()}><RotateCcw size={13} />同步最新价</button></div>
+                  {liveWatchlist.length ? (
+                    <div className="live-performance-list">
+                      {liveWatchPerformanceRows.map((row) => {
+                        const { watch, observationTimestamp, entryTimestamp, entryPrice, change, returnPct } = row;
+                        const result = liveWatchResult(watch);
+                        const index = liveWatchlist.findIndex((item) => item.instrumentId === watch.instrumentId);
+                        return (
+                          <div className="live-performance-row live-watch-row" key={watch.id}>
+                            <span className="live-performance-instrument"><strong>{watch.symbol}</strong><small>{watch.name}</small></span>
+                            <span><strong>{watch.market === "CN" ? "A股" : "美股"}</strong><small>{new Date(watch.latestTimestamp).toLocaleDateString("zh-CN")}</small></span>
+                            <span><strong>{watch.latestClose.toFixed(4)}</strong><small>最新价 · {entryPrice === null ? `观望日 ${new Date(observationTimestamp).toLocaleDateString("zh-CN")} · 买入价待定` : `模拟买入价 ${entryPrice.toFixed(4)} · ${new Date(entryTimestamp ?? 0).toLocaleDateString("zh-CN")}`}</small></span>
+                            <span className="live-performance-result"><strong className={returnPct === null || returnPct >= 0 ? "up" : "down"}>{returnPct === null ? "待次日开盘" : percent(returnPct)}</strong><small>{change === null ? `观望日 ${new Date(observationTimestamp).toLocaleDateString("zh-CN")} · 等待下一交易日开盘` : `买入价 ${entryPrice?.toFixed(4)} · 价格变动 ${priceDelta(change)} · ${watch.presetNames.length ? watch.presetNames.join(" · ") : "未设置形态"}`}</small></span>
+                            <span className="live-watch-row-actions"><button type="button" className="ghost-button" onClick={() => openLiveScanResult(result, index >= 0 ? index : undefined, "watch")}><BarChart3 size={14} />打开</button><button type="button" className="row-action danger" onClick={() => removeLiveWatch(watch.instrumentId)}>移除</button></span>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  ) : <div className="empty-state">还没有实盘观望记录。在实盘浏览中点击“观望”即可加入。</div>}
+                </div>
+              </section>
+            ) : (
+              <>
             <article className="performance-filter-card">
               <div className="performance-section-head">
                 <div>
@@ -5416,6 +6658,8 @@ export function TrainingWorkbench() {
               )}
 
             </article>
+              </>
+            )}
           </section>
         )}
 
@@ -5456,6 +6700,9 @@ export function TrainingWorkbench() {
               onOpenSettings={() => openSettingsPanel("data")}
               onDataChanged={() => {
                 void Promise.all([loadCoverage(), loadInstrumentCatalog()]);
+                // Keep live-observation marks in sync when the database page
+                // finishes an import, incremental update, or repair.
+                void refreshLivePortfolioPrices();
               }}
             />
             <div className="coverage-toolbar">

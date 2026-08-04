@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
+  fetchAlpacaMultiSymbolChunk,
   fetchProviderChunk,
   filterTradableUsAssets,
   normalizeAlpacaBars,
@@ -52,6 +53,41 @@ test("Alpaca bars 去重并排除 OHLC 不合法的数据", () => {
   assert.equal(result.report.invalid, 1);
 });
 
+test("Alpaca 多品种日线请求按 symbols 返回并保留分页游标", async () => {
+  let capturedUrl = "";
+  const result = await fetchAlpacaMultiSymbolChunk({
+    symbols: ["AAPL", "MSFT"],
+    timeframe: "1d",
+    startDate: "2026-08-03",
+    endDate: "2026-08-03",
+    feed: "iex",
+    limit: 10000,
+  }, {
+    alpacaKeyId: "local-key",
+    alpacaSecretKey: "local-secret",
+  }, async (url) => {
+    capturedUrl = String(url);
+    return Response.json({
+      bars: {
+        AAPL: [{ t: "2026-08-03T04:00:00Z", o: 10, h: 12, l: 9, c: 11, v: 100 }],
+        MSFT: [{ t: "2026-08-03T04:00:00Z", o: 20, h: 22, l: 19, c: 21, v: 200 }],
+      },
+      next_page_token: "page-2",
+    });
+  });
+
+  const url = new URL(capturedUrl);
+  assert.equal(url.pathname, "/v2/stocks/bars");
+  assert.equal(url.searchParams.get("symbols"), "AAPL,MSFT");
+  assert.equal(url.searchParams.get("timeframe"), "1Day");
+  assert.equal(url.searchParams.get("feed"), "iex");
+  assert.equal(url.searchParams.get("limit"), "10000");
+  assert.deepEqual([...result.candlesBySymbol.keys()], ["AAPL", "MSFT"]);
+  assert.equal(result.candlesBySymbol.get("MSFT")[0].close, 21);
+  assert.deepEqual(result.cursor, { pageToken: "page-2", feed: "iex" });
+  assert.equal(result.complete, false);
+});
+
 test("通用校验按时间升序输出", () => {
   const result = validateCandles([
     { timestamp: 2, open: 2, high: 3, low: 1, close: 2, volume: null, turnover: null },
@@ -89,9 +125,38 @@ test("Alpaca 下载使用免费历史行情接口、认证头和分页游标", a
   assert.equal(url.searchParams.get("feed"), "sip");
   assert.equal(url.searchParams.get("page_token"), "next-token");
   assert.equal(capturedHeaders["APCA-API-KEY-ID"], "local-key");
-  assert.deepEqual(result.cursor, { pageToken: "page-2" });
+  assert.deepEqual(result.cursor, { pageToken: "page-2", feed: "sip" });
   assert.equal(result.complete, false);
   assert.equal(result.source, "alpaca-sip");
+});
+
+test("Alpaca 近期 SIP 无权限时回退到 IEX", async () => {
+  const feeds = [];
+  let calls = 0;
+  const result = await fetchProviderChunk({
+    provider: "alpaca",
+    vendorSymbol: "ACT",
+    timeframe: "1d",
+    startDate: "2026-08-01",
+    endDate: "2026-08-03",
+    cursor: {},
+  }, {
+    alpacaKeyId: "local-key",
+    alpacaSecretKey: "local-secret",
+  }, async (url) => {
+    feeds.push(new URL(String(url)).searchParams.get("feed"));
+    calls += 1;
+    if (calls === 1) {
+      return Response.json({ message: "subscription does not permit querying recent SIP data" }, { status: 403 });
+    }
+    return Response.json({
+      bars: [{ t: "2026-08-03T04:00:00Z", o: 47, h: 48, l: 46, c: 47.89, v: 100 }],
+    });
+  });
+
+  assert.deepEqual(feeds, ["sip", "iex"]);
+  assert.equal(result.source, "alpaca-iex");
+  assert.equal(result.candles.length, 1);
 });
 
 test("数据源缺少本地凭证时不会发出网络请求", async () => {

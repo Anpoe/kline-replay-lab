@@ -1091,6 +1091,78 @@ export class TdxLocalStore {
     };
   }
 
+  async getLatestCandles(instrumentIds = [], entryAfter = {}) {
+    const requested = new Set(instrumentIds.map((value) => String(value)).filter(Boolean));
+    if (!requested.size) return [];
+    const manifest = await this.getManifest();
+    if (!manifest) return [];
+    const selected = manifest.instruments.filter((instrument) => requested.has(instrument.id));
+    const overlayDbAvailable = await exists(this.overlayDbFile);
+    const output = [];
+    for (const instrument of selected) {
+      const target = path.resolve(this.root, instrument.relativePath);
+      if (!target.startsWith(this.root) || !(await exists(target))) continue;
+      const info = await stat(target);
+      const recordCount = Math.min(340, Math.trunc(info.size / TDX_DAY_RECORD_SIZE));
+      if (!recordCount) continue;
+      const byteLength = recordCount * TDX_DAY_RECORD_SIZE;
+      const buffer = Buffer.allocUnsafe(byteLength);
+      const handle = await open(target, "r");
+      try {
+        await handle.read(buffer, 0, byteLength, Math.max(0, info.size - byteLength));
+      } finally {
+        await handle.close();
+      }
+      const merged = new Map(parseTdxDayBuffer(buffer).map((bar) => [bar.timestamp, bar]));
+      const afterTimestamp = Number(entryAfter?.[instrument.id]);
+      if (overlayDbAvailable) {
+        const overlays = Number.isFinite(afterTimestamp)
+          ? this.ensureOverlayDb().prepare(`
+              SELECT timestamp, open, high, low, close, volume, turnover
+              FROM daily_overlay WHERE instrument_id = ? ORDER BY timestamp ASC
+            `).all(instrument.id)
+          : this.ensureOverlayDb().prepare(`
+              SELECT timestamp, open, high, low, close, volume, turnover
+              FROM daily_overlay WHERE instrument_id = ? ORDER BY timestamp DESC LIMIT 1
+            `).all(instrument.id);
+        for (const overlay of overlays) {
+          merged.set(Number(overlay.timestamp), {
+            timestamp: Number(overlay.timestamp),
+            open: Number(overlay.open),
+            high: Number(overlay.high),
+            low: Number(overlay.low),
+            close: Number(overlay.close),
+            volume: overlay.volume == null ? null : Number(overlay.volume),
+            turnover: overlay.turnover == null ? null : Number(overlay.turnover),
+          });
+        }
+      }
+      let sorted = [...merged.values()].sort((left, right) => left.timestamp - right.timestamp);
+      let entry = Number.isFinite(afterTimestamp)
+        ? sorted.find((bar) => bar.timestamp > afterTimestamp)
+        : undefined;
+      if (Number.isFinite(afterTimestamp) && !entry) {
+        // The fast path reads recent records only.  Fall back to the complete
+        // file when a very old watch record needs its first later session.
+        const complete = new Map(parseTdxDayBuffer(await readFile(target)).map((bar) => [bar.timestamp, bar]));
+        for (const [timestamp, bar] of merged) complete.set(timestamp, bar);
+        sorted = [...complete.values()].sort((left, right) => left.timestamp - right.timestamp);
+        entry = sorted.find((bar) => bar.timestamp > afterTimestamp);
+      }
+      const latest = sorted.at(-1);
+      if (latest) {
+        output.push({
+          instrumentId: instrument.id,
+          timestamp: latest.timestamp,
+          open: latest.open,
+          close: latest.close,
+          ...(entry ? { entryTimestamp: entry.timestamp, entryOpen: entry.open } : {}),
+        });
+      }
+    }
+    return output;
+  }
+
   async scanLatest({ presets = [], filters = {}, limit = 100, sort = "turnover" } = {}) {
     const manifest = await this.getManifest();
     if (!manifest) throw new Error("请先完成 A 股全市场日线初始化");

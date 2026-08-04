@@ -44,6 +44,7 @@ test("ships the K-line training workbench instead of the starter", async () => {
   assert.match(workbench, /已同步 .* 份历史决策/);
   assert.match(workbench, /decisionSubmissions/);
   assert.match(workbench, /reasonTags/);
+  assert.match(workbench, /normalizeReasonTagText/);
   assert.match(workbench, /REASON_TAGS_KEY/);
   assert.match(workbench, /事前决策记录/);
   assert.match(workbench, /查看复盘/);
@@ -73,6 +74,15 @@ test("ships the K-line training workbench instead of the starter", async () => {
   assert.match(workbench, /选择具体训练/);
   assert.match(workbench, /什么是盲测/);
   assert.match(workbench, /总盈亏/);
+  assert.match(workbench, /observationClose/);
+  assert.match(workbench, /scanTimestamp/);
+  assert.match(workbench, /entryTimestamp/);
+  assert.match(workbench, /entryAfter/);
+  assert.match(workbench, /待次日开盘/);
+  assert.match(workbench, /liveWatchPerformanceRows/);
+  assert.match(workbench, /liveWatchPerformanceSummary/);
+  assert.match(workbench, /totalReturn/);
+  assert.match(workbench, /previousIndex/);
   assert.match(workbench, /orders_filled/);
   assert.match(workbench, /deleteSession/);
   assert.match(workbench, /dataSnapshotId/);
@@ -130,7 +140,7 @@ test("ships the K-line training workbench instead of the starter", async () => {
   assert.match(marketJobsRoute, /filterTradableUsAssets/);
   assert.match(marketJobsRoute, /loadLatestClosedUsSession/);
   assert.match(marketJobsRoute, /resumeOnly/);
-  assert.match(marketJobsRoute, /c\.source = 'alpaca-sip'/);
+  assert.match(marketJobsRoute, /c\.source (?:= 'alpaca-sip'|IN \('alpaca-sip', 'alpaca-iex'\))/);
   assert.match(downloadRunner, /chunk\.source === "alpaca-sip"/);
   assert.doesNotMatch(downloadRunner, /DELETE FROM data_snapshots/);
   assert.match(dataJobsRoute, /WITH instrument_status AS/);

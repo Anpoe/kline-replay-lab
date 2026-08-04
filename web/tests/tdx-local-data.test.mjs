@@ -152,6 +152,12 @@ test("local store downloads, indexes and serves daily/weekly candles", async (co
   assert.equal(maintainedDaily.candles.at(-1).close, 12.1);
   assert.equal((await store.getCandles("600519.SH", "1w")).candles.length, 2);
   assert.match((await store.getManifest()).datasetVersion, /-ts-\d+$/);
+  const refreshed = await store.getLatestCandles(
+    ["600519.SH"],
+    { "600519.SH": Date.UTC(2026, 6, 21) },
+  );
+  assert.equal(refreshed[0].entryTimestamp, Date.UTC(2026, 6, 27));
+  assert.equal(refreshed[0].entryOpen, 11.8);
 
   const deletion = await store.deleteInstruments(["600519.SH"]);
   assert.deepEqual(deletion, { deletedInstruments: 1, instrumentIds: ["600519.SH"] });

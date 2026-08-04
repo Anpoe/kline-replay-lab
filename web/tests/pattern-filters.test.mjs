@@ -1,13 +1,25 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { defaultPatternPresets, findPatternMatches, matchesPattern } from "../app/lib/patternFilters.ts";
+import { defaultPatternPresets, findPatternMatches, matchesPattern, normalizePatternPresets } from "../app/lib/patternFilters.ts";
 
 const candle = (timestamp, open, high, low, close, volume = 100) => ({ timestamp, open, high, low, close, volume });
 const breakout = defaultPatternPresets.find((preset) => preset.id === "breakout");
 const uptrend = defaultPatternPresets.find((preset) => preset.id === "uptrend");
 const uptrendBreakout = defaultPatternPresets.find((preset) => preset.id === "uptrend-breakout");
 const bullishEngulfing = defaultPatternPresets.find((preset) => preset.id === "bullish-engulfing");
+const contraction = defaultPatternPresets.find((preset) => preset.id === "contraction");
+
+test("repairs replacement and control characters in preset text", () => {
+  const normalized = normalizePatternPresets([{
+    ...contraction,
+    name: "波\uFFFD\u0085收缩",
+    description: "近期平均振\uFFFD\u0085显著小于此前同长度窗口，代表价格正在压缩。",
+  }]);
+  const repaired = normalized.find((preset) => preset.id === "contraction");
+  assert.equal(repaired.name, "波幅收缩");
+  assert.equal(repaired.description, contraction.description);
+});
 
 test("breakout only uses prior candles and requires all configured conditions", () => {
   const bars = Array.from({ length: 20 }, (_, index) => candle(index, 9.7, 10, 9.4, 9.8, 100));
