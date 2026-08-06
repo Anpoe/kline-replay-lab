@@ -1,10 +1,15 @@
 import { ensureSchema, getRawDb } from "../../../db/runtime";
 
 const PREFERENCES_KEY = "training_preferences_v1";
-// Live screener results and the separate live-performance ledger are synced
-// with the rest of the local preferences. Keep enough room for the configured
-// 500-result watch list without silently dropping the whole preferences write.
 const MAX_PREFERENCES_BYTES = 2 * 1024 * 1024;
+
+function withoutLegacyLiveState(value: unknown) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return value;
+  const preferences = { ...(value as Record<string, unknown>) };
+  delete preferences.livePortfolios;
+  delete preferences.liveWatchlist;
+  return preferences;
+}
 
 export async function GET() {
   await ensureSchema();
@@ -19,7 +24,7 @@ export async function GET() {
 
   try {
     return Response.json(
-      { preferences: JSON.parse(row.value) },
+      { preferences: withoutLegacyLiveState(JSON.parse(row.value)) },
       { headers: { "Cache-Control": "no-store" } },
     );
   } catch {
@@ -34,7 +39,7 @@ export async function PUT(request: Request) {
     return Response.json({ error: "设置内容格式不正确" }, { status: 400 });
   }
 
-  const value = JSON.stringify(preferences);
+  const value = JSON.stringify(withoutLegacyLiveState(preferences));
   if (new TextEncoder().encode(value).byteLength > MAX_PREFERENCES_BYTES) {
     return Response.json({ error: "设置内容过大" }, { status: 413 });
   }

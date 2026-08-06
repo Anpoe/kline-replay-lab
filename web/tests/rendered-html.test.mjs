@@ -32,6 +32,18 @@ test("ships the K-line training workbench instead of the starter", async () => {
   assert.match(workbench, /queueClosePosition/);
   assert.match(workbench, /kline-replay-lab:last-training/);
   assert.match(workbench, /继续训练/);
+  assert.match(workbench, /RECYCLE BIN/);
+  assert.match(workbench, /loadTrashSessions/);
+  assert.match(workbench, /inspectTrashedSession/);
+  assert.match(workbench, /查看训练/);
+  assert.match(workbench, /resumeSession\(session, true\)/);
+  assert.match(workbench, /trashPreview/);
+  assert.match(workbench, /恢复训练/);
+  assert.match(workbench, /彻底删除/);
+  assert.doesNotMatch(workbench, />默认品种/);
+  assert.doesNotMatch(workbench, />默认周期/);
+  assert.doesNotMatch(workbench, />默认下单数量/);
+  assert.doesNotMatch(workbench, />默认播放速度/);
   assert.match(workbench, /drawingsRestoreNonce/);
   assert.match(workbench, /session_created/);
   assert.match(workbench, /decision_submitted/);
@@ -77,10 +89,14 @@ test("ships the K-line training workbench instead of the starter", async () => {
   assert.match(workbench, /observationClose/);
   assert.match(workbench, /scanTimestamp/);
   assert.match(workbench, /entryTimestamp/);
-  assert.match(workbench, /entryAfter/);
-  assert.match(workbench, /待次日开盘/);
+  assert.match(workbench, /observationPrice/);
+  assert.match(workbench, /观望当日开盘价/);
   assert.match(workbench, /liveWatchPerformanceRows/);
   assert.match(workbench, /liveWatchPerformanceSummary/);
+  assert.match(workbench, /performanceFilters\.market/);
+  assert.match(workbench, /performanceFilters\.outcome/);
+  assert.match(workbench, /performanceMarketOptions/);
+  assert.match(workbench, /value="profit"/);
   assert.match(workbench, /totalReturn/);
   assert.match(workbench, /previousIndex/);
   assert.match(workbench, /orders_filled/);
@@ -107,9 +123,10 @@ test("ships the K-line training workbench instead of the starter", async () => {
   assert.match(providerSettings, /清除本机凭证/);
   assert.match(providerSettings, /正在读取本机凭证状态/);
   assert.match(providerSettings, /1200/);
-  assert.match(dataSourceManager, /usDownloadConcurrency = 8/);
-  assert.match(dataSourceManager, /usRequestSpacingMs = 400/);
-  assert.match(dataSourceManager, /正在高速批量更新美股/);
+  assert.match(dataSourceManager, /MarketSyncStatus/);
+  assert.match(dataSourceManager, /market\/sync\/worker/);
+  assert.match(dataSourceManager, /URL 长度自动计算批量/);
+  assert.doesNotMatch(dataSourceManager, /usDownloadConcurrency/);
   assert.match(downloadRunner, /rowsPerStatement = 8/);
   assert.match(downloadRunner, /candle_coverage/);
   assert.match(workbench, /Avoid reading and serializing the same market file twice/);
@@ -121,6 +138,9 @@ test("ships the K-line training workbench instead of the starter", async () => {
   assert.match(workbench, /次日开盘平仓/);
   assert.match(workbench, /order_queued_for_next_session/);
   assert.match(workbench, /earliestScheduledIndex - 1/);
+  assert.match(workbench, /syncedPreferencesHydratedRef/);
+  assert.match(workbench, /!syncedPreferencesReady \|\| !syncedPreferencesHydratedRef\.current/);
+  assert.doesNotMatch(workbench, /\.finally\(\(\) => \{\s*if \(!cancelled\) setSyncedPreferencesReady\(true\)/);
   assert.doesNotMatch(providerSettingsRoute, /credentialsJson.*Response\.json/s);
   assert.match(replayChart, /tradeLifecycle/);
   assert.match(replayChart, /decisionSubmission/);
@@ -130,6 +150,10 @@ test("ships the K-line training workbench instead of the starter", async () => {
   assert.doesNotMatch(replayChart, /FrameResizeObserver/);
   assert.match(replayChart, /style: "dashed"/);
   assert.match(sessionsRoute, /export async function DELETE/);
+  assert.match(sessionsRoute, /export async function PATCH/);
+  assert.match(sessionsRoute, /deleted_at/);
+  assert.match(sessionsRoute, /movedToTrash/);
+  assert.match(sessionsRoute, /permanentlyDeleted/);
   assert.match(sessionsRoute, /ORDER BY sequence ASC/);
   assert.match(sessionsRoute, /searchParams\.get\("all"\) === "1"/);
   assert.match(snapshotsRoute, /SHA-256/);
@@ -137,13 +161,12 @@ test("ships the K-line training workbench instead of the starter", async () => {
   assert.match(snapshotsRoute, /storageMode/);
   assert.match(snapshotsRoute, /baseSnapshotId/);
   assert.match(marketRules, /CN_A_MAINBOARD_RULES_V1/);
-  assert.match(marketJobsRoute, /filterTradableUsAssets/);
-  assert.match(marketJobsRoute, /loadLatestClosedUsSession/);
-  assert.match(marketJobsRoute, /resumeOnly/);
-  assert.match(marketJobsRoute, /c\.source (?:= 'alpaca-sip'|IN \('alpaca-sip', 'alpaca-iex'\))/);
+  assert.match(marketJobsRoute, /createMarketSyncRun/);
+  assert.match(marketJobsRoute, /marketSyncService/);
   assert.match(downloadRunner, /chunk\.source === "alpaca-sip"/);
   assert.doesNotMatch(downloadRunner, /DELETE FROM data_snapshots/);
-  assert.match(dataJobsRoute, /WITH instrument_status AS/);
+  assert.match(dataJobsRoute, /WITH ranked_jobs AS/);
+  assert.match(dataJobsRoute, /instrument_status AS/);
   assert.doesNotMatch(packageJson, /react-loading-skeleton/);
 });
 
@@ -165,5 +188,8 @@ test("build output and database migration exist", async () => {
     access(new URL("drizzle/0003_calm_silvermane.sql", root)),
     access(new URL("drizzle/0004_violet_squirrel_girl.sql", root)),
     access(new URL("drizzle/0005_normal_supernaut.sql", root)),
+    access(new URL("drizzle/0006_numerous_jack_power.sql", root)),
+    access(new URL("drizzle/0007_left_phalanx.sql", root)),
+    access(new URL("drizzle/0008_adorable_smiling_tiger.sql", root)),
   ]);
 });

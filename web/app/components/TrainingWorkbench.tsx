@@ -175,6 +175,22 @@ function marketRuleCode(market: string) {
   return market === "A股" ? "CN" : market === "美股" ? "US" : market;
 }
 
+function performanceMarketCode(market: string | undefined, instrumentId: string) {
+  const fallback = /\.(SH|SZ|BJ)$/i.test(instrumentId) ? "CN" : "US";
+  const code = marketRuleCode((market ?? fallback).trim()).toUpperCase();
+  if (code === "FOREX") return "FX";
+  if (code === "METAL") return "GOLD";
+  return code;
+}
+
+function performanceMarketLabel(market: string) {
+  if (market === "CN") return "A股";
+  if (market === "US") return "美股";
+  if (market === "FX") return "外汇";
+  if (market === "GOLD") return "黄金";
+  return market;
+}
+
 function instrumentAssetLabel(item: Pick<AvailableInstrument, "market" | "assetType">) {
   if (item.assetType === "index") return "指数";
   if (item.assetType === "fund") return "基金";
@@ -427,10 +443,10 @@ type LiveWatchRecord = {
   market: LiveScanMarket;
   latestTimestamp: number;
   latestClose: number;
-  /** Price captured when the symbol was added to the observation list. */
+  /** Baseline price captured when the symbol was added (stored in the legacy observation_close field). */
   observationTimestamp?: number;
   observationClose?: number;
-  /** Simulated fill at the first trading session after the observation day. */
+  /** Legacy simulated-fill fields retained only for old database records. */
   entryTimestamp?: number;
   entryPrice?: number;
   scanTimestamp: number;
@@ -477,7 +493,7 @@ function liveWatchResult(watch: LiveWatchRecord): LiveScanResult {
   };
 }
 
-function liveWatchObservationClose(watch: LiveWatchRecord) {
+function liveWatchObservationPrice(watch: LiveWatchRecord) {
   return typeof watch.observationClose === "number"
     && Number.isFinite(watch.observationClose)
     && watch.observationClose > 0
@@ -498,15 +514,6 @@ function liveWatchObservationTimestamp(watch: LiveWatchRecord) {
     : watch.latestTimestamp;
 }
 
-function liveWatchEntry(watch: LiveWatchRecord) {
-  if (typeof watch.entryPrice !== "number" || !Number.isFinite(watch.entryPrice) || watch.entryPrice <= 0) return null;
-  const entryTimestamp = typeof watch.entryTimestamp === "number" && Number.isFinite(watch.entryTimestamp)
-    ? watch.entryTimestamp
-    : watch.latestTimestamp;
-  return entryTimestamp > liveWatchObservationTimestamp(watch)
-    ? { timestamp: entryTimestamp, price: watch.entryPrice }
-    : null;
-}
 type SnapshotTradeContext = {
   averageDailyVolume?: number;
   averageDailyTurnover?: number;
@@ -554,6 +561,7 @@ type TrainingSession = {
   stateJson: string;
   createdAt: string;
   updatedAt: string;
+  deletedAt?: string;
 };
 type RestoreRequest = {
   id: string;
@@ -561,6 +569,7 @@ type RestoreRequest = {
   timeframe: string;
   state: TrainingState;
   updatedAt?: string;
+  preview?: boolean;
 };
 type NewTaskRequest = {
   instrumentId: string;
@@ -579,10 +588,12 @@ type SettingsTab = "basic" | "training" | "data";
 type TaskSetupKind = "configured" | "random";
 type PerformanceFilters = {
   instrumentId: string;
+  market: string;
   timeframe: string;
   modeLabel: string;
   patternPresetId: string;
   status: "all" | "active" | "completed";
+  outcome: "all" | "profit" | "loss" | "flat";
   dateFrom: string;
   dateTo: string;
 };
@@ -648,8 +659,6 @@ type SyncedPreferences = {
     index: number;
     instrumentId?: string;
   };
-  livePortfolios?: LivePortfolioRecord[];
-  liveWatchlist?: LiveWatchRecord[];
 };
 
 /**
@@ -743,6 +752,19 @@ function sanitizeLivePortfolios(value: unknown): LivePortfolioRecord[] {
       ...(decision ? { decision } : {}),
       ...(decisionSubmissions.length ? { decisionSubmissions } : {}),
     }];
+  }).slice(0, 500);
+}
+
+function sanitizeLiveWatchlist(value: unknown): LiveWatchRecord[] {
+  if (!Array.isArray(value)) return [];
+  const seen = new Set<string>();
+  return value.flatMap((item) => {
+    if (!item || typeof item !== "object") return [];
+    const watch = item as LiveWatchRecord;
+    if (!watch.instrumentId || typeof watch.instrumentId !== "string" || seen.has(watch.instrumentId)) return [];
+    if (watch.market !== "CN" && watch.market !== "US") return [];
+    seen.add(watch.instrumentId);
+    return [{ ...watch, id: `watch:${watch.instrumentId}` }];
   }).slice(0, 500);
 }
 
@@ -844,10 +866,12 @@ function MovingAverageEditor({
 }
 const defaultPerformanceFilters: PerformanceFilters = {
   instrumentId: "all",
+  market: "all",
   timeframe: "all",
   modeLabel: "all",
   patternPresetId: "all",
   status: "all",
+  outcome: "all",
   dateFrom: "",
   dateTo: "",
 };
@@ -1065,6 +1089,57 @@ function profitFactorLabel(value: number | null) {
   if (value === null) return "—";
   if (!Number.isFinite(value)) return "∞";
   return value.toFixed(2);
+}
+
+type TrainingPnlStats = {
+  closedSessionPositions: PositionLot[];
+  closedTradePnls: number[];
+  closedTradeReturns: number[];
+  winningTrades: number;
+  losingTrades: number;
+  flatTrades: number;
+  pnl: NonNullable<TrainingState["pnlSnapshot"]>;
+  returnPct: number;
+  realizedReturnPct: number;
+  floatingReturnPct: number;
+};
+
+function trainingPnlStats(state: TrainingState): TrainingPnlStats {
+  const closedSessionPositions = state.positions.filter((position) => position.status === "closed");
+  const openSessionPositions = state.positions.filter((position) => position.status === "open");
+  const closedTradePnls = closedSessionPositions.map((position) => position.realizedPnl ?? 0);
+  const closedTradeReturns = closedSessionPositions.map((position) => (
+    positionReturnPct(position, position.exitPrice ?? position.entryPrice)
+  ));
+  const winningTrades = closedTradePnls.filter((value) => value > 0).length;
+  const losingTrades = closedTradePnls.filter((value) => value < 0).length;
+  const flatTrades = closedTradePnls.length - winningTrades - losingTrades;
+  const pnl = state.pnlSnapshot ?? {
+    realized: closedTradePnls.reduce((sum, value) => sum + value, 0),
+    floating: 0,
+    total: closedTradePnls.reduce((sum, value) => sum + value, 0),
+    openPositions: openSessionPositions.length,
+    closedPositions: closedSessionPositions.length,
+  };
+  const returnPct = pnl.returnPct ?? portfolioReturnPct(closedSessionPositions, 0);
+  const realizedReturnPct = portfolioReturnPct(closedSessionPositions, 0);
+  const openEntryNotional = openSessionPositions.reduce(
+    (sum, position) => sum + position.entryPrice * position.qty,
+    0,
+  );
+  const floatingReturnPct = openEntryNotional > 0 ? pnl.floating / openEntryNotional * 100 : 0;
+  return {
+    closedSessionPositions,
+    closedTradePnls,
+    closedTradeReturns,
+    winningTrades,
+    losingTrades,
+    flatTrades,
+    pnl,
+    returnPct,
+    realizedReturnPct,
+    floatingReturnPct,
+  };
 }
 
 function estimatedHoldingBars(timeframe: string, entryTimestamp: number, exitTimestamp?: number) {
@@ -1378,7 +1453,7 @@ export function TrainingWorkbench() {
   const [liveScanError, setLiveScanError] = useState("");
   const [liveScanRunning, setLiveScanRunning] = useState(false);
   const [livePriceRefreshRunning, setLivePriceRefreshRunning] = useState(false);
-  const [livePriceRefreshStatus, setLivePriceRefreshStatus] = useState("");
+  const [, setLivePriceRefreshStatus] = useState("");
   const [liveScanData, setLiveScanData] = useState<LiveScanResponse | null>(null);
   const [liveMode, setLiveMode] = useState(false);
   const [liveContext, setLiveContext] = useState<LiveScanResult | null>(null);
@@ -1392,6 +1467,7 @@ export function TrainingWorkbench() {
   const [performanceSection, setPerformanceSection] = useState<"training" | "live" | "watch">("training");
   const [taskSetupKind, setTaskSetupKind] = useState<TaskSetupKind>("configured");
   const [showRandomComplete, setShowRandomComplete] = useState(false);
+  const [trashPreview, setTrashPreview] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
   const [showPatternFilters, setShowPatternFilters] = useState(false);
   const [settingsTab, setSettingsTab] = useState<SettingsTab>("basic");
@@ -1424,6 +1500,11 @@ export function TrainingWorkbench() {
   const [selectedCoverageKeys, setSelectedCoverageKeys] = useState<string[]>([]);
   const [dataMarket, setDataMarket] = useState<DataMarket>("CN");
   const [sessions, setSessions] = useState<TrainingSession[]>([]);
+  const [trashSessions, setTrashSessions] = useState<TrainingSession[]>([]);
+  const [showTrash, setShowTrash] = useState(false);
+  const [trashLoading, setTrashLoading] = useState(false);
+  const [trashActionId, setTrashActionId] = useState("");
+  const [trashError, setTrashError] = useState("");
   const [snapshotTradeContexts, setSnapshotTradeContexts] = useState<SnapshotTradeContextMap>({});
   const [performanceFilters, setPerformanceFilters] = useState<PerformanceFilters>(defaultPerformanceFilters);
   const [reviewSessionFilters, setReviewSessionFilters] = useState<ReviewSessionFilters>(defaultReviewSessionFilters);
@@ -1433,6 +1514,10 @@ export function TrainingWorkbench() {
   const [startupReady, setStartupReady] = useState(false);
   const [settingsReady, setSettingsReady] = useState(false);
   const [syncedPreferencesReady, setSyncedPreferencesReady] = useState(false);
+  const [syncedPreferencesRetryNonce, setSyncedPreferencesRetryNonce] = useState(0);
+  const [liveStateReady, setLiveStateReady] = useState(false);
+  const [liveStateLoadNonce, setLiveStateLoadNonce] = useState(0);
+  const [liveStateSaveRetryNonce, setLiveStateSaveRetryNonce] = useState(0);
   const [instrumentCatalogReady, setInstrumentCatalogReady] = useState(false);
   const [trainingReady, setTrainingReady] = useState(false);
   const [loadNonce, setLoadNonce] = useState(0);
@@ -1451,6 +1536,14 @@ export function TrainingWorkbench() {
   const liveBarDragRef = useRef<{ pointerId: number; startX: number; startY: number; offsetX: number; offsetY: number } | null>(null);
   const startupRandomStartedRef = useRef(false);
   const syncedPreferencesLoadStartedRef = useRef(false);
+  const syncedPreferencesHydratedRef = useRef(false);
+  const syncedPreferencesRetryCountRef = useRef(0);
+  const liveStateHydratedRef = useRef(false);
+  const liveStateRetryCountRef = useRef(0);
+  const liveStatePersistedRef = useRef({
+    portfolios: [] as LivePortfolioRecord[],
+    watchlist: [] as LiveWatchRecord[],
+  });
 
   useEffect(() => {
     livePortfoliosRef.current = livePortfolios;
@@ -1597,6 +1690,7 @@ export function TrainingWorkbench() {
   }), [cashBalance, closedPositions.length, cursor, currentBar?.timestamp, dataSignature, dataSnapshotId, decision, decisionSubmissions, drawings, equity, events, executions, initialCapital, marketRules, openPnl, openPositions.length, orderQty, orderRejections, pendingOrders, positions, randomSeed, realizedPnl, snapshotHash, totalPnl, totalReturnPct, tradingMode, trainingTask]);
 
   useEffect(() => {
+    if (!liveStateHydratedRef.current) return;
     // During a live-symbol switch React may briefly render the previous
     // instrument's bar together with the new live context.  Never persist
     // that mixed state under the new symbol; the live ledger is restored only
@@ -1610,10 +1704,12 @@ export function TrainingWorkbench() {
       || hasDecisionContent(decision, decisionSubmissions);
     if (!hasLiveActivity) {
       livePersistSignatureRef.current = "";
-      setLivePortfolios((items) => items.some((item) => item.id === liveContext.instrumentId)
-        ? items.filter((item) => item.id !== liveContext.instrumentId)
-        : items);
-      return;
+      const cleanupTimer = window.setTimeout(() => {
+        setLivePortfolios((items) => items.some((item) => item.id === liveContext.instrumentId)
+          ? items.filter((item) => item.id !== liveContext.instrumentId)
+          : items);
+      }, 0);
+      return () => window.clearTimeout(cleanupTimer);
     }
     const nextRecord: LivePortfolioRecord = {
       id: liveContext.instrumentId,
@@ -1865,8 +1961,6 @@ export function TrainingWorkbench() {
           : {}),
       });
     }
-    if (Array.isArray(stored.livePortfolios)) setLivePortfolios(sanitizeLivePortfolios(stored.livePortfolios));
-    if (Array.isArray(stored.liveWatchlist)) setLiveWatchlist(stored.liveWatchlist.slice(0, 500));
   }, []);
 
   useEffect(() => {
@@ -2000,22 +2094,47 @@ export function TrainingWorkbench() {
       || syncedPreferencesLoadStartedRef.current
     ) return;
     syncedPreferencesLoadStartedRef.current = true;
+    syncedPreferencesHydratedRef.current = false;
     let cancelled = false;
+    let readyTimer: number | null = null;
+    let retryTimer: number | null = null;
     void fetch("/api/preferences", { cache: "no-store" })
       .then(async (response) => {
         if (!response.ok) throw new Error("读取同步设置失败");
         const payload = await response.json() as { preferences?: unknown };
-        if (!cancelled && payload.preferences) applySyncedPreferences(payload.preferences);
+        if (cancelled) return;
+        if (payload.preferences) applySyncedPreferences(payload.preferences);
+        syncedPreferencesRetryCountRef.current = 0;
+        syncedPreferencesHydratedRef.current = true;
+        readyTimer = window.setTimeout(() => {
+          if (!cancelled) setSyncedPreferencesReady(true);
+        }, 0);
       })
-      .catch(() => undefined)
-      .finally(() => {
-        if (!cancelled) setSyncedPreferencesReady(true);
+      .catch(() => {
+        if (cancelled) return;
+        // Initial state is empty. Never enable persistence when the read failed,
+        // otherwise an empty render can overwrite the stored preferences.
+        syncedPreferencesLoadStartedRef.current = false;
+        syncedPreferencesHydratedRef.current = false;
+        setSyncedPreferencesReady(false);
+        const retryDelay = Math.min(
+          30_000,
+          1_000 * (2 ** Math.min(syncedPreferencesRetryCountRef.current, 5)),
+        );
+        syncedPreferencesRetryCountRef.current += 1;
+        retryTimer = window.setTimeout(() => {
+          if (!cancelled) setSyncedPreferencesRetryNonce((nonce) => nonce + 1);
+        }, retryDelay);
       });
-    return () => { cancelled = true; };
-  }, [applySyncedPreferences, customReasonTagsReady, movingAverageSettingsReady, patternPresetsReady, reasonTagsReady, settingsReady]);
+    return () => {
+      cancelled = true;
+      if (readyTimer !== null) window.clearTimeout(readyTimer);
+      if (retryTimer !== null) window.clearTimeout(retryTimer);
+    };
+  }, [applySyncedPreferences, customReasonTagsReady, movingAverageSettingsReady, patternPresetsReady, reasonTagsReady, settingsReady, syncedPreferencesRetryNonce]);
 
   useEffect(() => {
-    if (!syncedPreferencesReady) return;
+    if (!syncedPreferencesReady || !syncedPreferencesHydratedRef.current) return;
     const timer = window.setTimeout(() => {
       const preferences: SyncedPreferences = {
         version: 1,
@@ -2045,11 +2164,6 @@ export function TrainingWorkbench() {
         liveScanData,
         liveNavigatorResume,
         liveScanResume,
-        // Run the same migration on every write as well as on load.  This
-        // prevents an already-open tab carrying an old duplicated ledger from
-        // writing the bad records back over the cleaned local database.
-        livePortfolios: sanitizeLivePortfolios(livePortfolios),
-        liveWatchlist,
       };
       void fetch("/api/preferences", {
         method: "PUT",
@@ -2065,8 +2179,6 @@ export function TrainingWorkbench() {
     drawingLineWidth,
     drawingMagnetMode,
     groupDrawingTools,
-    livePortfolios,
-    liveWatchlist,
     liveScanData,
     liveNavigatorResume,
     liveScanResume,
@@ -2109,6 +2221,120 @@ export function TrainingWorkbench() {
     };
   }, [applySyncedPreferences, syncedPreferencesReady]);
 
+  useEffect(() => {
+    let cancelled = false;
+    let retryTimer: number | null = null;
+    liveStateHydratedRef.current = false;
+    void fetch("/api/live-state", { cache: "no-store" })
+      .then(async (response) => {
+        if (!response.ok) throw new Error("读取实盘数据失败");
+        const payload = await response.json() as { portfolios?: unknown; watchlist?: unknown };
+        if (!Array.isArray(payload.portfolios) || !Array.isArray(payload.watchlist)) {
+          throw new Error("实盘数据响应不完整");
+        }
+        if (cancelled) return;
+        const portfolios = sanitizeLivePortfolios(payload.portfolios);
+        const watchlist = sanitizeLiveWatchlist(payload.watchlist);
+        livePortfoliosRef.current = portfolios;
+        liveWatchlistRef.current = watchlist;
+        liveStatePersistedRef.current = { portfolios, watchlist };
+        setLivePortfolios(portfolios);
+        setLiveWatchlist(watchlist);
+        liveStateRetryCountRef.current = 0;
+        liveStateHydratedRef.current = true;
+        setLiveStateReady(true);
+      })
+      .catch(() => {
+        if (cancelled) return;
+        setLiveStateReady(false);
+        const retryDelay = Math.min(
+          30_000,
+          1_000 * (2 ** Math.min(liveStateRetryCountRef.current, 5)),
+        );
+        liveStateRetryCountRef.current += 1;
+        retryTimer = window.setTimeout(() => {
+          if (!cancelled) setLiveStateLoadNonce((nonce) => nonce + 1);
+        }, retryDelay);
+      });
+    return () => {
+      cancelled = true;
+      if (retryTimer !== null) window.clearTimeout(retryTimer);
+    };
+  }, [liveStateLoadNonce]);
+
+  useEffect(() => {
+    if (!liveStateReady || !liveStateHydratedRef.current) return;
+    const previous = liveStatePersistedRef.current;
+    const currentPortfolios = livePortfolios.map((record) => ({ ...record }));
+    const currentWatchlist = liveWatchlist.map((record) => ({ ...record }));
+    const previousPortfolioMap = new Map(previous.portfolios.map((record, index) => [record.instrumentId, { record, index }]));
+    const previousWatchMap = new Map(previous.watchlist.map((record, index) => [record.instrumentId, { record, index }]));
+    const currentPortfolioIds = new Set(currentPortfolios.map((record) => record.instrumentId));
+    const currentWatchIds = new Set(currentWatchlist.map((record) => record.instrumentId));
+    const portfolioUpserts = currentPortfolios.flatMap((record, index) => {
+      const previousRecord = previousPortfolioMap.get(record.instrumentId);
+      if (previousRecord
+        && previousRecord.index === index
+        && JSON.stringify(previousRecord.record) === JSON.stringify(record)) return [];
+      return [{ ...record, sortOrder: index }];
+    });
+    const watchlistUpserts = currentWatchlist.flatMap((record, index) => {
+      const previousRecord = previousWatchMap.get(record.instrumentId);
+      if (previousRecord
+        && previousRecord.index === index
+        && JSON.stringify(previousRecord.record) === JSON.stringify(record)) return [];
+      return [{ ...record, sortOrder: index }];
+    });
+    const portfolioDeletes = previous.portfolios
+      .filter((record) => !currentPortfolioIds.has(record.instrumentId))
+      .map((record) => ({ instrumentId: record.instrumentId, updatedAt: record.updatedAt }));
+    const watchlistDeletes = previous.watchlist
+      .filter((record) => !currentWatchIds.has(record.instrumentId))
+      .map((record) => ({ instrumentId: record.instrumentId, updatedAt: record.updatedAt }));
+    if (!portfolioUpserts.length && !watchlistUpserts.length && !portfolioDeletes.length && !watchlistDeletes.length) return;
+
+    let cancelled = false;
+    let retryTimer: number | null = null;
+    const timer = window.setTimeout(() => {
+      void fetch("/api/live-state", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ portfolioUpserts, portfolioDeletes, watchlistUpserts, watchlistDeletes }),
+      })
+        .then(async (response) => {
+          if (!response.ok) throw new Error("保存实盘数据失败");
+          const result = await response.json() as { portfolioSkipped?: number; watchSkipped?: number };
+          if (cancelled) return;
+          if ((result.portfolioSkipped ?? 0) > 0 || (result.watchSkipped ?? 0) > 0) {
+            liveStateHydratedRef.current = false;
+            setLiveStateReady(false);
+            setLiveStateLoadNonce((nonce) => nonce + 1);
+            return;
+          }
+          liveStatePersistedRef.current = {
+            portfolios: currentPortfolios,
+            watchlist: currentWatchlist,
+          };
+        })
+        .catch(() => {
+          if (cancelled) return;
+          const retryDelay = Math.min(
+            30_000,
+            1_000 * (2 ** Math.min(liveStateRetryCountRef.current, 5)),
+          );
+          liveStateRetryCountRef.current += 1;
+          retryTimer = window.setTimeout(() => {
+            if (!cancelled) setLiveStateSaveRetryNonce((nonce) => nonce + 1);
+          }, retryDelay);
+        });
+    }, 350);
+    return () => {
+      cancelled = true;
+      window.clearTimeout(timer);
+      if (retryTimer !== null) window.clearTimeout(retryTimer);
+    };
+  }, [livePortfolios, liveStateReady, liveStateSaveRetryNonce, liveWatchlist]);
+
   useEffect(() => () => marketLoadRef.current.controller?.abort(), []);
 
   const appendEvent = useCallback((
@@ -2140,6 +2366,7 @@ export function TrainingWorkbench() {
     setTradingMode(appSettingsRef.current.tradingMode);
     setInitialCapital(appSettingsRef.current.initialCapital);
     setCashBalance(appSettingsRef.current.initialCapital);
+    setTrashPreview(Boolean(request.preview));
     eventSequenceRef.current = 0;
     setEvents([]);
     restoreRequestRef.current = request;
@@ -2211,6 +2438,7 @@ export function TrainingWorkbench() {
       setMarketRules(loadedMarketRules);
       setRuleNotice("");
       if (liveRequest) {
+        setTrashPreview(false);
         const savedPortfolio = livePortfoliosRef.current.find((portfolio) => portfolio.instrumentId === liveRequest.instrumentId);
         const liveCursor = data.candles.length - 1;
         setLiveMode(true);
@@ -2245,6 +2473,8 @@ export function TrainingWorkbench() {
         setEvents([]);
         setSaveState("Live observation · not saved as training");
       } else if (restoreRequest) {
+        const isTrashPreview = Boolean(restoreRequest.preview);
+        setTrashPreview(isTrashPreview);
         setLiveMode(false);
         setLiveContext(null);
         const timestampCursor = restoreRequest.state.cursorTimestamp == null
@@ -2273,20 +2503,23 @@ export function TrainingWorkbench() {
         setRandomSeed(restoreRequest.state.randomSeed);
         const restoredTask = restoreRequest.state.trainingTask
           ?? createLegacyTrainingTask(data.candles, Math.max(0, Math.min(data.candles.length - 1, restoredCursor)));
-        setTrainingTask(finishTask(restoredTask, restoredCursor));
+        setTrainingTask(isTrashPreview ? restoredTask : finishTask(restoredTask, restoredCursor));
         const lastSequence = restoreRequest.state.events.reduce((maximum, event) => Math.max(maximum, event.sequence), 0);
         eventSequenceRef.current = lastSequence + 1;
-        setEvents([
-          ...restoreRequest.state.events,
-          createTrainingEvent(lastSequence + 1, "session_restored", data.candles[restoredCursor]?.timestamp, {
-            snapshotId: data.snapshot.id,
-            snapshotHash: data.snapshot.contentHash,
-            marketRuleId: loadedMarketRules.id,
-            marketRuleVersion: loadedMarketRules.version,
-          }),
-        ]);
-        setSaveState("已恢复保存点");
+        setEvents(isTrashPreview
+          ? restoreRequest.state.events
+          : [
+            ...restoreRequest.state.events,
+            createTrainingEvent(lastSequence + 1, "session_restored", data.candles[restoredCursor]?.timestamp, {
+              snapshotId: data.snapshot.id,
+              snapshotHash: data.snapshot.contentHash,
+              marketRuleId: loadedMarketRules.id,
+              marketRuleVersion: loadedMarketRules.version,
+            }),
+          ]);
+        setSaveState(isTrashPreview ? "回收站查看 · 未恢复" : "已恢复保存点");
       } else {
+        setTrashPreview(false);
         setLiveMode(false);
         setLiveContext(null);
         const nextSessionId = createUuid();
@@ -2392,11 +2625,11 @@ export function TrainingWorkbench() {
   }, [dataSnapshotId, instrumentId, sessionId, timeframe]);
 
   useEffect(() => {
-    if (!trainingReady || !trainingComplete || !saveCompletedTrainingRef.current) return;
+    if (trashPreview || !trainingReady || !trainingComplete || !saveCompletedTrainingRef.current) return;
     saveCompletedTrainingRef.current = false;
     setSaveState("训练完成 · 正在保存…");
     void persistTrainingState(trainingState, "训练完成 · 已保存");
-  }, [persistTrainingState, trainingComplete, trainingReady, trainingState]);
+  }, [persistTrainingState, trainingComplete, trainingReady, trainingState, trashPreview]);
 
   const executeOrders = useCallback((orders: PendingOrder[], bar: KLineData) => {
     const nextPositions = [...positions];
@@ -2865,6 +3098,7 @@ export function TrainingWorkbench() {
     setTradingMode(appSettingsRef.current.tradingMode);
     setInitialCapital(appSettingsRef.current.initialCapital);
     setCashBalance(appSettingsRef.current.initialCapital);
+    setTrashPreview(false);
     eventSequenceRef.current = 0;
     setEvents([]);
     restoreRequestRef.current = null;
@@ -2905,20 +3139,66 @@ export function TrainingWorkbench() {
       headers: { "content-type": "application/json" },
       body: JSON.stringify({
         market: "US",
+        mode: "update",
         ...(instrumentIds?.length ? { instrumentIds } : {}),
       }),
     });
     const payload = await response.json() as {
-      updatedCount?: number;
-      insertedCount?: number;
-      pendingCount?: number;
-      failedCount?: number;
-      missingHistoryCount?: number;
-      firstError?: string;
+      run?: {
+        id: string;
+        status: string;
+        completedSymbols: number;
+        totalSymbols: number;
+        completedBatches: number;
+        totalBatches: number;
+        insertedCount: number;
+        failedSymbols: number;
+        skippedSymbols: number;
+      };
       error?: string;
     };
-    if (!response.ok) throw new Error(payload.error ?? "美股最新日线批量同步失败");
-    setLiveScanStatus(`美股最新日线批量同步完成：处理 ${Number(payload.pendingCount ?? 0).toLocaleString()} 个品种，写入 ${Number(payload.insertedCount ?? 0).toLocaleString()} 根${payload.failedCount ? `，${Number(payload.failedCount).toLocaleString()} 个品种未更新` : ""}${payload.missingHistoryCount ? `；${Number(payload.missingHistoryCount).toLocaleString()} 个尚未建立历史库` : ""}${payload.firstError ? `（${payload.firstError}）` : ""}`);
+    if (!response.ok || !payload.run) throw new Error(payload.error ?? "美股最新日线批量同步失败");
+    const runId = payload.run.id;
+    let workerFailures = 0;
+    for (let attempt = 0; attempt < 2_000; attempt += 1) {
+      let worker: Response | null = null;
+      let next: {
+        run?: typeof payload.run;
+        error?: string;
+      } | null = null;
+      try {
+        worker = await fetch("/api/data-jobs/market/sync/worker", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ runId }),
+        });
+        next = await worker.json();
+      } catch (error) {
+        workerFailures += 1;
+        if (workerFailures >= 5) throw error;
+        await new Promise((resolve) => window.setTimeout(resolve, 1_500));
+        continue;
+      }
+      if (!worker || !worker.ok || !next?.run) {
+        workerFailures += 1;
+        if (workerFailures >= 5) throw new Error(next?.error ?? "美股最新日线批次执行失败");
+        await new Promise((resolve) => window.setTimeout(resolve, 1_500));
+        continue;
+      }
+      workerFailures = 0;
+      const failed = next.run.failedSymbols
+        ? "，失败 " + next.run.failedSymbols.toLocaleString() + " 个"
+        : "";
+      setLiveScanStatus(
+        "美股最新日线同步：" +
+        next.run.completedSymbols.toLocaleString() + " / " +
+        next.run.totalSymbols.toLocaleString() + " 个品种，写入 " +
+        next.run.insertedCount.toLocaleString() + " 根" + failed,
+      );
+      if (["completed", "completed_with_errors", "cancelled", "paused"].includes(next.run.status)) return;
+      await new Promise((resolve) => window.setTimeout(resolve, 250));
+    }
+    throw new Error("美股最新日线同步等待超时，请到数据页查看任务状态");
   };
 
   const refreshLivePortfolioPrices = async () => {
@@ -2932,13 +3212,8 @@ export function TrainingWorkbench() {
     setLivePriceRefreshRunning(true);
     setLivePriceRefreshStatus("正在读取最新价…");
     try {
-      const pricesById = new Map<string, { timestamp: number; open: number; close: number; entryTimestamp?: number; entryOpen?: number }>();
+      const pricesById = new Map<string, { timestamp: number; open: number; close: number }>();
       const errors: string[] = [];
-      const entryAfter = Object.fromEntries(
-        watchlist
-          .filter((watch) => !liveWatchEntry(watch))
-          .map((watch) => [watch.instrumentId, liveWatchObservationTimestamp(watch)]),
-      );
       const usInstrumentIds = [...new Set(
         tracked.filter((item) => item.market === "US").map((item) => item.instrumentId),
       )];
@@ -2961,7 +3236,6 @@ export function TrainingWorkbench() {
               action: "refresh",
               market,
               instrumentIds,
-              ...(Object.keys(entryAfter).length ? { entryAfter } : {}),
             }),
           });
           if (!response.ok) {
@@ -2971,16 +3245,13 @@ export function TrainingWorkbench() {
               : `${market === "CN" ? "A 股" : "美股"}最新价同步失败`);
             continue;
           }
-          const payload = await response.json() as { prices?: Array<{ instrumentId: string; timestamp: number; open: number; close: number; entryTimestamp?: number; entryOpen?: number }> };
+          const payload = await response.json() as { prices?: Array<{ instrumentId: string; timestamp: number; open: number; close: number }> };
           for (const price of payload.prices ?? []) {
             if (Number.isFinite(price.timestamp) && Number.isFinite(price.open) && Number.isFinite(price.close)) {
               pricesById.set(price.instrumentId, {
                 timestamp: Number(price.timestamp),
                 open: Number(price.open),
                 close: Number(price.close),
-                ...(Number.isFinite(price.entryTimestamp) && Number.isFinite(price.entryOpen)
-                  ? { entryTimestamp: Number(price.entryTimestamp), entryOpen: Number(price.entryOpen) }
-                  : {}),
               });
             }
           }
@@ -3085,25 +3356,15 @@ export function TrainingWorkbench() {
       livePortfoliosRef.current = nextPortfolios;
       setLivePortfolios(nextPortfolios);
       const nextWatchlist = watchlist.map((watch) => {
-        // Reconcile legacy records with their original signal day.  The
-        // simulated fill is always looked up after that day, never after the
-        // latest cached quote.
-        const observationClose = liveWatchObservationClose(watch);
+        // Keep the observation baseline fixed at the original observation day.
+        // Watchlist performance is not a simulated next-session trade.
+        const observationClose = liveWatchObservationPrice(watch);
         const observationTimestamp = liveWatchObservationTimestamp(watch);
         const price = pricesById.get(watch.instrumentId);
-        const existingEntry = liveWatchEntry(watch);
-        const fetchedEntry = price
-          && Number.isFinite(price.entryTimestamp)
-          && Number.isFinite(price.entryOpen)
-          && Number(price.entryTimestamp) > observationTimestamp
-          ? { timestamp: Number(price.entryTimestamp), price: Number(price.entryOpen) }
-          : null;
-        const entry = existingEntry ?? fetchedEntry;
         const migratedWatch = {
           ...watch,
           observationTimestamp,
           observationClose,
-          ...(entry ? { entryTimestamp: entry.timestamp, entryPrice: entry.price } : {}),
         };
         return price
           ? (syncedInstrumentIds.add(watch.instrumentId), { ...migratedWatch, latestTimestamp: price.timestamp, latestClose: price.close, updatedAt: new Date().toISOString() })
@@ -3204,7 +3465,7 @@ export function TrainingWorkbench() {
       setDrawings([]);
       setDrawingUndoStack([]);
       setDrawingRedoStack([]);
-      setClearNonce(Date.now());
+      setClearNonce((nonce) => nonce + 1);
       setTradingMode(appSettingsRef.current.tradingMode);
       setInitialCapital(appSettingsRef.current.initialCapital);
       setCashBalance(appSettingsRef.current.initialCapital);
@@ -3263,6 +3524,9 @@ export function TrainingWorkbench() {
   const liveWatchExists = Boolean(liveContext && liveWatchlist.some((item) => item.instrumentId === liveContext.instrumentId));
   const addLiveWatch = () => {
     if (!liveMode || !liveContext || !currentBar) return;
+    const observationPrice = Number.isFinite(currentBar.open) && currentBar.open > 0
+      ? currentBar.open
+      : currentBar.close;
     const nextRecord: LiveWatchRecord = {
       id: `watch:${liveContext.instrumentId}`,
       instrumentId: liveContext.instrumentId,
@@ -3272,7 +3536,7 @@ export function TrainingWorkbench() {
       latestTimestamp: currentBar.timestamp,
       latestClose: currentBar.close,
       observationTimestamp: currentBar.timestamp,
-      observationClose: currentBar.close,
+      observationClose: observationPrice,
       scanTimestamp: liveContext.timestamp,
       presetIds: liveContext.presetIds,
       presetNames: liveContext.presetNames,
@@ -3373,6 +3637,10 @@ export function TrainingWorkbench() {
   };
 
   const saveSession = async () => {
+    if (trashPreview) {
+      setSaveState("回收站查看模式不会保存训练");
+      return;
+    }
     if (liveMode) {
       const hasContent = hasDecisionContent(decision, decisionSubmissions);
       if (liveContext && currentBar && hasContent) {
@@ -3419,22 +3687,36 @@ export function TrainingWorkbench() {
     }, "已手动保存");
   };
 
-  const resumeSession = (session: TrainingSession) => {
+  const resumeSession = (session: TrainingSession, preview = false) => {
     try {
       const state = parseTrainingState(JSON.parse(session.stateJson));
       if (!state) throw new Error("invalid session");
       setReviewedSession(null);
-      queueRestore({ ...session, state });
+      queueRestore({ ...session, state, preview });
     } catch {
-      setImportStatus("这条训练记录不完整，暂时无法恢复。");
+      setImportStatus(preview ? "这条训练记录不完整，无法查看训练。" : "这条训练记录不完整，暂时无法恢复。");
     }
   };
 
+  const resumeCurrentTraining = () => {
+    setShowRandomComplete(false);
+    const now = new Date().toISOString();
+    resumeSession({
+      id: sessionId,
+      instrumentId,
+      timeframe,
+      dataSnapshotId: dataSnapshotId || undefined,
+      stateJson: JSON.stringify(trainingState),
+      createdAt: now,
+      updatedAt: now,
+    });
+  };
+
   const deleteSession = async (session: TrainingSession) => {
-    if (!window.confirm(`确定删除 ${session.instrumentId} · ${session.timeframe} 的这次训练吗？此操作不可撤销。`)) return;
+    if (!window.confirm(`确定将 ${session.instrumentId} · ${session.timeframe} 的这次训练移入回收站吗？`)) return;
     const response = await fetch(`/api/sessions?id=${encodeURIComponent(session.id)}`, { method: "DELETE" });
     if (!response.ok) {
-      setImportStatus("训练记录删除失败。");
+      setImportStatus("训练记录移入回收站失败。");
       return;
     }
     setSessions((items) => items.filter((item) => item.id !== session.id));
@@ -3450,7 +3732,7 @@ export function TrainingWorkbench() {
     }
     if (session.id === sessionId) {
       resetTraining();
-      setSaveState("原训练已删除，已开始一场新的空白训练");
+      setSaveState("原训练已移入回收站，已开始一场新的空白训练");
     }
   };
 
@@ -3952,37 +4234,86 @@ export function TrainingWorkbench() {
     }
   }, []);
 
+  const loadTrashSessions = useCallback(async () => {
+    setTrashLoading(true);
+    setTrashError("");
+    try {
+      const response = await fetch("/api/sessions?trash=1&all=1", { cache: "no-store" });
+      const data = await response.json() as { sessions?: TrainingSession[]; error?: string };
+      if (!response.ok) throw new Error(data.error ?? "读取回收站失败");
+      setTrashSessions(data.sessions ?? []);
+    } catch (error) {
+      setTrashError(error instanceof Error ? error.message : "读取回收站失败");
+    } finally {
+      setTrashLoading(false);
+    }
+  }, []);
+
+  const inspectTrashedSession = (session: TrainingSession) => {
+    setShowTrash(false);
+    setShowSettings(false);
+    resumeSession(session, true);
+  };
+
+  const restoreTrashedSession = async (session: TrainingSession) => {
+    if (trashActionId) return;
+    if (!window.confirm(`恢复 ${session.instrumentId} · ${session.timeframe} 这次训练吗？`)) return;
+    setTrashActionId(session.id);
+    setTrashError("");
+    try {
+      const response = await fetch(`/api/sessions?id=${encodeURIComponent(session.id)}`, {
+        method: "PATCH",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ action: "restore" }),
+      });
+      const data = await response.json() as { error?: string };
+      if (!response.ok) throw new Error(data.error ?? "恢复训练失败");
+      setTrashSessions((items) => items.filter((item) => item.id !== session.id));
+      void loadSessions(true);
+      setShowTrash(false);
+      setShowSettings(false);
+      resumeSession(session);
+    } catch (error) {
+      setTrashError(error instanceof Error ? error.message : "恢复训练失败");
+    } finally {
+      setTrashActionId("");
+    }
+  };
+
+  const permanentlyDeleteTrashedSession = async (session: TrainingSession) => {
+    if (trashActionId) return;
+    if (!window.confirm(`确定彻底删除 ${session.instrumentId} · ${session.timeframe} 吗？删除后无法恢复。`)) return;
+    setTrashActionId(session.id);
+    setTrashError("");
+    try {
+      const response = await fetch(`/api/sessions?id=${encodeURIComponent(session.id)}&permanent=1`, { method: "DELETE" });
+      const data = await response.json() as { error?: string };
+      if (!response.ok) throw new Error(data.error ?? "彻底删除失败");
+      setTrashSessions((items) => items.filter((item) => item.id !== session.id));
+    } catch (error) {
+      setTrashError(error instanceof Error ? error.message : "彻底删除失败");
+    } finally {
+      setTrashActionId("");
+    }
+  };
+
   const sessionSummaries = useMemo(() => sessions.flatMap((session) => {
     try {
       const state = parseTrainingState(JSON.parse(session.stateJson));
       if (!state) return [];
       const task = state.trainingTask;
-      const closedSessionPositions = state.positions.filter((position) => position.status === "closed");
-      const openSessionPositions = state.positions.filter((position) => position.status === "open");
-      const closedTradePnls = closedSessionPositions.map((position) => position.realizedPnl ?? 0);
-      const closedTradeReturns = closedSessionPositions.map((position) => (
-        positionReturnPct(position, position.exitPrice ?? position.entryPrice)
-      ));
-      const winningTrades = closedTradePnls.filter((value) => value > 0).length;
-      const losingTrades = closedTradePnls.filter((value) => value < 0).length;
-      const flatTrades = closedTradePnls.length - winningTrades - losingTrades;
-      const pnl = state.pnlSnapshot ?? {
-        realized: closedTradePnls.reduce((sum, value) => sum + value, 0),
-        floating: 0,
-        total: closedTradePnls.reduce((sum, value) => sum + value, 0),
-        openPositions: openSessionPositions.length,
-        closedPositions: closedSessionPositions.length,
-      };
-      const returnPct = pnl.returnPct ?? portfolioReturnPct(
+      const {
         closedSessionPositions,
-        0,
-      );
-      const realizedReturnPct = portfolioReturnPct(closedSessionPositions, 0);
-      const openEntryNotional = openSessionPositions.reduce(
-        (sum, position) => sum + position.entryPrice * position.qty,
-        0,
-      );
-      const floatingReturnPct = openEntryNotional > 0 ? pnl.floating / openEntryNotional * 100 : 0;
+        closedTradePnls,
+        closedTradeReturns,
+        winningTrades,
+        losingTrades,
+        flatTrades,
+        pnl,
+        returnPct,
+        realizedReturnPct,
+        floatingReturnPct,
+      } = trainingPnlStats(state);
       const progressSummary = task
         ? taskProgress(task, state.cursor)
         : { revealed: 0, total: 0, percent: 0 };
@@ -4110,6 +4441,25 @@ export function TrainingWorkbench() {
     [performanceSessionSummaries],
   );
 
+  const performanceMarketByInstrument = useMemo(
+    () => new Map(availableInstruments.map((item) => [
+      item.id,
+      performanceMarketCode(item.market, item.id),
+    ])),
+    [availableInstruments],
+  );
+
+  const performanceMarketOptions = useMemo(() => {
+    const markets = new Set<string>();
+    performanceSessionSummaries.forEach((summary) => {
+      markets.add(
+        performanceMarketByInstrument.get(summary.session.instrumentId)
+          ?? performanceMarketCode(undefined, summary.session.instrumentId),
+      );
+    });
+    return [...markets].sort((left, right) => performanceMarketLabel(left).localeCompare(performanceMarketLabel(right), "zh-CN"));
+  }, [performanceMarketByInstrument, performanceSessionSummaries]);
+
   const performancePatternOptions = useMemo(() => {
     const labels = new Map<string, string>();
     performanceSessionSummaries.forEach((summary) => {
@@ -4128,8 +4478,16 @@ export function TrainingWorkbench() {
       : Number.POSITIVE_INFINITY;
     return performanceSessionSummaries.filter((summary) => {
       const updatedAt = Date.parse(summary.session.updatedAt);
+      const market = performanceMarketByInstrument.get(summary.session.instrumentId)
+        ?? performanceMarketCode(undefined, summary.session.instrumentId);
+      const totalResult = summary.state.tradingMode === "capital" ? summary.pnl.total : summary.returnPct;
+      const outcomeMatches = performanceFilters.outcome === "all"
+        || (performanceFilters.outcome === "profit" && totalResult > 0.000001)
+        || (performanceFilters.outcome === "loss" && totalResult < -0.000001)
+        || (performanceFilters.outcome === "flat" && Math.abs(totalResult) <= 0.000001);
       return (
         (performanceFilters.instrumentId === "all" || summary.session.instrumentId === performanceFilters.instrumentId)
+        && (performanceFilters.market === "all" || market === performanceFilters.market)
         && (performanceFilters.timeframe === "all" || summary.session.timeframe === performanceFilters.timeframe)
         && (performanceFilters.modeLabel === "all" || summary.modeLabel === performanceFilters.modeLabel)
         && (
@@ -4142,11 +4500,12 @@ export function TrainingWorkbench() {
           performanceFilters.status === "all"
           || (performanceFilters.status === "completed" ? summary.task?.status === "completed" : summary.task?.status !== "completed")
         )
+        && outcomeMatches
         && updatedAt >= dateFrom
         && updatedAt <= dateTo
       );
     });
-  }, [performanceFilters, performanceSessionSummaries]);
+  }, [performanceFilters, performanceMarketByInstrument, performanceSessionSummaries]);
 
   const performanceRecord = useCallback((summary: typeof sessionSummaries[number]): PerformanceRecord => {
     const capitalMode = summary.state.tradingMode === "capital";
@@ -4230,16 +4589,15 @@ export function TrainingWorkbench() {
   }, [livePerformanceRows]);
 
   const liveWatchPerformanceRows = useMemo(() => liveWatchlist.map((watch) => {
-    const observationClose = liveWatchObservationClose(watch);
-    const entry = liveWatchEntry(watch);
-    const change = entry ? watch.latestClose - entry.price : null;
-    const returnPct = entry ? (watch.latestClose - entry.price) / entry.price * 100 : null;
+    const observationPrice = liveWatchObservationPrice(watch);
+    const change = Number.isFinite(watch.latestClose) && observationPrice > 0
+      ? watch.latestClose - observationPrice
+      : null;
+    const returnPct = change === null ? null : change / observationPrice * 100;
     return {
       watch,
-      observationClose,
+      observationPrice,
       observationTimestamp: liveWatchObservationTimestamp(watch),
-      entryTimestamp: entry?.timestamp ?? null,
-      entryPrice: entry?.price ?? null,
       change,
       returnPct,
     };
@@ -4253,10 +4611,10 @@ export function TrainingWorkbench() {
     const total = pricedRows.length
       ? pricedRows.reduce((sum, row) => sum + (row.returnPct ?? 0), 0) / pricedRows.length
       : null;
-    const totalEntryValue = pricedRows.reduce((sum, row) => sum + (row.entryPrice ?? 0), 0);
+    const totalObservationValue = pricedRows.reduce((sum, row) => sum + row.observationPrice, 0);
     const totalLatestValue = pricedRows.reduce((sum, row) => sum + row.watch.latestClose, 0);
-    const totalReturn = totalEntryValue > 0
-      ? (totalLatestValue - totalEntryValue) / totalEntryValue * 100
+    const totalReturn = totalObservationValue > 0
+      ? (totalLatestValue - totalObservationValue) / totalObservationValue * 100
       : null;
     return {
       instruments: liveWatchPerformanceRows.length,
@@ -4373,6 +4731,12 @@ export function TrainingWorkbench() {
     setSettingsTab(tab);
     setSettingsError("");
     setShowSettings(true);
+  };
+
+  const openTrash = () => {
+    setTrashError("");
+    setShowTrash(true);
+    void loadTrashSessions();
   };
 
   const saveSettings = () => {
@@ -5011,6 +5375,7 @@ export function TrainingWorkbench() {
             )}
             <span className="rule-pill">{trainingTask ? trainingModeLabels[trainingTask.mode] : "自由训练"}</span>
             <span className="rule-pill">{tradingMode === "capital" ? "资金账户" : "收益率"}</span>
+            {trashPreview && <span className="rule-pill read-only">回收站查看 · 未恢复</span>}
             {!marketRules.tradingEnabled && <span className="rule-pill read-only">只看盘</span>}
             {trainingTask?.patternFilter && (
               <span className="rule-pill" title={`命中：${trainingTask.patternFilter.matchedPresetIds.join("、")}`}>
@@ -5057,7 +5422,7 @@ export function TrainingWorkbench() {
             }}><Activity size={16} />实盘筛选</button>
             <button className="ghost-button" onClick={openRandomTraining}><Shuffle size={16} />随机训练</button>
             <button className="ghost-button" onClick={openTaskSetup}><Play size={16} />新建 Replay 训练</button>
-            <button className="primary-button" onClick={saveSession}><Save size={16} />保存训练</button>
+            <button className="primary-button" disabled={trashPreview} onClick={saveSession}><Save size={16} />保存训练</button>
           </div>
           <div className="mobile-quick-actions" aria-label="训练快捷操作">
             <button type="button" aria-label="实盘筛选" title="实盘筛选" onClick={() => {
@@ -5072,7 +5437,7 @@ export function TrainingWorkbench() {
               onClick={() => void startQuickRandomTraining()}
             >{startingTraining ? <Activity size={15} /> : <Shuffle size={15} />}</button>
             <button type="button" aria-label="新建 Replay 训练" title="新建 Replay 训练" onClick={openTaskSetup}><Play size={15} /></button>
-            <button type="button" className="save" aria-label="保存训练" title="保存训练" onClick={saveSession}><Save size={15} /></button>
+            <button type="button" className="save" disabled={trashPreview} aria-label="保存训练" title="保存训练" onClick={saveSession}><Save size={15} /></button>
           </div>
           <button
             className="mobile-toolbar-toggle"
@@ -5180,28 +5545,17 @@ export function TrainingWorkbench() {
                     )}
                     <small>切换只影响之后新建的训练；已开始和已保存训练会继续使用创建时锁定的账户模式。</small>
                   </div>
-                  <div className="task-form-row">
-                    <label>默认品种
-                      <InstrumentPicker
-                        value={settingsDraft.defaultInstrumentId}
-                        instruments={availableInstruments}
-                        ariaLabel="默认品种"
-                        onChange={(defaultInstrumentId) => setSettingsDraft((draft) => ({ ...draft, defaultInstrumentId }))}
-                      />
-                    </label>
-                    <label>默认周期
-                      <select value={settingsDraft.defaultTimeframe} onChange={(event) => setSettingsDraft((draft) => ({ ...draft, defaultTimeframe: event.target.value }))}>
-                        {timeframes.map((item) => <option key={item}>{item}</option>)}
-                      </select>
-                    </label>
-                    <label>默认下单数量
-                      <input type="number" min="1" value={settingsDraft.defaultOrderQty} onChange={(event) => setSettingsDraft((draft) => ({ ...draft, defaultOrderQty: Math.max(1, Number(event.target.value)) }))} />
-                    </label>
-                    <label>默认播放速度
-                      <select value={settingsDraft.defaultSpeed} onChange={(event) => setSettingsDraft((draft) => ({ ...draft, defaultSpeed: Number(event.target.value) }))}>
-                        {[0.5, 1, 2, 5].map((item) => <option key={item} value={item}>{item}x</option>)}
-                      </select>
-                    </label>
+                  <div className="settings-rule trash-settings-rule">
+                    <div className="settings-row-action">
+                      <div>
+                        <span>训练回收站</span>
+                        <strong>已删除训练</strong>
+                        <small>删除的训练会暂存在这里，可以恢复；彻底删除后将无法找回。</small>
+                      </div>
+                      <button className="ghost-button trash-entry-button" onClick={openTrash} type="button">
+                        <Trash2 size={15} />打开回收站
+                      </button>
+                    </div>
                   </div>
                 </div>
               ) : settingsTab === "training" ? (
@@ -5327,6 +5681,102 @@ export function TrainingWorkbench() {
               <div className="task-modal-actions">
                 <button className="ghost-button" onClick={() => setShowSettings(false)}>{settingsTab === "data" ? "关闭" : "取消"}</button>
                 {settingsTab !== "data" && <button className="primary-button" onClick={saveSettings}><Save size={16} />保存设置</button>}
+              </div>
+            </section>
+          </div>
+        )}
+
+        {showTrash && (
+          <div className="task-modal-backdrop" role="presentation" onMouseDown={(event) => {
+            if (event.target === event.currentTarget) setShowTrash(false);
+          }}>
+            <section className="task-modal trash-modal" role="dialog" aria-modal="true" aria-labelledby="trash-modal-title">
+              <div className="task-modal-head">
+                <div>
+                  <span>RECYCLE BIN</span>
+                  <h2 id="trash-modal-title">训练回收站</h2>
+                  <p>删除的训练记录会保留在这里，可直接查看训练；恢复后可继续训练。</p>
+                </div>
+                <button aria-label="关闭回收站" onClick={() => setShowTrash(false)}><X size={19} /></button>
+              </div>
+
+              {trashLoading ? (
+                <div className="empty-state">正在读取回收站…</div>
+              ) : trashSessions.length ? (
+                <div className="trash-session-list">
+                  {trashSessions.map((session) => {
+                    let state: TrainingState | null = null;
+                    try {
+                      state = parseTrainingState(JSON.parse(session.stateJson));
+                    } catch {
+                      state = null;
+                    }
+                    const task = state?.trainingTask;
+                    const stats = state ? trainingPnlStats(state) : null;
+                    const progressSummary = state && task ? taskProgress(task, state.cursor) : null;
+                    const modeLabel = task
+                      ? task.randomRun ? task.mode === "blind" ? "随机盲测" : "随机训练" : trainingModeLabels[task.mode]
+                      : "旧版自由训练";
+                    const totalResult = stats && state?.tradingMode === "capital" ? stats.pnl.total : stats?.returnPct ?? 0;
+                    const realizedResult = stats && state?.tradingMode === "capital" ? stats.pnl.realized : stats?.realizedReturnPct ?? 0;
+                    const floatingResult = stats && state?.tradingMode === "capital" ? stats.pnl.floating : stats?.floatingReturnPct ?? 0;
+                    return (
+                      <div className="trash-session-row" key={session.id}>
+                        <div className="trash-session-main">
+                          <div className="session-title">
+                            <strong>{session.instrumentId} · {session.timeframe}</strong>
+                            <span className={task?.status === "completed" ? "session-status completed" : "session-status"}>
+                              {task?.status === "completed" ? "已完成" : "可继续"}
+                            </span>
+                          </div>
+                          <span>{modeLabel}{progressSummary ? ` · 进度 ${progressSummary.revealed}/${progressSummary.total}` : ""}</span>
+                          {stats && state && (
+                            <div className="trash-session-metrics">
+                              <span className={totalResult >= 0 ? "up" : "down"}>
+                                <small>{state.tradingMode === "capital" ? "总盈亏" : "总收益率"}</small>
+                                <strong>{state.tradingMode === "capital" ? money(totalResult) : percent(totalResult)}</strong>
+                              </span>
+                              <span className={realizedResult >= 0 ? "up" : "down"}>
+                                <small>{state.tradingMode === "capital" ? "已实现" : "已实现收益率"}</small>
+                                <strong>{state.tradingMode === "capital" ? money(realizedResult) : percent(realizedResult)}</strong>
+                              </span>
+                              <span className={floatingResult >= 0 ? "up" : "down"}>
+                                <small>{state.tradingMode === "capital" ? "浮动" : "浮动收益率"}</small>
+                                <strong>{state.tradingMode === "capital" ? money(floatingResult) : percent(floatingResult)}</strong>
+                              </span>
+                              <span>
+                                <small>平仓笔数</small>
+                                <strong>{stats.closedSessionPositions.length}</strong>
+                              </span>
+                              <span>
+                                <small>胜 / 负 / 平</small>
+                                <strong>{stats.winningTrades} / {stats.losingTrades} / {stats.flatTrades}</strong>
+                              </span>
+                            </div>
+                          )}
+                          <small>移入时间 {new Date(session.deletedAt ?? session.updatedAt).toLocaleString("zh-CN")}</small>
+                        </div>
+                        <div className="trash-session-actions">
+                          <button className="review-session" disabled={Boolean(trashActionId)} onClick={() => inspectTrashedSession(session)}>
+                            <BookOpenCheck size={14} />查看训练
+                          </button>
+                          <button className="resume-session" disabled={Boolean(trashActionId)} onClick={() => void restoreTrashedSession(session)}>
+                            <RotateCcw size={14} />恢复训练
+                          </button>
+                          <button className="delete-session" disabled={Boolean(trashActionId)} onClick={() => void permanentlyDeleteTrashedSession(session)}>
+                            <Trash2 size={14} />彻底删除
+                          </button>
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              ) : (
+                <div className="empty-state">回收站还是空的。训练列表中的删除操作会把记录移到这里。</div>
+              )}
+              {trashError && <div className="task-error">{trashError}</div>}
+              <div className="task-modal-actions">
+                <button className="ghost-button" onClick={() => setShowTrash(false)}>关闭</button>
               </div>
             </section>
           </div>
@@ -5712,17 +6162,14 @@ export function TrainingWorkbench() {
               <button className="random-complete-close" aria-label="退出随机训练" onClick={() => setShowRandomComplete(false)}><X size={20} /></button>
               <span>RANDOM ROUND COMPLETE</span>
               <h2 id="random-complete-title">本局随机训练已结束</h2>
-              <p>{trainingTask.mode === "blind" ? "盲测答案现在已经解锁。" : "已到达本局设定的 K 线边界。"} 所有持仓已按最后一根收盘价自动平仓并保存，可以继续抽取下一局或查看复盘。</p>
+              <p>{trainingTask.mode === "blind" ? "盲测答案现在已经解锁。" : "已到达本局设定的 K 线边界。"} 所有持仓已按最后一根收盘价自动平仓并保存，可以继续训练或抽取下一局。</p>
               <div className="random-complete-stats">
                 <div><span>{tradingMode === "capital" ? "账户总盈亏" : "总收益率"}</span><strong className={totalPnl >= 0 ? "up" : "down"}>{tradingMode === "capital" ? money(totalPnl) : percent(totalReturnPct)}</strong></div>
                 <div><span>{tradingMode === "capital" ? "账户权益" : "已实现收益率"}</span><strong>{tradingMode === "capital" ? money(equity) : percent(realizedReturnPct)}</strong></div>
                 <div><span>本局进度</span><strong>{currentTaskProgress.revealed}/{currentTaskProgress.total}</strong></div>
               </div>
               <div className="random-complete-actions">
-                <button className="ghost-button" onClick={() => {
-                  setShowRandomComplete(false);
-                  setView("review");
-                }}><BookOpenCheck size={16} />查看复盘</button>
+                <button className="resume-session" onClick={resumeCurrentTraining}><RotateCcw size={16} />继续训练</button>
                 <button className="primary-button" onClick={continueRandomTraining}><Shuffle size={16} />继续随机</button>
               </div>
             </section>
@@ -6428,31 +6875,31 @@ export function TrainingWorkbench() {
               <section className="live-performance-panel">
                 <div className="performance-section-head">
                   <div><span className="section-label">LIVE WATCH</span><h2>实盘观望</h2></div>
-                  <small>观望记录不会进入实盘交易表现或训练表现；当天记录，下一交易日开盘模拟买入</small>
+                  <small>观望记录不会进入实盘交易表现或训练表现；以加入观望当日开盘价为基准，持续计算到最新价</small>
                 </div>
                 <div className="performance-overview live-performance-overview live-watch-performance-overview">
-                  <div className="performance-hero"><span>观望收益率</span><strong className={liveWatchPerformanceSummary.total === null || liveWatchPerformanceSummary.total >= 0 ? "up" : "down"}>{liveWatchPerformanceSummary.total === null ? "--" : percent(liveWatchPerformanceSummary.total)}</strong><small>{liveWatchPerformanceSummary.instruments} 个品种，{liveWatchPerformanceSummary.winning} 个上涨，{liveWatchPerformanceSummary.losing} 个下跌，{liveWatchPerformanceSummary.flats} 个持平，{liveWatchPerformanceSummary.pending} 个待次日开盘</small></div>
-                  <div className="performance-metric"><span>观望品种</span><strong>{liveWatchPerformanceSummary.instruments}</strong><small>按加入观望时价格记录</small></div>
+                  <div className="performance-hero"><span>观望收益率</span><strong className={liveWatchPerformanceSummary.total === null || liveWatchPerformanceSummary.total >= 0 ? "up" : "down"}>{liveWatchPerformanceSummary.total === null ? "--" : percent(liveWatchPerformanceSummary.total)}</strong><small>{liveWatchPerformanceSummary.instruments} 个品种，{liveWatchPerformanceSummary.winning} 个上涨，{liveWatchPerformanceSummary.losing} 个下跌，{liveWatchPerformanceSummary.flats} 个持平，{liveWatchPerformanceSummary.pending} 个待计算</small></div>
+                  <div className="performance-metric"><span>观望品种</span><strong>{liveWatchPerformanceSummary.instruments}</strong><small>按加入观望当日开盘价记录</small></div>
                   <div className="performance-metric"><span>价格胜率</span><strong>{liveWatchPerformanceSummary.winRate === null ? "--" : `${liveWatchPerformanceSummary.winRate}%`}</strong><small>{liveWatchPerformanceSummary.winning} 上涨 / {liveWatchPerformanceSummary.losing} 下跌 / {liveWatchPerformanceSummary.flats} 持平</small></div>
-                  <div className="performance-metric"><span>浮动收益率</span><strong className={liveWatchPerformanceSummary.floating === null || liveWatchPerformanceSummary.floating >= 0 ? "up" : "down"}>{liveWatchPerformanceSummary.floating === null ? "--" : percent(liveWatchPerformanceSummary.floating)}</strong><small>按次日开盘买入价重算，等权平均</small></div>
-                  <div className="performance-metric"><span>总收益率</span><strong className={liveWatchPerformanceSummary.totalReturn === null || liveWatchPerformanceSummary.totalReturn >= 0 ? "up" : "down"}>{liveWatchPerformanceSummary.totalReturn === null ? "--" : percent(liveWatchPerformanceSummary.totalReturn)}</strong><small>当前总价 ÷ 模拟买入总价 − 1，按已完成模拟计算</small></div>
+                  <div className="performance-metric"><span>浮动收益率</span><strong className={liveWatchPerformanceSummary.floating === null || liveWatchPerformanceSummary.floating >= 0 ? "up" : "down"}>{liveWatchPerformanceSummary.floating === null ? "--" : percent(liveWatchPerformanceSummary.floating)}</strong><small>按观望当日开盘价计算，等权平均</small></div>
+                  <div className="performance-metric"><span>总收益率</span><strong className={liveWatchPerformanceSummary.totalReturn === null || liveWatchPerformanceSummary.totalReturn >= 0 ? "up" : "down"}>{liveWatchPerformanceSummary.totalReturn === null ? "--" : percent(liveWatchPerformanceSummary.totalReturn)}</strong><small>当前总价 ÷ 观望日开盘总价 − 1</small></div>
                   <div className="performance-metric"><span>已实现收益</span><strong>--</strong><small>观望不产生买卖成交</small></div>
-                  <div className="performance-metric"><span>数据同步</span><strong>{liveWatchPerformanceSummary.instruments ? "已同步" : "--"}</strong><small>{liveWatchPerformanceSummary.priced}/{liveWatchPerformanceSummary.instruments} 个已完成次日开盘模拟</small></div>
+                  <div className="performance-metric"><span>数据同步</span><strong>{liveWatchPerformanceSummary.instruments ? "已同步" : "--"}</strong><small>{liveWatchPerformanceSummary.priced}/{liveWatchPerformanceSummary.instruments} 个已完成观望收益计算</small></div>
                 </div>
                 <div className="performance-sessions live-performance-sessions">
                   <div className="performance-section-head"><div><span className="section-label">WATCHLIST</span><h2>观望列表</h2></div><button type="button" className="ghost-button" disabled={livePriceRefreshRunning || !liveWatchlist.length} onClick={() => void refreshLivePortfolioPrices()}><RotateCcw size={13} />同步最新价</button></div>
                   {liveWatchlist.length ? (
                     <div className="live-performance-list">
                       {liveWatchPerformanceRows.map((row) => {
-                        const { watch, observationTimestamp, entryTimestamp, entryPrice, change, returnPct } = row;
+                        const { watch, observationTimestamp, observationPrice, change, returnPct } = row;
                         const result = liveWatchResult(watch);
                         const index = liveWatchlist.findIndex((item) => item.instrumentId === watch.instrumentId);
                         return (
                           <div className="live-performance-row live-watch-row" key={watch.id}>
                             <span className="live-performance-instrument"><strong>{watch.symbol}</strong><small>{watch.name}</small></span>
                             <span><strong>{watch.market === "CN" ? "A股" : "美股"}</strong><small>{new Date(watch.latestTimestamp).toLocaleDateString("zh-CN")}</small></span>
-                            <span><strong>{watch.latestClose.toFixed(4)}</strong><small>最新价 · {entryPrice === null ? `观望日 ${new Date(observationTimestamp).toLocaleDateString("zh-CN")} · 买入价待定` : `模拟买入价 ${entryPrice.toFixed(4)} · ${new Date(entryTimestamp ?? 0).toLocaleDateString("zh-CN")}`}</small></span>
-                            <span className="live-performance-result"><strong className={returnPct === null || returnPct >= 0 ? "up" : "down"}>{returnPct === null ? "待次日开盘" : percent(returnPct)}</strong><small>{change === null ? `观望日 ${new Date(observationTimestamp).toLocaleDateString("zh-CN")} · 等待下一交易日开盘` : `买入价 ${entryPrice?.toFixed(4)} · 价格变动 ${priceDelta(change)} · ${watch.presetNames.length ? watch.presetNames.join(" · ") : "未设置形态"}`}</small></span>
+                            <span><strong>{watch.latestClose.toFixed(4)}</strong><small>最新价 · 观望日开盘基准 {observationPrice.toFixed(4)} · {new Date(observationTimestamp).toLocaleDateString("zh-CN")}</small></span>
+                            <span className="live-performance-result"><strong className={returnPct === null || returnPct >= 0 ? "up" : "down"}>{returnPct === null ? "--" : percent(returnPct)}</strong><small>{change === null ? "观望基准价不可用" : `开盘基准 ${observationPrice.toFixed(4)} · 价格变动 ${priceDelta(change)} · ${watch.presetNames.length ? watch.presetNames.join(" · ") : "未设置形态"}`}</small></span>
                             <span className="live-watch-row-actions"><button type="button" className="ghost-button" onClick={() => openLiveScanResult(result, index >= 0 ? index : undefined, "watch")}><BarChart3 size={14} />打开</button><button type="button" className="row-action danger" onClick={() => removeLiveWatch(watch.instrumentId)}>移除</button></span>
                           </div>
                         );
@@ -6481,6 +6928,12 @@ export function TrainingWorkbench() {
                     {[...new Set(performanceSessionSummaries.map((summary) => summary.session.instrumentId))].map((value) => <option key={value} value={value}>{value}</option>)}
                   </select>
                 </label>
+                <label>市场
+                  <select value={performanceFilters.market} onChange={(event) => setPerformanceFilters((filters) => ({ ...filters, market: event.target.value }))}>
+                    <option value="all">全部市场</option>
+                    {performanceMarketOptions.map((value) => <option key={value} value={value}>{performanceMarketLabel(value)}</option>)}
+                  </select>
+                </label>
                 <label>周期
                   <select value={performanceFilters.timeframe} onChange={(event) => setPerformanceFilters((filters) => ({ ...filters, timeframe: event.target.value }))}>
                     <option value="all">全部周期</option>
@@ -6505,6 +6958,14 @@ export function TrainingWorkbench() {
                     <option value="all">全部状态</option>
                     <option value="completed">已完成</option>
                     <option value="active">可继续</option>
+                  </select>
+                </label>
+                <label>盈亏
+                  <select value={performanceFilters.outcome} onChange={(event) => setPerformanceFilters((filters) => ({ ...filters, outcome: event.target.value as PerformanceFilters["outcome"] }))}>
+                    <option value="all">全部盈亏</option>
+                    <option value="profit">盈利</option>
+                    <option value="loss">亏损</option>
+                    <option value="flat">持平</option>
                   </select>
                 </label>
                 <label>保存日期从
@@ -6934,8 +7395,8 @@ export function TrainingWorkbench() {
                       <button className="resume-session" onClick={() => resumeSession(summary.session)}>
                         <RotateCcw size={13} />继续训练
                       </button>
-                      <button className="delete-session" aria-label={`删除 ${summary.session.instrumentId} 训练`} onClick={() => deleteSession(summary.session)}>
-                        <Trash2 size={13} />删除
+                      <button className="delete-session" aria-label={`将 ${summary.session.instrumentId} 训练移入回收站`} onClick={() => deleteSession(summary.session)}>
+                        <Trash2 size={13} />移入回收站
                       </button>
                     </div>
                   </div>

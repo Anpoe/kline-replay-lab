@@ -41,10 +41,15 @@ type DownloadJob = {
   timeframe: string;
   startDate: string;
   endDate: string;
-  status: "queued" | "running" | "paused" | "completed" | "failed";
+  status: "queued" | "running" | "paused" | "completed" | "failed" | "no_data" | "superseded" | "cancelled";
   insertedCount: number;
   qualityReportJson: string;
   lastError?: string;
+  syncRunId?: string | null;
+  syncBatchId?: string | null;
+  feed?: "sip" | "iex" | null;
+  attemptCount?: number;
+  terminalReason?: string | null;
   updatedAt: string;
 };
 type DownloadJobSummary = {
@@ -59,6 +64,37 @@ type DownloadJobSummary = {
 type JobRunResult = {
   status: DownloadJob["status"];
   insertedCount: number;
+};
+type MarketSyncStatus = {
+  run: {
+    id: string;
+    mode: "initialize" | "update";
+    status: "queued" | "running" | "paused" | "completed" | "completed_with_errors" | "failed" | "cancelled";
+    feed: "sip" | "iex";
+    totalSymbols: number;
+    completedSymbols: number;
+    failedSymbols: number;
+    totalBatches: number;
+    completedBatches: number;
+    insertedCount: number;
+    skippedSymbols: number;
+    lastError?: string | null;
+    updatedAt: string;
+  };
+  currentBatch?: {
+    batchNo: number;
+    symbolCount: number;
+    startDate: string;
+    endDate: string;
+    sessionCount: number;
+    estimatedPoints: number;
+    attemptCount: number;
+    insertedCount: number;
+    lastError?: string | null;
+  } | null;
+  pendingBatches: number;
+  runningBatches: number;
+  failedBatches: number;
 };
 type LocalDataTask = {
   id: string;
@@ -129,10 +165,6 @@ type AdvancedSetup = {
 };
 
 const onboardingKey = "kline-training:data-onboarding";
-const usDownloadConcurrency = 8;
-const usRequestSpacingMs = 400;
-const usProgressRefreshSize = 20;
-
 const defaultAdvancedSetup: AdvancedSetup = {
   cnMarket: true,
   usMarket: false,
@@ -170,6 +202,9 @@ function statusLabel(status: DownloadJob["status"]) {
     paused: "已暂停",
     completed: "已完成",
     failed: "失败",
+    no_data: "无数据",
+    superseded: "已被替换",
+    cancelled: "已取消",
   }[status];
 }
 
@@ -213,7 +248,8 @@ export function DataSourceManager({
     insertedCount: 0,
   });
   const [notice, setNotice] = useState("");
-  const [bulkQueueRunning, setBulkQueueRunning] = useState(false);
+  const [marketSync, setMarketSync] = useState<MarketSyncStatus | null>(null);
+  const [marketSyncBusy, setMarketSyncBusy] = useState(false);
   const [setupView, setSetupView] = useState<SetupView>("welcome");
   const [advancedStep, setAdvancedStep] = useState(1);
   const [advanced, setAdvanced] = useState<AdvancedSetup>(defaultAdvancedSetup);
@@ -224,8 +260,7 @@ export function DataSourceManager({
   const [maintenanceBusy, setMaintenanceBusy] = useState(false);
   const [localServiceAvailable, setLocalServiceAvailable] = useState(true);
   const aliveRef = useRef(true);
-  const bulkStopRef = useRef(false);
-  const bulkRequestGateRef = useRef<Promise<void>>(Promise.resolve());
+  const marketSyncLoopRef = useRef<string | null>(null);
   const localServiceAvailableRef = useRef(true);
 
   const loadProviders = useCallback(async () => {
@@ -252,6 +287,33 @@ export function DataSourceManager({
       failed: Number(data.summary?.failed ?? 0),
       insertedCount: Number(data.summary?.insertedCount ?? 0),
     });
+  }, [market]);
+
+  const loadMarketSync = useCallback(async (runId?: string) => {
+    if (market !== "US") return null;
+    const query = runId ? "?runId=" + encodeURIComponent(runId) : "";
+    const response = await fetch("/api/data-jobs/market/sync" + query, { cache: "no-store" });
+    if (!response.ok) return null;
+    const data = await response.json() as {
+      run?: MarketSyncStatus["run"] | null;
+      currentBatch?: MarketSyncStatus["currentBatch"];
+      pendingBatches?: number;
+      runningBatches?: number;
+      failedBatches?: number;
+    };
+    if (!data.run) {
+      setMarketSync(null);
+      return null;
+    }
+    const next: MarketSyncStatus = {
+      run: data.run,
+      currentBatch: data.currentBatch ?? null,
+      pendingBatches: Number(data.pendingBatches ?? 0),
+      runningBatches: Number(data.runningBatches ?? 0),
+      failedBatches: Number(data.failedBatches ?? 0),
+    };
+    setMarketSync(next);
+    return next;
   }, [market]);
 
   const loadLocalTask = useCallback(async () => {
@@ -316,6 +378,7 @@ export function DataSourceManager({
       void Promise.all([
         loadProviders(),
         loadJobs(),
+        loadMarketSync(),
         loadLocalTask(),
         loadCatalogTask(),
         loadCnMaintenanceTask(),
@@ -325,7 +388,7 @@ export function DataSourceManager({
       window.clearTimeout(timer);
       aliveRef.current = false;
     };
-  }, [loadCatalogTask, loadCnMaintenanceTask, loadJobs, loadLocalTask, loadProviders]);
+  }, [loadCatalogTask, loadCnMaintenanceTask, loadJobs, loadLocalTask, loadMarketSync, loadProviders]);
 
   useEffect(() => {
     if (!localTask || !["queued", "running"].includes(localTask.status)) return;
@@ -372,10 +435,6 @@ export function DataSourceManager({
     return () => window.removeEventListener("provider-settings-updated", reload);
   }, [loadProviders]);
 
-  useEffect(() => {
-    if (market !== "US" && bulkQueueRunning) bulkStopRef.current = true;
-  }, [bulkQueueRunning, market]);
-
   const configured = useMemo(
     () => Object.fromEntries(providers.map((provider) => [provider.id, provider.configured])) as Partial<Record<ProviderId, boolean>>,
     [providers],
@@ -384,12 +443,16 @@ export function DataSourceManager({
     () => jobs.filter((job) => job.market === market),
     [jobs, market],
   );
-  const usStarted = market === "US" && jobSummary.total > 0;
-  const usPending = market === "US"
-    ? jobSummary.queued + jobSummary.running + jobSummary.paused
-    : 0;
-  const usRemaining = usPending + (market === "US" ? jobSummary.failed : 0);
-  const usInitialized = usStarted && usRemaining === 0;
+  const usStarted = market === "US" && (jobSummary.total > 0 || Boolean(marketSync));
+  const usPending = market === "US" && marketSync
+    ? Math.max(0, marketSync.run.totalSymbols - marketSync.run.completedSymbols - marketSync.run.failedSymbols)
+    : market === "US"
+      ? jobSummary.queued + jobSummary.running + jobSummary.paused
+      : 0;
+  const usRemaining = usPending + (market === "US" && !marketSync ? jobSummary.failed : 0);
+  const usInitialized = market === "US"
+    && ((marketSync?.run.status === "completed" && marketSync.run.failedSymbols === 0)
+      || (!marketSync && usStarted && usRemaining === 0));
 
   const saveSetupPlan = (plan: Record<string, unknown>, message: string) => {
     window.localStorage.setItem(onboardingKey, JSON.stringify(plan));
@@ -504,23 +567,10 @@ export function DataSourceManager({
     }
   };
 
-  const runJob = async (id: string, bulk = false): Promise<JobRunResult> => {
-    if (!bulk) setNotice("正在分批下载并校验 K 线，可以随时暂停。");
+  const runJob = async (id: string): Promise<JobRunResult> => {
+    setNotice("正在分批下载并校验 K 线，可以随时暂停。");
     try {
       while (aliveRef.current) {
-        if (bulk) {
-          // Reserve request slots synchronously so all workers share one limiter.
-          // 400 ms spacing caps the client at 150 requests/minute, below Alpaca
-          // Basic's documented 200 historical requests/minute limit.
-          const previousSlot = bulkRequestGateRef.current;
-          let releaseSlot = () => {};
-          bulkRequestGateRef.current = new Promise<void>((resolve) => {
-            releaseSlot = resolve;
-          });
-          await previousSlot;
-          await new Promise((resolve) => window.setTimeout(resolve, usRequestSpacingMs));
-          releaseSlot();
-        }
         const response = await fetch("/api/data-jobs/run", {
           method: "POST",
           headers: { "content-type": "application/json" },
@@ -532,16 +582,14 @@ export function DataSourceManager({
           insertedCount?: number;
           error?: string;
         };
-        if (!bulk) await loadJobs();
+        await loadJobs();
         if (!response.ok) throw new Error(result.error ?? "下载失败");
         if (result.complete || result.status === "paused" || result.status === "completed") {
           const finalStatus = result.status ?? (result.complete ? "completed" : "queued");
-          if (!bulk) {
-            setNotice(finalStatus === "paused"
-              ? "任务已暂停，下载游标和已导入数据均已保存。"
-              : `下载完成，累计处理 ${Number(result.insertedCount ?? 0).toLocaleString()} 根 K 线。`);
-            onDataChanged?.();
-          }
+          setNotice(finalStatus === "paused"
+            ? "任务已暂停，下载游标和已导入数据均已保存。"
+            : `下载完成，累计处理 ${Number(result.insertedCount ?? 0).toLocaleString()} 根 K 线。`);
+          onDataChanged?.();
           return {
             status: finalStatus,
             insertedCount: Number(result.insertedCount ?? 0),
@@ -550,10 +598,8 @@ export function DataSourceManager({
         await new Promise((resolve) => window.setTimeout(resolve, 180));
       }
     } catch (error) {
-      if (!bulk) {
-        setNotice(error instanceof Error ? error.message : "下载失败");
-        await loadJobs();
-      }
+      setNotice(error instanceof Error ? error.message : "下载失败");
+      await loadJobs();
       return { status: "failed", insertedCount: 0 };
     }
     return { status: "paused", insertedCount: 0 };
@@ -585,45 +631,88 @@ export function DataSourceManager({
     });
   };
 
-  const runMarketJobs = async (jobIds: string[]) => {
-    if (!jobIds.length) {
-      setNotice("当前市场已经是最新状态，没有需要执行的任务。");
-      return;
-    }
-    bulkStopRef.current = false;
-    bulkRequestGateRef.current = Promise.resolve();
-    setBulkQueueRunning(true);
-    let processed = 0;
-    let failed = 0;
-    let nextIndex = 0;
-    setNotice(`正在高速批量更新美股：0 / ${jobIds.length.toLocaleString()}。8 路动态并发，保留安全限速。`);
-    const worker = async () => {
-      while (aliveRef.current && !bulkStopRef.current) {
-        const currentIndex = nextIndex;
-        nextIndex += 1;
-        if (currentIndex >= jobIds.length) return;
-        const result = await runJob(jobIds[currentIndex], true);
-        processed += 1;
-        if (result.status === "failed") failed += 1;
-        if (processed % usDownloadConcurrency === 0 || processed === jobIds.length) {
-          setNotice(`正在高速批量更新美股：${processed.toLocaleString()} / ${jobIds.length.toLocaleString()}。8 路动态并发，保留安全限速。`);
+  const runMarketSync = useCallback(async (runId: string) => {
+    if (marketSyncLoopRef.current === runId) return;
+    marketSyncLoopRef.current = runId;
+    setMarketSyncBusy(true);
+    let networkFailures = 0;
+    try {
+      while (aliveRef.current) {
+        let response: Response | null = null;
+        let data: {
+          run?: MarketSyncStatus["run"];
+          currentBatch?: MarketSyncStatus["currentBatch"];
+          pendingBatches?: number;
+          runningBatches?: number;
+          failedBatches?: number;
+          error?: string;
+        } | null = null;
+        try {
+          response = await fetch("/api/data-jobs/market/sync/worker", {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({ runId }),
+          });
+          data = await response.json();
+        } catch (error) {
+          networkFailures += 1;
+          setNotice(error instanceof Error ? error.message : "美股批次执行网络失败，正在等待后重试");
+          if (networkFailures >= 5) break;
+          await new Promise((resolve) => window.setTimeout(resolve, 1500));
+          continue;
         }
-        if (processed % usProgressRefreshSize === 0 || processed === jobIds.length) {
+        if (!response || !response.ok || !data?.run) {
+          networkFailures += 1;
+          setNotice(data?.error ?? "美股批次执行失败，正在等待后重试");
+          if (networkFailures >= 5) break;
+          await new Promise((resolve) => window.setTimeout(resolve, 1500));
+          continue;
+        }
+        networkFailures = 0;
+        const next: MarketSyncStatus = {
+          run: data.run,
+          currentBatch: data.currentBatch ?? null,
+          pendingBatches: Number(data.pendingBatches ?? 0),
+          runningBatches: Number(data.runningBatches ?? 0),
+          failedBatches: Number(data.failedBatches ?? 0),
+        };
+        setMarketSync(next);
+        try {
           await loadJobs();
+        } catch {
+          // A status update must continue even if the auxiliary job list is offline.
         }
+        const title = next.run.mode === "initialize" ? "美股历史初始化" : "美股最新日线更新";
+        const failed = next.run.failedSymbols
+          ? "，失败 " + next.run.failedSymbols.toLocaleString() + " 个"
+          : "";
+        setNotice(title + "：" +
+          next.run.completedSymbols.toLocaleString() + " / " +
+          next.run.totalSymbols.toLocaleString() + " 个品种，完成 " +
+          next.run.completedBatches.toLocaleString() + " / " +
+          next.run.totalBatches.toLocaleString() + " 批，写入 " +
+          next.run.insertedCount.toLocaleString() + " 根 K 线" + failed);
+        if (["completed", "completed_with_errors", "cancelled", "paused"].includes(next.run.status)) {
+          onDataChanged?.();
+          break;
+        }
+        await new Promise((resolve) => window.setTimeout(resolve, 250));
       }
-    };
-    await Promise.all(Array.from(
-      { length: Math.min(usDownloadConcurrency, jobIds.length) },
-      () => worker(),
-    ));
-    setBulkQueueRunning(false);
-    await loadJobs();
-    onDataChanged?.();
-    setNotice(bulkStopRef.current
-      ? "批量更新已暂停；未执行的任务仍保存在本机，下次可继续。"
-      : `本轮市场更新完成，共处理 ${processed.toLocaleString()} 个品种${failed ? `，其中 ${failed.toLocaleString()} 个待重试` : ""}。`);
-  };
+    } finally {
+      marketSyncLoopRef.current = null;
+      setMarketSyncBusy(false);
+      try {
+        await loadMarketSync(runId);
+      } catch {
+        // Keep the persisted run resumable even when the final refresh is offline.
+      }
+      try {
+        await loadJobs();
+      } catch {
+        // The next status poll can refresh the job list after a transient failure.
+      }
+    }
+  }, [loadJobs, loadMarketSync, onDataChanged]);
 
   const syncUsMarket = async (mode: "initialize" | "update") => {
     if (!configured.alpaca) {
@@ -632,55 +721,84 @@ export function DataSourceManager({
     }
     const message = mode === "initialize"
       ? "初始化会读取 Alpaca 的活跃可交易美股目录，并从 2016 年开始批量下载 SIP/IEX 日线。任务可能较多，可以随时暂停，确定继续吗？"
-      : "只同步最新已收盘日线：每次请求约 100 个品种，完成后再进行筛选。不会删除旧训练快照，确定继续吗？";
+      : "只同步最新已收盘日线：服务端会根据缺失交易日和 URL 长度自动计算批量。不会删除旧训练快照，确定继续吗？";
     if (!window.confirm(message)) return;
-    if (mode === "update") {
-      setNotice("正在批量同步美股最新日线：服务端按 100 个品种一批，并自动处理限流重试……");
-      const response = await fetch("/api/data-jobs/market/sync", {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ market: "US" }),
-      });
-      const result = await response.json() as {
-        updatedCount?: number;
-        insertedCount?: number;
-        pendingCount?: number;
-        missingHistoryCount?: number;
-        failedCount?: number;
-        firstError?: string;
-        error?: string;
-      };
-      if (!response.ok) {
-        setNotice(result.error ?? "美股最新日线批量同步失败");
-        return;
-      }
-      await loadJobs();
-      onDataChanged?.();
-      setNotice(`美股最新日线同步完成：检查 ${Number(result.pendingCount ?? 0).toLocaleString()} 个品种，更新 ${Number(result.updatedCount ?? 0).toLocaleString()} 个，写入 ${Number(result.insertedCount ?? 0).toLocaleString()} 根${result.failedCount ? `，${Number(result.failedCount).toLocaleString()} 个品种未更新` : ""}${result.missingHistoryCount ? `；${Number(result.missingHistoryCount).toLocaleString()} 个品种尚未建立历史库` : ""}${result.firstError ? `（${result.firstError}）` : ""}`);
-      return;
-    }
-    setNotice(mode === "initialize" ? "正在读取美股品种目录并建立批量任务……" : "正在建立美股市场增量任务……");
-    const response = await fetch("/api/data-jobs/market", {
+    try {
+    setMarketSyncBusy(true);
+    setNotice(mode === "initialize"
+      ? "正在创建可恢复的美股历史初始化任务……"
+      : "正在创建可恢复的美股最新日线任务……");
+    const response = await fetch("/api/data-jobs/market/sync", {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ market: "US", mode }),
     });
     const result = await response.json() as {
-      jobIds?: string[];
-      catalogCount?: number;
-      createdJobs?: number;
+      run?: MarketSyncStatus["run"];
+      currentBatch?: MarketSyncStatus["currentBatch"];
+      pendingBatches?: number;
+      runningBatches?: number;
+      failedBatches?: number;
       error?: string;
     };
-    if (!response.ok || !result.jobIds) {
-      setNotice(result.error ?? "美股市场任务创建失败");
+    if (!response.ok || !result.run) {
+      setMarketSyncBusy(false);
+      setNotice(result.error ?? "美股同步任务创建失败");
       return;
     }
-    await loadJobs();
-    setNotice(`已建立 ${Number(result.createdJobs ?? 0).toLocaleString()} 条任务，开始 8 路动态并发执行。`);
-    void runMarketJobs(result.jobIds);
+    const created: MarketSyncStatus = {
+      run: result.run,
+      currentBatch: result.currentBatch ?? null,
+      pendingBatches: Number(result.pendingBatches ?? 0),
+      runningBatches: Number(result.runningBatches ?? 0),
+      failedBatches: Number(result.failedBatches ?? 0),
+    };
+    setMarketSync(created);
+    try {
+      await loadJobs();
+    } catch {
+      // The worker can start even when the auxiliary list refresh is offline.
+    }
+    void runMarketSync(created.run.id);
+    return;
+    } catch (error) {
+      setMarketSyncBusy(false);
+      setNotice(error instanceof Error ? error.message : "美股同步任务创建失败");
+    }
+
   };
 
+  const controlUsMarketSync = async (action: "pause" | "resume" | "cancel" | "retry") => {
+    const runId = marketSync?.run.id;
+    if (!runId) return;
+    setMarketSyncBusy(true);
+    try {
+      const response = await fetch("/api/data-jobs/market/sync", {
+        method: "PATCH",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ runId, action }),
+      });
+      const result = await response.json() as { run?: MarketSyncStatus["run"]; error?: string };
+      if (!response.ok || !result.run) throw new Error(result.error ?? "美股同步任务操作失败");
+      await loadMarketSync(runId);
+      if (action === "resume" || action === "retry") void runMarketSync(runId);
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : "美股同步任务操作失败");
+      setMarketSyncBusy(false);
+    }
+  };
+
+  useEffect(() => {
+    const run = market === "US" ? marketSync?.run : null;
+    if (!run || !["queued", "running"].includes(run.status)) return;
+    if (marketSyncLoopRef.current !== run.id) void runMarketSync(run.id);
+  }, [market, marketSync?.run, runMarketSync]);
+
   const updateJob = async (job: DownloadJob, action: "pause" | "resume" | "retry") => {
+    if (job.syncRunId) {
+      setNotice("美股批量任务请使用市场同步面板操作");
+      return;
+    }
     await fetch("/api/data-jobs", {
       method: "PATCH",
       headers: { "content-type": "application/json" },
@@ -691,6 +809,10 @@ export function DataSourceManager({
   };
 
   const deleteJob = async (job: DownloadJob) => {
+    if (job.syncRunId) {
+      setNotice("美股批量任务不支持单独删除");
+      return;
+    }
     if (!window.confirm("只删除这条下载任务记录？已经导入的 K 线会保留。")) return;
     await fetch(`/api/data-jobs?id=${encodeURIComponent(job.id)}`, { method: "DELETE" });
     await loadJobs();
@@ -1168,22 +1290,30 @@ export function DataSourceManager({
               : usStarted ? `初始化未完成：还剩 ${usRemaining.toLocaleString()} 个品种` : "美股市场库尚未初始化"}</strong>
             <small>{usInitialized
               ? "点击更新后，系统会检查已初始化的全部美股并从最后日期继续，不需要输入代码。"
-              : usStarted
-                ? `已完成 ${jobSummary.completed.toLocaleString()} / ${jobSummary.total.toLocaleString()} 个任务；继续时优先处理未完成任务，不会重下已有 K 线。`
-              : "首次初始化会自动读取活跃可交易美股目录，并建立从 2016 年至今的日线任务。8 路动态并发并保留安全限速，可随时暂停。"}</small>
+              : marketSync
+                ? `当前批量任务：${marketSync.run.completedSymbols.toLocaleString()} / ${marketSync.run.totalSymbols.toLocaleString()} 个品种，${marketSync.run.completedBatches.toLocaleString()} / ${marketSync.run.totalBatches.toLocaleString()} 批，数据源 ${marketSync.run.feed.toUpperCase()}。`
+                : usStarted
+                  ? `已完成 ${jobSummary.completed.toLocaleString()} / ${jobSummary.total.toLocaleString()} 个任务；继续时优先处理未完成任务，不会重下已有 K 线。`
+                  : "首次初始化会自动读取活跃可交易美股目录，并建立从 2016 年至今的可恢复批量任务；服务端按交易日数量和 URL 长度自动计算批次。"}</small>
           </div>
           <div className="market-maintenance-actions">
             {!configured.alpaca && <button onClick={onOpenSettings}><Settings2 size={14} />配置 Alpaca</button>}
-            {configured.alpaca && !bulkQueueRunning && (
+            {configured.alpaca && !marketSyncBusy && !["queued", "running", "paused"].includes(marketSync?.run.status ?? "") && (
               <button className="primary" onClick={() => void syncUsMarket(usStarted ? "update" : "initialize")}>
                 <CloudDownload size={14} />{usInitialized
                   ? "拉取最新美股数据"
                   : usStarted ? "继续初始化美股" : "初始化美股市场库"}
               </button>
             )}
-            {bulkQueueRunning && <button className="danger" onClick={() => {
-              bulkStopRef.current = true;
-            }}><Pause size={14} />暂停批量更新</button>}
+            {marketSync?.run.status === "running" && <button className="danger" disabled={marketSyncBusy} onClick={() => void controlUsMarketSync("pause")}>
+              <Pause size={14} />暂停同步
+            </button>}
+            {marketSync?.run.status === "paused" && <button className="primary" disabled={marketSyncBusy} onClick={() => void controlUsMarketSync("resume")}>
+              <Play size={14} />继续同步
+            </button>}
+            {marketSync?.run.status === "completed_with_errors" && <button className="primary" disabled={marketSyncBusy} onClick={() => void controlUsMarketSync("retry")}>
+              <RefreshCw size={14} />重试失败批次
+            </button>}
           </div>
         </div>
       )}

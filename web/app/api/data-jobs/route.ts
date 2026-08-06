@@ -25,19 +25,29 @@ export async function GET(request: Request) {
       end_date AS endDate, adjustment_type AS adjustmentType, status,
       cursor_json AS cursorJson, inserted_count AS insertedCount,
       quality_report_json AS qualityReportJson, last_error AS lastError,
+      sync_run_id AS syncRunId, sync_batch_id AS syncBatchId, sync_mode AS syncMode,
+      attempt_count AS attemptCount, feed, terminal_reason AS terminalReason,
       created_at AS createdAt, updated_at AS updatedAt
       FROM data_download_jobs ${market ? "WHERE market = ?" : ""}
       ORDER BY updated_at DESC LIMIT 100`);
   const rows = market ? await statement.bind(market).all() : await statement.all();
-  const summaryStatement = db.prepare(`WITH instrument_status AS (
+  const summaryStatement = db.prepare(`WITH ranked_jobs AS (
+      SELECT instrument_id, status, inserted_count,
+        ROW_NUMBER() OVER (
+          PARTITION BY instrument_id
+          ORDER BY updated_at DESC, created_at DESC, id DESC
+        ) AS row_number
+      FROM data_download_jobs ${market ? "WHERE market = ?" : ""}
+    ), instrument_status AS (
       SELECT instrument_id,
-        MAX(CASE WHEN status = 'completed' THEN 1 ELSE 0 END) AS has_completed,
+        MAX(CASE WHEN status IN ('completed', 'no_data') THEN 1 ELSE 0 END) AS has_completed,
         MAX(CASE WHEN status = 'queued' THEN 1 ELSE 0 END) AS has_queued,
         MAX(CASE WHEN status = 'running' THEN 1 ELSE 0 END) AS has_running,
         MAX(CASE WHEN status = 'paused' THEN 1 ELSE 0 END) AS has_paused,
-        MAX(CASE WHEN status = 'failed' THEN 1 ELSE 0 END) AS has_failed,
-        SUM(inserted_count) AS inserted_count
-      FROM data_download_jobs ${market ? "WHERE market = ?" : ""}
+        MAX(CASE WHEN status IN ('failed', 'cancelled', 'superseded') THEN 1 ELSE 0 END) AS has_failed,
+        MAX(inserted_count) AS inserted_count
+      FROM ranked_jobs
+      WHERE row_number = 1
       GROUP BY instrument_id
     )
     SELECT COUNT(*) AS total,
@@ -112,6 +122,12 @@ export async function PATCH(request: Request) {
   if (!payload.id || !payload.action) {
     return Response.json({ error: "缺少任务 ID 或操作" }, { status: 400 });
   }
+  const managedJob = await getRawDb()
+    .prepare("SELECT sync_run_id AS syncRunId FROM data_download_jobs WHERE id = ?")
+    .bind(payload.id)
+    .first<{ syncRunId: string | null }>();
+  if (!managedJob) return Response.json({ error: "下载任务不存在" }, { status: 404 });
+  if (managedJob.syncRunId) return Response.json({ error: "美股批量任务请在市场同步面板中操作" }, { status: 409 });
   const status = payload.action === "pause" ? "paused" : "queued";
   const resetError = payload.action === "retry";
   const result = await getRawDb()
@@ -127,6 +143,11 @@ export async function DELETE(request: Request) {
   await ensureSchema();
   const id = new URL(request.url).searchParams.get("id");
   if (!id) return Response.json({ error: "缺少下载任务 ID" }, { status: 400 });
+  const managedJob = await getRawDb()
+    .prepare("SELECT sync_run_id AS syncRunId FROM data_download_jobs WHERE id = ?")
+    .bind(id)
+    .first<{ syncRunId: string | null }>();
+  if (managedJob?.syncRunId) return Response.json({ error: "美股批量任务不支持单独删除" }, { status: 409 });
   await getRawDb().prepare("DELETE FROM data_download_jobs WHERE id = ?").bind(id).run();
   return Response.json({ id, deleted: true });
 }

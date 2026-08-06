@@ -140,7 +140,11 @@ function retryDelayMs(response: Response | null, attempt: number) {
   const header = response?.headers.get("retry-after");
   const seconds = Number(header);
   if (Number.isFinite(seconds) && seconds > 0) return Math.min(30_000, Math.max(250, seconds * 1000));
-  return Math.min(8_000, 250 * (2 ** attempt));
+  if (header) {
+    const retryAt = Date.parse(header);
+    if (Number.isFinite(retryAt)) return Math.min(30_000, Math.max(250, retryAt - Date.now()));
+  }
+  return Math.min(30_000, 500 * (2 ** attempt) + Math.floor(Math.random() * 250));
 }
 
 function errorMessage(payload: { message?: string }, status: number) {
@@ -157,29 +161,29 @@ async function fetchAlpacaJson<T extends { message?: string }>(
   fetcher: typeof fetch,
 ) {
   let lastError: unknown;
-  for (let attempt = 0; attempt < 4; attempt += 1) {
+  for (let attempt = 0; attempt < 5; attempt += 1) {
     let response: Response | null = null;
     try {
-      response = await fetcher(url, init);
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), 30_000);
+      try {
+        response = await fetcher(url, { ...init, signal: controller.signal });
+      } finally {
+        clearTimeout(timeout);
+      }
       const payload = await response.json().catch(() => ({})) as T;
       if (response.ok) return { response, payload };
       const error = new AlpacaApiError(errorMessage(payload, response.status), response.status);
-      if (!isRetryableAlpacaStatus(response.status) || attempt === 3) throw error;
+      if (!isRetryableAlpacaStatus(response.status) || attempt === 4) throw error;
       lastError = error;
     } catch (error) {
       if (error instanceof AlpacaApiError && !isRetryableAlpacaStatus(error.status)) throw error;
       lastError = error;
-      if (attempt === 3) throw error;
+      if (attempt === 4) throw error;
     }
     await new Promise((resolve) => setTimeout(resolve, retryDelayMs(response, attempt)));
   }
   throw lastError instanceof Error ? lastError : new Error("Alpaca 请求失败");
-}
-
-export function isAlpacaSipPermissionError(error: unknown) {
-  if (error instanceof AlpacaApiError && error.status === 403) return true;
-  const message = error instanceof Error ? error.message : String(error ?? "");
-  return /(?:subscription|permission|entitlement|forbidden).*sip|sip.*(?:subscription|permission|entitlement|forbidden)/i.test(message);
 }
 
 function tushareTimestamp(value: unknown, timeframe: SupportedTimeframe) {
@@ -269,6 +273,22 @@ export function normalizeAlpacaBars(payload: AlpacaPayload) {
   return validateCandles(candles);
 }
 
+export function buildAlpacaMultiSymbolUrl(request: AlpacaMultiSymbolChunkRequest) {
+  const symbols = [...new Set(request.symbols.map((value) => String(value).trim().toUpperCase()).filter(Boolean))];
+  const params = new URLSearchParams({
+    symbols: symbols.join(","),
+    timeframe: timeframeToAlpaca[request.timeframe],
+    start: request.startDate,
+    end: request.endDate,
+    limit: String(Math.min(10_000, Math.max(1, request.limit ?? 10_000))),
+    adjustment: "raw",
+    feed: request.feed,
+    sort: "asc",
+  });
+  if (request.pageToken) params.set("page_token", request.pageToken);
+  return `https://data.alpaca.markets/v2/stocks/bars?${params}`;
+}
+
 export async function fetchAlpacaMultiSymbolChunk(
   request: AlpacaMultiSymbolChunkRequest,
   secrets: ProviderSecrets,
@@ -281,18 +301,7 @@ export async function fetchAlpacaMultiSymbolChunk(
   if (!symbols.length) {
     return { candlesBySymbol: new Map(), cursor: {}, complete: true, source: `alpaca-${request.feed}` };
   }
-  const params = new URLSearchParams({
-    symbols: symbols.join(","),
-    timeframe: timeframeToAlpaca[request.timeframe],
-    start: request.startDate,
-    end: request.endDate,
-    limit: String(Math.min(10_000, Math.max(1, request.limit ?? 10_000))),
-    adjustment: "raw",
-    feed: request.feed,
-    sort: "asc",
-  });
-  if (request.pageToken) params.set("page_token", request.pageToken);
-  const url = `https://data.alpaca.markets/v2/stocks/bars?${params}`;
+  const url = buildAlpacaMultiSymbolUrl({ ...request, symbols });
   let result: { response: Response; payload: AlpacaMultiSymbolPayload };
   try {
     result = await fetchAlpacaJson<AlpacaMultiSymbolPayload>(url, {
@@ -387,46 +396,39 @@ export async function fetchProviderChunk(
   if (!secrets.alpacaKeyId || !secrets.alpacaSecretKey) {
     throw new Error("尚未配置 APCA_API_KEY_ID 和 APCA_API_SECRET_KEY");
   }
-  const feeds: AlpacaFeed[] = request.cursor.feed
-    ? [request.cursor.feed]
-    : ["sip", "iex"];
-  let lastError = "Alpaca request failed";
-  for (const feed of feeds) {
-    const params = new URLSearchParams({
-      timeframe: timeframeToAlpaca[request.timeframe],
-      start: request.startDate,
-      end: request.endDate,
-      limit: "10000",
-      adjustment: "raw",
-      feed,
-      sort: "asc",
-    });
-    if (request.cursor.pageToken) params.set("page_token", request.cursor.pageToken);
-    try {
-      const result = await fetchAlpacaJson<AlpacaPayload>(
-        `https://data.alpaca.markets/v2/stocks/${encodeURIComponent(request.vendorSymbol)}/bars?${params}`,
-        {
-          headers: {
-            "APCA-API-KEY-ID": secrets.alpacaKeyId,
-            "APCA-API-SECRET-KEY": secrets.alpacaSecretKey,
-          },
-        },
-        fetcher,
-      );
-      const normalized = normalizeAlpacaBars(result.payload);
-      const pageToken = result.payload.next_page_token ?? undefined;
-      return {
-        candles: normalized.candles,
-        quality: normalized.report,
-        cursor: pageToken ? { pageToken, feed } : {},
-        complete: !pageToken,
-        source: feed === "sip" ? "alpaca-sip" : "alpaca-iex",
-      };
-    } catch (error) {
-      lastError = error instanceof Error ? error.message : String(error);
-      const canFallbackToIex = feed === "sip" && isAlpacaSipPermissionError(error);
-      if (!canFallbackToIex) throw error;
-    }
+  // US history is intentionally SIP-only.  IEX is a partial venue feed and
+  // silently falling back to it makes the same instrument change definition
+  // halfway through its history.  A SIP failure must be visible to the user.
+  const feed: AlpacaFeed = "sip";
+  const params = new URLSearchParams({
+    timeframe: timeframeToAlpaca[request.timeframe],
+    start: request.startDate,
+    end: request.endDate,
+    limit: "10000",
+    adjustment: "raw",
+    feed,
+    sort: "asc",
+  });
+  if (request.cursor.feed !== "iex" && request.cursor.pageToken) {
+    params.set("page_token", request.cursor.pageToken);
   }
-  throw new Error(lastError);
+  const result = await fetchAlpacaJson<AlpacaPayload>(
+    `https://data.alpaca.markets/v2/stocks/${encodeURIComponent(request.vendorSymbol)}/bars?${params}`,
+    {
+      headers: {
+        "APCA-API-KEY-ID": secrets.alpacaKeyId,
+        "APCA-API-SECRET-KEY": secrets.alpacaSecretKey,
+      },
+    },
+    fetcher,
+  );
+  const normalized = normalizeAlpacaBars(result.payload);
+  const pageToken = result.payload.next_page_token ?? undefined;
+  return {
+    candles: normalized.candles,
+    quality: normalized.report,
+    cursor: pageToken ? { pageToken, feed } : {},
+    complete: !pageToken,
+    source: "alpaca-sip",
+  };
 }

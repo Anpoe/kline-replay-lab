@@ -21,13 +21,16 @@ type SessionEventRow = {
 export async function GET(request: Request) {
   await ensureSchema();
   const db = getRawDb();
-  const id = new URL(request.url).searchParams.get("id");
+  const searchParams = new URL(request.url).searchParams;
+  const id = searchParams.get("id");
+  const includeTrash = searchParams.get("trash") === "1";
+  const visibilityClause = includeTrash ? "deleted_at IS NOT NULL" : "deleted_at IS NULL";
   if (id) {
     const session = await db
       .prepare(`SELECT id, instrument_id AS instrumentId, timeframe,
         data_snapshot_id AS dataSnapshotId, state_json AS stateJson,
-        created_at AS createdAt, updated_at AS updatedAt
-        FROM training_sessions WHERE id = ?`)
+        created_at AS createdAt, updated_at AS updatedAt, deleted_at AS deletedAt
+        FROM training_sessions WHERE id = ? AND ${visibilityClause}`)
       .bind(id)
       .first();
     if (!session) return Response.json({ error: "训练记录不存在" }, { status: 404 });
@@ -49,12 +52,13 @@ export async function GET(request: Request) {
     return Response.json({ session, events: normalizedEvents });
   }
 
-  const includeAll = new URL(request.url).searchParams.get("all") === "1";
+  const includeAll = searchParams.get("all") === "1";
   const rows = await db
     .prepare(`SELECT id, instrument_id AS instrumentId, timeframe,
       data_snapshot_id AS dataSnapshotId, state_json AS stateJson,
-      created_at AS createdAt, updated_at AS updatedAt
-      FROM training_sessions ORDER BY updated_at DESC${includeAll ? "" : " LIMIT 20"}`)
+      created_at AS createdAt, updated_at AS updatedAt, deleted_at AS deletedAt
+      FROM training_sessions WHERE ${visibilityClause}
+      ORDER BY updated_at DESC${includeAll ? "" : " LIMIT 20"}`)
     .all();
   return Response.json({ sessions: rows.results });
 }
@@ -112,16 +116,48 @@ export async function POST(request: Request) {
   return Response.json({ id: payload.id, savedAt: now });
 }
 
-export async function DELETE(request: Request) {
+export async function PATCH(request: Request) {
   await ensureSchema();
   const id = new URL(request.url).searchParams.get("id");
   if (!id) return Response.json({ error: "缺少训练记录 ID" }, { status: 400 });
+  const payload = (await request.json().catch(() => ({}))) as { action?: string };
+  if (payload.action !== "restore") {
+    return Response.json({ error: "不支持的训练记录操作" }, { status: 400 });
+  }
+  const now = new Date().toISOString();
   const db = getRawDb();
+  const existing = await db
+    .prepare("SELECT id FROM training_sessions WHERE id = ? AND deleted_at IS NOT NULL")
+    .bind(id)
+    .first();
+  if (!existing) return Response.json({ error: "回收站中不存在这条训练记录" }, { status: 404 });
+  await db
+    .prepare("UPDATE training_sessions SET deleted_at = NULL, updated_at = ? WHERE id = ?")
+    .bind(now, id)
+    .run();
+  return Response.json({ id, restored: true, restoredAt: now });
+}
+
+export async function DELETE(request: Request) {
+  await ensureSchema();
+  const searchParams = new URL(request.url).searchParams;
+  const id = searchParams.get("id");
+  if (!id) return Response.json({ error: "缺少训练记录 ID" }, { status: 400 });
+  const db = getRawDb();
+  const permanently = searchParams.get("permanent") === "1";
   const exists = await db.prepare("SELECT id FROM training_sessions WHERE id = ?").bind(id).first();
   if (!exists) return Response.json({ error: "训练记录不存在" }, { status: 404 });
+  if (!permanently) {
+    const now = new Date().toISOString();
+    await db
+      .prepare("UPDATE training_sessions SET deleted_at = ? WHERE id = ? AND deleted_at IS NULL")
+      .bind(now, id)
+      .run();
+    return Response.json({ id, deleted: true, movedToTrash: true, deletedAt: now });
+  }
   await db.batch([
     db.prepare("DELETE FROM session_events WHERE session_id = ?").bind(id),
     db.prepare("DELETE FROM training_sessions WHERE id = ?").bind(id),
   ]);
-  return Response.json({ id, deleted: true });
+  return Response.json({ id, deleted: true, permanentlyDeleted: true });
 }

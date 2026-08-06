@@ -23,6 +23,7 @@ type DownloadJobRow = {
   cursorJson: string;
   insertedCount: number;
   qualityReportJson: string;
+  syncRunId?: string | null;
 };
 
 function mergeQuality(previous: Partial<QualityReport>, current: QualityReport): QualityReport {
@@ -50,11 +51,14 @@ export async function POST(request: Request) {
       instrument_name AS instrumentName, market, timeframe, start_date AS startDate,
       end_date AS endDate, adjustment_type AS adjustmentType, status,
       cursor_json AS cursorJson, inserted_count AS insertedCount,
-      quality_report_json AS qualityReportJson
+      quality_report_json AS qualityReportJson, sync_run_id AS syncRunId
       FROM data_download_jobs WHERE id = ?`)
     .bind(payload.id)
     .first<DownloadJobRow>();
   if (!job) return Response.json({ error: "下载任务不存在" }, { status: 404 });
+  if (job.market === "US" && job.syncRunId) {
+    return Response.json({ error: "美股批量任务请通过市场同步 Worker 执行" }, { status: 409 });
+  }
   if (job.status === "paused") return Response.json({ id: job.id, status: "paused" });
   if (job.status === "completed") return Response.json({ id: job.id, status: "completed", complete: true });
 
@@ -64,13 +68,19 @@ export async function POST(request: Request) {
 
   try {
     const { secrets } = await loadProviderSecrets();
+    const storedCursor = JSON.parse(job.cursorJson || "{}") as ProviderCursor;
+    // Existing queued jobs may still carry an old IEX cursor.  Restart that
+    // page from the beginning so the US library can migrate to SIP cleanly.
+    const cursor = job.market === "US" && storedCursor.feed === "iex"
+      ? {}
+      : storedCursor;
     const chunk = await fetchProviderChunk({
       provider: job.provider,
       vendorSymbol: job.vendorSymbol,
       timeframe: job.timeframe,
       startDate: job.startDate,
       endDate: job.endDate,
-      cursor: JSON.parse(job.cursorJson || "{}") as ProviderCursor,
+      cursor,
     }, secrets);
 
     await db.prepare(`INSERT INTO instruments
@@ -98,6 +108,7 @@ export async function POST(request: Request) {
     // 100 variables per statement, so eight rows (88 variables) is the largest safe
     // portable batch while still avoiding thousands of one-row round trips.
     const statements = [];
+    const insertVerb = chunk.source === "alpaca-iex" ? "INSERT OR IGNORE" : "INSERT OR REPLACE";
     const rowsPerStatement = 8;
     for (let index = 0; index < chunk.candles.length; index += rowsPerStatement) {
       const rows = chunk.candles.slice(index, index + rowsPerStatement);
@@ -117,7 +128,7 @@ export async function POST(request: Request) {
         job.adjustmentType,
         chunk.source,
       ]);
-      statements.push(db.prepare(`INSERT OR REPLACE INTO candles
+      statements.push(db.prepare(`${insertVerb} INTO candles
         (instrument_id, timeframe, timestamp, open, high, low, close, volume, turnover,
          adjustment_type, source, quality_flags)
         VALUES ${placeholders}`).bind(...values));
@@ -158,26 +169,15 @@ export async function POST(request: Request) {
       .first<{ status: string }>();
     const status = latest?.status === "paused" ? "paused" : chunk.complete ? "completed" : "queued";
     const insertedCount = Number(job.insertedCount) + chunk.candles.length;
-    if (chunk.complete && chunk.source === "alpaca-sip" && insertedCount > 0) {
-      // SIP backfills replace the mutable US candle library only. Immutable
-      // snapshots are stored separately in data_snapshots, so old training
-      // sessions continue to reproduce their original market data exactly.
-      await db.prepare(`DELETE FROM candles
-        WHERE instrument_id = ? AND timeframe = ? AND adjustment_type = ? AND source = 'alpaca-iex'`)
-        .bind(job.instrumentId, job.timeframe, job.adjustmentType)
-        .run();
-      await db.prepare(`DELETE FROM candle_coverage
-        WHERE instrument_id = ? AND timeframe = ? AND adjustment_type = ? AND source = 'alpaca-iex'`)
-        .bind(job.instrumentId, job.timeframe, job.adjustmentType)
-        .run();
-    }
     await db.prepare(`UPDATE data_download_jobs SET status = ?, cursor_json = ?,
-      inserted_count = ?, quality_report_json = ?, last_error = NULL, updated_at = ? WHERE id = ?`)
+      inserted_count = ?, quality_report_json = ?, feed = ?, last_error = NULL,
+      updated_at = ? WHERE id = ?`)
       .bind(
         status,
         JSON.stringify(chunk.cursor),
         insertedCount,
         JSON.stringify(quality),
+        chunk.source === "alpaca-sip" ? "sip" : "iex",
         new Date().toISOString(),
         job.id,
       )

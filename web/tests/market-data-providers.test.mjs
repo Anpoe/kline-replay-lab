@@ -130,10 +130,9 @@ test("Alpaca 下载使用免费历史行情接口、认证头和分页游标", a
   assert.equal(result.source, "alpaca-sip");
 });
 
-test("Alpaca 近期 SIP 无权限时回退到 IEX", async () => {
+test("Alpaca SIP 权限失败时直接暴露错误，不回退到 IEX", async () => {
   const feeds = [];
-  let calls = 0;
-  const result = await fetchProviderChunk({
+  await assert.rejects(() => fetchProviderChunk({
     provider: "alpaca",
     vendorSymbol: "ACT",
     timeframe: "1d",
@@ -145,18 +144,10 @@ test("Alpaca 近期 SIP 无权限时回退到 IEX", async () => {
     alpacaSecretKey: "local-secret",
   }, async (url) => {
     feeds.push(new URL(String(url)).searchParams.get("feed"));
-    calls += 1;
-    if (calls === 1) {
-      return Response.json({ message: "subscription does not permit querying recent SIP data" }, { status: 403 });
-    }
-    return Response.json({
-      bars: [{ t: "2026-08-03T04:00:00Z", o: 47, h: 48, l: 46, c: 47.89, v: 100 }],
-    });
-  });
+    return Response.json({ message: "subscription does not permit querying recent SIP data" }, { status: 403 });
+  }), /subscription does not permit querying recent SIP data/);
 
-  assert.deepEqual(feeds, ["sip", "iex"]);
-  assert.equal(result.source, "alpaca-iex");
-  assert.equal(result.candles.length, 1);
+  assert.deepEqual(feeds, ["sip"]);
 });
 
 test("数据源缺少本地凭证时不会发出网络请求", async () => {
