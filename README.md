@@ -80,9 +80,10 @@ npm run dev
 
 - Alpaca API Key ID 和 Secret Key：用于美股。
 - Tushare Token：用于 A 股。
+- Twelve Data API Key：用于外汇已收盘 M1 增量；Dukascopy 历史初始化使用内置官方适配器，无需填写地址。
 - TdxQuant 本地端点：用于以后接入已启动的通达信 TQ 客户端，默认 `http://127.0.0.1:17709`。
 
-凭证只保存在这台电脑的本地数据库，界面不会回显完整内容，也不会进入 Git。保存后无需重启；A 股完成 TDX 初始化后即可使用 Tushare 120 的每日增量和缺口修复。5m/1h 历史分钟线仍取决于更高的数据权限。
+凭证只保存在这台电脑的本地数据库，界面不会回显完整内容，也不会进入 Git。保存后无需重启；A 股完成 TDX 初始化后即可使用 Tushare 120 的每日增量和缺口修复。外汇增量只向 Twelve Data 请求 1min，保存 M1 后由本地生成 5m/1h/1d/1w。Tushare 的 5m/1h 历史分钟线仍取决于更高的数据权限。
 
 `web/.env.local` 仍可作为高级兼容配置，但普通使用不再需要手动编辑文件。
 

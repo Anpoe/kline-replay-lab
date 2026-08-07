@@ -35,7 +35,7 @@ export async function GET() {
         name: "Twelve Data REST",
         market: "外汇",
         configured: Boolean(secrets.twelveDataApiKey),
-        supportedTimeframes: ["5m"],
+        supportedTimeframes: ["1m"],
         credentialNames: ["TWELVE_DATA_API_KEY"],
       },
       {

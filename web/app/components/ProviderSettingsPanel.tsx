@@ -203,7 +203,7 @@ export function ProviderSettingsPanel() {
 
       <article className="provider-setting-card">
         <div className="provider-setting-title">
-          <div><KeyRound size={17} /><span><strong>Twelve Data REST</strong><small>外汇 5m 增量更新</small></span></div>
+          <div><KeyRound size={17} /><span><strong>Twelve Data REST</strong><small>外汇 1m 增量更新</small></span></div>
           <span className={status.twelvedata.configured ? "configured" : ""}>
             {statusLoaded ? sourceLabel(status.twelvedata.source) : "正在读取本机凭证状态…"}
             {statusLoaded && status.twelvedata.hint ? ` · ${status.twelvedata.hint}` : ""}
@@ -214,7 +214,7 @@ export function ProviderSettingsPanel() {
             <input type="password" autoComplete="new-password" value={twelveDataApiKey} onChange={(event) => setTwelveDataApiKey(event.target.value)} placeholder={status.twelvedata.configured ? "输入新值可替换现有凭证" : "填写 Twelve Data API Key"} />
           </label>
         </div>
-        <p className="provider-setting-help">密钥只在服务端请求 Twelve Data，前端不会把完整密钥回显。增量更新只写入已经收盘的 5m K 线。</p>
+        <p className="provider-setting-help">密钥只在服务端请求 Twelve Data，前端不会把完整密钥回显。增量更新写入已经收盘的 M1，并在本机聚合 5m / 1h / 1d / 1w。</p>
         <div className="provider-setting-actions">
           {status.twelvedata.source === "settings" && <button className="delete-session" onClick={() => clearProvider("twelvedata")}><Trash2 size={13} />清除本机凭证</button>}
           <button className="primary-button" disabled={saving === "twelvedata"} onClick={() => saveProvider("twelvedata")}><Save size={14} />保存 Twelve Data</button>

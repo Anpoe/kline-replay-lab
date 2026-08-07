@@ -8,6 +8,7 @@ import {
 import {
   aggregate5mToTimeframe,
   aggregateM1To5m,
+  bucketStartTimestamp,
   findFxCandleGaps,
   type FxCandle,
 } from "./fx/dukascopyAggregation.ts";
@@ -21,7 +22,7 @@ import {
 } from "./fx/dukascopyOfficialClient.ts";
 import type { DukascopyQualityReport } from "./fx/dukascopyCsv.ts";
 import {
-  fetchTwelveDataFiveMinuteChunk,
+  fetchTwelveDataOneMinuteChunk,
   type TwelveDataCursor,
 } from "./fx/twelveDataClient.ts";
 import { loadProviderSecrets } from "./providerCredentials.ts";
@@ -84,6 +85,7 @@ type FxTaskCreateInput = {
 
 type FxTaskCursor = {
   twelveData?: TwelveDataCursor;
+  twelveDataInterval?: "1min";
   historyNextStartDate?: string;
   officialMinuteFrom?: number | null;
   historyBoundary?: number | null;
@@ -111,6 +113,12 @@ const VALID_TARGET_TIMEFRAMES = new Set(DEFAULT_TARGET_TIMEFRAMES);
 const FX_SOURCE_DUKASCOPY = "dukascopy";
 const FX_SOURCE_TWELVE_DATA = "twelvedata";
 const DEFAULT_DATE = "1970-01-01";
+// Keep each browser-driven request small enough that local D1 can release its
+// page cache between chunks. Large M1 ranges can otherwise make the UI and
+// status endpoint appear offline while a multi-gigabyte database is writing.
+const HISTORICAL_CHUNK_DAYS = 7;
+const activeFxTaskRuns = new Set<string>();
+const sharedDukascopyOfficialClient = new DukascopyOfficialClient();
 
 function nowIso() {
   return new Date().toISOString();
@@ -376,16 +384,33 @@ async function ensureInstrument(db: D1Database, instrument: FxInstrumentDefiniti
     .run();
 }
 
-async function persistCandles(db: D1Database, task: FxTaskRow, timeframe: string, source: string, candles: readonly FxCandle[]) {
+async function persistCandles(
+  db: D1Database,
+  task: FxTaskRow,
+  timeframe: string,
+  source: string,
+  candles: readonly FxCandle[],
+  onProgress?: (completed: number, total: number) => void | Promise<void>,
+) {
   if (!candles.length) return 0;
-  const rowsPerStatement = 8;
-  const statements = [];
-  for (let index = 0; index < candles.length; index += rowsPerStatement) {
-    const rows = candles.slice(index, index + rowsPerStatement);
-    const placeholders = rows.map(() => "(?, ?, ?, ?, ?, ?, ?, ?, ?, 'none', ?, '[]')").join(", ");
-    const values = rows.flatMap((candle) => [
-      task.instrumentId,
-      timeframe,
+  const firstTimestamp = candles.reduce((minimum, candle) => Math.min(minimum, candle.timestamp), Number.POSITIVE_INFINITY);
+  const lastTimestamp = candles.reduce((maximum, candle) => Math.max(maximum, candle.timestamp), Number.NEGATIVE_INFINITY);
+  const uniqueTimestampCount = new Set(candles.map((candle) => candle.timestamp)).size;
+  const previousCoverage = await db.prepare(`SELECT bar_count AS barCount, first_timestamp AS firstTimestamp,
+    last_timestamp AS lastTimestamp FROM candle_coverage
+    WHERE instrument_id = ? AND timeframe = ? AND adjustment_type = 'none' AND source = ?`)
+    .bind(task.instrumentId, timeframe, source)
+    .first<{ barCount: number; firstTimestamp: number; lastTimestamp: number }>();
+  const existingRange = await db.prepare(`SELECT COUNT(*) AS barCount FROM candles
+    WHERE instrument_id = ? AND timeframe = ? AND adjustment_type = 'none' AND source = ?
+    AND timestamp BETWEEN ? AND ?`)
+    .bind(task.instrumentId, timeframe, source, firstTimestamp, lastTimestamp)
+    .first<{ barCount: number }>();
+  const rowsPerBatch = 1_000;
+  let nextHeartbeat = 2_048;
+  for (let batchStart = 0; batchStart < candles.length; batchStart += rowsPerBatch) {
+    const batchEnd = Math.min(candles.length, batchStart + rowsPerBatch);
+    const payload = JSON.stringify(candles.slice(batchStart, batchEnd).map((candle) => [
       candle.timestamp,
       candle.open,
       candle.high,
@@ -393,18 +418,48 @@ async function persistCandles(db: D1Database, task: FxTaskRow, timeframe: string
       candle.close,
       candle.volume,
       candle.turnover,
-      source,
-    ]);
-    statements.push(db.prepare(`INSERT OR REPLACE INTO candles
+    ]));
+    await db.prepare(`INSERT OR REPLACE INTO candles
       (instrument_id, timeframe, timestamp, open, high, low, close, volume, turnover,
-       adjustment_type, source, quality_flags) VALUES ${placeholders}`).bind(...values));
+       adjustment_type, source, quality_flags)
+      SELECT ?, ?,
+        CAST(json_extract(value, '$[0]') AS INTEGER),
+        json_extract(value, '$[1]'),
+        json_extract(value, '$[2]'),
+        json_extract(value, '$[3]'),
+        json_extract(value, '$[4]'),
+        json_extract(value, '$[5]'),
+        json_extract(value, '$[6]'),
+        'none', ?, '[]'
+      FROM json_each(?)`)
+      .bind(task.instrumentId, timeframe, source, payload)
+      .run();
+    if (onProgress && (batchEnd >= nextHeartbeat || batchEnd === candles.length)) {
+      await onProgress(batchEnd, candles.length);
+      nextHeartbeat = batchEnd + 2_048;
+    }
+    // Give the local worker a chance to answer status and page requests between
+    // database batches instead of monopolising the only request isolate.
+    await new Promise<void>((resolve) => setTimeout(resolve, 0));
   }
-  for (let index = 0; index < statements.length; index += 16) await db.batch(statements.slice(index, index + 16));
-  const coverage = await db.prepare(`SELECT COUNT(*) AS barCount, MIN(timestamp) AS firstTimestamp,
-    MAX(timestamp) AS lastTimestamp FROM candles
-    WHERE instrument_id = ? AND timeframe = ? AND adjustment_type = 'none' AND source = ?`)
-    .bind(task.instrumentId, timeframe, source)
-    .first<{ barCount: number; firstTimestamp: number; lastTimestamp: number }>();
+  // A full COUNT/MIN/MAX scan becomes extremely expensive once M1 history is
+  // several gigabytes. Count only the incoming timestamp window and merge it
+  // with the persisted coverage row. This also keeps retries idempotent.
+  const addedBars = Math.max(0, uniqueTimestampCount - Number(existingRange?.barCount ?? 0));
+  let coverage = previousCoverage
+    ? {
+        barCount: Number(previousCoverage.barCount) + addedBars,
+        firstTimestamp: Math.min(Number(previousCoverage.firstTimestamp), firstTimestamp),
+        lastTimestamp: Math.max(Number(previousCoverage.lastTimestamp), lastTimestamp),
+      }
+    : null;
+  if (!coverage) {
+    coverage = await db.prepare(`SELECT COUNT(*) AS barCount, MIN(timestamp) AS firstTimestamp,
+      MAX(timestamp) AS lastTimestamp FROM candles
+      WHERE instrument_id = ? AND timeframe = ? AND adjustment_type = 'none' AND source = ?`)
+      .bind(task.instrumentId, timeframe, source)
+      .first<{ barCount: number; firstTimestamp: number; lastTimestamp: number }>();
+  }
   await db.prepare(`INSERT OR REPLACE INTO candle_coverage
     (instrument_id, timeframe, adjustment_type, source, bar_count, first_timestamp, last_timestamp, updated_at)
     VALUES (?, ?, 'none', ?, ?, ?, ?, ?)`)
@@ -412,13 +467,35 @@ async function persistCandles(db: D1Database, task: FxTaskRow, timeframe: string
       task.instrumentId,
       timeframe,
       source,
-      Number(coverage?.barCount ?? 0),
-      Number(coverage?.firstTimestamp ?? 0),
-      Number(coverage?.lastTimestamp ?? 0),
+      Number(coverage?.barCount ?? uniqueTimestampCount),
+      Number(coverage?.firstTimestamp ?? firstTimestamp),
+      Number(coverage?.lastTimestamp ?? lastTimestamp),
       nowIso(),
     )
     .run();
   return candles.length;
+}
+
+async function isCandleRangeCovered(
+  db: D1Database,
+  task: FxTaskRow,
+  timeframe: string,
+  source: string,
+  candles: readonly FxCandle[],
+) {
+  if (!candles.length) return true;
+  const firstTimestamp = candles.reduce((minimum, candle) => Math.min(minimum, candle.timestamp), Number.POSITIVE_INFINITY);
+  const lastTimestamp = candles.reduce((maximum, candle) => Math.max(maximum, candle.timestamp), Number.NEGATIVE_INFINITY);
+  const coverage = await db.prepare(`SELECT first_timestamp AS firstTimestamp, last_timestamp AS lastTimestamp
+    FROM candle_coverage
+    WHERE instrument_id = ? AND timeframe = ? AND adjustment_type = 'none' AND source = ?`)
+    .bind(task.instrumentId, timeframe, source)
+    .first<{ firstTimestamp: number; lastTimestamp: number }>();
+  return Boolean(
+    coverage
+    && Number(coverage.firstTimestamp) <= firstTimestamp
+    && Number(coverage.lastTimestamp) >= lastTimestamp,
+  );
 }
 
 function isoTimestamp(timestamp: number | null | undefined) {
@@ -443,8 +520,8 @@ function qualityFromDukascopy(report: DukascopyQualityReport, base: FxCandle[], 
   };
 }
 
-function qualityFromTwelveData(report: { received: number; accepted: number; invalid: number; duplicates: number; firstTimestamp?: number; lastTimestamp?: number }, base: FxCandle[], insertedBars: number, historyBoundary: number | null): QualitySummary {
-  const gaps = findFxCandleGaps(base, "5m").filter((gap) => !gap.ignored).length;
+function qualityFromTwelveData(report: { received: number; accepted: number; invalid: number; duplicates: number; firstTimestamp?: number; lastTimestamp?: number }, candles: FxCandle[], insertedBars: number, historyBoundary: number | null): QualitySummary {
+  const gaps = findFxCandleGaps(candles, "1m").filter((gap) => !gap.ignored).length;
   return {
     acceptedRows: report.accepted,
     insertedBars,
@@ -453,8 +530,8 @@ function qualityFromTwelveData(report: { received: number; accepted: number; inv
     duplicateRows: report.duplicates,
     missingIntervals: gaps,
     abnormalJumps: 0,
-    earliestTimestamp: isoTimestamp(report.firstTimestamp ?? base[0]?.timestamp),
-    latestTimestamp: isoTimestamp(report.lastTimestamp ?? base.at(-1)?.timestamp),
+    earliestTimestamp: isoTimestamp(report.firstTimestamp ?? candles[0]?.timestamp),
+    latestTimestamp: isoTimestamp(report.lastTimestamp ?? candles.at(-1)?.timestamp),
     historyBoundary: isoTimestamp(historyBoundary),
     source: FX_SOURCE_TWELVE_DATA,
     checkedAt: nowIso(),
@@ -488,7 +565,7 @@ function mergeQuality(previous: Partial<QualitySummary>, current: QualitySummary
 async function runHistoricalTask(db: D1Database, task: FxTaskRow, instrument: FxInstrumentDefinition) {
   const { secrets } = await loadProviderSecrets();
   const cursor = parseJson<FxTaskCursor>(task.cursorJson, {});
-  const officialClient = secrets.dukascopyEndpoint ? null : new DukascopyOfficialClient();
+  const officialClient = secrets.dukascopyEndpoint ? null : sharedDukascopyOfficialClient;
   const officialMinuteFrom = officialClient
     ? cursor.officialMinuteFrom === undefined
       ? await officialClient.getMinuteAvailability(task.dukascopySymbol)
@@ -531,7 +608,8 @@ async function runHistoricalTask(db: D1Database, task: FxTaskRow, instrument: Fx
       finishedAt: nowIso(),
     });
   }
-  const chunkEnd = minDate(addUtcDays(chunkStart, 30), task.endDate);
+  const chunkEnd = minDate(addUtcDays(chunkStart, HISTORICAL_CHUNK_DAYS - 1), task.endDate);
+  const chunkStartedAt = Date.now();
   const totalDays = totalDaysForTask(task);
   const completedDays = Math.max(0, Math.floor((Date.parse(`${chunkStart}T00:00:00Z`) - Date.parse(`${task.startDate}T00:00:00Z`)) / 86_400_000));
   const progressPercent = Math.min(95, Math.max(5, (completedDays / totalDays) * 100));
@@ -567,22 +645,43 @@ async function runHistoricalTask(db: D1Database, task: FxTaskRow, instrument: Fx
   const base = aggregateM1To5m(parsed.candles);
   await ensureInstrument(db, instrument);
   await updateTask(db, task.id, { stage: "persist", stageProgress: Math.min(99, progressPercent + 20), message: "正在写入本次分片的 1m / 5m 基准" });
-  let inserted = await persistCandles(db, task, "1m", FX_SOURCE_DUKASCOPY, parsed.candles);
+  let inserted = await persistCandles(
+    db,
+    task,
+    "1m",
+    FX_SOURCE_DUKASCOPY,
+    parsed.candles,
+    async (completed, total) => {
+      await updateTask(db, task.id, {
+        stage: "persist",
+        message: `正在写入本次分片的 M1：${completed.toLocaleString()} / ${total.toLocaleString()}`,
+      });
+    },
+  );
   if (await isTaskStopped(db, task.id)) return getFxTask(db, task.id);
-  inserted += await persistCandles(db, task, "5m", FX_SOURCE_DUKASCOPY, base);
+  if (!(await isCandleRangeCovered(db, task, "5m", FX_SOURCE_DUKASCOPY, base))) {
+    inserted += await persistCandles(db, task, "5m", FX_SOURCE_DUKASCOPY, base);
+  }
   if (await isTaskStopped(db, task.id)) return getFxTask(db, task.id);
 
   const targetTimeframes = parseJson<string[]>(task.targetTimeframesJson, [...DEFAULT_TARGET_TIMEFRAMES]);
-  const recent = await readRecentBaseCandles(db, task, base.at(-1)?.timestamp ?? Date.parse(`${chunkEnd}T00:00:00Z`));
+  const currentChunkLastTimestamp = base.at(-1)?.timestamp ?? Date.parse(`${chunkEnd}T23:59:59Z`);
+  const recent = await readRecentBaseCandles(db, task, currentChunkLastTimestamp, currentChunkLastTimestamp);
   const higher: Array<[string, FxCandle[]]> = [];
   if (targetTimeframes.includes("1h")) higher.push(["1h", aggregate5mToTimeframe(recent, "1h")]);
   if (targetTimeframes.includes("1d")) higher.push(["1d", aggregate5mToTimeframe(recent, "1d")]);
   if (targetTimeframes.includes("1w")) higher.push(["1w", aggregate5mToTimeframe(recent, "1w")]);
-  for (const [timeframe, candles] of higher) inserted += await persistCandles(db, task, timeframe, FX_SOURCE_DUKASCOPY, candles);
+  for (const [timeframe, candles] of higher) {
+    if (!(await isCandleRangeCovered(db, task, timeframe, FX_SOURCE_DUKASCOPY, candles))) {
+      inserted += await persistCandles(db, task, timeframe, FX_SOURCE_DUKASCOPY, candles);
+    }
+  }
   const currentQuality = qualityFromDukascopy(parsed.report, base, inserted, null);
   const previousQuality = parseJson<Partial<QualitySummary>>(task.qualityReportJson, {});
   const nextStartDate = addUtcDays(chunkEnd, 1);
   const complete = nextStartDate > task.endDate;
+  const chunkElapsedSeconds = Math.max(0.1, (Date.now() - chunkStartedAt) / 1_000);
+  const chunkDayCount = Math.round((Date.parse(`${chunkEnd}T00:00:00Z`) - Date.parse(`${chunkStart}T00:00:00Z`)) / 86_400_000) + 1;
   const lastCompleteRow = await db.prepare(`SELECT MAX(timestamp) AS lastTimestamp FROM candles
     WHERE instrument_id = ? AND timeframe = '5m' AND adjustment_type = 'none' AND source = ?`)
     .bind(task.instrumentId, FX_SOURCE_DUKASCOPY)
@@ -615,39 +714,86 @@ async function runHistoricalTask(db: D1Database, task: FxTaskRow, instrument: Fx
     insertedCount: cumulative,
     message: complete
       ? (task.keepRawCsv ? "历史数据已完成；当前运行时只保留解析后的 K 线与质量报告" : "Dukascopy 历史基准已完成")
-      : `本次分片已完成，下一片从 ${nextStartDate} 继续`,
+      : `本次 ${chunkDayCount} 天分片已完成（${chunkElapsedSeconds.toFixed(1)} 秒），下一片从 ${nextStartDate} 继续`,
     error: null,
     finishedAt: complete ? nowIso() : null,
   });
 }
 
-async function readRecentBaseCandles(db: D1Database, task: FxTaskRow, fromTimestamp: number) {
+async function readRecentBaseCandles(
+  db: D1Database,
+  task: FxTaskRow,
+  fromTimestamp: number,
+  throughTimestamp: number,
+) {
   const rows = await db.prepare(`SELECT timestamp, open, high, low, close, volume, turnover
     FROM candles WHERE instrument_id = ? AND timeframe = '5m' AND adjustment_type = 'none'
-    AND timestamp >= ? ORDER BY timestamp ASC`)
-    .bind(task.instrumentId, Math.max(0, fromTimestamp - 8 * 24 * 60 * 60 * 1000))
+    AND timestamp BETWEEN ? AND ? ORDER BY timestamp ASC`)
+    .bind(
+      task.instrumentId,
+      Math.max(0, fromTimestamp - 8 * 24 * 60 * 60 * 1000),
+      throughTimestamp,
+    )
     .all<Record<string, unknown>>();
   return rows.results.map(asCandle);
+}
+
+async function readRecentMinuteCandles(
+  db: D1Database,
+  task: FxTaskRow,
+  fromTimestamp: number,
+  throughTimestamp: number,
+) {
+  const rows = await db.prepare(`SELECT timestamp, open, high, low, close, volume, turnover
+    FROM candles WHERE instrument_id = ? AND timeframe = '1m' AND adjustment_type = 'none'
+    AND timestamp BETWEEN ? AND ? ORDER BY timestamp ASC`)
+    .bind(
+      task.instrumentId,
+      Math.max(0, fromTimestamp - 10 * FX_TIMEFRAME_MS["1m"]),
+      throughTimestamp,
+    )
+    .all<Record<string, unknown>>();
+  return rows.results.map(asCandle);
+}
+
+function rowTimestamp(row: { lastTimestamp: number | null } | null) {
+  return Number.isFinite(Number(row?.lastTimestamp)) ? Number(row?.lastTimestamp) : null;
 }
 
 async function runIncrementalTask(db: D1Database, task: FxTaskRow, instrument: FxInstrumentDefinition) {
   const { secrets } = await loadProviderSecrets();
   if (!secrets.twelveDataApiKey) throw new Error("尚未配置 Twelve Data API Key，请在“设置 → 数据源设置”中保存凭证");
-  const latest = await db.prepare(`SELECT MAX(timestamp) AS lastTimestamp FROM candles
-    WHERE instrument_id = ? AND timeframe = '5m' AND adjustment_type = 'none'`)
-    .bind(task.instrumentId)
-    .first<{ lastTimestamp: number | null }>();
-  const lastTimestamp = Number.isFinite(Number(latest?.lastTimestamp)) ? Number(latest?.lastTimestamp) : null;
+  const [historyMinuteRow, historyFiveMinuteRow, latestIncrementalRow] = await Promise.all([
+    db.prepare(`SELECT MAX(timestamp) AS lastTimestamp FROM candles
+      WHERE instrument_id = ? AND timeframe = '1m' AND adjustment_type = 'none' AND source = ?`)
+      .bind(task.instrumentId, FX_SOURCE_DUKASCOPY)
+      .first<{ lastTimestamp: number | null }>(),
+    db.prepare(`SELECT MAX(timestamp) AS lastTimestamp FROM candles
+      WHERE instrument_id = ? AND timeframe = '5m' AND adjustment_type = 'none' AND source = ?`)
+      .bind(task.instrumentId, FX_SOURCE_DUKASCOPY)
+      .first<{ lastTimestamp: number | null }>(),
+    db.prepare(`SELECT MAX(timestamp) AS lastTimestamp FROM candles
+      WHERE instrument_id = ? AND timeframe = '1m' AND adjustment_type = 'none' AND source = ?`)
+      .bind(task.instrumentId, FX_SOURCE_TWELVE_DATA)
+      .first<{ lastTimestamp: number | null }>(),
+  ]);
+  const historyMinuteTimestamp = rowTimestamp(historyMinuteRow);
+  const historyFiveMinuteTimestamp = rowTimestamp(historyFiveMinuteRow);
+  // Old databases may only have the historical 5m baseline. In that case the
+  // first safe M1 timestamp is the minute immediately after that 5m bucket.
+  const historyBoundary = historyMinuteTimestamp
+    ?? (historyFiveMinuteTimestamp == null ? null : historyFiveMinuteTimestamp + 4 * FX_TIMEFRAME_MS["1m"]);
+  const lastTimestamp = rowTimestamp(latestIncrementalRow);
   const cursor = parseJson<FxTaskCursor>(task.cursorJson, {});
-  await updateTask(db, task.id, { stage: "download", stageProgress: 10, message: "正在从 Twelve Data 请求 5m 增量" });
-  const chunk = await fetchTwelveDataFiveMinuteChunk({
+  await updateTask(db, task.id, { stage: "download", stageProgress: 10, message: "正在从 Twelve Data 请求 1m 增量" });
+  const chunk = await fetchTwelveDataOneMinuteChunk({
     apiKey: secrets.twelveDataApiKey,
     symbol: task.twelveDataSymbol,
-    startDate: lastTimestamp == null ? task.startDate : undefined,
+    startDate: lastTimestamp == null && historyBoundary == null ? task.startDate : undefined,
     endDate: task.endDate === DEFAULT_DATE ? undefined : task.endDate,
-    cursor: cursor.twelveData,
+    cursor: cursor.twelveDataInterval === "1min" ? cursor.twelveData : undefined,
     lastCompletedTimestamp: lastTimestamp,
-    historyBoundary: lastTimestamp,
+    historyBoundary,
     overlapBars: 3,
   });
   if (await isTaskStopped(db, task.id)) return getFxTask(db, task.id);
@@ -655,32 +801,73 @@ async function runIncrementalTask(db: D1Database, task: FxTaskRow, instrument: F
     stage: "parse",
     stageProgress: 35,
     progress: { completed: chunk.quality.accepted, total: chunk.quality.received, unit: "rows", percent: 35 },
-    message: `Twelve Data 返回 ${chunk.quality.accepted.toLocaleString()} 根已收盘 K 线`,
+    message: `Twelve Data 返回 ${chunk.quality.accepted.toLocaleString()} 根已收盘 M1 K 线`,
   });
   await ensureInstrument(db, instrument);
   await updateTask(db, task.id, { stage: "validate", stageProgress: 60, message: "正在校验历史边界与未收盘过滤结果" });
   const writeCandles = chunk.candles.map((candle) => ({ ...candle, turnover: null }));
   let inserted = 0;
-  if (writeCandles.length) inserted += await persistCandles(db, task, "5m", FX_SOURCE_TWELVE_DATA, writeCandles);
+  if (writeCandles.length) inserted += await persistCandles(db, task, "1m", FX_SOURCE_TWELVE_DATA, writeCandles);
   if (await isTaskStopped(db, task.id)) return getFxTask(db, task.id);
   if (writeCandles.length) {
-    await updateTask(db, task.id, { stage: "aggregate", stageProgress: 75, message: "正在刷新边界附近的小时、日线和周线" });
-    const recent = await readRecentBaseCandles(db, task, writeCandles[0].timestamp);
+    await updateTask(db, task.id, { stage: "aggregate", stageProgress: 75, message: "正在由 M1 刷新 5m、小时、日线和周线" });
+    const incrementalStart = historyBoundary == null
+      ? Date.parse(`${task.startDate}T00:00:00Z`)
+      : historyBoundary + FX_TIMEFRAME_MS["1m"];
+    const fiveMinuteWriteStart = Math.ceil(incrementalStart / FX_TIMEFRAME_MS["5m"]) * FX_TIMEFRAME_MS["5m"];
+    const fiveMinuteRefreshStart = Math.max(
+      fiveMinuteWriteStart,
+      bucketStartTimestamp(writeCandles[0].timestamp, "5m"),
+    );
+    const completeThroughExclusive = (chunk.latestCompletedTimestamp ?? writeCandles.at(-1)?.timestamp ?? 0)
+      + FX_TIMEFRAME_MS["1m"];
+    const recentMinutes = await readRecentMinuteCandles(
+      db,
+      task,
+      writeCandles[0].timestamp,
+      writeCandles.at(-1)?.timestamp ?? writeCandles[0].timestamp,
+    );
+    const fiveMinuteCandles = aggregateM1To5m(recentMinutes).filter((candle) => (
+      candle.timestamp >= fiveMinuteRefreshStart
+      && candle.timestamp + FX_TIMEFRAME_MS["5m"] <= completeThroughExclusive
+    ));
+    if (fiveMinuteCandles.length) {
+      inserted += await persistCandles(db, task, "5m", FX_SOURCE_TWELVE_DATA, fiveMinuteCandles);
+    }
+    const recent = fiveMinuteCandles.length
+      ? await readRecentBaseCandles(
+          db,
+          task,
+          fiveMinuteCandles[0].timestamp,
+          fiveMinuteCandles.at(-1)?.timestamp ?? fiveMinuteCandles[0].timestamp,
+        )
+      : [];
     const targetTimeframes = parseJson<string[]>(task.targetTimeframesJson, [...DEFAULT_TARGET_TIMEFRAMES]);
-    const higher: Array<[string, FxCandle[]]> = [];
+    const higher: Array<["1h" | "1d" | "1w", FxCandle[]]> = [];
     if (targetTimeframes.includes("1h")) higher.push(["1h", aggregate5mToTimeframe(recent, "1h")]);
     if (targetTimeframes.includes("1d")) higher.push(["1d", aggregate5mToTimeframe(recent, "1d")]);
     if (targetTimeframes.includes("1w")) higher.push(["1w", aggregate5mToTimeframe(recent, "1w")]);
-    for (const [timeframe, candles] of higher) inserted += await persistCandles(db, task, timeframe, FX_SOURCE_TWELVE_DATA, candles);
+    for (const [timeframe, candles] of higher) {
+      const refreshStart = Math.max(
+        fiveMinuteWriteStart,
+        bucketStartTimestamp(writeCandles[0].timestamp, timeframe),
+      );
+      const completed = candles.filter((candle) => (
+        candle.timestamp >= refreshStart
+        && candle.timestamp + FX_TIMEFRAME_MS[timeframe] <= completeThroughExclusive
+      ));
+      inserted += await persistCandles(db, task, timeframe, FX_SOURCE_TWELVE_DATA, completed);
+    }
   }
   const nextLastTimestamp = writeCandles.at(-1)?.timestamp ?? lastTimestamp;
-  const quality = qualityFromTwelveData(chunk.writeQuality, writeCandles, inserted, lastTimestamp);
+  const quality = qualityFromTwelveData(chunk.writeQuality, writeCandles, inserted, historyBoundary);
   const nextCursor: FxTaskCursor = {
     ...cursor,
     twelveData: chunk.complete ? undefined : chunk.cursor,
-    historyBoundary: lastTimestamp,
+    twelveDataInterval: "1min",
+    historyBoundary,
     lastCompleteTimestamp: nextLastTimestamp,
-    nextStartTimestamp: nextLastTimestamp == null ? null : nextLastTimestamp + FX_TIMEFRAME_MS["5m"],
+    nextStartTimestamp: nextLastTimestamp == null ? null : nextLastTimestamp + FX_TIMEFRAME_MS["1m"],
   };
   const complete = chunk.complete;
   const cumulative = Number(task.insertedCount ?? 0) + inserted;
@@ -692,7 +879,7 @@ async function runIncrementalTask(db: D1Database, task: FxTaskRow, instrument: F
     cursor: nextCursor,
     quality: { ...quality, insertedBars: cumulative },
     insertedCount: cumulative,
-    message: complete ? (inserted ? `增量更新完成，写入 ${inserted.toLocaleString()} 根 K 线` : "当前没有新的完整 5m K 线") : "本次达到分页上限，等待继续处理",
+    message: complete ? (inserted ? `增量更新完成，写入 ${inserted.toLocaleString()} 根 K 线` : "当前没有新的完整 1m K 线") : "本次达到分页上限，等待继续处理",
     error: null,
     finishedAt: complete ? nowIso() : null,
   });
@@ -702,18 +889,24 @@ export async function runFxTask(db: D1Database, taskId: string) {
   const task = await getFxTask(db, taskId);
   if (!task) throw new Error("外汇任务不存在");
   if (["paused", "cancelled", "completed"].includes(task.status)) return task;
-  const instrument = getFxInstrumentDefinition(task.instrumentId);
-  if (!instrument) throw new Error("任务中的外汇品种已不再受支持");
-  const startedAt = task.startedAt ?? nowIso();
-  await updateTask(db, task.id, {
-    status: "running",
-    stage: task.stage === "queued" ? "download" : task.stage,
-    message: task.mode === "initialize" ? "外汇历史任务正在处理" : "外汇增量任务正在处理",
-    startedAt,
-    error: null,
-  });
-  if (task.mode === "initialize") return runHistoricalTask(db, task, instrument);
-  return runIncrementalTask(db, task, instrument);
+  if (activeFxTaskRuns.has(taskId)) return task;
+  activeFxTaskRuns.add(taskId);
+  try {
+    const instrument = getFxInstrumentDefinition(task.instrumentId);
+    if (!instrument) throw new Error("任务中的外汇品种已不再受支持");
+    const startedAt = task.startedAt ?? nowIso();
+    await updateTask(db, task.id, {
+      status: "running",
+      stage: task.stage === "queued" ? "download" : task.stage,
+      message: task.mode === "initialize" ? "外汇历史任务正在处理" : "外汇增量任务正在处理",
+      startedAt,
+      error: null,
+    });
+    if (task.mode === "initialize") return runHistoricalTask(db, task, instrument);
+    return runIncrementalTask(db, task, instrument);
+  } finally {
+    activeFxTaskRuns.delete(taskId);
+  }
 }
 
 export async function failFxTask(db: D1Database, taskId: string, error: unknown) {

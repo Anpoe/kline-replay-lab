@@ -8,7 +8,11 @@ import {
 export const DUKASCOPY_WIDGET_CONFIG_URL = "https://widgets.dukascopy.com/en/config.json";
 /** Stable official fallback used when the widget config points at a test host. */
 export const DUKASCOPY_PRODUCTION_SERVER_URL = "https://jetta.dukascopy.com";
-const DEFAULT_TIMEOUT_MS = 15_000;
+const DEFAULT_TIMEOUT_MS = 20_000;
+const DEFAULT_MAX_ATTEMPTS = 3;
+const DEFAULT_RETRY_BASE_DELAY_MS = 750;
+const DEFAULT_DAILY_CONCURRENCY = 4;
+const MAX_RETRY_DELAY_MS = 8_000;
 
 type JsonObject = Record<string, unknown>;
 
@@ -48,6 +52,12 @@ export type DukascopyOfficialClientOptions = {
   configUrl?: string;
   /** Prevent a blocked upstream from holding a task open indefinitely. */
   timeoutMs?: number;
+  /** Total attempts for retryable requests, including the first request. */
+  maxAttempts?: number;
+  /** Initial retry delay; each later retry uses exponential backoff. */
+  retryBaseDelayMs?: number;
+  /** Number of daily candle files downloaded at the same time. */
+  dailyConcurrency?: number;
 };
 
 export type DukascopyOfficialDownloadRequest = {
@@ -67,13 +77,73 @@ export type DukascopyOfficialParseResult = DukascopyParseResult & {
 export class DukascopyOfficialClientError extends Error {
   readonly status?: number;
   readonly url: string;
+  readonly retryAfterMs?: number;
 
-  constructor(message: string, url: string, status?: number) {
+  constructor(message: string, url: string, status?: number, retryAfterMs?: number) {
     super(message);
     this.name = "DukascopyOfficialClientError";
     this.url = url;
     this.status = status;
+    this.retryAfterMs = retryAfterMs;
   }
+}
+
+function positiveInteger(value: unknown, fallback: number, maximum: number) {
+  const number = Number(value);
+  if (!Number.isFinite(number) || number <= 0) return fallback;
+  return Math.min(Math.max(Math.floor(number), 1), maximum);
+}
+
+function retryAfterMilliseconds(response: Response) {
+  const value = response.headers.get("retry-after")?.trim();
+  if (!value) return undefined;
+  const seconds = Number(value);
+  if (Number.isFinite(seconds) && seconds >= 0) return seconds * 1000;
+  const timestamp = Date.parse(value);
+  return Number.isFinite(timestamp) ? Math.max(0, timestamp - Date.now()) : undefined;
+}
+
+function isRetryableError(error: unknown) {
+  if (!(error instanceof DukascopyOfficialClientError)) return false;
+  return error.status === undefined
+    || error.status === 408
+    || error.status === 425
+    || error.status === 429
+    || error.status >= 500;
+}
+
+function waitForRetry(delayMs: number, signal?: AbortSignal) {
+  if (signal?.aborted) return Promise.reject(signal.reason ?? new Error("Request cancelled"));
+  return new Promise<void>((resolve, reject) => {
+    const timer = setTimeout(() => {
+      signal?.removeEventListener("abort", onAbort);
+      resolve();
+    }, delayMs);
+    const onAbort = () => {
+      clearTimeout(timer);
+      signal?.removeEventListener("abort", onAbort);
+      reject(signal.reason ?? new Error("Request cancelled"));
+    };
+    signal?.addEventListener("abort", onAbort, { once: true });
+  });
+}
+
+async function mapWithConcurrency<Input, Output>(
+  items: readonly Input[],
+  concurrency: number,
+  worker: (item: Input, index: number) => Promise<Output>,
+) {
+  const results = new Array<Output>(items.length);
+  let nextIndex = 0;
+  const runners = Array.from({ length: Math.min(concurrency, items.length) }, async () => {
+    while (nextIndex < items.length) {
+      const index = nextIndex;
+      nextIndex += 1;
+      results[index] = await worker(items[index], index);
+    }
+  });
+  await Promise.all(runners);
+  return results;
 }
 
 function defaultFetcher(input: string | URL, init?: RequestInit) {
@@ -246,6 +316,9 @@ export class DukascopyOfficialClient {
   private readonly configUrl: string;
   private readonly configuredServerUrl?: string;
   private readonly timeoutMs: number;
+  private readonly maxAttempts: number;
+  private readonly retryBaseDelayMs: number;
+  private readonly dailyConcurrency: number;
   private serverUrlsPromise?: Promise<string[]>;
   private readonly instrumentCache = new Map<string, Promise<OfficialInstrumentInfo>>();
 
@@ -256,6 +329,11 @@ export class DukascopyOfficialClient {
     this.timeoutMs = Number.isFinite(options.timeoutMs) && Number(options.timeoutMs) > 0
       ? Number(options.timeoutMs)
       : DEFAULT_TIMEOUT_MS;
+    this.maxAttempts = positiveInteger(options.maxAttempts, DEFAULT_MAX_ATTEMPTS, 6);
+    this.retryBaseDelayMs = Number.isFinite(options.retryBaseDelayMs) && Number(options.retryBaseDelayMs) >= 0
+      ? Number(options.retryBaseDelayMs)
+      : DEFAULT_RETRY_BASE_DELAY_MS;
+    this.dailyConcurrency = positiveInteger(options.dailyConcurrency, DEFAULT_DAILY_CONCURRENCY, 6);
   }
 
   private async serverUrls() {
@@ -317,16 +395,23 @@ export class DukascopyOfficialClient {
     const serverUrl = typeof payload.JETTA_SERVER_URL === "string" ? payload.JETTA_SERVER_URL : "";
     if (!serverUrl) return [production];
     const configured = normalizeServerUrl(serverUrl);
-    return [...new Set([configured, production])];
+    const configuredHostname = new URL(configured).hostname.toLowerCase();
+    // The widget may advertise a test host that is frequently unreachable.
+    // Prefer production so each task chunk does not pay a full timeout first.
+    const candidates = configuredHostname.includes(".test.")
+      ? [production]
+      : [configured, production];
+    return [...new Set(candidates)];
   }
 
-  private async requestJson(url: string, signal?: AbortSignal) {
+  private async requestJsonOnce(url: string, signal: AbortSignal | undefined, allowMissing: boolean) {
     const response = await this.fetchWithTimeout(url, {
       method: "GET",
       headers: { accept: "application/json" },
       signal,
     });
     const body = await response.text();
+    if (allowMissing && response.status === 404) return null;
     let payload: unknown = null;
     try {
       payload = body ? JSON.parse(body) : null;
@@ -339,34 +424,48 @@ export class DukascopyOfficialClient {
         `Dukascopy 官方数据返回 HTTP ${response.status}${detail ? `：${String(detail)}` : ""}`,
         url,
         response.status,
+        retryAfterMilliseconds(response),
       );
     }
     return payload;
   }
 
-  private async requestJsonAllowMissing(url: string, signal?: AbortSignal) {
-    const response = await this.fetchWithTimeout(url, {
-      method: "GET",
-      headers: { accept: "application/json" },
-      signal,
-    });
-    const body = await response.text();
-    if (response.status === 404) return null;
-    let payload: unknown = null;
-    try {
-      payload = body ? JSON.parse(body) : null;
-    } catch {
-      if (response.ok) throw new DukascopyOfficialClientError("Dukascopy 官方数据返回的不是 JSON", url, response.status);
+  private async requestJsonWithRetry(url: string, signal: AbortSignal | undefined, allowMissing: boolean) {
+    for (let attempt = 1; attempt <= this.maxAttempts; attempt += 1) {
+      try {
+        return await this.requestJsonOnce(url, signal, allowMissing);
+      } catch (error) {
+        if (signal?.aborted || !isRetryableError(error) || attempt >= this.maxAttempts) {
+          if (isRetryableError(error) && attempt > 1 && error instanceof DukascopyOfficialClientError) {
+            throw new DukascopyOfficialClientError(
+              `${error.message}（已尝试 ${attempt} 次）`,
+              error.url,
+              error.status,
+              error.retryAfterMs,
+            );
+          }
+          throw error;
+        }
+        const retryDelay = Math.max(
+          Math.min(MAX_RETRY_DELAY_MS, this.retryBaseDelayMs * (2 ** (attempt - 1))),
+          error instanceof DukascopyOfficialClientError ? error.retryAfterMs ?? 0 : 0,
+        );
+        try {
+          await waitForRetry(retryDelay, signal);
+        } catch {
+          throw new DukascopyOfficialClientError("Dukascopy 官方数据请求已取消", url);
+        }
+      }
     }
-    if (!response.ok) {
-      const detail = asJsonObject(payload).error;
-      throw new DukascopyOfficialClientError(
-        `Dukascopy 官方数据返回 HTTP ${response.status}${detail ? `：${String(detail)}` : ""}`,
-        url,
-        response.status,
-      );
-    }
-    return payload;
+    throw new DukascopyOfficialClientError("Dukascopy 官方数据请求失败", url);
+  }
+
+  private requestJson(url: string, signal?: AbortSignal) {
+    return this.requestJsonWithRetry(url, signal, false);
+  }
+
+  private requestJsonAllowMissing(url: string, signal?: AbortSignal) {
+    return this.requestJsonWithRetry(url, signal, true);
   }
 
   private async loadInstrument(symbol: string, signal?: AbortSignal): Promise<OfficialInstrumentInfo> {
@@ -375,6 +474,9 @@ export class DukascopyOfficialClient {
     if (cached) return cached;
     const promise = this.fetchInstrument(symbol, signal);
     this.instrumentCache.set(cacheKey, promise);
+    void promise.catch(() => {
+      if (this.instrumentCache.get(cacheKey) === promise) this.instrumentCache.delete(cacheKey);
+    });
     return promise;
   }
 
@@ -441,10 +543,11 @@ export class DukascopyOfficialClient {
     const effectiveStart = Math.max(start, instrument.minuteFrom ?? start);
     if (effectiveStart >= end) return emptyParsedResult(instrument.minuteFrom);
 
-    const candles: FxCandle[] = [];
     const firstDay = new Date(effectiveStart);
     firstDay.setUTCHours(0, 0, 0, 0);
-    for (let day = firstDay.getTime(); day < end; day += 86_400_000) {
+    const days: number[] = [];
+    for (let day = firstDay.getTime(); day < end; day += 86_400_000) days.push(day);
+    const dailyCandles = await mapWithConcurrency(days, this.dailyConcurrency, async (day) => {
       const date = new Date(day);
       let payload: unknown = null;
       let requestedPath = "";
@@ -461,17 +564,18 @@ export class DukascopyOfficialClient {
         payload = await this.requestJsonAllowMissing(requestedPath, request.signal);
         if (payload !== null) break;
       }
-      if (payload === null) continue;
+      if (payload === null) return [];
       try {
-        candles.push(...decodeCandlePayload(payload, start, end));
+        return decodeCandlePayload(payload, start, end);
       } catch (error) {
         throw new DukascopyOfficialClientError(
           error instanceof Error ? error.message : "Dukascopy 官方分钟数据无法解码",
           requestedPath,
         );
       }
-    }
+    });
 
+    const candles = dailyCandles.flat();
     candles.sort((left, right) => left.timestamp - right.timestamp);
     const parsed = parseDukascopyCsv(candleCsvLines(candles), {
       timestampUnit: "milliseconds",

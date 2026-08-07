@@ -178,6 +178,17 @@ function formatCount(value: number | undefined) {
   return typeof value === "number" && Number.isFinite(value) ? value.toLocaleString("zh-CN") : "—";
 }
 
+function formatActivityTime(value: string | undefined) {
+  if (!value) return "—";
+  const timestamp = Date.parse(value);
+  return Number.isFinite(timestamp) ? new Date(timestamp).toLocaleTimeString("zh-CN", { hour12: false }) : value;
+}
+
+function getTaskStatusLabel(task: FxDataTask) {
+  if (task.status === "queued" && Number(task.progress?.completed ?? 0) > 0) return "等待下一分片";
+  return STATUS_LABELS[task.status];
+}
+
 function qualityHasIssues(summary: FxQualitySummary) {
   return [summary.invalidRows, summary.duplicateRows, summary.missingIntervals, summary.abnormalJumps]
     .some((value) => typeof value === "number" && value > 0);
@@ -383,7 +394,7 @@ export function FxDataControlPanel({
         </div>
 
         {!pairs.length && <div className="setup-warning">当前没有可用货币对，请由主组件传入 currencyPairs。</div>}
-        {!rangeIsValid && <small className="provider-setting-help">历史初始化需要有效的日期范围；增量更新日期可留空，留空时由服务端从最后一根完整 5m K 线继续。</small>}
+        {!rangeIsValid && <small className="provider-setting-help">历史初始化需要有效的日期范围；增量更新日期可留空，留空时由服务端从最后一根完整 M1 K 线继续。</small>}
       </div>
 
       <div className={`market-maintenance-card ${taskClassName}`}>
@@ -391,7 +402,7 @@ export function FxDataControlPanel({
         <div>
           <span>FX DATA TASK · {currentTask?.mode === "update" ? "INCREMENTAL" : "HISTORY"}</span>
           <strong>{currentTask
-            ? `${currentTask.pairLabel ?? selectedPair?.label ?? currentTask.pairId} · ${STATUS_LABELS[currentTask.status]}`
+            ? `${currentTask.pairLabel ?? selectedPair?.label ?? currentTask.pairId} · ${getTaskStatusLabel(currentTask)}`
             : "尚未启动外汇任务"}</strong>
           <small>{currentTask?.error || currentTask?.message || "选择货币对和日期后，可以创建 Dukascopy 历史初始化或 Twelve Data 增量任务。"}</small>
 
@@ -410,6 +421,7 @@ export function FxDataControlPanel({
               <small className="maintenance-task-summary">
                 {formatCount(currentTask.progress?.completed)} / {formatCount(currentTask.progress?.total)} {currentTask.progress?.unit ?? "项"}
                 {" · "}当前阶段：{STAGE_LABELS[currentTask.stage]} {typeof currentTask.stageProgress === "number" ? `${Math.round(clampPercent(currentTask.stageProgress))}%` : ""}
+                {" · "}最近活动：{formatActivityTime(currentTask.updatedAt)}
               </small>
             </>
           )}

@@ -2,7 +2,7 @@ import type { NormalizedCandle, QualityReport } from "../marketDataProviders.ts"
 import {
   calculateTwelveDataSyncWindow,
   formatTwelveDataDateTime,
-  getLastCompletedFiveMinuteTimestamp,
+  getLastCompletedOneMinuteTimestamp,
   normalizeTwelveDataPayload,
   parseTwelveDataTimestamp,
   summarizeTwelveDataQuality,
@@ -12,14 +12,14 @@ import {
 } from "./twelveDataNormalize.ts";
 
 export const TWELVE_DATA_TIME_SERIES_URL = "https://api.twelvedata.com/time_series";
-export const TWELVE_DATA_SOURCE = "twelvedata-fx-5m";
+export const TWELVE_DATA_SOURCE = "twelvedata-fx-1m";
 
 export type TwelveDataCursor = {
   /** Twelve Data has no opaque page token for /time_series; date is the cursor. */
   nextStartDate?: string;
 };
 
-export type TwelveDataFiveMinuteRequest = {
+export type TwelveDataOneMinuteRequest = {
   apiKey: string;
   symbol: string;
   startDate?: string | number;
@@ -35,13 +35,13 @@ export type TwelveDataFiveMinuteRequest = {
 };
 
 export type TwelveDataUrlRequest = Pick<
-  TwelveDataFiveMinuteRequest,
+  TwelveDataOneMinuteRequest,
   "apiKey" | "symbol" | "startDate" | "endDate" | "cursor" | "outputsize" | "baseUrl"
 >;
 
 export type TwelveDataFetcher = typeof fetch;
 
-export type TwelveDataFiveMinuteChunk = {
+export type TwelveDataOneMinuteChunk = {
   /** Bars safe for the caller to write to the canonical FX dataset. */
   candles: NormalizedCandle[];
   /** Completed overlap bars before writeFromTimestamp, for read-only comparison. */
@@ -197,7 +197,7 @@ export function buildTwelveDataTimeSeriesUrl(request: TwelveDataUrlRequest) {
   const url = new URL(baseUrl);
   const params = url.searchParams;
   params.set("symbol", normalizeFxSymbol(request.symbol));
-  params.set("interval", "5min");
+  params.set("interval", "1min");
   params.set("outputsize", String(clampOutputsize(request.outputsize)));
   params.set("order", "asc");
   params.set("timezone", "UTC");
@@ -213,7 +213,7 @@ export function buildTwelveDataTimeSeriesUrl(request: TwelveDataUrlRequest) {
 function emptyChunk(options: {
   window?: TwelveDataSyncWindow;
   completedThroughTimestamp: number;
-}): TwelveDataFiveMinuteChunk {
+}): TwelveDataOneMinuteChunk {
   const window = options.window;
   return {
     candles: [],
@@ -249,19 +249,19 @@ function nextCursor(
   requestedEndTimestamp: number | undefined,
 ) {
   if (valuesReceived < outputsize || latestCompletedTimestamp === undefined) return undefined;
-  const candidate = latestCompletedTimestamp + 5 * 60 * 1000;
+  const candidate = latestCompletedTimestamp + 60 * 1000;
   if (requestedStartTimestamp !== undefined && candidate <= requestedStartTimestamp) return undefined;
   if (requestedEndTimestamp !== undefined && candidate > requestedEndTimestamp) return undefined;
   return { nextStartDate: formatTwelveDataDateTime(candidate) } satisfies TwelveDataCursor;
 }
 
-export async function fetchTwelveDataFiveMinuteChunk(
-  request: TwelveDataFiveMinuteRequest,
+export async function fetchTwelveDataOneMinuteChunk(
+  request: TwelveDataOneMinuteRequest,
   fetcher: TwelveDataFetcher = fetch,
-): Promise<TwelveDataFiveMinuteChunk> {
+): Promise<TwelveDataOneMinuteChunk> {
   if (!request.apiKey?.trim()) throw new Error("Twelve Data API key is required");
   const now = request.now ?? Date.now();
-  const completedThroughTimestamp = getLastCompletedFiveMinuteTimestamp(now);
+  const completedThroughTimestamp = getLastCompletedOneMinuteTimestamp(now);
   const hasSyncAnchor = request.lastCompletedTimestamp != null || request.historyBoundary != null;
   const calculatedWindow = hasSyncAnchor
     ? calculateTwelveDataSyncWindow({

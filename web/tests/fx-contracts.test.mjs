@@ -54,7 +54,7 @@ test("历史边界包含 Dukascopy 最后一根，增量起点排他且不回退
   assert.equal(boundary?.nextStartTimestamp, Date.parse("2026-08-06T12:30:00.000Z"));
   assert.equal(calculateFxIncrementStart(boundary, {
     instrumentId: "EURUSD.FX",
-    timeframe: "5m",
+    timeframe: "1m",
     source: "twelvedata",
     lastCompleteTimestamp: first,
     nextStartTimestamp: first,

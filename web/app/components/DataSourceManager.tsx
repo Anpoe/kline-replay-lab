@@ -824,6 +824,7 @@ export function DataSourceManager({
     if (fxTaskLoopRef.current === taskId) return;
     fxTaskLoopRef.current = taskId;
     let failures = 0;
+    let retryDelayMs = 250;
     try {
       while (aliveRef.current) {
         try {
@@ -843,17 +844,20 @@ export function DataSourceManager({
           }
           if (!response.ok || !data.task) {
             failures += 1;
-            setNotice(data.error ?? "外汇任务执行失败");
-            if (failures >= 3) break;
+            retryDelayMs = Math.min(30_000, 1_000 * 2 ** Math.min(failures - 1, 5));
+            setNotice(`${data.error ?? "外汇任务请求暂时失败"}，${Math.ceil(retryDelayMs / 1_000)} 秒后自动重试（第 ${failures} 次）`);
           } else {
+            if (failures) setNotice("");
             failures = 0;
+            retryDelayMs = 250;
           }
         } catch (error) {
           failures += 1;
-          setNotice(error instanceof Error ? error.message : "外汇任务网络请求失败");
-          if (failures >= 3) break;
+          retryDelayMs = Math.min(30_000, 1_000 * 2 ** Math.min(failures - 1, 5));
+          const message = error instanceof Error ? error.message : "外汇任务网络请求失败";
+          setNotice(`${message}，${Math.ceil(retryDelayMs / 1_000)} 秒后自动重试（第 ${failures} 次）`);
         }
-        await new Promise((resolve) => window.setTimeout(resolve, 250));
+        await new Promise((resolve) => window.setTimeout(resolve, retryDelayMs));
       }
     } finally {
       fxTaskLoopRef.current = null;

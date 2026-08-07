@@ -1,7 +1,7 @@
 import type { NormalizedCandle, QualityReport } from "../marketDataProviders.ts";
 
-export const TWELVE_DATA_FIVE_MINUTE_MS = 5 * 60 * 1000;
-export const TWELVE_DATA_FIVE_MINUTE_INTERVAL = "5min" as const;
+export const TWELVE_DATA_ONE_MINUTE_MS = 60 * 1000;
+export const TWELVE_DATA_ONE_MINUTE_INTERVAL = "1min" as const;
 
 export type TwelveDataMeta = {
   symbol?: string;
@@ -42,12 +42,12 @@ export class TwelveDataPayloadError extends Error {
 }
 
 export type TwelveDataNormalizeOptions = {
-  /** The wall-clock time used to decide whether a 5m bar has closed. */
+  /** The wall-clock time used to decide whether a 1m bar has closed. */
   now?: number;
   /** A deterministic cutoff, useful when the caller already computed it. */
   completedThroughTimestamp?: number;
-  /** Keep the project-wide five-minute alignment check enabled by default. */
-  enforceFiveMinuteAlignment?: boolean;
+  /** Keep the one-minute alignment check enabled by default. */
+  enforceOneMinuteAlignment?: boolean;
 };
 
 export type TwelveDataNormalizeResult = {
@@ -87,7 +87,7 @@ function finiteNumber(value: unknown) {
 function finiteTimestamp(value: number | null | undefined, name: string) {
   if (value === null || value === undefined) return undefined;
   if (!Number.isFinite(value)) throw new RangeError(`${name} must be a finite timestamp`);
-  return Math.floor(value / TWELVE_DATA_FIVE_MINUTE_MS) * TWELVE_DATA_FIVE_MINUTE_MS;
+  return Math.floor(value / TWELVE_DATA_ONE_MINUTE_MS) * TWELVE_DATA_ONE_MINUTE_MS;
 }
 
 function positiveInteger(value: number | undefined, fallback: number) {
@@ -136,20 +136,20 @@ export function formatTwelveDataDateTime(timestamp: number) {
 }
 
 /**
- * A bar stamped at floor(now / 5m) is still forming.  The previous bucket is
+ * A bar stamped at floor(now / 1m) is still forming. The previous bucket is
  * therefore the most recent bar that can safely enter the training database.
  */
-export function getLastCompletedFiveMinuteTimestamp(now = Date.now()) {
+export function getLastCompletedOneMinuteTimestamp(now = Date.now()) {
   if (!Number.isFinite(now)) throw new RangeError("now must be a finite timestamp");
-  return Math.floor(now / TWELVE_DATA_FIVE_MINUTE_MS) * TWELVE_DATA_FIVE_MINUTE_MS
-    - TWELVE_DATA_FIVE_MINUTE_MS;
+  return Math.floor(now / TWELVE_DATA_ONE_MINUTE_MS) * TWELVE_DATA_ONE_MINUTE_MS
+    - TWELVE_DATA_ONE_MINUTE_MS;
 }
 
-export function filterCompletedFiveMinuteCandles(
+export function filterCompletedOneMinuteCandles(
   candles: NormalizedCandle[],
   now = Date.now(),
 ) {
-  const cutoff = getLastCompletedFiveMinuteTimestamp(now);
+  const cutoff = getLastCompletedOneMinuteTimestamp(now);
   return candles
     .filter((candle) => Number.isFinite(candle.timestamp) && candle.timestamp <= cutoff)
     .sort((left, right) => left.timestamp - right.timestamp);
@@ -167,7 +167,7 @@ export function calculateTwelveDataSyncWindow(
   options: TwelveDataSyncWindowOptions = {},
 ): TwelveDataSyncWindow {
   const now = options.now ?? Date.now();
-  const endTimestamp = getLastCompletedFiveMinuteTimestamp(now);
+  const endTimestamp = getLastCompletedOneMinuteTimestamp(now);
   const lastCompletedTimestamp = finiteTimestamp(options.lastCompletedTimestamp, "lastCompletedTimestamp");
   const historyBoundary = finiteTimestamp(options.historyBoundary, "historyBoundary");
   const overlapBars = positiveInteger(options.overlapBars, 2);
@@ -177,13 +177,13 @@ export function calculateTwelveDataSyncWindow(
     ...(historyBoundary === undefined ? [] : [historyBoundary]),
   ];
   const anchor = anchors.length ? Math.max(...anchors) : endTimestamp;
-  const requestStartTimestamp = anchor - overlapBars * TWELVE_DATA_FIVE_MINUTE_MS;
+  const requestStartTimestamp = anchor - overlapBars * TWELVE_DATA_ONE_MINUTE_MS;
   const sameSourceWriteStart = lastCompletedTimestamp === undefined
     ? requestStartTimestamp
-    : lastCompletedTimestamp - overlapBars * TWELVE_DATA_FIVE_MINUTE_MS;
+    : lastCompletedTimestamp - overlapBars * TWELVE_DATA_ONE_MINUTE_MS;
   const writeFromTimestamp = historyBoundary === undefined
     ? sameSourceWriteStart
-    : Math.max(historyBoundary + TWELVE_DATA_FIVE_MINUTE_MS, sameSourceWriteStart);
+    : Math.max(historyBoundary + TWELVE_DATA_ONE_MINUTE_MS, sameSourceWriteStart);
 
   return {
     requestStartTimestamp,
@@ -194,11 +194,11 @@ export function calculateTwelveDataSyncWindow(
   };
 }
 
-function isValidCandle(candle: NormalizedCandle, enforceFiveMinuteAlignment: boolean) {
+function isValidCandle(candle: NormalizedCandle, enforceOneMinuteAlignment: boolean) {
   return (
     Number.isFinite(candle.timestamp)
-    && (!enforceFiveMinuteAlignment
-      || candle.timestamp % TWELVE_DATA_FIVE_MINUTE_MS === 0)
+    && (!enforceOneMinuteAlignment
+      || candle.timestamp % TWELVE_DATA_ONE_MINUTE_MS === 0)
     && Number.isFinite(candle.open)
     && Number.isFinite(candle.high)
     && Number.isFinite(candle.low)
@@ -230,9 +230,9 @@ export function normalizeTwelveDataPayload(
     ? []
     : Array.isArray(payload.values) ? payload.values : [];
   const cutoff = options.completedThroughTimestamp
-    ?? getLastCompletedFiveMinuteTimestamp(options.now ?? Date.now());
+    ?? getLastCompletedOneMinuteTimestamp(options.now ?? Date.now());
   if (!Number.isFinite(cutoff)) throw new RangeError("completedThroughTimestamp must be finite");
-  const enforceFiveMinuteAlignment = options.enforceFiveMinuteAlignment ?? true;
+  const enforceOneMinuteAlignment = options.enforceOneMinuteAlignment ?? true;
 
   const unique = new Map<number, NormalizedCandle>();
   let invalid = 0;
@@ -265,7 +265,7 @@ export function normalizeTwelveDataPayload(
       turnover: null,
     };
 
-    if (!isValidCandle(candle, enforceFiveMinuteAlignment)) {
+    if (!isValidCandle(candle, enforceOneMinuteAlignment)) {
       invalid += 1;
       continue;
     }

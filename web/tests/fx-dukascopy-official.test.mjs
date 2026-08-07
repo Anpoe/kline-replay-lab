@@ -111,7 +111,7 @@ test("formats the built-in adapter result as a normal CSV response", () => {
   assert.equal(csv, "timestamp,open,high,low,close,volume\n1767571200000,1.1,1.2,1,1.15,\n");
 });
 
-test("official client falls back from an unreachable widget host and uses the official BID path", async () => {
+test("official client prefers production when widget config advertises a test host", async () => {
   const requested = [];
   const client = new DukascopyOfficialClient({
     timeoutMs: 20,
@@ -135,7 +135,103 @@ test("official client falls back from an unreachable widget host and uses the of
   });
 
   assert.equal(result.report.accepted, 3);
-  assert.ok(requested.some((url) => url.includes("jetta.test.dukascopy.com/v1/instruments/EUR-USD")));
+  assert.ok(!requested.some((url) => url.includes("jetta.test.dukascopy.com/v1/instruments/EUR-USD")));
   assert.ok(requested.some((url) => url.includes("jetta.dukascopy.com/v1/instruments/EUR-USD")));
   assert.ok(requested.some((url) => url.includes("/v1/candles/minute/EUR-USD/BID/2026/1/5")));
+});
+
+test("official client automatically retries a transient daily download failure", async () => {
+  let candleAttempts = 0;
+  const client = new DukascopyOfficialClient({
+    serverUrl: "https://jetta.dukascopy.com",
+    maxAttempts: 2,
+    retryBaseDelayMs: 0,
+    dailyConcurrency: 1,
+    fetcher: async (url) => {
+      const parsed = new URL(url);
+      if (parsed.pathname === "/v1/instruments/EUR-USD") return jsonResponse(instrumentPayload());
+      if (parsed.pathname === "/v1/candles/minute/EUR-USD/BID/2026/1/5") {
+        candleAttempts += 1;
+        if (candleAttempts === 1) throw new Error("Network connection lost.");
+        return jsonResponse(candlePayload());
+      }
+      return jsonResponse({ error: "not found" }, 404);
+    },
+  });
+
+  const result = await client.downloadAndParseCsv({
+    instrument: "EURUSD",
+    start: "2026-01-05",
+    end: "2026-01-05",
+  });
+
+  assert.equal(candleAttempts, 2);
+  assert.equal(result.report.accepted, 3);
+});
+
+test("official client reuses successful instrument metadata across task chunks", async () => {
+  let instrumentRequests = 0;
+  const client = new DukascopyOfficialClient({
+    serverUrl: "https://jetta.dukascopy.com",
+    fetcher: async (url) => {
+      const parsed = new URL(url);
+      if (parsed.pathname === "/v1/instruments/EUR-USD") {
+        instrumentRequests += 1;
+        return jsonResponse(instrumentPayload());
+      }
+      if (parsed.pathname.startsWith("/v1/candles/minute/EUR-USD/BID/2026/1/")) {
+        return jsonResponse(candlePayload());
+      }
+      return jsonResponse({ error: "not found" }, 404);
+    },
+  });
+
+  await client.downloadAndParseCsv({ instrument: "EURUSD", start: "2026-01-05", end: "2026-01-05" });
+  await client.downloadAndParseCsv({ instrument: "EURUSD", start: "2026-01-06", end: "2026-01-06" });
+
+  assert.equal(instrumentRequests, 1);
+});
+
+test("official client limits daily concurrency and keeps candles ordered", async () => {
+  let activeDownloads = 0;
+  let maximumActiveDownloads = 0;
+  const client = new DukascopyOfficialClient({
+    serverUrl: "https://jetta.dukascopy.com",
+    dailyConcurrency: 2,
+    fetcher: async (url) => {
+      const parsed = new URL(url);
+      if (parsed.pathname === "/v1/instruments/EUR-USD") return jsonResponse(instrumentPayload());
+      if (parsed.pathname.startsWith("/v1/candles/minute/EUR-USD/BID/2026/1/")) {
+        activeDownloads += 1;
+        maximumActiveDownloads = Math.max(maximumActiveDownloads, activeDownloads);
+        await new Promise((resolve) => setTimeout(resolve, parsed.pathname.endsWith("/5") ? 12 : 2));
+        activeDownloads -= 1;
+        const day = Number(parsed.pathname.split("/").at(-1));
+        return jsonResponse({
+          data: [{
+            timestamp: Date.UTC(2026, 0, day),
+            open: 1.1,
+            high: 1.2,
+            low: 1,
+            close: 1.15,
+            volume: 1,
+          }],
+        });
+      }
+      return jsonResponse({ error: "not found" }, 404);
+    },
+  });
+
+  const result = await client.downloadAndParseCsv({
+    instrument: "EURUSD",
+    start: "2026-01-05",
+    end: "2026-01-07",
+  });
+
+  assert.equal(maximumActiveDownloads, 2);
+  assert.deepEqual(result.candles.map((candle) => candle.timestamp), [
+    Date.UTC(2026, 0, 5),
+    Date.UTC(2026, 0, 6),
+    Date.UTC(2026, 0, 7),
+  ]);
 });

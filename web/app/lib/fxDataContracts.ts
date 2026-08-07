@@ -472,11 +472,11 @@ export type FxIncrementCursor = string | Readonly<Record<string, string | number
 
 export type FxIncrementCheckpoint = Readonly<{
   instrumentId: FxInstrumentId;
-  timeframe: FxBaseTimeframe;
+  timeframe: "1m";
   source: FxIncrementSource;
-  /** Twelve Data 已成功写入的最后一根完整 5m K 线，包含该时间戳。 */
+  /** Twelve Data 已成功写入的最后一根完整 M1 K 线，包含该时间戳。 */
   lastCompleteTimestamp: number | null;
-  /** API 查询起点，排他且必须 5m 对齐；可由 lastCompleteTimestamp 推导。 */
+  /** API 查询起点，排他且必须 1m 对齐；可由 lastCompleteTimestamp 推导。 */
   nextStartTimestamp: number | null;
   cursor: FxIncrementCursor | null;
   lastSuccessfulAt: number | null;
@@ -494,12 +494,12 @@ export function calculateFxIncrementStart(
   checkpoint: FxIncrementCheckpoint | null,
 ): number | null {
   const starts: number[] = [];
-  if (historyBoundary) starts.push(alignFxTimestampUp(historyBoundary.nextStartTimestamp, FX_BASE_TIMEFRAME));
+  if (historyBoundary) starts.push(alignFxTimestampUp(historyBoundary.nextStartTimestamp, "1m"));
   if (checkpoint?.lastCompleteTimestamp !== null && checkpoint?.lastCompleteTimestamp !== undefined) {
-    starts.push(getFxCandleEndTimestamp(checkpoint.lastCompleteTimestamp, FX_BASE_TIMEFRAME));
+    starts.push(getFxCandleEndTimestamp(checkpoint.lastCompleteTimestamp, "1m"));
   }
   if (checkpoint?.nextStartTimestamp !== null && checkpoint?.nextStartTimestamp !== undefined) {
-    starts.push(alignFxTimestampUp(checkpoint.nextStartTimestamp, FX_BASE_TIMEFRAME));
+    starts.push(alignFxTimestampUp(checkpoint.nextStartTimestamp, "1m"));
   }
   return starts.length === 0 ? null : Math.max(...starts);
 }
