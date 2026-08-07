@@ -764,6 +764,7 @@ function getPersistedDrawings(chart: Chart) {
 }
 
 const periods: Record<string, Period> = {
+  "1m": { type: "minute", span: 1 },
   "5m": { type: "minute", span: 5 },
   "1h": { type: "hour", span: 1 },
   "1d": { type: "day", span: 1 },

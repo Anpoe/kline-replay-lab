@@ -54,6 +54,8 @@ import {
 } from "./KLineReplayChart";
 import { DataSourceManager } from "./DataSourceManager";
 import { ProviderSettingsPanel } from "./ProviderSettingsPanel";
+import { aggregateM1To5m } from "../lib/fx/dukascopyAggregation";
+import { parseDukascopyCsv } from "../lib/fx/dukascopyCsv";
 import {
   CN_A_MAINBOARD_RULES_V1,
   buyQuantityStep,
@@ -514,6 +516,13 @@ function liveWatchObservationTimestamp(watch: LiveWatchRecord) {
     : watch.latestTimestamp;
 }
 
+function liveWatchHasLaterPrice(watch: LiveWatchRecord) {
+  const observationTimestamp = liveWatchObservationTimestamp(watch);
+  return Number.isFinite(watch.latestTimestamp)
+    && Number.isFinite(observationTimestamp)
+    && watch.latestTimestamp > observationTimestamp;
+}
+
 type SnapshotTradeContext = {
   averageDailyVolume?: number;
   averageDailyTurnover?: number;
@@ -596,6 +605,13 @@ type PerformanceFilters = {
   outcome: "all" | "profit" | "loss" | "flat";
   dateFrom: string;
   dateTo: string;
+};
+type LivePerformanceFilters = {
+  buyDateFrom: string;
+  buyDateTo: string;
+  market: "all" | LiveScanMarket;
+  holdingStatus: "all" | "holding" | "pending" | "closed";
+  outcome: "all" | "profit" | "loss" | "flat";
 };
 type ReviewSessionFilters = {
   query: string;
@@ -875,6 +891,13 @@ const defaultPerformanceFilters: PerformanceFilters = {
   dateFrom: "",
   dateTo: "",
 };
+const defaultLivePerformanceFilters: LivePerformanceFilters = {
+  buyDateFrom: "",
+  buyDateTo: "",
+  market: "all",
+  holdingStatus: "all",
+  outcome: "all",
+};
 const defaultReviewSessionFilters: ReviewSessionFilters = {
   query: "",
   timeframe: "all",
@@ -939,7 +962,7 @@ const defaultInstruments = [
   { id: "600519.SH", short: "600519", label: "贵州茅台", market: "A股", assetType: "stock" as const, timeframes: ["1d", "1w"] },
   { id: "AAPL.US", short: "AAPL", label: "Apple", market: "美股", assetType: "stock" as const, timeframes: ["1d"] },
 ];
-const timeframes = ["5m", "1h", "1d", "1w"];
+const timeframes = ["1m", "5m", "1h", "1d", "1w"];
 const coveragePageSize = 100;
 const defaultAppSettings: AppSettings = {
   defaultInstrumentId: "600519.SH",
@@ -1262,7 +1285,7 @@ function randomItem<T>(items: T[]) {
 
 function formatDate(timestamp: number, timeframe: string) {
   const date = new Date(timestamp);
-  return timeframe === "5m" || timeframe === "1h"
+  return timeframe === "1m" || timeframe === "5m" || timeframe === "1h"
     ? date.toLocaleString("zh-CN", { month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit" })
     : date.toLocaleDateString("zh-CN", { year: "numeric", month: "2-digit", day: "2-digit" });
 }
@@ -1507,6 +1530,7 @@ export function TrainingWorkbench() {
   const [trashError, setTrashError] = useState("");
   const [snapshotTradeContexts, setSnapshotTradeContexts] = useState<SnapshotTradeContextMap>({});
   const [performanceFilters, setPerformanceFilters] = useState<PerformanceFilters>(defaultPerformanceFilters);
+  const [livePerformanceFilters, setLivePerformanceFilters] = useState<LivePerformanceFilters>(defaultLivePerformanceFilters);
   const [reviewSessionFilters, setReviewSessionFilters] = useState<ReviewSessionFilters>(defaultReviewSessionFilters);
   const [selectedPerformanceSessionId, setSelectedPerformanceSessionId] = useState("");
   const [importStatus, setImportStatus] = useState("");
@@ -4545,52 +4569,87 @@ export function TrainingWorkbench() {
     const realized = closed.reduce((sum, position) => sum + (position.realizedPnl ?? 0), 0);
     const floating = open.reduce((sum, position) => sum + (portfolio.latestClose - position.entryPrice) * position.qty * (position.side === "long" ? 1 : -1), 0);
     const total = realized + floating;
-    const closedReturns = closed.map((position) => positionReturnPct(position, position.exitPrice ?? position.entryPrice));
-    const values = portfolio.tradingMode === "capital" ? [realized, floating, total] : [
-      portfolioReturnPct(closed, portfolio.latestClose),
-      open.length ? floating / open.reduce((sum, position) => sum + position.entryPrice * position.qty, 0) * 100 : 0,
-      portfolioReturnPct(portfolio.positions, portfolio.latestClose),
-    ];
-    const winning = (portfolio.tradingMode === "capital" ? closed.map((position) => position.realizedPnl ?? 0) : closedReturns).filter((value) => value > 0).length;
-    const losing = (portfolio.tradingMode === "capital" ? closed.map((position) => position.realizedPnl ?? 0) : closedReturns).filter((value) => value < 0).length;
-    const flats = closed.length - winning - losing;
-    return {
-      portfolio,
-      open,
-      closed,
-      pending,
-      realized: values[0],
+     const closedReturns = closed.map((position) => positionReturnPct(position, position.exitPrice ?? position.entryPrice));
+     const values = portfolio.tradingMode === "capital" ? [realized, floating, total] : [
+       portfolioReturnPct(closed, portfolio.latestClose),
+       open.length ? floating / open.reduce((sum, position) => sum + position.entryPrice * position.qty, 0) * 100 : 0,
+       portfolioReturnPct(portfolio.positions, portfolio.latestClose),
+     ];
+     const winning = (portfolio.tradingMode === "capital" ? closed.map((position) => position.realizedPnl ?? 0) : closedReturns).filter((value) => value > 0).length;
+     const losing = (portfolio.tradingMode === "capital" ? closed.map((position) => position.realizedPnl ?? 0) : closedReturns).filter((value) => value < 0).length;
+     const flats = closed.length - winning - losing;
+     const buyTimestamps = [
+       ...portfolio.positions.map((position) => position.entryTimestamp),
+       ...portfolio.pendingOrders
+         .filter((order) => order.action === "open")
+         .map((order) => order.executeAtTimestamp ?? order.createdAt),
+     ].filter((timestamp): timestamp is number => Number.isFinite(timestamp));
+     return {
+       portfolio,
+       open,
+       closed,
+       pending,
+       buyTimestamps,
+       realized: values[0],
       floating: values[1],
       total: values[2],
       winning,
       losing,
       flats,
-    };
-    }), [livePortfolios]);
+     };
+     }), [livePortfolios]);
+  const filteredLivePerformanceRows = useMemo(() => {
+    const dateFrom = livePerformanceFilters.buyDateFrom
+      ? Date.parse(`${livePerformanceFilters.buyDateFrom}T00:00:00`)
+      : Number.NEGATIVE_INFINITY;
+    const dateTo = livePerformanceFilters.buyDateTo
+      ? Date.parse(`${livePerformanceFilters.buyDateTo}T23:59:59.999`)
+      : Number.POSITIVE_INFINITY;
+    return livePerformanceRows.filter((row) => {
+      const buyDateMatches = row.buyTimestamps.some((timestamp) => timestamp >= dateFrom && timestamp <= dateTo);
+      const holdingStatusMatches = livePerformanceFilters.holdingStatus === "all"
+        || (livePerformanceFilters.holdingStatus === "holding" && row.open.length > 0)
+        || (livePerformanceFilters.holdingStatus === "pending" && row.pending.length > 0)
+        || (livePerformanceFilters.holdingStatus === "closed" && row.open.length === 0 && row.pending.length === 0 && row.closed.length > 0);
+      const outcomeMatches = livePerformanceFilters.outcome === "all"
+        || (livePerformanceFilters.outcome === "profit" && row.total > 0.000001)
+        || (livePerformanceFilters.outcome === "loss" && row.total < -0.000001)
+        || (livePerformanceFilters.outcome === "flat" && Math.abs(row.total) <= 0.000001);
+      return (
+        (livePerformanceFilters.buyDateFrom || livePerformanceFilters.buyDateTo ? buyDateMatches : true)
+        && (livePerformanceFilters.market === "all" || row.portfolio.market === livePerformanceFilters.market)
+        && holdingStatusMatches
+        && outcomeMatches
+      );
+    });
+  }, [livePerformanceFilters, livePerformanceRows]);
   const livePerformanceSummary = useMemo(() => {
-    const closedTrades = livePerformanceRows.reduce((sum, row) => sum + row.closed.length, 0);
-    const winning = livePerformanceRows.reduce((sum, row) => sum + row.winning, 0);
-    const losing = livePerformanceRows.reduce((sum, row) => sum + row.losing, 0);
+    const closedTrades = filteredLivePerformanceRows.reduce((sum, row) => sum + row.closed.length, 0);
+    const winning = filteredLivePerformanceRows.reduce((sum, row) => sum + row.winning, 0);
+    const losing = filteredLivePerformanceRows.reduce((sum, row) => sum + row.losing, 0);
     const flats = closedTrades - winning - losing;
     const decisive = winning + losing;
     return {
-      instruments: livePerformanceRows.length,
-      openPositions: livePerformanceRows.reduce((sum, row) => sum + row.open.length, 0),
-      pendingOrders: livePerformanceRows.reduce((sum, row) => sum + row.pending.length, 0),
+      instruments: filteredLivePerformanceRows.length,
+      openPositions: filteredLivePerformanceRows.reduce((sum, row) => sum + row.open.length, 0),
+      pendingOrders: filteredLivePerformanceRows.reduce((sum, row) => sum + row.pending.length, 0),
       closedTrades,
       winning,
       losing,
       flats,
       winRate: decisive ? Math.round(winning / decisive * 100) : 0,
-      total: livePerformanceRows.reduce((sum, row) => sum + row.total, 0),
-      realized: livePerformanceRows.reduce((sum, row) => sum + row.realized, 0),
-      floating: livePerformanceRows.reduce((sum, row) => sum + row.floating, 0),
+      total: filteredLivePerformanceRows.reduce((sum, row) => sum + row.total, 0),
+      realized: filteredLivePerformanceRows.reduce((sum, row) => sum + row.realized, 0),
+      floating: filteredLivePerformanceRows.reduce((sum, row) => sum + row.floating, 0),
     };
-  }, [livePerformanceRows]);
-
+  }, [filteredLivePerformanceRows]);
+  const livePerformanceCapitalMode = filteredLivePerformanceRows.length
+    ? filteredLivePerformanceRows.some((row) => row.portfolio.tradingMode === "capital")
+    : livePerformanceRows.some((row) => row.portfolio.tradingMode === "capital");
   const liveWatchPerformanceRows = useMemo(() => liveWatchlist.map((watch) => {
     const observationPrice = liveWatchObservationPrice(watch);
-    const change = Number.isFinite(watch.latestClose) && observationPrice > 0
+    const pending = !liveWatchHasLaterPrice(watch);
+    const change = !pending && Number.isFinite(watch.latestClose) && observationPrice > 0
       ? watch.latestClose - observationPrice
       : null;
     const returnPct = change === null ? null : change / observationPrice * 100;
@@ -4598,12 +4657,14 @@ export function TrainingWorkbench() {
       watch,
       observationPrice,
       observationTimestamp: liveWatchObservationTimestamp(watch),
+      pending,
       change,
       returnPct,
     };
   }), [liveWatchlist]);
   const liveWatchPerformanceSummary = useMemo(() => {
-    const pricedRows = liveWatchPerformanceRows.filter((row) => row.returnPct !== null);
+    const pricedRows = liveWatchPerformanceRows.filter((row) => !row.pending && row.returnPct !== null);
+    const pendingRows = liveWatchPerformanceRows.filter((row) => row.pending);
     const winning = pricedRows.filter((row) => row.returnPct !== null && row.returnPct > 0.000001).length;
     const losing = pricedRows.filter((row) => row.returnPct !== null && row.returnPct < -0.000001).length;
     const flats = pricedRows.length - winning - losing;
@@ -4619,7 +4680,7 @@ export function TrainingWorkbench() {
     return {
       instruments: liveWatchPerformanceRows.length,
       priced: pricedRows.length,
-      pending: liveWatchPerformanceRows.length - pricedRows.length,
+      pending: pendingRows.length,
       winning,
       losing,
       flats,
@@ -5283,7 +5344,7 @@ export function TrainingWorkbench() {
       const text = await file.text();
       const lines = text.trim().split(/\r?\n/);
       const headers = lines[0].split(",").map((item) => item.trim().toLowerCase());
-      const barsToImport = lines.slice(1).filter(Boolean).map((line) => {
+      const genericBars = lines.slice(1).filter(Boolean).map((line) => {
         const cells = line.split(",").map((item) => item.trim());
         const row = Object.fromEntries(headers.map((header, index) => [header, cells[index]]));
         let timestamp = Number(row.timestamp);
@@ -5299,25 +5360,36 @@ export function TrainingWorkbench() {
           turnover: row.turnover ? Number(row.turnover) : undefined,
         };
       });
+      const fxParsed = dataMarket === "FX" ? parseDukascopyCsv(text, { timestampTimeZone: "UTC" }) : null;
+      const barsToImport = dataMarket === "FX"
+        ? aggregateM1To5m(fxParsed?.candles ?? []).map((bar) => ({ ...bar }))
+        : genericBars;
+      if (!barsToImport.length) throw new Error("CSV 没有可导入的有效 K 线");
       const customId = `CUSTOM.${dataMarket}.${file.name.replace(/\.[^.]+$/, "").toUpperCase()}`;
       const timezone = dataMarket === "CN"
         ? "Asia/Shanghai"
         : dataMarket === "US"
           ? "America/New_York"
           : "UTC";
+      const importTimeframe = dataMarket === "FX" ? "5m" : "1d";
+      let imported = 0;
+      for (let offset = 0; offset < barsToImport.length; offset += 4000) {
       const response = await fetch("/api/candles", {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({
           instrument: { id: customId, symbol: customId, name: file.name, market: dataMarket, timezone },
-          timeframe: "1d",
+          timeframe: importTimeframe,
           adjustmentType: "none",
-          bars: barsToImport,
+          bars: barsToImport.slice(offset, offset + 4000),
         }),
       });
-      const result = await response.json() as { imported?: number; error?: string };
+        const result = await response.json() as { imported?: number; error?: string };
+        imported += Number(result.imported ?? 0);
       if (!response.ok) throw new Error(result.error ?? "导入失败");
       setImportStatus(`已导入 ${result.imported} 根日 K`);
+      }
+      setImportStatus(`宸插鍏?${imported} ${importTimeframe} K`);
       await Promise.all([loadCoverage(), loadInstrumentCatalog()]);
     } catch (error) {
       setImportStatus(error instanceof Error ? error.message : "导入失败");
@@ -6823,7 +6895,7 @@ export function TrainingWorkbench() {
 
             <div className="performance-view-tabs" role="tablist" aria-label="表现视图">
               <button type="button" role="tab" aria-selected={performanceSection === "training"} className={performanceSection === "training" ? "active" : ""} onClick={() => setPerformanceSection("training")}>训练表现</button>
-              <button type="button" role="tab" aria-selected={performanceSection === "live"} className={performanceSection === "live" ? "active" : ""} onClick={() => setPerformanceSection("live")}>实盘表现 <span>{livePerformanceRows.length}</span></button>
+              <button type="button" role="tab" aria-selected={performanceSection === "live"} className={performanceSection === "live" ? "active" : ""} onClick={() => setPerformanceSection("live")}>实盘表现 <span>{filteredLivePerformanceRows.length}</span></button>
               <button type="button" role="tab" aria-selected={performanceSection === "watch"} className={performanceSection === "watch" ? "active" : ""} onClick={() => setPerformanceSection("watch")}>实盘观望 <span>{liveWatchlist.length}</span></button>
             </div>
 
@@ -6844,31 +6916,73 @@ export function TrainingWorkbench() {
                   </div>
                 </div>
                 <div className="performance-overview live-performance-overview">
-                  <div className="performance-hero"><span>实盘观察收益</span><strong className={livePerformanceSummary.total >= 0 ? "up" : "down"}>{livePerformanceRows.some((row) => row.portfolio.tradingMode === "capital") ? money(livePerformanceSummary.total) : percent(livePerformanceSummary.total)}</strong><small>{livePerformanceSummary.instruments} 个品种，{livePerformanceSummary.openPositions} 个持仓，{livePerformanceSummary.pendingOrders} 笔待成交，{livePerformanceSummary.closedTrades} 笔已平仓</small></div>
+                  <div className="performance-hero"><span>实盘观察收益</span><strong className={livePerformanceSummary.total >= 0 ? "up" : "down"}>{livePerformanceCapitalMode ? money(livePerformanceSummary.total) : percent(livePerformanceSummary.total)}</strong><small>{livePerformanceSummary.instruments} 个品种，{livePerformanceSummary.openPositions} 个持仓，{livePerformanceSummary.pendingOrders} 笔待成交，{livePerformanceSummary.closedTrades} 笔已平仓</small></div>
                   <div className="performance-metric"><span>观察品种</span><strong>{livePerformanceSummary.instruments}</strong><small>来自实盘筛选结果；待成交也会保留</small></div>
                   <div className="performance-metric"><span>按成交的胜率</span><strong>{livePerformanceSummary.winRate}%</strong><small>{livePerformanceSummary.winning} 胜 / {livePerformanceSummary.losing} 负 / {livePerformanceSummary.flats} 平局</small></div>
-                  <div className="performance-metric"><span>已实现收益</span><strong className={livePerformanceSummary.realized >= 0 ? "up" : "down"}>{livePerformanceRows.some((row) => row.portfolio.tradingMode === "capital") ? money(livePerformanceSummary.realized) : percent(livePerformanceSummary.realized)}</strong><small>已平仓交易合计</small></div>
-                  <div className="performance-metric"><span>浮动收益</span><strong className={livePerformanceSummary.floating >= 0 ? "up" : "down"}>{livePerformanceRows.some((row) => row.portfolio.tradingMode === "capital") ? money(livePerformanceSummary.floating) : percent(livePerformanceSummary.floating)}</strong><small>按最新价重算</small></div>
-                  <div className="performance-metric"><span>数据同步</span><strong>{livePerformanceRows.length ? "已同步" : "--"}</strong><small>不影响训练统计</small></div>
+                  <div className="performance-metric"><span>已实现收益</span><strong className={livePerformanceSummary.realized >= 0 ? "up" : "down"}>{livePerformanceCapitalMode ? money(livePerformanceSummary.realized) : percent(livePerformanceSummary.realized)}</strong><small>已平仓交易合计</small></div>
+                  <div className="performance-metric"><span>浮动收益</span><strong className={livePerformanceSummary.floating >= 0 ? "up" : "down"}>{livePerformanceCapitalMode ? money(livePerformanceSummary.floating) : percent(livePerformanceSummary.floating)}</strong><small>按最新价重算</small></div>
+                  <div className="performance-metric"><span>数据同步</span><strong>{filteredLivePerformanceRows.length ? "已同步" : "--"}</strong><small>不影响训练统计</small></div>
                 </div>
+                <article className="performance-filter-card live-performance-filter-card">
+                  <div className="performance-section-head">
+                    <div>
+                      <span className="section-label">FILTER</span>
+                      <h2>筛选实盘表现</h2>
+                    </div>
+                    <button type="button" className="ghost-button" onClick={() => setLivePerformanceFilters(defaultLivePerformanceFilters)}>清除筛选</button>
+                  </div>
+                  <div className="performance-filters live-performance-filters">
+                    <label>买入日期从
+                      <input type="date" value={livePerformanceFilters.buyDateFrom} onChange={(event) => setLivePerformanceFilters((filters) => ({ ...filters, buyDateFrom: event.target.value }))} />
+                    </label>
+                    <label>买入日期至
+                      <input type="date" value={livePerformanceFilters.buyDateTo} onChange={(event) => setLivePerformanceFilters((filters) => ({ ...filters, buyDateTo: event.target.value }))} />
+                    </label>
+                    <label>市场
+                      <select value={livePerformanceFilters.market} onChange={(event) => setLivePerformanceFilters((filters) => ({ ...filters, market: event.target.value as LivePerformanceFilters["market"] }))}>
+                        <option value="all">全部市场</option>
+                        <option value="CN">A股</option>
+                        <option value="US">美股</option>
+                      </select>
+                    </label>
+                    <label>持有状态
+                      <select value={livePerformanceFilters.holdingStatus} onChange={(event) => setLivePerformanceFilters((filters) => ({ ...filters, holdingStatus: event.target.value as LivePerformanceFilters["holdingStatus"] }))}>
+                        <option value="all">全部状态</option>
+                        <option value="holding">持仓中</option>
+                        <option value="pending">待成交</option>
+                        <option value="closed">已平仓</option>
+                      </select>
+                    </label>
+                    <label>盈亏
+                      <select value={livePerformanceFilters.outcome} onChange={(event) => setLivePerformanceFilters((filters) => ({ ...filters, outcome: event.target.value as LivePerformanceFilters["outcome"] }))}>
+                        <option value="all">全部盈亏</option>
+                        <option value="profit">盈利</option>
+                        <option value="loss">亏损</option>
+                        <option value="flat">持平/无盈亏</option>
+                      </select>
+                    </label>
+                  </div>
+                  <small className="live-performance-filter-hint">买入日期按持仓开仓时间或待成交买入订单时间匹配；筛选结果会同步更新上方统计。</small>
+                </article>
                 <div className="performance-sessions live-performance-sessions">
                   <div className="performance-section-head"><div><span className="section-label">WATCHLIST</span><h2>实盘观察标的</h2></div><div className="live-performance-actions"><small>点击打开标的，继续观察或交易</small><button type="button" className="ghost-button live-review-button" disabled={!livePortfolios.length} onClick={reviewLivePortfolios}><BookOpenCheck size={13} />审阅</button></div></div>
-                  {livePerformanceRows.length ? (
+                  {filteredLivePerformanceRows.length ? (
                     <div className="live-performance-list">
-                      {livePerformanceRows.map((row) => {
+                      {filteredLivePerformanceRows.map((row) => {
                         const capital = row.portfolio.tradingMode === "capital";
+                        const buyTimestamp = row.buyTimestamps.length ? Math.min(...row.buyTimestamps) : null;
                         return (
                           <div className="live-performance-row" key={row.portfolio.id}>
                             <span className="live-performance-instrument"><strong>{row.portfolio.symbol}</strong><small>{row.portfolio.name}</small></span>
                             <span><strong>{row.portfolio.market === "CN" ? "A股" : "美股"}</strong><small>{new Date(row.portfolio.latestTimestamp).toLocaleDateString("zh-CN")}</small></span>
-                            <span><strong>{row.open.length} 个持仓</strong><small>{row.pending.length} 笔待成交 · {row.closed.length} 笔已平</small></span>
+                            <span><strong>{row.open.length} 个持仓</strong><small>{buyTimestamp === null ? "暂无买入日期" : `买入 ${new Date(buyTimestamp).toLocaleDateString("zh-CN")} · `}{row.pending.length} 笔待成交 · {row.closed.length} 笔已平</small></span>
                             <span className="live-performance-result"><strong className={row.total >= 0 ? "up" : "down"}>{capital ? money(row.total) : percent(row.total)}</strong><small>已实现 {capital ? money(row.realized) : percent(row.realized)} · 浮动 {capital ? money(row.floating) : percent(row.floating)}</small></span>
                             <button type="button" className="ghost-button" onClick={() => openLivePortfolio(row.portfolio)}><BarChart3 size={14} />打开实盘</button>
                           </div>
                         );
                       })}
                     </div>
-                  ) : <div className="empty-state">还没有实盘订单或持仓。已撤单的委托不会出现在这里。</div>}
+                  ) : <div className="empty-state">{livePerformanceRows.length ? "当前筛选条件下没有匹配的实盘表现。" : "还没有实盘订单或持仓。已撤单的委托不会出现在这里。"}</div>}
                 </div>
               </section>
             ) : performanceSection === "watch" ? (
@@ -6891,7 +7005,7 @@ export function TrainingWorkbench() {
                   {liveWatchlist.length ? (
                     <div className="live-performance-list">
                       {liveWatchPerformanceRows.map((row) => {
-                        const { watch, observationTimestamp, observationPrice, change, returnPct } = row;
+                        const { watch, observationTimestamp, observationPrice, pending, change, returnPct } = row;
                         const result = liveWatchResult(watch);
                         const index = liveWatchlist.findIndex((item) => item.instrumentId === watch.instrumentId);
                         return (
@@ -6899,7 +7013,7 @@ export function TrainingWorkbench() {
                             <span className="live-performance-instrument"><strong>{watch.symbol}</strong><small>{watch.name}</small></span>
                             <span><strong>{watch.market === "CN" ? "A股" : "美股"}</strong><small>{new Date(watch.latestTimestamp).toLocaleDateString("zh-CN")}</small></span>
                             <span><strong>{watch.latestClose.toFixed(4)}</strong><small>最新价 · 观望日开盘基准 {observationPrice.toFixed(4)} · {new Date(observationTimestamp).toLocaleDateString("zh-CN")}</small></span>
-                            <span className="live-performance-result"><strong className={returnPct === null || returnPct >= 0 ? "up" : "down"}>{returnPct === null ? "--" : percent(returnPct)}</strong><small>{change === null ? "观望基准价不可用" : `开盘基准 ${observationPrice.toFixed(4)} · 价格变动 ${priceDelta(change)} · ${watch.presetNames.length ? watch.presetNames.join(" · ") : "未设置形态"}`}</small></span>
+                            <span className="live-performance-result"><strong className={returnPct === null || returnPct >= 0 ? "up" : "down"}>{pending ? "待计算" : returnPct === null ? "--" : percent(returnPct)}</strong><small>{pending ? "观望日行情尚未产生后续价格" : change === null ? "观望基准价不可用" : `开盘基准 ${observationPrice.toFixed(4)} · 价格变动 ${priceDelta(change)} · ${watch.presetNames.length ? watch.presetNames.join(" · ") : "未设置形态"}`}</small></span>
                             <span className="live-watch-row-actions"><button type="button" className="ghost-button" onClick={() => openLiveScanResult(result, index >= 0 ? index : undefined, "watch")}><BarChart3 size={14} />打开</button><button type="button" className="row-action danger" onClick={() => removeLiveWatch(watch.instrumentId)}>移除</button></span>
                           </div>
                         );

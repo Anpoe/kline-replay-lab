@@ -833,6 +833,8 @@ button { color: inherit; }
   width: 100%; min-width: 0; color: #cbd6d4; background: var(--surface-soft); border: 1px solid var(--line-strong); border-radius: 8px; padding: 9px 10px; outline: none;
 }
 .performance-filters select:focus, .performance-filters input:focus { border-color: rgba(32, 201, 151, .5); }
+.live-performance-filters { grid-template-columns: repeat(5, minmax(0, 1fr)); }
+.live-performance-filter-hint { display: block; margin-top: 10px; color: var(--faint); font-size: 9px; line-height: 1.5; }
 .filtered-performance-head { margin-top: 22px; }
 .filtered-performance-grid { display: grid; grid-template-columns: repeat(6, 1fr); gap: 10px; }
 .filtered-performance-grid strong { display: block; margin: 11px 0 7px; font: 650 21px/1 var(--font-geist-mono), monospace; }

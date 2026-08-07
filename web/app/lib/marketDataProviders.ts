@@ -41,6 +41,8 @@ export type ProviderSecrets = {
   tushareToken?: string;
   alpacaKeyId?: string;
   alpacaSecretKey?: string;
+  twelveDataApiKey?: string;
+  dukascopyEndpoint?: string;
 };
 
 export type ProviderChunk = {

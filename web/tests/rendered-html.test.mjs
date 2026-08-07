@@ -90,9 +90,18 @@ test("ships the K-line training workbench instead of the starter", async () => {
   assert.match(workbench, /scanTimestamp/);
   assert.match(workbench, /entryTimestamp/);
   assert.match(workbench, /observationPrice/);
+  assert.match(workbench, /function liveWatchHasLaterPrice/);
+  assert.match(workbench, /watch\.latestTimestamp > observationTimestamp/);
+  assert.match(workbench, /const pending = !liveWatchHasLaterPrice\(watch\)/);
+  assert.match(workbench, /!row\.pending && row\.returnPct !== null/);
   assert.match(workbench, /观望当日开盘价/);
   assert.match(workbench, /liveWatchPerformanceRows/);
   assert.match(workbench, /liveWatchPerformanceSummary/);
+  assert.match(workbench, /type LivePerformanceFilters/);
+  assert.match(workbench, /buyDateFrom/);
+  assert.match(workbench, /holdingStatus/);
+  assert.match(workbench, /filteredLivePerformanceRows/);
+  assert.match(workbench, /row\.buyTimestamps/);
   assert.match(workbench, /performanceFilters\.market/);
   assert.match(workbench, /performanceFilters\.outcome/);
   assert.match(workbench, /performanceMarketOptions/);

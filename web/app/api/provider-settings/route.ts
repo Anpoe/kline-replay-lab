@@ -2,11 +2,13 @@ import { ensureSchema, getRawDb } from "../../../db/runtime";
 import { loadProviderSecrets } from "../../lib/providerCredentials";
 
 type ProviderSettingsInput = {
-  provider?: "tushare" | "alpaca" | "tdxquant";
+  provider?: "tushare" | "alpaca" | "tdxquant" | "twelvedata" | "dukascopy";
   tushareToken?: string;
   alpacaKeyId?: string;
   alpacaSecretKey?: string;
   tdxQuantEndpoint?: string;
+  twelveDataApiKey?: string;
+  dukascopyEndpoint?: string;
 };
 
 function hint(value?: string) {
@@ -33,6 +35,16 @@ export async function GET() {
         configured: Boolean(tdxQuantEndpoint),
         source: sources.tdxquant,
         endpoint: tdxQuantEndpoint,
+      },
+      twelvedata: {
+        configured: Boolean(secrets.twelveDataApiKey),
+        source: sources.twelvedata,
+        hint: hint(secrets.twelveDataApiKey),
+      },
+      dukascopy: {
+        configured: true,
+        source: sources.dukascopy,
+        endpoint: secrets.dukascopyEndpoint,
       },
     },
   });
@@ -66,6 +78,31 @@ export async function PUT(request: Request) {
       return Response.json({ error: "TdxQuant 只能连接本机 127.0.0.1 或 localhost" }, { status: 400 });
     }
     credentials = { tdxQuantEndpoint: endpoint };
+  } else if (payload.provider === "twelvedata") {
+    const apiKey = payload.twelveDataApiKey?.trim();
+    if (!apiKey) return Response.json({ error: "请填写 Twelve Data API Key" }, { status: 400 });
+    credentials = { twelveDataApiKey: apiKey };
+  } else if (payload.provider === "dukascopy") {
+    const endpoint = payload.dukascopyEndpoint?.trim();
+    if (!endpoint) return Response.json({ error: "请填写 Dukascopy CSV 服务地址" }, { status: 400 });
+    let parsed: URL;
+    try {
+      parsed = new URL(endpoint);
+    } catch {
+      return Response.json({ error: "Dukascopy CSV 服务地址格式不正确" }, { status: 400 });
+    }
+    if (!/^https?:$/.test(parsed.protocol)) {
+      return Response.json({ error: "Dukascopy CSV 服务地址必须使用 HTTP 或 HTTPS" }, { status: 400 });
+    }
+    const allowedHost = parsed.hostname === "localhost"
+      || parsed.hostname === "127.0.0.1"
+      || parsed.hostname === "::1"
+      || parsed.hostname === "dukascopy.com"
+      || parsed.hostname.endsWith(".dukascopy.com");
+    if (!allowedHost) {
+      return Response.json({ error: "Dukascopy CSV 地址只允许 Dukascopy 官方域名或本机代理" }, { status: 400 });
+    }
+    credentials = { dukascopyEndpoint: endpoint };
   } else {
     return Response.json({ error: "不支持的数据源" }, { status: 400 });
   }
@@ -84,7 +121,7 @@ export async function PUT(request: Request) {
 export async function DELETE(request: Request) {
   await ensureSchema();
   const provider = new URL(request.url).searchParams.get("provider");
-  if (provider !== "tushare" && provider !== "alpaca" && provider !== "tdxquant") {
+  if (provider !== "tushare" && provider !== "alpaca" && provider !== "tdxquant" && provider !== "twelvedata" && provider !== "dukascopy") {
     return Response.json({ error: "不支持的数据源" }, { status: 400 });
   }
   await getRawDb()
@@ -96,6 +133,10 @@ export async function DELETE(request: Request) {
     ? Boolean(secrets.tushareToken)
     : provider === "alpaca"
       ? Boolean(secrets.alpacaKeyId && secrets.alpacaSecretKey)
-      : Boolean(tdxQuantEndpoint);
+      : provider === "tdxquant"
+        ? Boolean(tdxQuantEndpoint)
+        : provider === "twelvedata"
+          ? Boolean(secrets.twelveDataApiKey)
+          : true;
   return Response.json({ provider, configured, source: sources[provider] });
 }

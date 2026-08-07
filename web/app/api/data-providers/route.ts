@@ -30,6 +30,22 @@ export async function GET() {
         supportedTimeframes: ["5m", "1h", "1d", "1w"],
         credentialNames: [],
       },
+      {
+        id: "twelvedata",
+        name: "Twelve Data REST",
+        market: "外汇",
+        configured: Boolean(secrets.twelveDataApiKey),
+        supportedTimeframes: ["5m"],
+        credentialNames: ["TWELVE_DATA_API_KEY"],
+      },
+      {
+        id: "dukascopy",
+        name: "Dukascopy Official CSV Adapter",
+        market: "外汇",
+        configured: true,
+        supportedTimeframes: ["1m"],
+        credentialNames: [],
+      },
     ],
   });
 }

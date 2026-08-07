@@ -52,7 +52,7 @@ npm run dev
 
 ### 本地行情凭证
 
-打开应用侧栏“设置 → 数据源设置”，直接保存 Alpaca API Key ID、Secret Key、Tushare Token 或 TdxQuant 本地端点。配置保存在本地 D1，接口只返回状态和掩码，不会回显完整凭证，也不会进入 Git；保存后无需重启。
+打开应用侧栏“设置 → 数据源设置”，直接保存 Alpaca API Key ID、Secret Key、Tushare Token、Twelve Data API Key 或 TdxQuant 本地端点。配置保存在本地 D1，接口只返回状态和掩码，不会回显完整凭证，也不会进入 Git；保存后无需重启。外汇历史初始化默认使用内置 Dukascopy 官方适配器，服务端读取官方 widget 配置并解码 Jetta 分钟数据；适配器使用官方 `EUR-USD/BID` 路径，测试主机不可达时自动回退官方生产主机，并对网络失败给出超时诊断。历史初始化同时保存 M1 与 5m/1h/1d/1w，训练页可直接选择 1m 回放；已有高周期历史不能反推 M1，需要重新下载对应范围。如需覆盖官方服务，才填写可选的自定义 CSV 地址。增量更新使用 Twelve Data 的 5m REST 接口。
 
 `.env.local` 仍作为高级兼容方式保留，对应字段见 `.env.example`。Tushare 的 5m/1h 历史分钟线还需要对应的数据权限。
 

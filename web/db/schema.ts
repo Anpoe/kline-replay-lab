@@ -157,6 +157,38 @@ export const dataDownloadJobs = sqliteTable(
   ],
 );
 
+export const fxDataTasks = sqliteTable(
+  "fx_data_tasks",
+  {
+    id: text("id").primaryKey(),
+    mode: text("mode").notNull(),
+    instrumentId: text("instrument_id").notNull(),
+    pairLabel: text("pair_label").notNull(),
+    vendorSymbol: text("vendor_symbol").notNull(),
+    dukascopySymbol: text("dukascopy_symbol").notNull(),
+    twelveDataSymbol: text("twelve_data_symbol").notNull(),
+    startDate: text("start_date").notNull(),
+    endDate: text("end_date").notNull(),
+    rawTimeframe: text("raw_timeframe").notNull().default("1m"),
+    targetTimeframesJson: text("target_timeframes_json").notNull().default('["5m","1h","1d","1w"]'),
+    keepRawCsv: integer("keep_raw_csv").notNull().default(0),
+    status: text("status").notNull().default("queued"),
+    stage: text("stage").notNull().default("queued"),
+    stageProgress: real("stage_progress").notNull().default(0),
+    progressJson: text("progress_json").notNull().default("{}"),
+    cursorJson: text("cursor_json").notNull().default("{}"),
+    qualityReportJson: text("quality_report_json").notNull().default("{}"),
+    insertedCount: integer("inserted_count").notNull().default(0),
+    message: text("message"),
+    lastError: text("last_error"),
+    createdAt: text("created_at").notNull(),
+    updatedAt: text("updated_at").notNull(),
+    startedAt: text("started_at"),
+    finishedAt: text("finished_at"),
+  },
+  (table) => [index("fx_data_tasks_status_idx").on(table.status, table.updatedAt)],
+);
+
 export const marketSyncRuns = sqliteTable(
   "market_sync_runs",
   {

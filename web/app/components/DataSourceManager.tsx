@@ -20,9 +20,16 @@ import {
   Trash2,
 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import {
+  DEFAULT_FX_CURRENCY_PAIRS,
+  FxDataControlPanel,
+  type FxDataControlAction,
+  type FxDataTask,
+  type FxQualitySummary,
+} from "./FxDataControlPanel";
 
 type DownloadProviderId = "tushare" | "alpaca";
-type ProviderId = DownloadProviderId | "tdxquant";
+type ProviderId = DownloadProviderId | "tdxquant" | "twelvedata" | "dukascopy";
 type DataMarket = "CN" | "US" | "FX" | "GOLD";
 type Provider = {
   id: ProviderId;
@@ -257,10 +264,13 @@ export function DataSourceManager({
   const [localTask, setLocalTask] = useState<LocalDataTask | null>(null);
   const [catalogTask, setCatalogTask] = useState<CatalogTask | null>(null);
   const [cnMaintenanceTask, setCnMaintenanceTask] = useState<CnMaintenanceTask | null>(null);
+  const [fxTask, setFxTask] = useState<FxDataTask | null>(null);
+  const [fxQuality, setFxQuality] = useState<FxQualitySummary | null>(null);
   const [maintenanceBusy, setMaintenanceBusy] = useState(false);
   const [localServiceAvailable, setLocalServiceAvailable] = useState(true);
   const aliveRef = useRef(true);
   const marketSyncLoopRef = useRef<string | null>(null);
+  const fxTaskLoopRef = useRef<string | null>(null);
   const localServiceAvailableRef = useRef(true);
 
   const loadProviders = useCallback(async () => {
@@ -363,6 +373,21 @@ export function DataSourceManager({
     }
   }, []);
 
+  const loadFxTask = useCallback(async () => {
+    if (market !== "FX") return null;
+    try {
+      const response = await fetch("/api/fx-data", { cache: "no-store" });
+      if (!response.ok) return null;
+      const data = await response.json() as { task?: FxDataTask | null; qualitySummary?: FxQualitySummary | null };
+      const task = data.task ?? null;
+      setFxTask(task);
+      setFxQuality(data.qualitySummary ?? task?.quality ?? null);
+      return task;
+    } catch {
+      return null;
+    }
+  }, [market]);
+
   useEffect(() => {
     aliveRef.current = true;
     const timer = window.setTimeout(() => {
@@ -382,13 +407,14 @@ export function DataSourceManager({
         loadLocalTask(),
         loadCatalogTask(),
         loadCnMaintenanceTask(),
+        loadFxTask(),
       ]);
     }, 0);
     return () => {
       window.clearTimeout(timer);
       aliveRef.current = false;
     };
-  }, [loadCatalogTask, loadCnMaintenanceTask, loadJobs, loadLocalTask, loadMarketSync, loadProviders]);
+  }, [loadCatalogTask, loadCnMaintenanceTask, loadFxTask, loadJobs, loadLocalTask, loadMarketSync, loadProviders]);
 
   useEffect(() => {
     if (!localTask || !["queued", "running"].includes(localTask.status)) return;
@@ -793,6 +819,68 @@ export function DataSourceManager({
     if (!run || !["queued", "running"].includes(run.status)) return;
     if (marketSyncLoopRef.current !== run.id) void runMarketSync(run.id);
   }, [market, marketSync?.run, runMarketSync]);
+
+  const runFxTask = useCallback(async (taskId: string) => {
+    if (fxTaskLoopRef.current === taskId) return;
+    fxTaskLoopRef.current = taskId;
+    let failures = 0;
+    try {
+      while (aliveRef.current) {
+        try {
+          const response = await fetch("/api/fx-data/run", {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({ taskId }),
+          });
+          const data = await response.json() as { task?: FxDataTask | null; error?: string };
+          if (data.task) {
+            setFxTask(data.task);
+            setFxQuality(data.task.quality ?? null);
+          }
+          if (data.task && ["completed", "failed", "cancelled", "paused"].includes(data.task.status)) {
+            if (data.task.status === "completed") onDataChanged?.();
+            break;
+          }
+          if (!response.ok || !data.task) {
+            failures += 1;
+            setNotice(data.error ?? "外汇任务执行失败");
+            if (failures >= 3) break;
+          } else {
+            failures = 0;
+          }
+        } catch (error) {
+          failures += 1;
+          setNotice(error instanceof Error ? error.message : "外汇任务网络请求失败");
+          if (failures >= 3) break;
+        }
+        await new Promise((resolve) => window.setTimeout(resolve, 250));
+      }
+    } finally {
+      fxTaskLoopRef.current = null;
+      await loadFxTask();
+    }
+  }, [loadFxTask, onDataChanged]);
+
+  useEffect(() => {
+    if (market !== "FX" || !fxTask || !["queued", "running"].includes(fxTask.status)) return;
+    if (fxTaskLoopRef.current !== fxTask.id) void runFxTask(fxTask.id);
+  }, [fxTask, market, runFxTask]);
+
+  const handleFxAction = async (action: FxDataControlAction) => {
+    const isTaskAction = action.type === "task";
+    const response = await fetch(action.apiPath, {
+      method: isTaskAction ? "PATCH" : "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(isTaskAction
+        ? { taskId: action.taskId, action: action.action }
+        : { ...action.payload }),
+    });
+    const data = await response.json() as { task?: FxDataTask | null; error?: string };
+    if (!response.ok || !data.task) throw new Error(data.error ?? "外汇任务操作失败");
+    setFxTask(data.task);
+    setFxQuality(data.task.quality ?? null);
+    if (action.type !== "task" || action.action === "resume" || action.action === "retry") void runFxTask(data.task.id);
+  };
 
   const updateJob = async (job: DownloadJob, action: "pause" | "resume" | "retry") => {
     if (job.syncRunId) {
@@ -1318,7 +1406,20 @@ export function DataSourceManager({
         </div>
       )}
 
-      {(market === "FX" || market === "GOLD") && (
+      {market === "FX" && (
+        <FxDataControlPanel
+          apiPaths={{ initialize: "/api/fx-data/initialize", update: "/api/fx-data/update", task: "/api/fx-data/task" }}
+          currentTask={fxTask}
+          qualitySummary={fxQuality}
+          currencyPairs={DEFAULT_FX_CURRENCY_PAIRS}
+          defaultStartDate="2020-01-01"
+          defaultEndDate={new Date().toISOString().slice(0, 10)}
+          onAction={handleFxAction}
+          onRefreshStatus={async () => { await loadFxTask(); }}
+        />
+      )}
+
+      {market === "GOLD" && (
         <div className="market-maintenance-card unavailable">
           <div className="market-maintenance-icon"><Database size={22} /></div>
           <div>

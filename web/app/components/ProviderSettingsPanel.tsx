@@ -5,7 +5,7 @@ import { useCallback, useEffect, useState } from "react";
 
 type ProviderState = {
   configured: boolean;
-  source: "settings" | "environment" | null;
+  source: "settings" | "environment" | "builtin" | null;
   hint?: string;
   keyIdHint?: string;
   endpoint?: string;
@@ -16,6 +16,8 @@ type ProviderSettingsResponse = {
     tushare: ProviderState;
     alpaca: ProviderState;
     tdxquant: ProviderState;
+    twelvedata: ProviderState;
+    dukascopy: ProviderState;
   };
 };
 
@@ -23,11 +25,14 @@ const emptyStatus: ProviderSettingsResponse["providers"] = {
   tushare: { configured: false, source: null },
   alpaca: { configured: false, source: null },
   tdxquant: { configured: false, source: null },
+  twelvedata: { configured: false, source: null },
+  dukascopy: { configured: false, source: null },
 };
 
 function sourceLabel(source: ProviderState["source"]) {
   if (source === "settings") return "已保存在本机设置";
   if (source === "environment") return "来自本机环境文件";
+  if (source === "builtin") return "已启用官方内置适配器";
   return "尚未配置";
 }
 
@@ -37,8 +42,10 @@ export function ProviderSettingsPanel() {
   const [alpacaKeyId, setAlpacaKeyId] = useState("");
   const [alpacaSecretKey, setAlpacaSecretKey] = useState("");
   const [tdxQuantEndpoint, setTdxQuantEndpoint] = useState("http://127.0.0.1:17709");
+  const [twelveDataApiKey, setTwelveDataApiKey] = useState("");
+  const [dukascopyEndpoint, setDukascopyEndpoint] = useState("");
   const [notice, setNotice] = useState("");
-  const [saving, setSaving] = useState<"" | "tushare" | "alpaca" | "tdxquant">("");
+  const [saving, setSaving] = useState<"" | "tushare" | "alpaca" | "tdxquant" | "twelvedata" | "dukascopy">("");
   const [statusLoaded, setStatusLoaded] = useState(false);
 
   const loadStatus = useCallback(async () => {
@@ -49,6 +56,7 @@ export function ProviderSettingsPanel() {
       setStatus(data.providers);
       setStatusLoaded(true);
       if (data.providers.tdxquant.endpoint) setTdxQuantEndpoint(data.providers.tdxquant.endpoint);
+      setDukascopyEndpoint(data.providers.dukascopy.endpoint ?? "");
       return true;
     } catch {
       setStatusLoaded(false);
@@ -72,7 +80,7 @@ export function ProviderSettingsPanel() {
     };
   }, [loadStatus]);
 
-  const saveProvider = async (provider: "tushare" | "alpaca" | "tdxquant") => {
+  const saveProvider = async (provider: "tushare" | "alpaca" | "tdxquant" | "twelvedata" | "dukascopy") => {
     setSaving(provider);
     setNotice("");
     try {
@@ -83,18 +91,27 @@ export function ProviderSettingsPanel() {
           ? { provider, tushareToken }
           : provider === "alpaca"
             ? { provider, alpacaKeyId, alpacaSecretKey }
-            : { provider, tdxQuantEndpoint }),
+          : provider === "tdxquant"
+            ? { provider, tdxQuantEndpoint }
+            : provider === "twelvedata"
+              ? { provider, twelveDataApiKey }
+              : { provider, dukascopyEndpoint }),
       });
       const result = await response.json() as { error?: string };
       if (!response.ok) throw new Error(result.error ?? "保存失败");
       setTushareToken("");
       setAlpacaKeyId("");
       setAlpacaSecretKey("");
+      setTwelveDataApiKey("");
       await loadStatus();
       window.dispatchEvent(new Event("provider-settings-updated"));
       setNotice(provider === "tdxquant"
         ? "TdxQuant 本地端点已保存。使用分钟数据时仍需启动并登录支持 TQ 的通达信客户端。"
-        : `${provider === "alpaca" ? "Alpaca" : "Tushare"} 凭证已保存在本机。`);
+        : provider === "twelvedata"
+          ? "Twelve Data API Key 已保存在本机。"
+          : provider === "dukascopy"
+            ? "Dukascopy 自定义 CSV 地址已保存在本机。"
+            : `${provider === "alpaca" ? "Alpaca" : "Tushare"} 凭证已保存在本机。`);
     } catch (error) {
       setNotice(error instanceof Error ? error.message : "保存失败");
     } finally {
@@ -102,8 +119,8 @@ export function ProviderSettingsPanel() {
     }
   };
 
-  const clearProvider = async (provider: "tushare" | "alpaca" | "tdxquant") => {
-    const label = provider === "alpaca" ? "Alpaca" : provider === "tushare" ? "Tushare" : "TdxQuant";
+  const clearProvider = async (provider: "tushare" | "alpaca" | "tdxquant" | "twelvedata" | "dukascopy") => {
+    const label = provider === "alpaca" ? "Alpaca" : provider === "tushare" ? "Tushare" : provider === "tdxquant" ? "TdxQuant" : provider === "twelvedata" ? "Twelve Data" : "Dukascopy";
     if (!window.confirm(`清除本机保存的 ${label} 配置？`)) return;
     const response = await fetch(`/api/provider-settings?provider=${provider}`, { method: "DELETE" });
     const result = await response.json() as { error?: string };
@@ -181,6 +198,45 @@ export function ProviderSettingsPanel() {
         <div className="provider-setting-actions">
           {status.tushare.source === "settings" && <button className="delete-session" onClick={() => clearProvider("tushare")}><Trash2 size={13} />清除本机凭证</button>}
           <button className="primary-button" disabled={saving === "tushare"} onClick={() => saveProvider("tushare")}><Save size={14} />保存 Tushare</button>
+        </div>
+      </article>
+
+      <article className="provider-setting-card">
+        <div className="provider-setting-title">
+          <div><KeyRound size={17} /><span><strong>Twelve Data REST</strong><small>外汇 5m 增量更新</small></span></div>
+          <span className={status.twelvedata.configured ? "configured" : ""}>
+            {statusLoaded ? sourceLabel(status.twelvedata.source) : "正在读取本机凭证状态…"}
+            {statusLoaded && status.twelvedata.hint ? ` · ${status.twelvedata.hint}` : ""}
+          </span>
+        </div>
+        <div className="provider-secret-fields single">
+          <label>API Key
+            <input type="password" autoComplete="new-password" value={twelveDataApiKey} onChange={(event) => setTwelveDataApiKey(event.target.value)} placeholder={status.twelvedata.configured ? "输入新值可替换现有凭证" : "填写 Twelve Data API Key"} />
+          </label>
+        </div>
+        <p className="provider-setting-help">密钥只在服务端请求 Twelve Data，前端不会把完整密钥回显。增量更新只写入已经收盘的 5m K 线。</p>
+        <div className="provider-setting-actions">
+          {status.twelvedata.source === "settings" && <button className="delete-session" onClick={() => clearProvider("twelvedata")}><Trash2 size={13} />清除本机凭证</button>}
+          <button className="primary-button" disabled={saving === "twelvedata"} onClick={() => saveProvider("twelvedata")}><Save size={14} />保存 Twelve Data</button>
+        </div>
+      </article>
+
+      <article className="provider-setting-card">
+        <div className="provider-setting-title">
+          <div><Link2 size={17} /><span><strong>Dukascopy CSV</strong><small>外汇历史基准导入</small></span></div>
+          <span className={status.dukascopy.configured ? "configured" : ""}>
+            {statusLoaded ? sourceLabel(status.dukascopy.source) : "正在读取本机配置…"}
+          </span>
+        </div>
+        <div className="provider-secret-fields single">
+          <label>自定义 CSV 服务地址（可选）
+            <input value={dukascopyEndpoint} onChange={(event) => setDukascopyEndpoint(event.target.value)} placeholder="留空即可使用官方内置适配器" />
+          </label>
+        </div>
+        <p className="provider-setting-help">系统已内置官方 Dukascopy 适配器，无需填写地址。只有在你要覆盖官方服务时，才填写一个直接返回 CSV 并接受 instrument、start、end、timeframe 参数的自定义地址。</p>
+        <div className="provider-setting-actions">
+          {status.dukascopy.source === "settings" && <button className="delete-session" onClick={() => clearProvider("dukascopy")}><Trash2 size={13} />清除本机配置</button>}
+          {dukascopyEndpoint.trim() && <button className="primary-button" disabled={saving === "dukascopy"} onClick={() => saveProvider("dukascopy")}><Save size={14} />保存自定义地址</button>}
         </div>
       </article>
 
