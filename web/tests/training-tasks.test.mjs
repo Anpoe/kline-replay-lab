@@ -3,9 +3,15 @@ import test from "node:test";
 
 import {
   advanceWithinTask,
+  DEFAULT_REPLAY_HISTORY_BARS,
   defaultTrainingTaskDraft,
   finishTask,
+  MAX_REPLAY_HISTORY_BARS,
+  MIN_REPLAY_HISTORY_BARS,
+  normalizeReplayHistoryBars,
+  rebaseTrainingTaskToBars,
   resolveTrainingTask,
+  taskVisibleStartCursor,
   taskProgress,
 } from "../app/lib/trainingTasks.ts";
 
@@ -135,4 +141,43 @@ test("persists the complete random setup for the next round", () => {
 
   assert.deepEqual(task.randomConfig, randomConfig);
   assert.notEqual(task.randomConfig, randomConfig);
+});
+
+test("normalizes replay history bars into the supported range", () => {
+  assert.equal(normalizeReplayHistoryBars(undefined), DEFAULT_REPLAY_HISTORY_BARS);
+  assert.equal(normalizeReplayHistoryBars(12), MIN_REPLAY_HISTORY_BARS);
+  assert.equal(normalizeReplayHistoryBars(777.6), 778);
+  assert.equal(normalizeReplayHistoryBars(9000), MAX_REPLAY_HISTORY_BARS);
+});
+
+test("persists a fixed history window for new tasks while legacy tasks keep all history", () => {
+  const task = resolveTrainingTask({
+    ...defaultTrainingTaskDraft,
+    startMode: "bar",
+    startBar: 76,
+    historyBars: 25,
+  }, bars, "Asia/Shanghai", "history-window-seed");
+
+  assert.equal(task.historyBars, MIN_REPLAY_HISTORY_BARS);
+  assert.equal(taskVisibleStartCursor(task), 0);
+  assert.equal(taskVisibleStartCursor({ startCursor: 550, historyBars: 100 }), 450);
+  assert.equal(taskVisibleStartCursor({ startCursor: 550 }), 0);
+});
+
+test("rebases a persisted task onto a partial snapshot window by timestamp", () => {
+  const fullBars = Array.from({ length: 300 }, (_, index) => ({ timestamp: index + 1 }));
+  const task = resolveTrainingTask({
+    ...defaultTrainingTaskDraft,
+    startMode: "bar",
+    startBar: 201,
+    length: 50,
+    historyBars: 100,
+  }, fullBars, "UTC", "range-window-seed");
+  const partialBars = fullBars.slice(100, 251);
+  const rebased = rebaseTrainingTaskToBars(task, partialBars);
+
+  assert.equal(rebased.startCursor, 100);
+  assert.equal(rebased.endCursor, 150);
+  assert.equal(rebased.startTimestamp, task.startTimestamp);
+  assert.equal(rebased.endTimestamp, task.endTimestamp);
 });

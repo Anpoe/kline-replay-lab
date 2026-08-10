@@ -76,9 +76,15 @@ import {
 import {
   advanceWithinTask,
   createLegacyTrainingTask,
+  DEFAULT_REPLAY_HISTORY_BARS,
   defaultTrainingTaskDraft,
   finishTask,
+  MAX_REPLAY_HISTORY_BARS,
+  MIN_REPLAY_HISTORY_BARS,
+  normalizeReplayHistoryBars,
+  rebaseTrainingTaskToBars,
   resolveTrainingTask,
+  taskVisibleStartCursor,
   taskProgress,
   trainingModeLabels,
   type RandomTrainingConfig,
@@ -533,6 +539,7 @@ type TrainingState = {
   version: 7;
   cursor: number;
   cursorTimestamp?: number;
+  dataIndexOffset?: number;
   dataSignature?: string;
   dataSnapshotId?: string;
   snapshotHash?: string;
@@ -626,6 +633,7 @@ type AppSettings = {
   defaultSpeed: number;
   tradingMode: TradingMode;
   initialCapital: number;
+  replayHistoryBars: number;
   randomInstrumentMode: "current" | "all" | "market";
   randomMarket: string;
   randomTimeframeMode: "current" | "all" | "fixed";
@@ -971,6 +979,7 @@ const defaultAppSettings: AppSettings = {
   defaultSpeed: 1,
   tradingMode: "return",
   initialCapital: 100000,
+  replayHistoryBars: DEFAULT_REPLAY_HISTORY_BARS,
   randomInstrumentMode: "all",
   randomMarket: "A股",
   randomTimeframeMode: "all",
@@ -1226,6 +1235,7 @@ function normalizeSettings(value: Partial<AppSettings>): AppSettings {
     defaultOrderQty: Math.max(1, Math.round(Number(merged.defaultOrderQty) || defaultAppSettings.defaultOrderQty)),
     tradingMode: merged.tradingMode === "capital" ? "capital" : "return",
     initialCapital: Math.max(1000, Math.round(Number(merged.initialCapital) || defaultAppSettings.initialCapital)),
+    replayHistoryBars: normalizeReplayHistoryBars(merged.replayHistoryBars),
     defaultSpeed: [0.5, 1, 2, 5].includes(Number(merged.defaultSpeed))
       ? Number(merged.defaultSpeed)
       : defaultAppSettings.defaultSpeed,
@@ -1409,6 +1419,7 @@ export function TrainingWorkbench() {
     pricePrecision: 2,
   });
   const [bars, setBars] = useState<KLineData[]>([]);
+  const [snapshotDataIndexOffset, setSnapshotDataIndexOffset] = useState(0);
   const [cursor, setCursor] = useState(0);
   const [loading, setLoading] = useState(true);
   const [playing, setPlaying] = useState(false);
@@ -1577,7 +1588,12 @@ export function TrainingWorkbench() {
     liveWatchlistRef.current = liveWatchlist;
   }, [liveWatchlist]);
 
-  const visibleBars = useMemo(() => bars.slice(0, cursor + 1), [bars, cursor]);
+  const visibleBarStartIndex = trainingTask ? taskVisibleStartCursor(trainingTask) : 0;
+  const chartDataIndexOffset = snapshotDataIndexOffset + visibleBarStartIndex;
+  const visibleBars = useMemo(
+    () => bars.slice(visibleBarStartIndex, cursor + 1),
+    [bars, cursor, visibleBarStartIndex],
+  );
   const selectedCatalogInstrument = availableInstruments.find((item) => item.id === instrumentId);
   const currentAssetType = inferInstrumentAssetType(
     instrument.id,
@@ -1683,6 +1699,7 @@ export function TrainingWorkbench() {
     version: 7,
     cursor,
     cursorTimestamp: currentBar?.timestamp,
+    dataIndexOffset: snapshotDataIndexOffset,
     dataSignature,
     dataSnapshotId,
     snapshotHash,
@@ -1711,7 +1728,7 @@ export function TrainingWorkbench() {
       equity,
       cashBalance,
     },
-  }), [cashBalance, closedPositions.length, cursor, currentBar?.timestamp, dataSignature, dataSnapshotId, decision, decisionSubmissions, drawings, equity, events, executions, initialCapital, marketRules, openPnl, openPositions.length, orderQty, orderRejections, pendingOrders, positions, randomSeed, realizedPnl, snapshotHash, totalPnl, totalReturnPct, tradingMode, trainingTask]);
+  }), [cashBalance, closedPositions.length, cursor, currentBar?.timestamp, dataSignature, dataSnapshotId, decision, decisionSubmissions, drawings, equity, events, executions, initialCapital, marketRules, openPnl, openPositions.length, orderQty, orderRejections, pendingOrders, positions, randomSeed, realizedPnl, snapshotDataIndexOffset, snapshotHash, totalPnl, totalReturnPct, tradingMode, trainingTask]);
 
   useEffect(() => {
     if (!liveStateHydratedRef.current) return;
@@ -1836,6 +1853,9 @@ export function TrainingWorkbench() {
       version: 7,
       cursor: Number(state.cursor),
       cursorTimestamp: typeof state.cursorTimestamp === "number" ? state.cursorTimestamp : undefined,
+      dataIndexOffset: typeof state.dataIndexOffset === "number" && state.dataIndexOffset >= 0
+        ? Math.floor(state.dataIndexOffset)
+        : undefined,
       dataSignature: typeof state.dataSignature === "string" ? state.dataSignature : undefined,
       dataSnapshotId: typeof state.dataSnapshotId === "string" ? state.dataSnapshotId : undefined,
       snapshotHash: typeof state.snapshotHash === "string" ? state.snapshotHash : undefined,
@@ -2430,9 +2450,24 @@ export function TrainingWorkbench() {
     try {
       const requestedSnapshotId = restoreRequest?.state.dataSnapshotId
         ?? newTaskRequest?.snapshotId;
-      let data: { instrument: Instrument; candles: KLineData[]; snapshot: SnapshotMeta };
+      let data: {
+        instrument: Instrument;
+        candles: KLineData[];
+        snapshot: SnapshotMeta;
+        window?: { startIndex: number; endIndex: number; barCount: number; snapshotBarCount: number; isPartial: boolean };
+      };
       if (requestedSnapshotId) {
-        const response = await fetch(`/api/snapshots?id=${encodeURIComponent(requestedSnapshotId)}`, {
+        const snapshotUrl = new URL("/api/snapshots", window.location.origin);
+        snapshotUrl.searchParams.set("id", requestedSnapshotId);
+        const persistedTask = restoreRequest?.state.trainingTask;
+        if (persistedTask?.historyBars != null
+          && Number.isFinite(persistedTask.startTimestamp)
+          && Number.isFinite(persistedTask.endTimestamp)) {
+          snapshotUrl.searchParams.set("startTimestamp", String(persistedTask.startTimestamp));
+          snapshotUrl.searchParams.set("endTimestamp", String(persistedTask.endTimestamp));
+          snapshotUrl.searchParams.set("lookbackBars", String(normalizeReplayHistoryBars(persistedTask.historyBars)));
+        }
+        const response = await fetch(`${snapshotUrl.pathname}${snapshotUrl.search}`, {
           signal: controller.signal,
         });
         if (!response.ok) throw new Error("训练绑定的数据快照不存在，无法进行确定性恢复");
@@ -2453,8 +2488,10 @@ export function TrainingWorkbench() {
         data = await snapshotResponse.json() as typeof data;
       }
       if (marketLoadRef.current.id !== requestId) return;
+      const loadedDataIndexOffset = data.window?.startIndex ?? 0;
       setInstrument(data.instrument);
       setBars(data.candles);
+      setSnapshotDataIndexOffset(loadedDataIndexOffset);
       setDataSnapshotId(data.snapshot.id);
       setSnapshotHash(data.snapshot.contentHash);
       const loadedMarketRules = restoreRequest?.state.marketRules
@@ -2504,14 +2541,30 @@ export function TrainingWorkbench() {
         const timestampCursor = restoreRequest.state.cursorTimestamp == null
           ? -1
           : data.candles.findIndex((bar) => bar.timestamp === restoreRequest.state.cursorTimestamp);
-        const restoredCursor = timestampCursor >= 0 ? timestampCursor : restoreRequest.state.cursor;
-        setCursor(Math.max(0, Math.min(data.candles.length - 1, restoredCursor)));
+        const previousDataIndexOffset = restoreRequest.state.dataIndexOffset ?? 0;
+        const restoredCursor = timestampCursor >= 0
+          ? timestampCursor
+          : restoreRequest.state.cursor + previousDataIndexOffset - loadedDataIndexOffset;
+        const safeRestoredCursor = Math.max(0, Math.min(data.candles.length - 1, restoredCursor));
+        setCursor(safeRestoredCursor);
         setPositions(restoreRequest.state.positions);
         setPendingOrders(restoreRequest.state.pendingOrders);
         setExecutions(restoreRequest.state.executions);
         setOrderRejections(restoreRequest.state.orderRejections);
         setDecision(restoreRequest.state.decision);
-        setDecisionSubmissions(restoreRequest.state.decisionSubmissions);
+        setDecisionSubmissions(restoreRequest.state.decisionSubmissions.map((submission) => {
+          const timestampIndex = data.candles.findIndex((bar) => bar.timestamp === submission.barTimestamp);
+          const rebasedCursor = timestampIndex >= 0
+            ? timestampIndex
+            : submission.cursor + previousDataIndexOffset - loadedDataIndexOffset;
+          return {
+            ...submission,
+            cursor: Math.max(0, Math.min(data.candles.length - 1, rebasedCursor)),
+            recordedAtCursor: submission.recordedAtCursor == null
+              ? undefined
+              : Math.max(0, submission.recordedAtCursor + previousDataIndexOffset - loadedDataIndexOffset),
+          };
+        }));
         setSelectedDecisionId("");
         setDecisionTarget(null);
         setEditingDecisionId("");
@@ -2526,15 +2579,16 @@ export function TrainingWorkbench() {
         setSessionId(restoreRequest.id);
         setRandomSeed(restoreRequest.state.randomSeed);
         const restoredTask = restoreRequest.state.trainingTask
-          ?? createLegacyTrainingTask(data.candles, Math.max(0, Math.min(data.candles.length - 1, restoredCursor)));
-        setTrainingTask(isTrashPreview ? restoredTask : finishTask(restoredTask, restoredCursor));
+          ? rebaseTrainingTaskToBars(restoreRequest.state.trainingTask, data.candles)
+          : createLegacyTrainingTask(data.candles, safeRestoredCursor);
+        setTrainingTask(isTrashPreview ? restoredTask : finishTask(restoredTask, safeRestoredCursor));
         const lastSequence = restoreRequest.state.events.reduce((maximum, event) => Math.max(maximum, event.sequence), 0);
         eventSequenceRef.current = lastSequence + 1;
         setEvents(isTrashPreview
           ? restoreRequest.state.events
           : [
             ...restoreRequest.state.events,
-            createTrainingEvent(lastSequence + 1, "session_restored", data.candles[restoredCursor]?.timestamp, {
+            createTrainingEvent(lastSequence + 1, "session_restored", data.candles[safeRestoredCursor]?.timestamp, {
               snapshotId: data.snapshot.id,
               snapshotHash: data.snapshot.contentHash,
               marketRuleId: loadedMarketRules.id,
@@ -2549,7 +2603,10 @@ export function TrainingWorkbench() {
         const nextSessionId = createUuid();
         const nextSeed = createUuid();
         const nextTask = resolveTrainingTask(
-          newTaskRequest?.draft ?? defaultTrainingTaskDraft,
+          {
+            ...(newTaskRequest?.draft ?? defaultTrainingTaskDraft),
+            historyBars: appSettingsRef.current.replayHistoryBars,
+          },
           data.candles,
           data.instrument.timezone,
           nextSeed,
@@ -5617,6 +5674,27 @@ export function TrainingWorkbench() {
                     )}
                     <small>切换只影响之后新建的训练；已开始和已保存训练会继续使用创建时锁定的账户模式。</small>
                   </div>
+                  <div className="settings-rule">
+                    <span>图表左侧历史 K 线</span>
+                    <label>新训练显示根数
+                      <input
+                        type="number"
+                        min={MIN_REPLAY_HISTORY_BARS}
+                        max={MAX_REPLAY_HISTORY_BARS}
+                        step="1"
+                        value={settingsDraft.replayHistoryBars}
+                        onChange={(event) => setSettingsDraft((draft) => ({
+                          ...draft,
+                          replayHistoryBars: Number(event.target.value),
+                        }))}
+                        onBlur={() => setSettingsDraft((draft) => ({
+                          ...draft,
+                          replayHistoryBars: normalizeReplayHistoryBars(draft.replayHistoryBars),
+                        }))}
+                      />
+                    </label>
+                    <small>每次新训练开始时，显示起点左侧最近多少根 K 线；最少 100、最多 5000。训练推进后，新揭示的 K 线会继续追加，已保存训练不会随设置变化。</small>
+                  </div>
                   <div className="settings-rule trash-settings-rule">
                     <div className="settings-row-action">
                       <div>
@@ -6459,6 +6537,7 @@ export function TrainingWorkbench() {
                   ) : (
                     <KLineReplayChart
                       bars={visibleBars}
+                      dataIndexOffset={chartDataIndexOffset}
                       symbol={trainingTask?.hideInstrument ? "BLIND" : instrument.symbol}
                       timezone={instrument.timezone}
                       timeframe={timeframe}

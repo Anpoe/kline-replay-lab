@@ -1,93 +1,132 @@
 import { ensureSchema, getRawDb } from "../../../db/runtime";
-import { computeSnapshotDelta, type SnapshotCandle } from "../../lib/dataSnapshots";
+import type { SnapshotCandle } from "../../lib/dataSnapshots";
 import { readLocalDataJson } from "../../lib/localDataService";
+import {
+  buildSnapshotChunks,
+  buildSnapshotContentHash,
+  canonicalStringify,
+  getSnapshotByContentHash,
+  getSnapshotRow,
+  SNAPSHOT_FORMAT_VERSION,
+  SNAPSHOT_NORMALIZATION_VERSION,
+  snapshotResponse,
+  type SnapshotChunk,
+  type SnapshotReadRange,
+} from "../../lib/snapshotStorage";
 
-type CandleRow = SnapshotCandle;
+// SHA-256 hashing and the legacy storageMode/baseSnapshotId response fields live in snapshotStorage.
 
-type SnapshotRow = {
-  id: string;
-  contentHash: string;
-  instrumentId: string;
-  timeframe: string;
-  adjustmentType: string;
-  instrumentJson: string;
-  candlesJson: string;
-  barCount: number;
-  firstTimestamp: number;
-  lastTimestamp: number;
-  createdAt: string;
-  baseSnapshotId: string | null;
-  storageMode: "full" | "delta";
-  removedTimestampsJson: string;
-  chainDepth: number;
-  storedBarCount: number;
+type SourceCoverageRow = {
+  source: string;
+} & SnapshotCandle;
+
+type LocalCandleResponse = {
+  instrument: Record<string, unknown>;
+  candles: SnapshotCandle[];
+  source?: string;
+  datasetVersion?: string;
 };
 
-const snapshotColumns = `id, content_hash AS contentHash, instrument_id AS instrumentId,
-  timeframe, adjustment_type AS adjustmentType, instrument_json AS instrumentJson,
-  candles_json AS candlesJson, bar_count AS barCount,
-  first_timestamp AS firstTimestamp, last_timestamp AS lastTimestamp,
-  created_at AS createdAt, base_snapshot_id AS baseSnapshotId,
-  storage_mode AS storageMode, removed_timestamps_json AS removedTimestampsJson,
-  chain_depth AS chainDepth, stored_bar_count AS storedBarCount`;
+type SnapshotDatabase = ReturnType<typeof getRawDb>;
+type SnapshotPreparedStatement = ReturnType<SnapshotDatabase["prepare"]>;
 
-async function sha256(value: string) {
-  const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(value));
-  return Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, "0")).join("");
-}
-
-async function getSnapshotRow(db: D1Database, id: string) {
-  return db.prepare(`SELECT ${snapshotColumns} FROM data_snapshots WHERE id = ?`)
-    .bind(id)
-    .first<SnapshotRow>();
-}
-
-async function materializeCandles(db: D1Database, row: SnapshotRow, visited = new Set<string>()): Promise<CandleRow[]> {
-  if (visited.has(row.id)) throw new Error("数据快照链出现循环引用");
-  visited.add(row.id);
-  const stored = JSON.parse(row.candlesJson) as CandleRow[];
-  if (row.storageMode !== "delta" || !row.baseSnapshotId) {
-    return stored.sort((left, right) => left.timestamp - right.timestamp);
+function d1SourceMetadata(candles: SourceCoverageRow[]) {
+  const grouped = new Map<string, { source: string; barCount: number; firstTimestamp: number; lastTimestamp: number }>();
+  for (const candle of candles) {
+    const source = String(candle.source || "unknown");
+    const timestamp = Number(candle.timestamp);
+    const current = grouped.get(source);
+    if (current) {
+      current.barCount += 1;
+      current.firstTimestamp = Math.min(current.firstTimestamp, timestamp);
+      current.lastTimestamp = Math.max(current.lastTimestamp, timestamp);
+    } else {
+      grouped.set(source, { source, barCount: 1, firstTimestamp: timestamp, lastTimestamp: timestamp });
+    }
   }
-  const base = await getSnapshotRow(db, row.baseSnapshotId);
-  if (!base) throw new Error(`数据快照缺少基础版本 ${row.baseSnapshotId}`);
-  const merged = new Map((await materializeCandles(db, base, visited)).map((candle) => [candle.timestamp, candle]));
-  const removed = JSON.parse(row.removedTimestampsJson || "[]") as number[];
-  removed.forEach((timestamp) => merged.delete(timestamp));
-  stored.forEach((candle) => merged.set(candle.timestamp, candle));
-  return [...merged.values()].sort((left, right) => left.timestamp - right.timestamp);
+  return {
+    kind: "d1",
+    coverage: [...grouped.values()].sort((left, right) => left.source.localeCompare(right.source)),
+  };
 }
 
-async function snapshotResponse(db: D1Database, row: SnapshotRow) {
-  return {
-    snapshot: {
-      id: row.id,
-      contentHash: row.contentHash,
-      instrumentId: row.instrumentId,
-      timeframe: row.timeframe,
-      adjustmentType: row.adjustmentType,
-      barCount: row.barCount,
-      firstTimestamp: row.firstTimestamp,
-      lastTimestamp: row.lastTimestamp,
-      createdAt: row.createdAt,
-      storageMode: row.storageMode,
-      storedBarCount: row.storedBarCount,
-      baseSnapshotId: row.baseSnapshotId,
-    },
-    instrument: JSON.parse(row.instrumentJson),
-    candles: await materializeCandles(db, row),
+async function insertChunks(db: SnapshotDatabase, chunks: SnapshotChunk[]) {
+  let statements: SnapshotPreparedStatement[] = [];
+  let batchBytes = 0;
+  const flush = async () => {
+    if (statements.length) await db.batch(statements);
+    statements = [];
+    batchBytes = 0;
   };
+  for (const chunk of chunks) {
+    if (statements.length && batchBytes + chunk.byteSize > 1_250_000) await flush();
+    statements.push(db.prepare(`INSERT OR IGNORE INTO candle_chunks
+      (chunk_hash, encoding, payload_json, bar_count, first_timestamp, last_timestamp, byte_size, created_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?)`)
+      .bind(
+        chunk.chunkHash,
+        chunk.encoding,
+        chunk.payloadJson,
+        chunk.barCount,
+        chunk.firstTimestamp,
+        chunk.lastTimestamp,
+        chunk.byteSize,
+        new Date().toISOString(),
+      ));
+    batchBytes += chunk.byteSize;
+  }
+  await flush();
+}
+
+async function mapSnapshotChunks(db: SnapshotDatabase, snapshotId: string, chunks: SnapshotChunk[]) {
+  const statements = chunks.map((chunk) => db.prepare(`INSERT OR REPLACE INTO data_snapshot_chunks
+    (snapshot_id, sequence, bucket_key, chunk_hash, first_timestamp, last_timestamp, bar_count)
+    VALUES (?, ?, ?, ?, ?, ?, ?)`)
+    .bind(
+      snapshotId,
+      chunk.sequence,
+      chunk.bucketKey,
+      chunk.chunkHash,
+      chunk.firstTimestamp,
+      chunk.lastTimestamp,
+      chunk.barCount,
+    ));
+  for (let index = 0; index < statements.length; index += 80) {
+    await db.batch(statements.slice(index, index + 80));
+  }
 }
 
 export async function GET(request: Request) {
   await ensureSchema();
-  const id = new URL(request.url).searchParams.get("id");
+  const url = new URL(request.url);
+  const id = url.searchParams.get("id");
   if (!id) return Response.json({ error: "缺少数据快照 ID" }, { status: 400 });
+  const numberParameter = (name: string) => {
+    const value = url.searchParams.get(name);
+    if (value == null || value === "") return undefined;
+    const parsed = Number(value);
+    if (!Number.isFinite(parsed)) throw new Error(`无效的快照范围参数：${name}`);
+    return parsed;
+  };
+  let range: SnapshotReadRange | undefined;
+  try {
+    const startTimestamp = numberParameter("startTimestamp");
+    const endTimestamp = numberParameter("endTimestamp");
+    const requestedLookback = numberParameter("lookbackBars");
+    if (requestedLookback != null && (!Number.isInteger(requestedLookback) || requestedLookback < 0 || requestedLookback > 100_000)) {
+      throw new Error("lookbackBars 必须是 0 到 100000 之间的整数");
+    }
+    if (startTimestamp != null || endTimestamp != null || requestedLookback != null) {
+      range = { startTimestamp, endTimestamp, lookbackBars: requestedLookback };
+    }
+  } catch (error) {
+    return Response.json({ error: error instanceof Error ? error.message : "无效的快照读取范围" }, { status: 400 });
+  }
   const db = getRawDb();
   const row = await getSnapshotRow(db, id);
-  if (!row) return Response.json({ error: "数据快照不存在" }, { status: 404 });
+  if (!row) return Response.json({ error: "数据快照不存在或尚未就绪" }, { status: 404 });
   try {
-    return Response.json(await snapshotResponse(db, row));
+    return Response.json(await snapshotResponse(db, row, range));
   } catch (error) {
     return Response.json({ error: error instanceof Error ? error.message : "数据快照读取失败" }, { status: 500 });
   }
@@ -110,97 +149,113 @@ export async function POST(request: Request) {
     .prepare(`SELECT id, symbol, name, market, timezone, price_precision AS pricePrecision
       FROM instruments WHERE id = ?`)
     .bind(payload.instrumentId)
-    .first();
+    .first<Record<string, unknown>>();
   const candlesResult = await db
-    .prepare(`SELECT timestamp, open, high, low, close, volume, turnover
+    .prepare(`SELECT timestamp, open, high, low, close, volume, turnover, source
       FROM candles WHERE instrument_id = ? AND timeframe = ? AND adjustment_type = ?
       ORDER BY timestamp ASC`)
     .bind(payload.instrumentId, payload.timeframe, adjustmentType)
-    .all<CandleRow>();
-  let candles = candlesResult.results;
-  if (!instrument || candles.length === 0) {
-    const local = await readLocalDataJson<{
-      instrument: Record<string, unknown>;
-      candles: CandleRow[];
-    }>(`/candles?instrument=${encodeURIComponent(payload.instrumentId)}&timeframe=${encodeURIComponent(payload.timeframe)}`, 15000);
-    if (local) {
+    .all<SourceCoverageRow>();
+  const d1Candles = candlesResult.results;
+  let candles: SnapshotCandle[] = d1Candles;
+  let sourceMetadata: unknown = null;
+
+  if (instrument && d1Candles.length) {
+    sourceMetadata = d1SourceMetadata(d1Candles);
+  } else {
+    const local = await readLocalDataJson<LocalCandleResponse>(
+      `/candles?instrument=${encodeURIComponent(payload.instrumentId)}&timeframe=${encodeURIComponent(payload.timeframe)}`,
+      15000,
+    );
+    if (local?.instrument && local.candles?.length) {
       instrument = local.instrument;
       candles = local.candles;
+      sourceMetadata = {
+        kind: "local",
+        source: local.source ?? "local-data-service",
+        datasetVersion: local.datasetVersion ?? null,
+      };
     }
   }
   if (!instrument || candles.length === 0) {
     return Response.json({ error: "没有可创建快照的 K 线数据" }, { status: 404 });
   }
 
-  const instrumentJson = JSON.stringify(instrument);
-  const canonical = JSON.stringify({
-    instrument,
-    timeframe: payload.timeframe,
-    adjustmentType,
-    candles,
-  });
-  const contentHash = await sha256(canonical);
-  const id = `snapshot_${contentHash}`;
-  const existing = await db
-    .prepare(`SELECT ${snapshotColumns} FROM data_snapshots WHERE content_hash = ?`)
-    .bind(contentHash)
-    .first<SnapshotRow>();
-  if (existing) return Response.json(await snapshotResponse(db, existing));
-
-  const latest = await db
-    .prepare(`SELECT ${snapshotColumns} FROM data_snapshots
-      WHERE instrument_id = ? AND timeframe = ? AND adjustment_type = ?
-      ORDER BY created_at DESC LIMIT 1`)
-    .bind(payload.instrumentId, payload.timeframe, adjustmentType)
-    .first<SnapshotRow>();
-
-  let storageMode: SnapshotRow["storageMode"] = "full";
-  let baseSnapshotId: string | null = null;
-  let storedCandles = candles;
-  let removedTimestamps: number[] = [];
-  let chainDepth = 0;
-
-  if (latest && latest.chainDepth < 19) {
-    const previousCandles = await materializeCandles(db, latest);
-    const delta = computeSnapshotDelta(previousCandles, candles);
-    removedTimestamps = delta.removedTimestamps;
-    if (delta.changedCandles.length + removedTimestamps.length < candles.length * 0.7) {
-      storageMode = "delta";
-      baseSnapshotId = latest.id;
-      storedCandles = delta.changedCandles;
-      chainDepth = latest.chainDepth + 1;
-    }
-  }
-
-  const firstTimestamp = Number(candles[0].timestamp);
-  const lastTimestamp = Number(candles[candles.length - 1].timestamp);
-  const createdAt = new Date().toISOString();
-  await db.prepare(`INSERT INTO data_snapshots
-    (id, content_hash, instrument_id, timeframe, adjustment_type, instrument_json,
-      candles_json, bar_count, first_timestamp, last_timestamp, created_at,
-      base_snapshot_id, storage_mode, removed_timestamps_json, chain_depth, stored_bar_count)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
-    .bind(
-      id,
-      contentHash,
-      payload.instrumentId,
-      payload.timeframe,
+  let id: string | null = null;
+  try {
+    const chunks = await buildSnapshotChunks(candles, payload.timeframe);
+    const sourceJson = canonicalStringify(sourceMetadata);
+    const contentHash = await buildSnapshotContentHash({
+      instrument,
+      timeframe: payload.timeframe,
       adjustmentType,
-      instrumentJson,
-      JSON.stringify(storedCandles),
-      candles.length,
-      firstTimestamp,
-      lastTimestamp,
-      createdAt,
-      baseSnapshotId,
-      storageMode,
-      JSON.stringify(removedTimestamps),
-      chainDepth,
-      storedCandles.length,
-    )
-    .run();
+      source: sourceMetadata,
+      normalizationVersion: SNAPSHOT_NORMALIZATION_VERSION,
+      chunkHashes: chunks.map((chunk) => chunk.chunkHash),
+    });
+    id = `snapshot_${contentHash}`;
+    const ready = await getSnapshotByContentHash(db, contentHash);
+    if (ready) return Response.json(await snapshotResponse(db, ready));
 
-  const created = await getSnapshotRow(db, id);
-  if (!created) return Response.json({ error: "数据快照创建失败" }, { status: 500 });
-  return Response.json(await snapshotResponse(db, created), { status: 201 });
+    const firstTimestamp = chunks[0].firstTimestamp;
+    const lastTimestamp = chunks[chunks.length - 1].lastTimestamp;
+    const createdAt = new Date().toISOString();
+    await db.prepare(`INSERT OR IGNORE INTO data_snapshots
+      (id, content_hash, instrument_id, timeframe, adjustment_type, instrument_json,
+        candles_json, bar_count, first_timestamp, last_timestamp, created_at,
+        base_snapshot_id, storage_mode, removed_timestamps_json, chain_depth, stored_bar_count,
+        format_version, status, source_json, normalization_version, chunk_count)
+      VALUES (?, ?, ?, ?, ?, ?, '[]', ?, ?, ?, ?, NULL, 'full', '[]', 0, ?, ?, 'building', ?, ?, ?)`)
+      .bind(
+        id,
+        contentHash,
+        payload.instrumentId,
+        payload.timeframe,
+        adjustmentType,
+        JSON.stringify(instrument),
+        candles.length,
+        firstTimestamp,
+        lastTimestamp,
+        createdAt,
+        candles.length,
+        SNAPSHOT_FORMAT_VERSION,
+        sourceJson,
+        SNAPSHOT_NORMALIZATION_VERSION,
+        chunks.length,
+      )
+      .run();
+
+    const existing = await getSnapshotByContentHash(db, contentHash, true);
+    if (!existing) throw new Error("Snapshot version row was not created");
+    if (existing.status === "ready") return Response.json(await snapshotResponse(db, existing));
+    if (existing.status === "failed") {
+      await db.prepare("UPDATE data_snapshots SET status = 'building' WHERE id = ? AND status = 'failed'")
+        .bind(existing.id)
+        .run();
+    }
+    const snapshotId = existing.id;
+    id = snapshotId;
+
+    await insertChunks(db, chunks);
+    await mapSnapshotChunks(db, snapshotId, chunks);
+    const verification = await db.prepare(`SELECT COUNT(*) AS chunkCount,
+        COALESCE(SUM(bar_count), 0) AS barCount
+      FROM data_snapshot_chunks WHERE snapshot_id = ?`)
+      .bind(snapshotId)
+      .first<{ chunkCount: number; barCount: number }>();
+    if (Number(verification?.chunkCount) !== chunks.length || Number(verification?.barCount) !== candles.length) {
+      throw new Error("Snapshot chunk verification failed");
+    }
+    await db.prepare(`UPDATE data_snapshots SET status = 'ready', chunk_count = ?
+      WHERE id = ? AND status = 'building'`)
+      .bind(chunks.length, snapshotId)
+      .run();
+
+    const created = await getSnapshotRow(db, snapshotId);
+    if (!created) throw new Error("Snapshot creation did not reach ready status");
+    return Response.json(await snapshotResponse(db, created), { status: 201 });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "数据快照创建失败";
+    return Response.json({ error: message }, { status: 500 });
+  }
 }

@@ -96,6 +96,11 @@ export const dataSnapshots = sqliteTable(
     removedTimestampsJson: text("removed_timestamps_json").notNull().default("[]"),
     chainDepth: integer("chain_depth").notNull().default(0),
     storedBarCount: integer("stored_bar_count").notNull().default(0),
+    formatVersion: integer("format_version").notNull().default(1),
+    status: text("status").notNull().default("ready"),
+    sourceJson: text("source_json").notNull().default("{}"),
+    normalizationVersion: integer("normalization_version").notNull().default(1),
+    chunkCount: integer("chunk_count").notNull().default(0),
   },
   (table) => [
     index("data_snapshots_lookup_idx").on(
@@ -104,6 +109,39 @@ export const dataSnapshots = sqliteTable(
       table.adjustmentType,
       table.createdAt,
     ),
+  ],
+);
+
+export const candleChunks = sqliteTable("candle_chunks", {
+  chunkHash: text("chunk_hash").primaryKey(),
+  encoding: text("encoding").notNull(),
+  payloadJson: text("payload_json").notNull(),
+  barCount: integer("bar_count").notNull(),
+  firstTimestamp: integer("first_timestamp").notNull(),
+  lastTimestamp: integer("last_timestamp").notNull(),
+  byteSize: integer("byte_size").notNull(),
+  createdAt: text("created_at").notNull(),
+});
+
+export const dataSnapshotChunks = sqliteTable(
+  "data_snapshot_chunks",
+  {
+    snapshotId: text("snapshot_id").notNull(),
+    sequence: integer("sequence").notNull(),
+    bucketKey: text("bucket_key").notNull(),
+    chunkHash: text("chunk_hash").notNull(),
+    firstTimestamp: integer("first_timestamp").notNull(),
+    lastTimestamp: integer("last_timestamp").notNull(),
+    barCount: integer("bar_count").notNull(),
+  },
+  (table) => [
+    primaryKey({ columns: [table.snapshotId, table.sequence] }),
+    index("data_snapshot_chunks_snapshot_time_idx").on(
+      table.snapshotId,
+      table.firstTimestamp,
+      table.lastTimestamp,
+    ),
+    index("data_snapshot_chunks_chunk_hash_idx").on(table.chunkHash),
   ],
 );
 

@@ -37,6 +37,7 @@ export type TrainingTaskDraft = {
   patternMatchTimestamp?: number;
   patternMatchedPresetIds?: string[];
   randomConfig?: RandomTrainingConfig;
+  historyBars?: number;
 };
 
 export type TrainingTask = {
@@ -54,6 +55,7 @@ export type TrainingTask = {
   sourceLabel?: string;
   randomRun?: boolean;
   randomConfig?: RandomTrainingConfig;
+  historyBars?: number;
   patternFilter?: {
     presetIds: string[];
     presetNames: string[];
@@ -65,6 +67,10 @@ export type TrainingTask = {
 };
 
 type TimestampBar = { timestamp: number };
+
+export const DEFAULT_REPLAY_HISTORY_BARS = 100;
+export const MIN_REPLAY_HISTORY_BARS = 100;
+export const MAX_REPLAY_HISTORY_BARS = 5000;
 
 export const defaultTrainingTaskDraft: TrainingTaskDraft = {
   mode: "free",
@@ -105,6 +111,30 @@ function dateKey(timestamp: number, timezone: string) {
 
 function clamp(value: number, minimum: number, maximum: number) {
   return Math.max(minimum, Math.min(maximum, value));
+}
+
+export function normalizeReplayHistoryBars(value: unknown) {
+  const parsed = Number(value);
+  const rounded = Number.isFinite(parsed) ? Math.round(parsed) : DEFAULT_REPLAY_HISTORY_BARS;
+  return clamp(rounded, MIN_REPLAY_HISTORY_BARS, MAX_REPLAY_HISTORY_BARS);
+}
+
+export function taskVisibleStartCursor(task: Pick<TrainingTask, "startCursor" | "historyBars">) {
+  if (task.historyBars == null) return 0;
+  return Math.max(0, task.startCursor - normalizeReplayHistoryBars(task.historyBars));
+}
+
+export function rebaseTrainingTaskToBars(task: TrainingTask, bars: TimestampBar[]): TrainingTask {
+  if (!bars.length) return { ...task, startCursor: 0, endCursor: 0 };
+  const locate = (timestamp: number, fallback: number) => {
+    const exact = bars.findIndex((bar) => bar.timestamp === timestamp);
+    if (exact >= 0) return exact;
+    const next = bars.findIndex((bar) => bar.timestamp >= timestamp);
+    return next >= 0 ? next : clamp(fallback, 0, bars.length - 1);
+  };
+  const startCursor = locate(task.startTimestamp, task.startCursor);
+  const endCursor = Math.max(startCursor, locate(task.endTimestamp, task.endCursor));
+  return { ...task, startCursor, endCursor };
 }
 
 function findStartByDate(bars: TimestampBar[], date: string, timezone: string) {
@@ -192,6 +222,7 @@ export function resolveTrainingTask(
     sourceLabel: draft.sourceLabel,
     randomRun: draft.randomRun,
     randomConfig: draft.randomConfig ? { ...draft.randomConfig } : undefined,
+    historyBars: draft.historyBars == null ? undefined : normalizeReplayHistoryBars(draft.historyBars),
     patternFilter: draft.patternPresetIds?.length && draft.patternMatchTimestamp != null
       ? {
           presetIds: [...draft.patternPresetIds],

@@ -91,10 +91,39 @@ async function initializeSchema() {
       storage_mode TEXT NOT NULL DEFAULT 'full',
       removed_timestamps_json TEXT NOT NULL DEFAULT '[]',
       chain_depth INTEGER NOT NULL DEFAULT 0,
-      stored_bar_count INTEGER NOT NULL DEFAULT 0
+      stored_bar_count INTEGER NOT NULL DEFAULT 0,
+      format_version INTEGER NOT NULL DEFAULT 1,
+      status TEXT NOT NULL DEFAULT 'ready',
+      source_json TEXT NOT NULL DEFAULT '{}',
+      normalization_version INTEGER NOT NULL DEFAULT 1,
+      chunk_count INTEGER NOT NULL DEFAULT 0
     )`),
     db.prepare(`CREATE INDEX IF NOT EXISTS data_snapshots_lookup_idx
       ON data_snapshots (instrument_id, timeframe, adjustment_type, created_at)`),
+    db.prepare(`CREATE TABLE IF NOT EXISTS candle_chunks (
+      chunk_hash TEXT PRIMARY KEY,
+      encoding TEXT NOT NULL,
+      payload_json TEXT NOT NULL,
+      bar_count INTEGER NOT NULL,
+      first_timestamp INTEGER NOT NULL,
+      last_timestamp INTEGER NOT NULL,
+      byte_size INTEGER NOT NULL,
+      created_at TEXT NOT NULL
+    )`),
+    db.prepare(`CREATE TABLE IF NOT EXISTS data_snapshot_chunks (
+      snapshot_id TEXT NOT NULL,
+      sequence INTEGER NOT NULL,
+      bucket_key TEXT NOT NULL,
+      chunk_hash TEXT NOT NULL,
+      first_timestamp INTEGER NOT NULL,
+      last_timestamp INTEGER NOT NULL,
+      bar_count INTEGER NOT NULL,
+      PRIMARY KEY (snapshot_id, sequence)
+    )`),
+    db.prepare(`CREATE INDEX IF NOT EXISTS data_snapshot_chunks_snapshot_time_idx
+      ON data_snapshot_chunks (snapshot_id, first_timestamp, last_timestamp)`),
+    db.prepare(`CREATE INDEX IF NOT EXISTS data_snapshot_chunks_chunk_hash_idx
+      ON data_snapshot_chunks (chunk_hash)`),
     db.prepare(`CREATE TABLE IF NOT EXISTS session_events (
       event_id TEXT PRIMARY KEY,
       session_id TEXT NOT NULL,
@@ -317,6 +346,19 @@ async function initializeSchema() {
   if (!snapshotColumns.results.some((column) => column.name === "stored_bar_count")) {
     await db.prepare("ALTER TABLE data_snapshots ADD COLUMN stored_bar_count INTEGER NOT NULL DEFAULT 0").run();
     await db.prepare("UPDATE data_snapshots SET stored_bar_count = bar_count WHERE stored_bar_count = 0").run();
+  }
+  const existingSnapshotColumns = new Set(snapshotColumns.results.map((column) => column.name));
+  const snapshotVersionColumnMigrations = [
+    ["format_version", "INTEGER NOT NULL DEFAULT 1"],
+    ["status", "TEXT NOT NULL DEFAULT 'ready'"],
+    ["source_json", "TEXT NOT NULL DEFAULT '{}'"],
+    ["normalization_version", "INTEGER NOT NULL DEFAULT 1"],
+    ["chunk_count", "INTEGER NOT NULL DEFAULT 0"],
+  ] as const;
+  for (const [name, definition] of snapshotVersionColumnMigrations) {
+    if (!existingSnapshotColumns.has(name)) {
+      await db.prepare(`ALTER TABLE data_snapshots ADD COLUMN ${name} ${definition}`).run();
+    }
   }
   const coverageBackfill = await db.prepare(
     "SELECT value FROM app_metadata WHERE key = 'candle_coverage_backfilled_v1'",

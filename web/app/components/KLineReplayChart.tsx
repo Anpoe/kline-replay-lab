@@ -647,7 +647,7 @@ function syncDecisionMarkers(
   });
 }
 
-function serializeDrawing(overlay: Overlay): PersistedDrawing {
+function serializeDrawing(overlay: Overlay, dataIndexOffset: number): PersistedDrawing {
   const rawExtendData = overlay.extendData ?? undefined;
   const extendData = ["trainingPosition", "trainingLongPosition", "trainingShortPosition"].includes(overlay.name)
     && rawExtendData && typeof rawExtendData === "object"
@@ -658,7 +658,7 @@ function serializeDrawing(overlay: Overlay): PersistedDrawing {
     name: overlay.name,
     paneId: overlay.paneId,
     points: overlay.points.map((point) => ({
-      dataIndex: point.dataIndex,
+      dataIndex: point.dataIndex == null ? undefined : point.dataIndex + dataIndexOffset,
       timestamp: point.timestamp,
       value: point.value,
     })),
@@ -759,8 +759,9 @@ function syncTrainingTextBoxScale(chart: Chart, overlay: Overlay, initializeBase
   }
 }
 
-function getPersistedDrawings(chart: Chart) {
-  return chart.getOverlays({ groupId: USER_DRAWING_GROUP }).map(serializeDrawing);
+function getPersistedDrawings(chart: Chart, dataIndexOffset: number) {
+  return chart.getOverlays({ groupId: USER_DRAWING_GROUP })
+    .map((overlay) => serializeDrawing(overlay, dataIndexOffset));
 }
 
 const periods: Record<string, Period> = {
@@ -773,6 +774,7 @@ const periods: Record<string, Period> = {
 
 export function KLineReplayChart({
   bars,
+  dataIndexOffset,
   symbol,
   timezone,
   timeframe,
@@ -793,6 +795,7 @@ export function KLineReplayChart({
   onDrawingSelect,
 }: {
   bars: KLineData[];
+  dataIndexOffset: number;
   symbol: string;
   timezone: string;
   timeframe: string;
@@ -817,6 +820,7 @@ export function KLineReplayChart({
   const preservedBarSpaceRef = useRef<number | null>(null);
   const refreshZoomAppliedRef = useRef(false);
   const barsRef = useRef<KLineData[]>(bars);
+  const dataIndexOffsetRef = useRef(dataIndexOffset);
   const tradeMarkersRef = useRef<TradeMarker[]>(tradeMarkers);
   const decisionMarkersRef = useRef<DecisionMarker[]>(decisionMarkers);
   const drawingsRef = useRef<PersistedDrawing[]>(drawings);
@@ -830,6 +834,10 @@ export function KLineReplayChart({
   const touchStartRef = useRef<{ x: number; y: number } | null>(null);
   const lastContextTriggerRef = useRef<{ timestamp: number; triggeredAt: number } | null>(null);
   const [drawingActive, setDrawingActive] = useState(false);
+
+  useEffect(() => {
+    dataIndexOffsetRef.current = dataIndexOffset;
+  }, [dataIndexOffset]);
 
   const setDrawingInteraction = useCallback((active: boolean, chart = chartRef.current) => {
     setDrawingActive(active);
@@ -855,7 +863,10 @@ export function KLineReplayChart({
     name: drawing.name,
     groupId: USER_DRAWING_GROUP,
     paneId: drawing.paneId,
-    points: drawing.points,
+    points: drawing.points.map((point) => ({
+      ...point,
+      dataIndex: point.dataIndex == null ? undefined : point.dataIndex - dataIndexOffsetRef.current,
+    })),
     needDefaultPointFigure: drawing.name === "trainingTextBox"
       ? drawing.id === selectedTrainingTextId
       : undefined,
@@ -867,11 +878,15 @@ export function KLineReplayChart({
     extendData: drawing.extendData,
     onDrawEnd: ({ chart: eventChart, overlay }) => {
       syncTrainingTextBoxScale(eventChart, overlay, true);
-      if (!suppressDrawingEventsRef.current) onDrawingsChangeRef.current(getPersistedDrawings(eventChart));
+      if (!suppressDrawingEventsRef.current) {
+        onDrawingsChangeRef.current(getPersistedDrawings(eventChart, dataIndexOffsetRef.current));
+      }
     },
     onPressedMoveEnd: ({ chart: eventChart, overlay }) => {
       syncTrainingTextBoxScale(eventChart, overlay);
-      if (!suppressDrawingEventsRef.current) onDrawingsChangeRef.current(getPersistedDrawings(eventChart));
+      if (!suppressDrawingEventsRef.current) {
+        onDrawingsChangeRef.current(getPersistedDrawings(eventChart, dataIndexOffsetRef.current));
+      }
     },
     onSelected: ({ chart, overlay }) => {
       selectedTrainingTextId = overlay.name === "trainingTextBox" ? overlay.id : "";
@@ -892,7 +907,9 @@ export function KLineReplayChart({
     },
     onRemoved: ({ chart: eventChart }) => {
       if (suppressDrawingEventsRef.current) return;
-      queueMicrotask(() => onDrawingsChangeRef.current(getPersistedDrawings(eventChart)));
+      queueMicrotask(() => onDrawingsChangeRef.current(
+        getPersistedDrawings(eventChart, dataIndexOffsetRef.current),
+      ));
     },
   }), []);
 
@@ -1114,13 +1131,13 @@ export function KLineReplayChart({
           id: overlay.id,
           ...(overlay.name === "trainingTextBox" ? { needDefaultPointFigure: true } : {}),
         });
-        onDrawingsChangeRef.current(getPersistedDrawings(eventChart));
+        onDrawingsChangeRef.current(getPersistedDrawings(eventChart, dataIndexOffsetRef.current));
         onDrawingSelectRef.current(overlay.id);
         finishDrawing();
       },
       onPressedMoveEnd: ({ chart: eventChart, overlay }) => {
         syncTrainingTextBoxScale(eventChart, overlay);
-        onDrawingsChangeRef.current(getPersistedDrawings(eventChart));
+        onDrawingsChangeRef.current(getPersistedDrawings(eventChart, dataIndexOffsetRef.current));
       },
       onSelected: ({ chart, overlay }) => {
         selectedTrainingTextId = overlay.name === "trainingTextBox" ? overlay.id : "";
@@ -1141,7 +1158,9 @@ export function KLineReplayChart({
       },
       onRemoved: ({ chart: eventChart }) => {
         if (!suppressDrawingEventsRef.current) {
-          queueMicrotask(() => onDrawingsChangeRef.current(getPersistedDrawings(eventChart)));
+          queueMicrotask(() => onDrawingsChangeRef.current(
+            getPersistedDrawings(eventChart, dataIndexOffsetRef.current),
+          ));
         }
         finishDrawing();
       },
@@ -1194,7 +1213,7 @@ export function KLineReplayChart({
     if (!bar) return null;
 
     return {
-      dataIndex,
+      dataIndex: dataIndex + dataIndexOffsetRef.current,
       timestamp: bar.timestamp,
       referencePrice: bar.close,
     } satisfies CandleContextTarget;

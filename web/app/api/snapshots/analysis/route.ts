@@ -1,47 +1,13 @@
 import { ensureSchema, getRawDb } from "../../../../db/runtime";
+import type { SnapshotCandle } from "../../../lib/dataSnapshots";
 import { tradingDate } from "../../../lib/marketRules";
+import {
+  getSnapshotRow,
+  materializeSnapshotCandleWindow,
+  type SnapshotRow,
+} from "../../../lib/snapshotStorage";
 
-type CandleRow = {
-  timestamp: number;
-  close: number;
-  volume?: number | null;
-};
-
-type SnapshotRow = {
-  id: string;
-  timeframe: string;
-  instrumentJson: string;
-  candlesJson: string;
-  baseSnapshotId: string | null;
-  storageMode: "full" | "delta";
-  removedTimestampsJson: string;
-};
-
-const snapshotColumns = `id, timeframe, instrument_json AS instrumentJson,
-  candles_json AS candlesJson, base_snapshot_id AS baseSnapshotId,
-  storage_mode AS storageMode, removed_timestamps_json AS removedTimestampsJson`;
-
-async function getSnapshotRow(db: D1Database, id: string) {
-  return db.prepare(`SELECT ${snapshotColumns} FROM data_snapshots WHERE id = ?`)
-    .bind(id)
-    .first<SnapshotRow>();
-}
-
-async function materializeCandles(db: D1Database, row: SnapshotRow, visited = new Set<string>()): Promise<CandleRow[]> {
-  if (visited.has(row.id)) throw new Error("数据快照链出现循环引用");
-  visited.add(row.id);
-  const stored = JSON.parse(row.candlesJson) as CandleRow[];
-  if (row.storageMode !== "delta" || !row.baseSnapshotId) {
-    return stored.sort((left, right) => left.timestamp - right.timestamp);
-  }
-  const base = await getSnapshotRow(db, row.baseSnapshotId);
-  if (!base) throw new Error(`数据快照缺少基础版本 ${row.baseSnapshotId}`);
-  const merged = new Map((await materializeCandles(db, base, visited)).map((candle) => [candle.timestamp, candle]));
-  const removed = JSON.parse(row.removedTimestampsJson || "[]") as number[];
-  removed.forEach((timestamp) => merged.delete(timestamp));
-  stored.forEach((candle) => merged.set(candle.timestamp, candle));
-  return [...merged.values()].sort((left, right) => left.timestamp - right.timestamp);
-}
+type AnalysisCandle = Pick<SnapshotCandle, "timestamp" | "close" | "volume">;
 
 function finitePositive(value: unknown) {
   const number = Number(value);
@@ -49,7 +15,7 @@ function finitePositive(value: unknown) {
 }
 
 function averageDailyActivity(
-  candles: CandleRow[],
+  candles: AnalysisCandle[],
   entryTimestamp: number,
   timezone: string,
   timeframe: string,
@@ -79,6 +45,34 @@ function averageDailyActivity(
   };
 }
 
+async function readAnalysisCandles(
+  db: ReturnType<typeof getRawDb>,
+  row: SnapshotRow,
+  entryTimestamps: number[],
+  timezone: string,
+) {
+  const earliestEntry = Math.min(...entryTimestamps);
+  const latestEntry = Math.max(...entryTimestamps);
+  let lookbackMilliseconds = 40 * 86_400_000;
+  let candles: SnapshotCandle[] = [];
+
+  for (let attempt = 0; attempt < 32; attempt += 1) {
+    const window = await materializeSnapshotCandleWindow(db, row, {
+      startTimestamp: Math.max(Number(row.firstTimestamp), earliestEntry - lookbackMilliseconds),
+      endTimestamp: latestEntry,
+    });
+    candles = window.candles;
+    const priorSessions = new Set(
+      candles
+        .filter((candle) => candle.timestamp < earliestEntry)
+        .map((candle) => tradingDate(candle.timestamp, timezone)),
+    );
+    if (priorSessions.size >= 20 || window.startIndex === 0) return candles;
+    lookbackMilliseconds *= 2;
+  }
+  return candles;
+}
+
 export async function POST(request: Request) {
   await ensureSchema();
   const payload = await request.json() as {
@@ -104,16 +98,17 @@ export async function POST(request: Request) {
       const marketCap = finitePositive(
         instrument.marketCap ?? instrument.market_cap ?? instrument.marketCapitalization ?? instrument.floatMarketCap,
       );
-      const candles = await materializeCandles(db, row);
+      const entryTimestamps = [...new Set(item.entryTimestamps ?? [])];
+      const candles = await readAnalysisCandles(db, row, entryTimestamps, timezone);
       contexts[snapshotId] = {};
-      [...new Set(item.entryTimestamps ?? [])].forEach((entryTimestamp) => {
+      entryTimestamps.forEach((entryTimestamp) => {
         contexts[snapshotId][String(entryTimestamp)] = {
           ...averageDailyActivity(candles, entryTimestamp, timezone, row.timeframe),
           ...(marketCap ? { marketCap } : {}),
         };
       });
     } catch {
-      // A damaged legacy snapshot should not block the rest of the performance page.
+      // A damaged or incomplete legacy snapshot should not block the rest of the performance page.
     }
   }
   return Response.json({ contexts });
