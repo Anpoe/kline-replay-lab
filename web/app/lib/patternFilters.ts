@@ -2,6 +2,8 @@ export type PatternKind =
   | "breakout"
   | "uptrend"
   | "uptrend_breakout"
+  | "always_in_long"
+  | "always_in_short"
   | "trend_pullback"
   | "contraction"
   | "bullish_engulfing"
@@ -65,6 +67,28 @@ export const patternParameterDefinitions: Record<PatternKind, PatternParameterDe
     { key: "minimumBreakoutPct", label: "最小突破幅度", min: 0, max: 10, step: 0.1, suffix: "%" },
     { key: "volumeMultiplier", label: "成交量相对均量", min: 0, max: 5, step: 0.1, suffix: "倍" },
   ],
+  always_in_long: [
+    { key: "emaPeriod", label: "趋势 EMA 周期", min: 5, max: 100, step: 1 },
+    { key: "pivotStrength", label: "摆动点左右确认", min: 1, max: 5, step: 1, suffix: "根" },
+    { key: "followThroughBars", label: "突破跟进窗口", min: 1, max: 4, step: 1, suffix: "根" },
+    { key: "emaSlopeBars", label: "EMA 连续同向", min: 1, max: 10, step: 1, suffix: "根" },
+    { key: "stateLookback", label: "状态有效回看", min: 20, max: 500, step: 10, suffix: "根" },
+    { key: "recentBreakoutBars", label: "最近有效突破", min: 4, max: 60, step: 1, suffix: "根内" },
+    { key: "controlWindow", label: "当前控制窗口", min: 6, max: 40, step: 1, suffix: "根" },
+    { key: "minimumTrendCloses", label: "均线正确一侧最少收盘", min: 3, max: 40, step: 1, suffix: "根" },
+    { key: "maximumEmaCrosses", label: "窗口内最多穿越 EMA", min: 0, max: 6, step: 1, suffix: "次" },
+  ],
+  always_in_short: [
+    { key: "emaPeriod", label: "趋势 EMA 周期", min: 5, max: 100, step: 1 },
+    { key: "pivotStrength", label: "摆动点左右确认", min: 1, max: 5, step: 1, suffix: "根" },
+    { key: "followThroughBars", label: "突破跟进窗口", min: 1, max: 4, step: 1, suffix: "根" },
+    { key: "emaSlopeBars", label: "EMA 连续同向", min: 1, max: 10, step: 1, suffix: "根" },
+    { key: "stateLookback", label: "状态有效回看", min: 20, max: 500, step: 10, suffix: "根" },
+    { key: "recentBreakoutBars", label: "最近有效突破", min: 4, max: 60, step: 1, suffix: "根内" },
+    { key: "controlWindow", label: "当前控制窗口", min: 6, max: 40, step: 1, suffix: "根" },
+    { key: "minimumTrendCloses", label: "均线正确一侧最少收盘", min: 3, max: 40, step: 1, suffix: "根" },
+    { key: "maximumEmaCrosses", label: "窗口内最多穿越 EMA", min: 0, max: 6, step: 1, suffix: "次" },
+  ],
   trend_pullback: [
     { key: "fastPeriod", label: "短均线周期", min: 3, max: 60, step: 1 },
     { key: "slowPeriod", label: "长均线周期", min: 8, max: 200, step: 1 },
@@ -99,6 +123,8 @@ export const defaultPatternPresets: PatternPreset[] = [
   { id: "breakout", kind: "breakout", name: "区间突破", description: "收盘有效越过此前区间高点或低点，可附加成交量确认。", builtIn: true, parameters: { lookback: 20, minimumBreakoutPct: 0.2, volumeMultiplier: 0 } },
   { id: "uptrend", kind: "uptrend", name: "上升趋势", description: "价格位于短均线上方、短均线位于长均线上方，并且长均线持续向上。", builtIn: true, parameters: { fastPeriod: 10, slowPeriod: 20, slopeLookback: 5, minimumRisePct: 0.5 } },
   { id: "uptrend-breakout", kind: "uptrend_breakout", name: "上升趋势突破", description: "先确认均线多头和长均线抬升，再要求当前收盘向上突破此前区间高点。", builtIn: true, parameters: { fastPeriod: 10, slowPeriod: 20, slopeLookback: 5, minimumRisePct: 0.5, lookback: 20, minimumBreakoutPct: 0.1, volumeMultiplier: 0 } },
+  { id: "always-in-long", kind: "always_in_long", name: "Always In Long（严格结构）", description: "HH/HL 后向上突破并跟进，且当前仍在 EMA 上方单边控制；排除过期状态与频繁穿越均线的震荡。", builtIn: true, parameters: { emaPeriod: 20, pivotStrength: 2, followThroughBars: 2, emaSlopeBars: 3, stateLookback: 120, recentBreakoutBars: 18, controlWindow: 12, minimumTrendCloses: 9, maximumEmaCrosses: 1 } },
+  { id: "always-in-short", kind: "always_in_short", name: "Always In Short（严格结构）", description: "LH/LL 后向下突破并跟进，且当前仍在 EMA 下方单边控制；排除过期状态与频繁穿越均线的震荡。", builtIn: true, parameters: { emaPeriod: 20, pivotStrength: 2, followThroughBars: 2, emaSlopeBars: 3, stateLookback: 120, recentBreakoutBars: 18, controlWindow: 12, minimumTrendCloses: 9, maximumEmaCrosses: 1 } },
   { id: "trend-pullback", kind: "trend_pullback", name: "趋势回调", description: "短均线保持在长均线之上，价格回踩短均线后重新收在其上方。", builtIn: true, parameters: { fastPeriod: 10, slowPeriod: 20, touchTolerancePct: 1.5 } },
   { id: "contraction", kind: "contraction", name: "波幅收缩", description: "近期平均振幅显著小于此前同长度窗口，代表价格正在压缩。", builtIn: true, parameters: { lookback: 8, rangeRatio: 0.65 } },
   { id: "bullish-engulfing", kind: "bullish_engulfing", name: "看涨吞没", description: "阳线实体完整吞没上一根阴线实体。", builtIn: true, parameters: { minimumBodyPct: 45 } },
@@ -137,12 +163,13 @@ export function normalizePatternPresets(value: unknown): PatternPreset[] {
       const nextValue = finite(item.parameters?.[definition.key], fallbackValue);
       return [definition.key, Math.max(definition.min, Math.min(definition.max, nextValue))];
     }));
+    const builtIn = Boolean(item.builtIn && defaultsById.has(item.id));
     return [{
       id: String(item.id),
       kind: item.kind,
-      name: normalizePresetText(item.name, fallback.name, 30),
-      description: normalizePresetText(item.description, fallback.description, 160),
-      builtIn: Boolean(item.builtIn && defaultsById.has(item.id)),
+      name: builtIn ? fallback.name : normalizePresetText(item.name, fallback.name, 30),
+      description: builtIn ? fallback.description : normalizePresetText(item.description, fallback.description, 160),
+      builtIn,
       parameters,
     }];
   });
@@ -165,6 +192,167 @@ function emaAt(candles: PatternCandle[], index: number, period: number) {
     result = candles[cursor].close * multiplier + result * (1 - multiplier);
   }
   return result;
+}
+
+type AlwaysInDirection = -1 | 0 | 1;
+type SwingPoint = { index: number; price: number };
+type PendingBreakout = { index: number; high: number; low: number; pivotIndex: number };
+
+function patternInteger(value: unknown, fallback: number, minimum: number, maximum: number) {
+  return Math.max(minimum, Math.min(maximum, Math.round(finite(value, fallback))));
+}
+
+function alwaysInStateSeries(
+  candles: PatternCandle[],
+  maximumIndex: number,
+  parameters: Record<string, number>,
+) {
+  const endIndex = Math.min(candles.length - 1, Math.max(-1, Math.round(maximumIndex)));
+  const states = new Int8Array(Math.max(0, endIndex + 1));
+  if (endIndex < 0) return states;
+
+  const emaPeriod = patternInteger(parameters.emaPeriod, 20, 5, 100);
+  const pivotStrength = patternInteger(parameters.pivotStrength, 2, 1, 5);
+  const followThroughBars = patternInteger(parameters.followThroughBars, 2, 1, 4);
+  const emaSlopeBars = patternInteger(parameters.emaSlopeBars, 3, 1, 10);
+  const stateLookback = patternInteger(parameters.stateLookback, 120, 20, 500);
+  const recentBreakoutBars = patternInteger(parameters.recentBreakoutBars, 18, 4, 60);
+  const controlWindow = patternInteger(parameters.controlWindow, 12, 6, 40);
+  const minimumTrendCloses = patternInteger(parameters.minimumTrendCloses, 9, 3, controlWindow);
+  const maximumEmaCrosses = patternInteger(parameters.maximumEmaCrosses, 1, 0, 6);
+  const ema = new Float64Array(endIndex + 1);
+  const multiplier = 2 / (emaPeriod + 1);
+  ema[0] = candles[0].close;
+  for (let index = 1; index <= endIndex; index += 1) {
+    ema[index] = candles[index].close * multiplier + ema[index - 1] * (1 - multiplier);
+  }
+
+  const emaMoves = (index: number, direction: -1 | 1) => {
+    if (index < emaSlopeBars) return false;
+    for (let cursor = index - emaSlopeBars + 1; cursor <= index; cursor += 1) {
+      if (direction === 1 ? ema[cursor] <= ema[cursor - 1] : ema[cursor] >= ema[cursor - 1]) return false;
+    }
+    return true;
+  };
+  const isConfirmedPivot = (index: number, direction: -1 | 1, knownIndex: number) => {
+    if (index < pivotStrength || index + pivotStrength > knownIndex) return false;
+    const price = direction === 1 ? candles[index].high : candles[index].low;
+    for (let offset = 1; offset <= pivotStrength; offset += 1) {
+      const left = direction === 1 ? candles[index - offset].high : candles[index - offset].low;
+      const right = direction === 1 ? candles[index + offset].high : candles[index + offset].low;
+      if (direction === 1 ? price <= left || price <= right : price >= left || price >= right) return false;
+    }
+    return true;
+  };
+
+  const swingHighs: SwingPoint[] = [];
+  const swingLows: SwingPoint[] = [];
+  let state: AlwaysInDirection = 0;
+  let lastStateEvent = -1;
+  let usedBullPivotIndex = -1;
+  let usedBearPivotIndex = -1;
+  let pendingBull: PendingBreakout | null = null;
+  let pendingBear: PendingBreakout | null = null;
+
+  for (let index = 0; index <= endIndex; index += 1) {
+    const pivotIndex = index - pivotStrength;
+    if (isConfirmedPivot(pivotIndex, 1, index)) {
+      swingHighs.push({ index: pivotIndex, price: candles[pivotIndex].high });
+      if (swingHighs.length > 2) swingHighs.shift();
+    }
+    if (isConfirmedPivot(pivotIndex, -1, index)) {
+      swingLows.push({ index: pivotIndex, price: candles[pivotIndex].low });
+      if (swingLows.length > 2) swingLows.shift();
+    }
+
+    const current = candles[index];
+    const bullStructure = swingHighs.length === 2 && swingLows.length === 2
+      && swingHighs[1].price > swingHighs[0].price
+      && swingLows[1].price > swingLows[0].price;
+    const bearStructure = swingHighs.length === 2 && swingLows.length === 2
+      && swingHighs[1].price < swingHighs[0].price
+      && swingLows[1].price < swingLows[0].price;
+
+    if (pendingBull) {
+      const age = index - pendingBull.index;
+      if (current.close < pendingBull.low || age > followThroughBars) {
+        pendingBull = null;
+      } else if (age >= 1 && current.close > pendingBull.high && current.close > current.open
+        && current.close > ema[index] && emaMoves(index, 1) && bullStructure) {
+        state = 1;
+        lastStateEvent = index;
+        usedBullPivotIndex = pendingBull.pivotIndex;
+        pendingBull = null;
+        pendingBear = null;
+      }
+    }
+    if (pendingBear) {
+      const age = index - pendingBear.index;
+      if (current.close > pendingBear.high || age > followThroughBars) {
+        pendingBear = null;
+      } else if (age >= 1 && current.close < pendingBear.low && current.close < current.open
+        && current.close < ema[index] && emaMoves(index, -1) && bearStructure) {
+        state = -1;
+        lastStateEvent = index;
+        usedBearPivotIndex = pendingBear.pivotIndex;
+        pendingBear = null;
+        pendingBull = null;
+      }
+    }
+
+    if (state !== 0 && lastStateEvent >= 0 && index - lastStateEvent > stateLookback) state = 0;
+
+    const previous = candles[index - 1];
+    const latestHigh = swingHighs.at(-1);
+    const latestLow = swingLows.at(-1);
+    if (!pendingBull && latestHigh && latestHigh.index > usedBullPivotIndex && previous
+      && previous.close <= latestHigh.price && current.close > latestHigh.price && current.close > current.open) {
+      pendingBull = { index, high: current.high, low: current.low, pivotIndex: latestHigh.index };
+    }
+    if (!pendingBear && latestLow && latestLow.index > usedBearPivotIndex && previous
+      && previous.close >= latestLow.price && current.close < latestLow.price && current.close < current.open) {
+      pendingBear = { index, high: current.high, low: current.low, pivotIndex: latestLow.index };
+    }
+    const structureMatches = state === 1 ? bullStructure : state === -1 ? bearStructure : false;
+    const windowStart = index - controlWindow + 1;
+    let trendSideCloses = 0;
+    let emaCrosses = 0;
+    if (state !== 0 && windowStart >= 0) {
+      let previousSide = Math.sign(candles[windowStart].close - ema[windowStart]);
+      for (let cursor = windowStart; cursor <= index; cursor += 1) {
+        const side = Math.sign(candles[cursor].close - ema[cursor]);
+        if (state === 1 ? side > 0 : side < 0) trendSideCloses += 1;
+        if (cursor > windowStart && side !== 0 && previousSide !== 0 && side !== previousSide) emaCrosses += 1;
+        if (side !== 0) previousSide = side;
+      }
+    }
+    const directionStillControls = state !== 0
+      && structureMatches
+      && lastStateEvent >= 0
+      && index - lastStateEvent <= recentBreakoutBars
+      && windowStart >= 0
+      && trendSideCloses >= minimumTrendCloses
+      && emaCrosses <= maximumEmaCrosses
+      && (state === 1
+        ? current.close > ema[index] && ema[index] > ema[windowStart] && current.close > candles[windowStart].close
+        : current.close < ema[index] && ema[index] < ema[windowStart] && current.close < candles[windowStart].close);
+    states[index] = directionStillControls ? state : 0;
+  }
+  return states;
+}
+
+function alwaysInDirectionAt(candles: PatternCandle[], index: number, parameters: Record<string, number>) {
+  const emaPeriod = patternInteger(parameters.emaPeriod, 20, 5, 100);
+  const pivotStrength = patternInteger(parameters.pivotStrength, 2, 1, 5);
+  const followThroughBars = patternInteger(parameters.followThroughBars, 2, 1, 4);
+  const emaSlopeBars = patternInteger(parameters.emaSlopeBars, 3, 1, 10);
+  const stateLookback = patternInteger(parameters.stateLookback, 120, 20, 500);
+  const controlWindow = patternInteger(parameters.controlWindow, 12, 6, 40);
+  const history = stateLookback + emaPeriod * 4 + pivotStrength * 4 + followThroughBars + emaSlopeBars + controlWindow;
+  const startIndex = Math.max(0, index - history);
+  const window = candles.slice(startIndex, index + 1);
+  const states = alwaysInStateSeries(window, window.length - 1, parameters);
+  return (states.at(-1) ?? 0) as AlwaysInDirection;
 }
 
 function priorExtremes(candles: PatternCandle[], index: number, lookback: number) {
@@ -220,6 +408,10 @@ export function matchesPattern(candles: PatternCandle[], index: number, preset: 
     const boundary = priorExtremes(candles, index, lookback).high;
     const brokeUp = current.close > boundary * (1 + p.minimumBreakoutPct / 100);
     return brokeUp && hasVolumeConfirmation(candles, index, lookback, p.volumeMultiplier);
+  }
+  if (preset.kind === "always_in_long" || preset.kind === "always_in_short") {
+    const direction = alwaysInDirectionAt(candles, index, p);
+    return preset.kind === "always_in_long" ? direction === 1 : direction === -1;
   }
   if (preset.kind === "trend_pullback") {
     const fast = Math.round(p.fastPeriod);
@@ -286,12 +478,22 @@ export function findPatternMatches(
   const matches: PatternMatch[] = [];
   const cooldownBars = Math.max(0, Math.round(options.cooldownBars ?? 0));
   const maximumIndex = Math.min(candles.length - 1, options.maximumIndex ?? candles.length - 1);
+  const alwaysInStates = new Map<PatternPreset, Int8Array>();
+  for (const preset of presets) {
+    if (preset.kind === "always_in_long" || preset.kind === "always_in_short") {
+      alwaysInStates.set(preset, alwaysInStateSeries(candles, maximumIndex, preset.parameters));
+    }
+  }
   let lastAcceptedIndex = -cooldownBars - 1;
   for (let index = 0; index <= maximumIndex; index += 1) {
     const candle = candles[index];
     if (options.startTimestamp != null && candle.timestamp < options.startTimestamp) continue;
     if (options.endTimestamp != null && candle.timestamp > options.endTimestamp) continue;
-    const hitPresets = presets.filter((preset) => matchesPattern(candles, index, preset));
+    const hitPresets = presets.filter((preset) => {
+      const states = alwaysInStates.get(preset);
+      if (!states) return matchesPattern(candles, index, preset);
+      return preset.kind === "always_in_long" ? states[index] === 1 : states[index] === -1;
+    });
     if (!hitPresets.length || index - lastAcceptedIndex <= cooldownBars) continue;
     matches.push({
       index,

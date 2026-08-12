@@ -24,6 +24,21 @@ test("resolves the versioned A-share mainboard rule profile", () => {
   assert.equal(rules.allowShort, false);
 });
 
+test("uses instrument precision for FX price ticks and quantity wording", () => {
+  const eurusd = resolveMarketRules("FX", "EURUSD.FX");
+  const usdjpy = resolveMarketRules("FX", "USDJPY.FX");
+  assert.equal(eurusd.id, "fx-spot-margin");
+  assert.equal(eurusd.priceTick, 0.00001);
+  assert.equal(usdjpy.priceTick, 0.001);
+  assert.equal(eurusd.allowShort, true);
+  assert.equal(eurusd.minimumBuyQuantity, 0.01);
+  assert.equal(eurusd.buyQuantityStep, 0.01);
+  assert.equal(eurusd.defaultOrderQuantity, 1);
+  assert.equal(eurusd.instrumentEconomics.contractSize, 100_000);
+  assert.equal(eurusd.instrumentEconomics.quoteBasis, "bid");
+  assert.equal(describeBuyQuantity(eurusd), "买入 0.01 手整数倍");
+});
+
 test("enforces board lots and prevents unbacked short selling", () => {
   assert.equal(validateOpenOrder(CN_A_MAINBOARD_RULES_V1, "buy", 100).ok, true);
   assert.equal(validateOpenOrder(CN_A_MAINBOARD_RULES_V1, "buy", 150).code, "board_lot_required");

@@ -1,3 +1,9 @@
+import {
+  accountNotional,
+  accountPnl,
+  type InstrumentEconomics,
+} from "./fxTrading.ts";
+
 export type TradingMode = "return" | "capital";
 
 export type AccountPosition = {
@@ -7,6 +13,7 @@ export type AccountPosition = {
   status: "open" | "closed";
   exitPrice?: number;
   realizedPnl?: number;
+  instrumentEconomics?: InstrumentEconomics;
 };
 
 export type CashReservation = {
@@ -34,8 +41,21 @@ export function executionCashFlow(side: "buy" | "sell", price: number, qty: numb
 
 export function positionPnl(position: AccountPosition, currentPrice: number) {
   if (position.status === "closed") return Number(position.realizedPnl ?? 0);
-  const direction = position.side === "long" ? 1 : -1;
-  return (currentPrice - position.entryPrice) * position.qty * direction;
+  return accountPnl(
+    position.entryPrice,
+    currentPrice,
+    position.qty,
+    position.side,
+    position.instrumentEconomics,
+  ) ?? 0;
+}
+
+function positionEntryNotional(position: AccountPosition) {
+  return accountNotional(
+    position.entryPrice,
+    position.qty,
+    position.instrumentEconomics,
+  ) ?? 0;
 }
 
 export function settleOpenPositionsAtPrice<
@@ -64,12 +84,12 @@ export function settleOpenPositionsAtPrice<
 }
 
 export function positionReturnPct(position: AccountPosition, currentPrice: number) {
-  const notional = position.entryPrice * position.qty;
+  const notional = positionEntryNotional(position);
   return notional > 0 ? positionPnl(position, currentPrice) / notional * 100 : 0;
 }
 
 export function portfolioReturnPct(positions: AccountPosition[], currentPrice: number) {
-  const notional = positions.reduce((sum, position) => sum + position.entryPrice * position.qty, 0);
+  const notional = positions.reduce((sum, position) => sum + positionEntryNotional(position), 0);
   const pnl = positions.reduce((sum, position) => sum + positionPnl(position, currentPrice), 0);
   return notional > 0 ? pnl / notional * 100 : 0;
 }

@@ -1,3 +1,9 @@
+import {
+  createFxInstrumentEconomics,
+  type FxAccountConfig,
+  type InstrumentEconomics,
+} from "./fxTrading.ts";
+
 export type MarketRuleProfile = {
   id: string;
   version: string;
@@ -13,6 +19,9 @@ export type MarketRuleProfile = {
   priceLimitRatio: number | null;
   priceTick: number;
   limitFillPolicy: "allow" | "conservative";
+  quantityUnit?: "share" | "unit" | "lot";
+  defaultOrderQuantity?: number;
+  instrumentEconomics?: InstrumentEconomics;
 };
 
 export type RuleValidation = {
@@ -60,6 +69,25 @@ export const GENERIC_CASH_RULES_V1: MarketRuleProfile = Object.freeze({
   priceLimitRatio: null,
   priceTick: 0.01,
   limitFillPolicy: "allow",
+});
+
+export const FX_SPOT_RULES_V2: MarketRuleProfile = Object.freeze({
+  id: "fx-spot-margin",
+  version: "2026.08-v2",
+  name: "外汇保证金（Bid/Ask）",
+  market: "FX",
+  tradingEnabled: true,
+  allowShort: true,
+  boardLot: 0.01,
+  minimumBuyQuantity: 0.01,
+  buyQuantityStep: 0.01,
+  ipoNoLimitTradingDays: 0,
+  tPlusOne: false,
+  priceLimitRatio: null,
+  priceTick: 0.00001,
+  limitFillPolicy: "allow",
+  quantityUnit: "lot",
+  defaultOrderQuantity: 1,
 });
 
 export const CN_UNSUPPORTED_RULES_V1: MarketRuleProfile = Object.freeze({
@@ -135,13 +163,25 @@ export const CN_BEIJING_RULES_V1: MarketRuleProfile = Object.freeze({
   limitFillPolicy: "conservative",
 });
 
-export function resolveMarketRules(market: string, instrumentId: string): MarketRuleProfile {
-  if (market === "CN") {
+export function resolveMarketRules(
+  market: string,
+  instrumentId: string,
+  fxAccountConfig?: Partial<FxAccountConfig> | null,
+): MarketRuleProfile {
+  const normalizedMarket = market.trim().toUpperCase();
+  if (normalizedMarket === "CN") {
     if (MAINBOARD_SYMBOL.test(instrumentId)) return CN_A_MAINBOARD_RULES_V1;
     if (STAR_MARKET_SYMBOL.test(instrumentId)) return CN_STAR_MARKET_RULES_V1;
     if (CHINEXT_SYMBOL.test(instrumentId)) return CN_CHINEXT_RULES_V1;
     if (BEIJING_SYMBOL.test(instrumentId)) return CN_BEIJING_RULES_V1;
     return CN_UNSUPPORTED_RULES_V1;
+  }
+  if (normalizedMarket === "FX" || /\.FX$/i.test(instrumentId)) {
+    return {
+      ...FX_SPOT_RULES_V2,
+      priceTick: /JPY(?:\.FX)?$/i.test(instrumentId) ? 0.001 : 0.00001,
+      instrumentEconomics: createFxInstrumentEconomics(instrumentId, fxAccountConfig),
+    };
   }
   return { ...GENERIC_CASH_RULES_V1, market };
 }
@@ -157,16 +197,18 @@ export function buyQuantityStep(rules: MarketRuleProfile) {
 export function normalizeBuyQuantity(rules: MarketRuleProfile, requested: number) {
   const minimum = minimumBuyQuantity(rules);
   const step = buyQuantityStep(rules);
-  const safeRequested = Number.isFinite(requested) ? Math.max(minimum, Math.round(requested)) : minimum;
-  return Math.ceil(safeRequested / step) * step;
+  const safeRequested = Number.isFinite(requested) ? Math.max(minimum, requested) : minimum;
+  const precision = Math.max(0, String(step).split(".")[1]?.length ?? 0);
+  return Number((Math.ceil((safeRequested - 1e-12) / step) * step).toFixed(precision));
 }
 
 export function describeBuyQuantity(rules: MarketRuleProfile) {
   const minimum = minimumBuyQuantity(rules);
   const step = buyQuantityStep(rules);
+  const unit = rules.quantityUnit === "lot" ? "手" : rules.market === "FX" ? "单位" : "股";
   return minimum === step
-    ? `买入 ${minimum} 股整数倍`
-    : `买入至少 ${minimum} 股，之后按 ${step} 股递增`;
+    ? `买入 ${minimum} ${unit}整数倍`
+    : `买入至少 ${minimum} ${unit}，之后按 ${step} ${unit}递增`;
 }
 
 export function validateOpenOrder(
@@ -177,26 +219,29 @@ export function validateOpenOrder(
   if (!rules.tradingEnabled) {
     return { ok: false, code: "market_rule_not_implemented", message: `${rules.name}暂未开放模拟交易` };
   }
-  if (!Number.isInteger(quantity) || quantity <= 0) {
-    return { ok: false, code: "invalid_quantity", message: "委托数量必须是正整数" };
+  if (!Number.isFinite(quantity) || quantity <= 0) {
+    return { ok: false, code: "invalid_quantity", message: "委托数量必须大于 0" };
   }
   if (side === "sell" && !rules.allowShort) {
     return { ok: false, code: "short_not_allowed", message: `${rules.name}默认禁止卖出开仓` };
   }
   const minimum = minimumBuyQuantity(rules);
   const step = buyQuantityStep(rules);
-  if (side === "buy" && quantity < minimum) {
+  const unit = rules.quantityUnit === "lot" ? "手" : rules.market === "FX" ? "单位" : "股";
+  const quantityRuleApplies = side === "buy" || rules.quantityUnit === "lot";
+  if (quantityRuleApplies && quantity < minimum) {
     return {
       ok: false,
       code: "minimum_quantity_required",
-      message: `买入数量不得少于 ${minimum} 股`,
+      message: `下单数量不得少于 ${minimum} ${unit}`,
     };
   }
-  if (side === "buy" && quantity % step !== 0) {
+  const alignedSteps = quantity / step;
+  if (quantityRuleApplies && Math.abs(alignedSteps - Math.round(alignedSteps)) > 1e-8) {
     return {
       ok: false,
       code: "board_lot_required",
-      message: `买入数量必须以 ${step} 股为增量`,
+      message: `下单数量必须以 ${step} ${unit}为增量`,
     };
   }
   return { ok: true };

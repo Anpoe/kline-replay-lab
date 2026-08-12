@@ -66,3 +66,45 @@ test("selected patterns reject a symbol when none match", () => {
   }]);
   assert.equal(result, null);
 });
+
+test("local scanner recognizes the structural Always In Long preset", () => {
+  const rows = [
+    [9.8, 10.5, 9.5, 10],
+    [10, 12, 9.8, 11.5],
+    [11.3, 11.4, 9, 10],
+    [10.3, 13, 10.2, 12.5],
+    [12, 12.1, 10, 10.5],
+    [10.5, 13.8, 10.4, 13.5],
+    [13.4, 14.5, 13.2, 14.2],
+    [14.1, 14.2, 13, 13.8],
+  ];
+  const candles = rows.map(([open, high, low, close], index) => ({
+    timestamp: index,
+    open,
+    high,
+    low,
+    close,
+    volume: 100,
+    turnover: 1_000,
+  }));
+  const preset = {
+    id: "always-in-long",
+    name: "Always In Long（结构）",
+    kind: "always_in_long",
+    parameters: {
+      emaPeriod: 5,
+      pivotStrength: 1,
+      followThroughBars: 1,
+      emaSlopeBars: 1,
+      stateLookback: 20,
+      recentBreakoutBars: 10,
+      controlWindow: 6,
+      minimumTrendCloses: 3,
+      maximumEmaCrosses: 3,
+    },
+  };
+
+  const result = screenLatestCandles(candles, [preset]);
+  assert.ok(result);
+  assert.deepEqual(result.presetIds, ["always-in-long"]);
+});

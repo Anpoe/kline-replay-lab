@@ -17,6 +17,140 @@ function emaAt(candles, index, period) {
   return result;
 }
 
+function patternInteger(value, fallback, minimum, maximum) {
+  return Math.max(minimum, Math.min(maximum, Math.round(finite(value, fallback))));
+}
+
+function alwaysInDirectionAt(candles, targetIndex, parameters) {
+  const emaPeriod = patternInteger(parameters.emaPeriod, 20, 5, 100);
+  const pivotStrength = patternInteger(parameters.pivotStrength, 2, 1, 5);
+  const followThroughBars = patternInteger(parameters.followThroughBars, 2, 1, 4);
+  const emaSlopeBars = patternInteger(parameters.emaSlopeBars, 3, 1, 10);
+  const stateLookback = patternInteger(parameters.stateLookback, 120, 20, 500);
+  const recentBreakoutBars = patternInteger(parameters.recentBreakoutBars, 18, 4, 60);
+  const controlWindow = patternInteger(parameters.controlWindow, 12, 6, 40);
+  const minimumTrendCloses = patternInteger(parameters.minimumTrendCloses, 9, 3, controlWindow);
+  const maximumEmaCrosses = patternInteger(parameters.maximumEmaCrosses, 1, 0, 6);
+  const history = stateLookback + emaPeriod * 4 + pivotStrength * 4 + followThroughBars + emaSlopeBars + controlWindow;
+  const startIndex = Math.max(0, targetIndex - history);
+  const bars = candles.slice(startIndex, targetIndex + 1);
+  if (!bars.length) return 0;
+
+  const ema = new Float64Array(bars.length);
+  const multiplier = 2 / (emaPeriod + 1);
+  ema[0] = bars[0].close;
+  for (let index = 1; index < bars.length; index += 1) {
+    ema[index] = bars[index].close * multiplier + ema[index - 1] * (1 - multiplier);
+  }
+  const emaMoves = (index, direction) => {
+    if (index < emaSlopeBars) return false;
+    for (let cursor = index - emaSlopeBars + 1; cursor <= index; cursor += 1) {
+      if (direction === 1 ? ema[cursor] <= ema[cursor - 1] : ema[cursor] >= ema[cursor - 1]) return false;
+    }
+    return true;
+  };
+  const isConfirmedPivot = (index, direction, knownIndex) => {
+    if (index < pivotStrength || index + pivotStrength > knownIndex) return false;
+    const price = direction === 1 ? bars[index].high : bars[index].low;
+    for (let offset = 1; offset <= pivotStrength; offset += 1) {
+      const left = direction === 1 ? bars[index - offset].high : bars[index - offset].low;
+      const right = direction === 1 ? bars[index + offset].high : bars[index + offset].low;
+      if (direction === 1 ? price <= left || price <= right : price >= left || price >= right) return false;
+    }
+    return true;
+  };
+
+  const swingHighs = [];
+  const swingLows = [];
+  let state = 0;
+  let lastStateEvent = -1;
+  let usedBullPivotIndex = -1;
+  let usedBearPivotIndex = -1;
+  let pendingBull = null;
+  let pendingBear = null;
+  let qualifiedState = 0;
+
+  for (let index = 0; index < bars.length; index += 1) {
+    const pivotIndex = index - pivotStrength;
+    if (isConfirmedPivot(pivotIndex, 1, index)) {
+      swingHighs.push({ index: pivotIndex, price: bars[pivotIndex].high });
+      if (swingHighs.length > 2) swingHighs.shift();
+    }
+    if (isConfirmedPivot(pivotIndex, -1, index)) {
+      swingLows.push({ index: pivotIndex, price: bars[pivotIndex].low });
+      if (swingLows.length > 2) swingLows.shift();
+    }
+
+    const current = bars[index];
+    const bullStructure = swingHighs.length === 2 && swingLows.length === 2
+      && swingHighs[1].price > swingHighs[0].price && swingLows[1].price > swingLows[0].price;
+    const bearStructure = swingHighs.length === 2 && swingLows.length === 2
+      && swingHighs[1].price < swingHighs[0].price && swingLows[1].price < swingLows[0].price;
+
+    if (pendingBull) {
+      const age = index - pendingBull.index;
+      if (current.close < pendingBull.low || age > followThroughBars) {
+        pendingBull = null;
+      } else if (age >= 1 && current.close > pendingBull.high && current.close > current.open
+        && current.close > ema[index] && emaMoves(index, 1) && bullStructure) {
+        state = 1;
+        lastStateEvent = index;
+        usedBullPivotIndex = pendingBull.pivotIndex;
+        pendingBull = null;
+        pendingBear = null;
+      }
+    }
+    if (pendingBear) {
+      const age = index - pendingBear.index;
+      if (current.close > pendingBear.high || age > followThroughBars) {
+        pendingBear = null;
+      } else if (age >= 1 && current.close < pendingBear.low && current.close < current.open
+        && current.close < ema[index] && emaMoves(index, -1) && bearStructure) {
+        state = -1;
+        lastStateEvent = index;
+        usedBearPivotIndex = pendingBear.pivotIndex;
+        pendingBear = null;
+        pendingBull = null;
+      }
+    }
+
+    if (state !== 0 && lastStateEvent >= 0 && index - lastStateEvent > stateLookback) state = 0;
+    const previous = bars[index - 1];
+    const latestHigh = swingHighs.at(-1);
+    const latestLow = swingLows.at(-1);
+    if (!pendingBull && latestHigh && latestHigh.index > usedBullPivotIndex && previous
+      && previous.close <= latestHigh.price && current.close > latestHigh.price && current.close > current.open) {
+      pendingBull = { index, high: current.high, low: current.low, pivotIndex: latestHigh.index };
+    }
+    if (!pendingBear && latestLow && latestLow.index > usedBearPivotIndex && previous
+      && previous.close >= latestLow.price && current.close < latestLow.price && current.close < current.open) {
+      pendingBear = { index, high: current.high, low: current.low, pivotIndex: latestLow.index };
+    }
+
+    const structureMatches = state === 1 ? bullStructure : state === -1 ? bearStructure : false;
+    const windowStart = index - controlWindow + 1;
+    let trendSideCloses = 0;
+    let emaCrosses = 0;
+    if (state !== 0 && windowStart >= 0) {
+      let previousSide = Math.sign(bars[windowStart].close - ema[windowStart]);
+      for (let cursor = windowStart; cursor <= index; cursor += 1) {
+        const side = Math.sign(bars[cursor].close - ema[cursor]);
+        if (state === 1 ? side > 0 : side < 0) trendSideCloses += 1;
+        if (cursor > windowStart && side !== 0 && previousSide !== 0 && side !== previousSide) emaCrosses += 1;
+        if (side !== 0) previousSide = side;
+      }
+    }
+    const directionStillControls = state !== 0 && structureMatches && lastStateEvent >= 0
+      && index - lastStateEvent <= recentBreakoutBars && windowStart >= 0
+      && trendSideCloses >= minimumTrendCloses && emaCrosses <= maximumEmaCrosses
+      && (state === 1
+        ? current.close > ema[index] && ema[index] > ema[windowStart] && current.close > bars[windowStart].close
+        : current.close < ema[index] && ema[index] < ema[windowStart] && current.close < bars[windowStart].close);
+    qualifiedState = directionStillControls ? state : 0;
+  }
+  return qualifiedState;
+}
+
 function priorExtremes(candles, index, lookback) {
   const previous = candles.slice(Math.max(0, index - lookback), index);
   return {
@@ -64,6 +198,10 @@ export function matchesLatestPattern(candles, preset) {
     if (index < lookback || !uptrend(candles, index, p)) return false;
     return current.close > priorExtremes(candles, index, lookback).high * (1 + p.minimumBreakoutPct / 100)
       && volumeConfirmed(candles, index, lookback, p.volumeMultiplier);
+  }
+  if (preset.kind === "always_in_long" || preset.kind === "always_in_short") {
+    const direction = alwaysInDirectionAt(candles, index, p);
+    return preset.kind === "always_in_long" ? direction === 1 : direction === -1;
   }
   if (preset.kind === "trend_pullback") {
     const fast = Math.round(p.fastPeriod);

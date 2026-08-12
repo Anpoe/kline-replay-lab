@@ -30,6 +30,40 @@ test("return-only account reports direction-aware percentage returns", () => {
   assert.equal(portfolioReturnPct([long, short], 22), 0);
 });
 
+test("FX returns use contract notional instead of treating one lot as one currency unit", () => {
+  const instrumentEconomics = {
+    settlementMode: "margin",
+    quoteBasis: "bid",
+    quantityUnit: "lot",
+    contractSize: 100_000,
+    pipSize: 0.0001,
+    pointSize: 0.00001,
+    baseCurrency: "EUR",
+    quoteCurrency: "USD",
+    accountCurrency: "USD",
+    leverage: 100,
+    stopOutLevelPct: 50,
+    manualQuoteToAccountRate: 0,
+  };
+  const positions = [
+    {
+      side: "long", qty: 1, entryPrice: 1.25926, status: "closed", realizedPnl: 98,
+      instrumentEconomics,
+    },
+    {
+      side: "long", qty: 1, entryPrice: 1.26013, status: "closed", realizedPnl: 11,
+      instrumentEconomics,
+    },
+  ];
+
+  assert.ok(Math.abs(
+    positionReturnPct(positions[0], 0) - 98 / (1.25926 * 100_000) * 100,
+  ) < 1e-12);
+  assert.ok(Math.abs(
+    portfolioReturnPct(positions, 0) - 109 / ((1.25926 + 1.26013) * 100_000) * 100,
+  ) < 1e-12);
+});
+
 test("training-end settlement closes every open position at the final close", () => {
   const positions = [
     { id: "long", side: "long", qty: 100, entryPrice: 10, entryTimestamp: 1, entryOrderId: "open-1", status: "open" },
