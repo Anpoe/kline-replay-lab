@@ -3,17 +3,18 @@ setlocal EnableExtensions
 title KLine Training Camp 2.0 - Local Web
 
 set "KLINE_WEB_DIR=%~dp0web"
-set "KLINE_LOCAL_URL=http://localhost:3000"
+set "KLINE_WEB_PORT=3101"
+set "KLINE_LOCAL_URL=http://localhost:%KLINE_WEB_PORT%"
 set "KLINE_DATA_URL=http://127.0.0.1:3100/health"
 set "KLINE_DATA_SERVICE_VERSION=2"
 set "KLINE_DATA_STARTED=0"
 set "KLINE_LAN_IP="
 set "KLINE_MOBILE_URL="
 set "KLINE_REMOTE_HOST=kline42.dynv6.net"
-set "KLINE_REMOTE_URL=http://%KLINE_REMOTE_HOST%:3000"
+set "KLINE_REMOTE_URL=http://%KLINE_REMOTE_HOST%:%KLINE_WEB_PORT%"
 
 for /f "usebackq delims=" %%I in (`powershell.exe -NoProfile -Command "$config = Get-NetIPConfiguration | Where-Object { $_.IPv4DefaultGateway -and $_.NetAdapter.Status -eq 'Up' } | Select-Object -First 1; if ($config.IPv4Address.IPAddress) { $config.IPv4Address.IPAddress }"`) do set "KLINE_LAN_IP=%%I"
-if defined KLINE_LAN_IP set "KLINE_MOBILE_URL=http://%KLINE_LAN_IP%:3000"
+if defined KLINE_LAN_IP set "KLINE_MOBILE_URL=http://%KLINE_LAN_IP%:%KLINE_WEB_PORT%"
 
 if exist "%KLINE_WEB_DIR%\package.json" goto project_found
 echo [ERROR] Web project not found: %KLINE_WEB_DIR%
@@ -65,13 +66,13 @@ goto restart_stale_data_service
 :restart_stale_data_service
 rem A previous project version may have left its helper running. Restart only
 rem when the saved PID still belongs to this project's local data service.
-powershell.exe -NoProfile -Command "$pidFile = '%KLINE_WEB_DIR%\.local-data\service.pid'; if (!(Test-Path -LiteralPath $pidFile)) { exit 1 }; $servicePid = [int](Get-Content -LiteralPath $pidFile -Raw); $process = Get-CimInstance Win32_Process -Filter ('ProcessId=' + $servicePid); if (!$process -or $process.CommandLine -notmatch 'local-data/server\.mjs') { exit 1 }; Stop-Process -Id $servicePid -Force; Remove-Item -LiteralPath $pidFile -Force -ErrorAction SilentlyContinue; $deadline = (Get-Date).AddSeconds(10); do { if (!(Get-NetTCPConnection -LocalPort 3100 -State Listen -ErrorAction SilentlyContinue)) { exit 0 }; Start-Sleep -Milliseconds 300 } while ((Get-Date) -lt $deadline); exit 1" >nul 2>nul
+powershell.exe -NoProfile -Command "$pidFile = '.local-data\service.pid'; if (!(Test-Path -LiteralPath $pidFile)) { exit 1 }; $servicePid = [int](Get-Content -LiteralPath $pidFile -Raw); $process = Get-CimInstance Win32_Process -Filter ('ProcessId=' + $servicePid); if (!$process -or $process.CommandLine -notmatch 'local-data/server\.mjs') { exit 1 }; Stop-Process -Id $servicePid -Force; Remove-Item -LiteralPath $pidFile -Force -ErrorAction SilentlyContinue; $deadline = (Get-Date).AddSeconds(10); do { if (!(Get-NetTCPConnection -LocalPort 3100 -State Listen -ErrorAction SilentlyContinue)) { exit 0 }; Start-Sleep -Milliseconds 300 } while ((Get-Date) -lt $deadline); exit 1" >nul 2>nul
 if not errorlevel 1 goto start_data_service
 goto data_port_conflict
 
 :start_data_service
 echo Starting local market data service...
-powershell.exe -NoProfile -Command "$p = Start-Process -FilePath 'node.exe' -ArgumentList 'local-data/server.mjs' -WorkingDirectory '%KLINE_WEB_DIR%' -WindowStyle Hidden -PassThru; Set-Content -LiteralPath '%KLINE_WEB_DIR%\.local-data\service.pid' -Value $p.Id -Encoding ascii"
+powershell.exe -NoProfile -Command "$p = Start-Process -FilePath 'node.exe' -ArgumentList 'local-data/server.mjs' -WorkingDirectory (Get-Location).Path -WindowStyle Hidden -PassThru; Set-Content -LiteralPath '.local-data\service.pid' -Value $p.Id -Encoding ascii"
 if errorlevel 1 goto data_start_error
 set "KLINE_DATA_STARTED=1"
 
@@ -96,7 +97,7 @@ rem loopback only, in which case it must be restarted once for phone access.
 powershell.exe -NoProfile -Command "try { $r = Invoke-WebRequest -Uri '%KLINE_LOCAL_URL%' -UseBasicParsing -TimeoutSec 3; if ($r.StatusCode -eq 200 -and $r.Content -match 'K') { exit 0 } } catch {}; exit 1" >nul 2>nul
 if errorlevel 1 goto check_web_port
 
-powershell.exe -NoProfile -Command "$listeners = @(Get-NetTCPConnection -LocalPort 3000 -State Listen -ErrorAction SilentlyContinue); $lanListeners = @($listeners.Where({ $_.LocalAddress -eq '0.0.0.0' -or $_.LocalAddress -eq '::' })); if ($lanListeners.Count -gt 0) { exit 0 }; exit 1" >nul 2>nul
+powershell.exe -NoProfile -Command "$listeners = @(Get-NetTCPConnection -LocalPort %KLINE_WEB_PORT% -State Listen -ErrorAction SilentlyContinue); $lanListeners = @($listeners.Where({ $_.LocalAddress -eq '0.0.0.0' -or $_.LocalAddress -eq '::' })); if ($lanListeners.Count -gt 0) { exit 0 }; exit 1" >nul 2>nul
 if errorlevel 1 goto existing_local_only_web
 
 echo KLine Training Camp is already running in another window.
@@ -113,7 +114,7 @@ exit /b 0
 echo [NOTICE] An older local-only KLine Training Camp instance is still running.
 echo It must be restarted once before a phone can connect.
 echo.
-powershell.exe -NoProfile -Command "$owner = Get-NetTCPConnection -LocalPort 3000 -State Listen -ErrorAction SilentlyContinue | Select-Object -First 1 -ExpandProperty OwningProcess; if ($owner) { $p = Get-Process -Id $owner -ErrorAction SilentlyContinue; if ($p) { Write-Host ('Current process: ' + $p.ProcessName + ' (PID ' + $owner + ')') } }"
+powershell.exe -NoProfile -Command "$owner = Get-NetTCPConnection -LocalPort %KLINE_WEB_PORT% -State Listen -ErrorAction SilentlyContinue | Select-Object -First 1 -ExpandProperty OwningProcess; if ($owner) { $p = Get-Process -Id $owner -ErrorAction SilentlyContinue; if ($p) { Write-Host ('Current process: ' + $p.ProcessName + ' (PID ' + $owner + ')') } }"
 echo Close the original KLine Training Camp BAT window or press Ctrl+C there.
 echo Then double-click this BAT again. The new service will show:
 if defined KLINE_MOBILE_URL echo Phone (LAN): %KLINE_MOBILE_URL%
@@ -121,9 +122,9 @@ echo Remote (IPv6): %KLINE_REMOTE_URL%
 goto fatal
 
 :check_web_port
-powershell.exe -NoProfile -Command "if (Get-NetTCPConnection -LocalPort 3000 -State Listen -ErrorAction SilentlyContinue) { exit 0 } else { exit 1 }" >nul 2>nul
+powershell.exe -NoProfile -Command "if (Get-NetTCPConnection -LocalPort %KLINE_WEB_PORT% -State Listen -ErrorAction SilentlyContinue) { exit 0 } else { exit 1 }" >nul 2>nul
 if errorlevel 1 goto start_web
-echo [ERROR] Port 3000 is already used by another program.
+echo [ERROR] Port %KLINE_WEB_PORT% is already used by another program.
 goto cleanup_and_fatal
 
 :start_web
@@ -133,7 +134,7 @@ if defined KLINE_MOBILE_URL echo Phone (LAN): %KLINE_MOBILE_URL%
 echo Remote (IPv6): %KLINE_REMOTE_URL%
 echo Data: http://127.0.0.1:3100
 if defined KLINE_MOBILE_URL echo LAN access requires the phone and PC to use the same trusted Wi-Fi.
-echo Remote access requires DDNS-GO, a dynv6 AAAA record, and an explicit Windows/router firewall rule for TCP 3000.
+echo Remote access requires DDNS-GO, a dynv6 AAAA record, and an explicit Windows/router firewall rule for TCP %KLINE_WEB_PORT%.
 echo This launcher does not open a public firewall port automatically.
 echo Close this window or press Ctrl+C to stop the local web service.
 echo.
@@ -146,12 +147,12 @@ goto cleanup_and_exit
 
 :cleanup_and_fatal
 if not "%KLINE_DATA_STARTED%"=="1" goto fatal
-powershell.exe -NoProfile -Command "$pidFile = '%KLINE_WEB_DIR%\.local-data\service.pid'; if (Test-Path -LiteralPath $pidFile) { $servicePid = [int](Get-Content -LiteralPath $pidFile -Raw); Stop-Process -Id $servicePid -ErrorAction SilentlyContinue; Remove-Item -LiteralPath $pidFile -Force -ErrorAction SilentlyContinue }"
+powershell.exe -NoProfile -Command "$pidFile = '.local-data\service.pid'; if (Test-Path -LiteralPath $pidFile) { $servicePid = [int](Get-Content -LiteralPath $pidFile -Raw); Stop-Process -Id $servicePid -ErrorAction SilentlyContinue; Remove-Item -LiteralPath $pidFile -Force -ErrorAction SilentlyContinue }"
 goto fatal
 
 :cleanup_and_exit
 if not "%KLINE_DATA_STARTED%"=="1" goto stopped
-powershell.exe -NoProfile -Command "$pidFile = '%KLINE_WEB_DIR%\.local-data\service.pid'; if (Test-Path -LiteralPath $pidFile) { $servicePid = [int](Get-Content -LiteralPath $pidFile -Raw); Stop-Process -Id $servicePid -ErrorAction SilentlyContinue; Remove-Item -LiteralPath $pidFile -Force -ErrorAction SilentlyContinue }"
+powershell.exe -NoProfile -Command "$pidFile = '.local-data\service.pid'; if (Test-Path -LiteralPath $pidFile) { $servicePid = [int](Get-Content -LiteralPath $pidFile -Raw); Stop-Process -Id $servicePid -ErrorAction SilentlyContinue; Remove-Item -LiteralPath $pidFile -Force -ErrorAction SilentlyContinue }"
 
 :stopped
 echo.

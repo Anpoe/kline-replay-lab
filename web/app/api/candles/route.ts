@@ -175,6 +175,9 @@ export async function GET(request: Request) {
         }>(`/coverage?offset=${localOffset}&limit=${localLimit}&q=${encodeURIComponent(query)}`)
       : null;
     const databaseBarCount = marketDatabaseRows.reduce((sum, item) => sum + Number(item.barCount ?? 0), 0);
+    const databaseHasNonSampleData = marketDatabaseRows.some((item) => (
+      Number(item.barCount ?? 0) > 0 && String(item.source ?? "") !== "sample"
+    ));
     const databaseTimeframes = new Set(marketDatabaseRows.map((item) => String(item.timeframe)));
     for (const timeframe of local?.summary.timeframes ?? []) databaseTimeframes.add(timeframe);
     return Response.json({
@@ -183,6 +186,7 @@ export async function GET(request: Request) {
       summary: {
         barCount: databaseBarCount + Number(local?.summary.barCount ?? 0),
         timeframeCount: databaseTimeframes.size,
+        hasNonSampleData: databaseHasNonSampleData || Number(local?.summary.barCount ?? 0) > 0,
       },
     });
   }

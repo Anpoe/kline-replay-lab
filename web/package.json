@@ -6,7 +6,7 @@
     "node": ">=22.13.0"
   },
   "scripts": {
-    "dev": "vinext dev --hostname ::",
+    "dev": "vinext dev --hostname :: --port 3101",
     "local-data": "node local-data/server.mjs",
     "build": "vinext build",
     "start": "vinext start",

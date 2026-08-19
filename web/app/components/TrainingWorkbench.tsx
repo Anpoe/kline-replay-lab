@@ -55,6 +55,7 @@ import {
   type TradeMarker,
 } from "./KLineReplayChart";
 import { DataSourceManager } from "./DataSourceManager";
+import { DataAutoUpdateController } from "./DataAutoUpdateController";
 import { ProviderSettingsPanel } from "./ProviderSettingsPanel";
 import { aggregateM1To5m } from "../lib/fx/dukascopyAggregation";
 import { parseDukascopyCsv } from "../lib/fx/dukascopyCsv";
@@ -168,6 +169,63 @@ import { calculateRiskSizedQuantity, inferRiskSizingSide } from "../lib/riskSizi
 
 type View = "replay" | "performance" | "database" | "review";
 type DataMarket = "CN" | "US" | "FX" | "GOLD";
+type MarketOrderQtySettings = Record<DataMarket, number>;
+
+const DEFAULT_MARKET_ORDER_QTYS: MarketOrderQtySettings = {
+  CN: 100,
+  US: 1,
+  FX: 1,
+  GOLD: 1,
+};
+
+const marketOrderQuantityFields: Array<{
+  key: DataMarket;
+  label: string;
+  min: number;
+  step: number;
+}> = [
+  { key: "CN", label: "A股默认数量（股）", min: 1, step: 1 },
+  { key: "US", label: "美股默认数量（股）", min: 1, step: 1 },
+  { key: "FX", label: "外汇默认手数（手）", min: 0.01, step: 0.01 },
+  { key: "GOLD", label: "黄金默认数量", min: 1, step: 1 },
+];
+
+function marketOrderQtyKey(market: string | undefined, instrumentId = ""): DataMarket | null {
+  const normalized = (market ?? "").trim().toUpperCase();
+  if (normalized === "CN" || normalized === "A股") return "CN";
+  if (normalized === "US" || normalized === "美股") return "US";
+  if (normalized === "FX" || normalized === "FOREX" || normalized === "外汇" || /\.FX$/i.test(instrumentId)) return "FX";
+  if (normalized === "GOLD" || normalized === "METAL" || normalized === "黄金") return "GOLD";
+  return null;
+}
+
+function positiveOrderQty(value: unknown, fallback: number) {
+  const quantity = Number(value);
+  return Number.isFinite(quantity) && quantity > 0 ? quantity : fallback;
+}
+
+function normalizeMarketOrderQtySettings(value: unknown, legacyValue?: unknown): MarketOrderQtySettings {
+  const stored = value && typeof value === "object" && !Array.isArray(value)
+    ? value as Partial<Record<DataMarket, unknown>>
+    : undefined;
+  const legacyQuantity = Number(legacyValue);
+  // A missing per-market map comes from the old single default.  Keep an
+  // explicitly changed legacy value, but do not migrate the old built-in 100
+  // shares into FX and gold, where it was never the intended default.
+  const legacyFallback = Number.isFinite(legacyQuantity)
+    && legacyQuantity > 0
+    && legacyQuantity !== defaultAppSettings.defaultOrderQty
+    ? legacyQuantity
+    : undefined;
+  const fallback = (key: DataMarket) => legacyFallback ?? DEFAULT_MARKET_ORDER_QTYS[key];
+  return {
+    CN: positiveOrderQty(stored?.CN, fallback("CN")),
+    US: positiveOrderQty(stored?.US, fallback("US")),
+    FX: positiveOrderQty(stored?.FX, fallback("FX")),
+    GOLD: positiveOrderQty(stored?.GOLD, fallback("GOLD")),
+  };
+}
+
 type Instrument = {
   id: string;
   symbol: string;
@@ -212,7 +270,21 @@ function inferInstrumentAssetType(
 }
 
 function marketRuleCode(market: string) {
-  return market === "A股" ? "CN" : market === "美股" ? "US" : market;
+  const normalized = market.trim().toUpperCase();
+  if (normalized === "CN" || normalized === "A股") return "CN";
+  if (normalized === "US" || normalized === "美股") return "US";
+  if (normalized === "FX" || normalized === "FOREX" || normalized === "外汇") return "FX";
+  if (normalized === "GOLD" || normalized === "METAL" || normalized === "黄金") return "GOLD";
+  return normalized;
+}
+
+function marketSelectionLabel(market: string | undefined) {
+  const code = marketRuleCode(market ?? "");
+  if (code === "CN") return "A股";
+  if (code === "US") return "美股";
+  if (code === "FX") return "FX";
+  if (code === "GOLD") return "GOLD";
+  return market?.trim() ?? "";
 }
 
 function randomScopeIncludesMarket(
@@ -362,6 +434,7 @@ type PendingOrder = {
   qty: number;
   createdAt: number;
   positionId: string;
+  decisionSubmissionId?: string;
   ruleId?: string;
   ruleVersion?: string;
   priceBand?: PriceBand | null;
@@ -388,6 +461,7 @@ type PositionLot = {
   entryPrice: number;
   entryTimestamp: number;
   entryOrderId: string;
+  decisionSubmissionId?: string;
   entryOrderType?: OrderType;
   entryIntrabar?: boolean;
   status: "open" | "closed";
@@ -420,6 +494,7 @@ type Execution = {
   qty: number;
   price: number;
   timestamp: number;
+  decisionSubmissionId?: string;
   realizedPnl: number;
   grossRealizedPnl?: number;
   rawPrice?: number;
@@ -642,6 +717,10 @@ type TrainingState = {
   decision: Decision;
   decisionSubmissions: DecisionSubmission[];
   orderQty: number;
+  orderType?: OrderType;
+  orderTriggerPrice?: string;
+  orderStopLoss?: string;
+  orderTakeProfit?: string;
   positionSizeMode: PositionSizeMode;
   riskPercent: number;
   drawings: PersistedDrawing[];
@@ -675,6 +754,21 @@ type TrainingSession = {
   updatedAt: string;
   deletedAt?: string;
 };
+
+function compareTrainingSessionsByCreatedAt(left: TrainingSession, right: TrainingSession) {
+  const leftTime = Date.parse(left.createdAt);
+  const rightTime = Date.parse(right.createdAt);
+  const safeLeft = Number.isFinite(leftTime) ? leftTime : Number.NEGATIVE_INFINITY;
+  const safeRight = Number.isFinite(rightTime) ? rightTime : Number.NEGATIVE_INFINITY;
+  return safeRight - safeLeft || right.id.localeCompare(left.id);
+}
+
+function compareTrainingSessionSummariesByCreatedAt(
+  left: TrainingSessionSummary,
+  right: TrainingSessionSummary,
+) {
+  return compareTrainingSessionsByCreatedAt(left.session, right.session);
+}
 type DuplicateMarketWarning = {
   session: TrainingSession;
   state: TrainingState;
@@ -689,6 +783,7 @@ type RestoreRequest = {
   state: TrainingState;
   updatedAt?: string;
   preview?: boolean;
+  evidenceTimestamp?: number;
 };
 type NewTaskRequest = {
   instrumentId: string;
@@ -729,11 +824,14 @@ type ReviewSessionFilters = {
   timeframe: string;
   modeLabel: string;
   status: "all" | "active" | "completed";
+  planStatus: "all" | "written" | "unwritten";
 };
 type AppSettings = {
   defaultInstrumentId: string;
   defaultTimeframe: string;
   defaultOrderQty: number;
+  defaultOrderQtyByMarket: MarketOrderQtySettings;
+  orderType: OrderType;
   positionSizeMode: PositionSizeMode;
   riskPercent: number;
   defaultSpeed: number;
@@ -1020,6 +1118,7 @@ const defaultReviewSessionFilters: ReviewSessionFilters = {
   timeframe: "all",
   modeLabel: "all",
   status: "all",
+  planStatus: "all",
 };
 const defaultDecision: Decision = {
   marketState: "",
@@ -1075,16 +1174,63 @@ function cloneDecisionSubmissions(value: unknown): DecisionSubmission[] {
   });
 }
 
+function latestEntryDecisionId(submissions: DecisionSubmission[], timestamp: number) {
+  return submissions
+    .filter((submission) => (
+      !submission.autoGenerated
+      && !submission.backfilled
+      && submission.barTimestamp <= timestamp
+    ))
+    .sort((left, right) => left.barTimestamp - right.barTimestamp || String(left.submittedAt ?? "").localeCompare(String(right.submittedAt ?? "")))
+    .at(-1)?.id;
+}
+
+function backfillCandidatePositions(
+  positions: PositionLot[],
+  submissions: DecisionSubmission[],
+  targetTimestamp: number,
+  currentTimestamp: number,
+) {
+  const nextDecisionTimestamp = submissions
+    .filter((submission) => !submission.autoGenerated && submission.barTimestamp > targetTimestamp)
+    .sort((left, right) => left.barTimestamp - right.barTimestamp)
+    .at(0)?.barTimestamp;
+  return positions
+    .filter((position) => (
+      position.entryTimestamp >= targetTimestamp
+      && position.entryTimestamp <= currentTimestamp
+      && (nextDecisionTimestamp == null || position.entryTimestamp < nextDecisionTimestamp)
+      && !position.decisionSubmissionId
+    ))
+    .sort((left, right) => left.entryTimestamp - right.entryTimestamp || left.id.localeCompare(right.id));
+}
+
 const defaultInstruments = [
   { id: "600519.SH", short: "600519", label: "贵州茅台", market: "A股", assetType: "stock" as const, timeframes: ["1d", "1w"] },
   { id: "AAPL.US", short: "AAPL", label: "Apple", market: "美股", assetType: "stock" as const, timeframes: ["1d"] },
 ];
 const timeframes = ["1m", "5m", "1h", "1d", "1w"];
+
+function normalizeAvailableInstrument(item: Instrument & { timeframes?: string[] }): AvailableInstrument | null {
+  const availableTimeframes = (item.timeframes ?? []).filter((value) => timeframes.includes(value));
+  if (!availableTimeframes.length) return null;
+  return {
+    id: item.id,
+    short: item.symbol,
+    label: item.name,
+    market: marketSelectionLabel(item.market) || item.market,
+    assetType: inferInstrumentAssetType(item.id, item.market, item.assetType),
+    timeframes: availableTimeframes,
+  };
+}
+
 const coveragePageSize = 100;
 const defaultAppSettings: AppSettings = {
   defaultInstrumentId: "600519.SH",
   defaultTimeframe: "1d",
   defaultOrderQty: 100,
+  defaultOrderQtyByMarket: { ...DEFAULT_MARKET_ORDER_QTYS },
+  orderType: "market",
   positionSizeMode: "fixed",
   riskPercent: 1,
   defaultSpeed: 1,
@@ -1251,6 +1397,71 @@ function exitReasonLabel(value: ExecutionReason | undefined) {
   return "手动平仓";
 }
 
+function DecisionLinkedTradeSummary({
+  positions,
+  tradingMode,
+  marginInstrument,
+  dateLabel,
+  priceLabel,
+  onEvidence,
+  compact = false,
+}: {
+  positions: PositionLot[];
+  tradingMode: TradingMode;
+  marginInstrument: boolean;
+  dateLabel: (timestamp: number) => string;
+  priceLabel: (price: number | undefined) => string;
+  onEvidence: (timestamp: number, label: string) => void;
+  compact?: boolean;
+}) {
+  return (
+    <div className={`decision-linked-trades${compact ? " compact" : ""}`}>
+      <div className="decision-linked-trades-head">
+        <span>关联交易</span>
+        <strong>{positions.length ? `${positions.length} 笔` : "尚未关联"}</strong>
+      </div>
+      {positions.length ? (
+        <div className="decision-linked-trade-list">
+          {positions.map((position) => {
+            const closed = position.status === "closed";
+            const result = closed
+              ? tradingMode === "capital"
+                ? money(position.realizedPnl ?? 0)
+                : percent(positionReturnPct(position, position.exitPrice ?? position.entryPrice))
+              : "持仓中";
+            const quantity = marginInstrument ? `${position.qty.toFixed(2)} 手` : `数量 ${position.qty}`;
+            return (
+              <div className="decision-linked-trade" key={position.id}>
+                <div className="decision-linked-trade-head">
+                  <strong>交易 #{position.id.slice(0, 8)} · <span className={position.side === "long" ? "side-long" : "side-short"}>{position.side === "long" ? "多 / 买" : "空 / 卖"}</span> · {quantity}</strong>
+                  <strong className={closed ? ((position.realizedPnl ?? 0) >= 0 ? "up" : "down") : ""}>{result}</strong>
+                </div>
+                <div className="decision-linked-trade-evidence">
+                  <button type="button" className="evidence-link" onClick={() => onEvidence(position.entryTimestamp, "入场")} aria-label={`跳到交易 ${position.id.slice(0, 8)} 的入场 K 线`}>
+                    入场 {dateLabel(position.entryTimestamp)} · {priceLabel(position.entryPrice)}
+                  </button>
+                  {position.exitTimestamp ? (
+                    <>
+                      <span>→</span>
+                      <button type="button" className="evidence-link" onClick={() => onEvidence(position.exitTimestamp as number, "出场")} aria-label={`跳到交易 ${position.id.slice(0, 8)} 的出场 K 线`}>
+                        出场 {dateLabel(position.exitTimestamp)} · {priceLabel(position.exitPrice)}
+                      </button>
+                    </>
+                  ) : <span className="decision-linked-trade-open">· 尚未平仓</span>}
+                </div>
+                {closed && <small>{exitReasonLabel(position.exitReason)}{position.intrabarAmbiguous ? " · 同根冲突" : ""}</small>}
+              </div>
+            );
+          })}
+        </div>
+      ) : (
+        <small className="decision-linked-trades-empty">这张计划目前没有明确关联的交易。</small>
+      )}
+      {positions.length > 0 && <small className="decision-linked-trades-hint">点击入场 / 出场时间可跳回对应 K 线</small>}
+    </div>
+  );
+}
+
 type TrainingPnlStats = {
   closedSessionPositions: PositionLot[];
   closedTradePnls: number[];
@@ -1383,6 +1594,10 @@ function PerformanceInsightCard({
 
 function normalizeSettings(value: Partial<AppSettings>): AppSettings {
   const merged = { ...defaultAppSettings, ...value };
+  const defaultOrderQtyByMarket = normalizeMarketOrderQtySettings(
+    value.defaultOrderQtyByMarket,
+    value.defaultOrderQty,
+  );
   return {
     ...merged,
     defaultInstrumentId: typeof merged.defaultInstrumentId === "string" && merged.defaultInstrumentId
@@ -1391,7 +1606,13 @@ function normalizeSettings(value: Partial<AppSettings>): AppSettings {
     defaultTimeframe: timeframes.includes(merged.defaultTimeframe)
       ? merged.defaultTimeframe
       : defaultAppSettings.defaultTimeframe,
-    defaultOrderQty: Math.max(1, Math.round(Number(merged.defaultOrderQty) || defaultAppSettings.defaultOrderQty)),
+    // Keep the old field as a compatibility alias for older preference data.
+    // All new order-entry paths use the market-specific map below.
+    defaultOrderQty: defaultOrderQtyByMarket.CN,
+    defaultOrderQtyByMarket,
+    orderType: ["market", "limit", "stop"].includes(merged.orderType)
+      ? merged.orderType
+      : defaultAppSettings.orderType,
     positionSizeMode: merged.positionSizeMode === "risk-percent" ? "risk-percent" : "fixed",
     riskPercent: Math.max(0.1, Math.min(100, Number(merged.riskPercent) || defaultAppSettings.riskPercent)),
     tradingMode: merged.tradingMode === "capital" ? "capital" : "return",
@@ -1408,6 +1629,7 @@ function normalizeSettings(value: Partial<AppSettings>): AppSettings {
     randomInstrumentMode: ["current", "all", "market"].includes(merged.randomInstrumentMode)
       ? merged.randomInstrumentMode
       : defaultAppSettings.randomInstrumentMode,
+    randomMarket: marketSelectionLabel(merged.randomMarket) || defaultAppSettings.randomMarket,
     randomTimeframeMode: ["current", "all", "fixed"].includes(merged.randomTimeframeMode)
       ? merged.randomTimeframeMode
       : defaultAppSettings.randomTimeframeMode,
@@ -1425,6 +1647,34 @@ function normalizeSettings(value: Partial<AppSettings>): AppSettings {
     patternCooldownBars: Math.max(0, Math.min(100, Math.round(Number(merged.patternCooldownBars) || 0))),
     patternScanAttempts: Math.max(1, Math.min(50, Math.round(Number(merged.patternScanAttempts) || defaultAppSettings.patternScanAttempts))),
   };
+}
+
+function configuredDefaultOrderQuantity(
+  settings: AppSettings,
+  market: string | undefined,
+  instrumentId: string,
+  rules: MarketRuleProfile,
+) {
+  const key = marketOrderQtyKey(market, instrumentId);
+  const requested = key ? settings.defaultOrderQtyByMarket[key] : settings.defaultOrderQty;
+  return normalizeBuyQuantity(
+    rules,
+    positiveOrderQty(requested, rules.defaultOrderQuantity ?? settings.defaultOrderQty),
+  );
+}
+
+function configuredDefaultOrderQuantityForRequest(
+  settings: AppSettings,
+  market: string | undefined,
+  instrumentId: string,
+) {
+  const key = marketOrderQtyKey(market, instrumentId);
+  const rules = resolveMarketRules(
+    key ?? marketRuleCode(market ?? ""),
+    instrumentId,
+    settings.fxAccountConfig,
+  );
+  return configuredDefaultOrderQuantity(settings, market, instrumentId, rules);
 }
 
 function randomUint32() {
@@ -1517,6 +1767,13 @@ function eventLabel(type: string) {
   return labels[type] ?? type;
 }
 
+const nonMutatingTrainingEventTypes = new Set([
+  "replay_advanced",
+  "replay_rewound",
+  "playback_toggled",
+  "playback_speed_changed",
+]);
+
 function priceLimitReference(
   bars: KLineData[],
   cursor: number,
@@ -1598,7 +1855,7 @@ export function TrainingWorkbench() {
   const [orderQty, setOrderQty] = useState(100);
   const [positionSizeMode, setPositionSizeMode] = useState<PositionSizeMode>(defaultAppSettings.positionSizeMode);
   const [riskPercent, setRiskPercent] = useState(defaultAppSettings.riskPercent);
-  const [orderType, setOrderType] = useState<OrderType>("market");
+  const [orderType, setOrderType] = useState<OrderType>(defaultAppSettings.orderType);
   const [orderTriggerPrice, setOrderTriggerPrice] = useState("");
   const [orderStopLoss, setOrderStopLoss] = useState("");
   const [orderTakeProfit, setOrderTakeProfit] = useState("");
@@ -1672,6 +1929,10 @@ export function TrainingWorkbench() {
   const [liveNavigatorResume, setLiveNavigatorResume] = useState<NonNullable<SyncedPreferences["liveNavigatorResume"]>>({ source: "scan", index: 0 });
   const [liveScanResume, setLiveScanResume] = useState<NonNullable<SyncedPreferences["liveScanResume"]>>({ index: 0 });
   const [liveBarOffset, setLiveBarOffset] = useState({ x: 0, y: 0 });
+  const [trainingNavigatorSessions, setTrainingNavigatorSessions] = useState<TrainingSession[]>([]);
+  const [trainingNavigatorIndex, setTrainingNavigatorIndex] = useState(0);
+  const [trainingNavigatorActive, setTrainingNavigatorActive] = useState(false);
+  const [trainingNavigatorOffset, setTrainingNavigatorOffset] = useState({ x: 0, y: 0 });
   const [performanceSection, setPerformanceSection] = useState<"training" | "live" | "watch">("training");
   const [taskSetupKind, setTaskSetupKind] = useState<TaskSetupKind>("configured");
   const [showRandomComplete, setShowRandomComplete] = useState(false);
@@ -1696,13 +1957,14 @@ export function TrainingWorkbench() {
   const [events, setEvents] = useState<TrainingEvent[]>([]);
   const [selectedDecisionId, setSelectedDecisionId] = useState("");
   const [decisionTarget, setDecisionTarget] = useState<CandleContextTarget | null>(null);
+  const [backfillAssociation, setBackfillAssociation] = useState<"associate" | "none">("associate");
   const [editingDecisionId, setEditingDecisionId] = useState("");
   const [reviewedSession, setReviewedSession] = useState<{ session: TrainingSession; state: TrainingState } | null>(null);
   const [duplicateMarketWarning, setDuplicateMarketWarning] = useState<DuplicateMarketWarning | null>(null);
   const [coverage, setCoverage] = useState<Coverage[]>([]);
   const [coveragePage, setCoveragePage] = useState(1);
   const [coverageTotal, setCoverageTotal] = useState(0);
-  const [coverageSummary, setCoverageSummary] = useState({ barCount: 0, timeframeCount: 0 });
+  const [coverageSummary, setCoverageSummary] = useState({ barCount: 0, timeframeCount: 0, hasNonSampleData: false });
   const [coverageSearch, setCoverageSearch] = useState("");
   const [coverageQuery, setCoverageQuery] = useState("");
   const [coverageLoading, setCoverageLoading] = useState(false);
@@ -1744,6 +2006,7 @@ export function TrainingWorkbench() {
   const liveWatchlistRef = useRef<LiveWatchRecord[]>([]);
   const livePersistSignatureRef = useRef("");
   const liveBarDragRef = useRef<{ pointerId: number; startX: number; startY: number; offsetX: number; offsetY: number } | null>(null);
+  const trainingBarDragRef = useRef<{ pointerId: number; startX: number; startY: number; offsetX: number; offsetY: number } | null>(null);
   const startupRandomStartedRef = useRef(false);
   const syncedPreferencesLoadStartedRef = useRef(false);
   const syncedPreferencesHydratedRef = useRef(false);
@@ -1754,6 +2017,17 @@ export function TrainingWorkbench() {
     portfolios: [] as LivePortfolioRecord[],
     watchlist: [] as LiveWatchRecord[],
   });
+  const trainingAutosaveInitializedRef = useRef(false);
+  const trainingAutosaveSignatureRef = useRef("");
+  const trainingAutosaveTimerRef = useRef<number | null>(null);
+
+  const rememberOrderEntryPreference = (update: Partial<Pick<AppSettings, "orderType" | "positionSizeMode" | "riskPercent">>) => {
+    const nextSettings = normalizeSettings({ ...appSettingsRef.current, ...update });
+    appSettingsRef.current = nextSettings;
+    setAppSettings(nextSettings);
+    setSettingsDraft((draft) => normalizeSettings({ ...draft, ...update }));
+    window.localStorage.setItem(APP_SETTINGS_KEY, JSON.stringify(nextSettings));
+  };
 
   useEffect(() => {
     livePortfoliosRef.current = livePortfolios;
@@ -1865,7 +2139,13 @@ export function TrainingWorkbench() {
     ) ?? 0), 0)
     : accountMarketValue(positions, currentPrice);
   const equity = currentMarginAccount?.equity ?? accountEquity(cashBalance, positions, currentPrice);
-  const sizingEquity = tradingMode === "capital" ? equity : Math.max(0, initialCapital + totalPnl);
+  // Risk sizing is intentionally based on account balance, not floating
+  // equity.  An open trade must not increase the next order's risk budget.
+  // Return mode has no cash ledger, so its starting capital plus realized P/L
+  // is the closest equivalent balance.
+  const riskBalance = tradingMode === "capital"
+    ? Math.max(0, cashBalance)
+    : Math.max(0, initialCapital + realizedPnl);
   const effectiveOrderStop = (() => {
     const entered = Number(orderStopLoss);
     if (Number.isFinite(entered) && entered > 0) return entered;
@@ -1881,7 +2161,7 @@ export function TrainingWorkbench() {
   const riskSizingFor = (side: "buy" | "sell", entryRawPrice: number, stopLoss: number) => (
     calculateRiskSizedQuantity({
       side,
-      equity: sizingEquity,
+      equity: riskBalance,
       riskPercent,
       entryRawPrice,
       entryPriceBasis: orderType === "market" ? "source" : "quote",
@@ -1991,6 +2271,26 @@ export function TrainingWorkbench() {
       };
     }), [bars, currentBar, decisionSubmissions]);
   const selectedDecision = decisionSubmissions.find((submission) => submission.id === selectedDecisionId);
+  const activeDecisionSubmission = editingDecisionId
+    ? decisionSubmissions.find((submission) => submission.id === editingDecisionId)
+    : selectedDecision;
+  const linkedDecisionPositions = useMemo(() => (
+    activeDecisionSubmission
+      ? positions
+        .filter((position) => position.decisionSubmissionId === activeDecisionSubmission.id)
+        .sort((left, right) => left.entryTimestamp - right.entryTimestamp)
+      : []
+  ), [activeDecisionSubmission, positions]);
+  const backfillCandidates = useMemo(() => (
+    decisionTarget && !editingDecisionId && currentBar
+      ? backfillCandidatePositions(
+        positions,
+        decisionSubmissions,
+        decisionTarget.timestamp,
+        currentBar.timestamp,
+      )
+      : []
+  ), [currentBar, decisionSubmissions, decisionTarget, editingDecisionId, positions]);
 
   const dataSignature = useMemo(() => bars.length
     ? `${bars.length}:${bars[0].timestamp}:${bars[bars.length - 1].timestamp}`
@@ -2019,6 +2319,10 @@ export function TrainingWorkbench() {
     decision,
     decisionSubmissions,
     orderQty,
+    orderType,
+    orderTriggerPrice: orderTriggerPrice || undefined,
+    orderStopLoss: orderStopLoss || undefined,
+    orderTakeProfit: orderTakeProfit || undefined,
     positionSizeMode,
     riskPercent,
     drawings,
@@ -2041,8 +2345,33 @@ export function TrainingWorkbench() {
       equity,
       cashBalance,
     },
-  }), [cashBalance, closedPositions.length, currentReviewMetrics, cursor, currentBar?.timestamp, dataSignature, dataSnapshotId, decision, decisionSubmissions, drawings, equity, events, executionProfile, executions, initialCapital, marketRules, openPnl, openPositions.length, orderQty, orderRejections, pendingOrders, positionSizeMode, positions, randomSeed, realizedPnl, riskPercent, snapshotDataIndexOffset, snapshotHash, totalPnl, totalReturnPct, tradingMode, trainingTask]);
+  }), [cashBalance, closedPositions.length, currentReviewMetrics, cursor, currentBar?.timestamp, dataSignature, dataSnapshotId, decision, decisionSubmissions, drawings, equity, events, executionProfile, executions, initialCapital, marketRules, openPnl, openPositions.length, orderQty, orderStopLoss, orderTakeProfit, orderTriggerPrice, orderType, orderRejections, pendingOrders, positionSizeMode, positions, randomSeed, realizedPnl, riskPercent, snapshotDataIndexOffset, snapshotHash, totalPnl, totalReturnPct, tradingMode, trainingTask]);
   /* eslint-enable react-hooks/preserve-manual-memoization */
+
+  // Cursor movement, playback, speed and derived review metrics are intentionally
+  // excluded. They are navigation state, not a user's training edit.
+  const trainingMutationSignature = useMemo(() => JSON.stringify({
+    positions,
+    pendingOrders,
+    executions,
+    orderRejections,
+    decision,
+    decisionSubmissions,
+    orderQty,
+    orderType,
+    orderTriggerPrice,
+    orderStopLoss,
+    orderTakeProfit,
+    positionSizeMode,
+    riskPercent,
+    drawings,
+    marketRules,
+    trainingTask,
+    tradingMode,
+    initialCapital,
+    cashBalance,
+    executionProfile,
+  }), [cashBalance, decision, decisionSubmissions, drawings, executionProfile, executions, initialCapital, marketRules, orderQty, orderStopLoss, orderTakeProfit, orderTriggerPrice, orderType, orderRejections, pendingOrders, positionSizeMode, positions, riskPercent, tradingMode, trainingTask]);
 
   useEffect(() => {
     if (!liveStateHydratedRef.current) return;
@@ -2115,14 +2444,24 @@ export function TrainingWorkbench() {
   useEffect(() => {
     const move = (event: PointerEvent) => {
       const drag = liveBarDragRef.current;
-      if (!drag || event.pointerId !== drag.pointerId) return;
-      setLiveBarOffset({
-        x: drag.offsetX + event.clientX - drag.startX,
-        y: drag.offsetY + event.clientY - drag.startY,
-      });
+      if (drag && event.pointerId === drag.pointerId) {
+        setLiveBarOffset({
+          x: drag.offsetX + event.clientX - drag.startX,
+          y: drag.offsetY + event.clientY - drag.startY,
+        });
+        return;
+      }
+      const trainingDrag = trainingBarDragRef.current;
+      if (trainingDrag && event.pointerId === trainingDrag.pointerId) {
+        setTrainingNavigatorOffset({
+          x: trainingDrag.offsetX + event.clientX - trainingDrag.startX,
+          y: trainingDrag.offsetY + event.clientY - trainingDrag.startY,
+        });
+      }
     };
     const end = (event: PointerEvent) => {
       if (liveBarDragRef.current?.pointerId === event.pointerId) liveBarDragRef.current = null;
+      if (trainingBarDragRef.current?.pointerId === event.pointerId) trainingBarDragRef.current = null;
     };
     window.addEventListener("pointermove", move);
     window.addEventListener("pointerup", end);
@@ -2159,6 +2498,10 @@ export function TrainingWorkbench() {
   const reviewTitle = reviewedSession
     ? `${reviewedSession.session.instrumentId} · ${reviewedSession.session.timeframe}`
     : `${instrumentId} · ${timeframe} · 当前训练`;
+  const reviewDecisionById = useMemo(
+    () => new Map(reviewState.decisionSubmissions.map((submission) => [submission.id, submission])),
+    [reviewState.decisionSubmissions],
+  );
 
   const parseTrainingState = useCallback((value: unknown): TrainingState | null => {
     if (!value || typeof value !== "object") return null;
@@ -2182,6 +2525,12 @@ export function TrainingWorkbench() {
       decision: state.decision && typeof state.decision === "object" ? { ...defaultDecision, ...state.decision } : defaultDecision,
       decisionSubmissions: Array.isArray(state.decisionSubmissions) ? state.decisionSubmissions : [],
       orderQty: typeof state.orderQty === "number" && state.orderQty > 0 ? state.orderQty : 100,
+      orderType: state.orderType === "market" || state.orderType === "limit" || state.orderType === "stop"
+        ? state.orderType
+        : undefined,
+      orderTriggerPrice: typeof state.orderTriggerPrice === "string" ? state.orderTriggerPrice : undefined,
+      orderStopLoss: typeof state.orderStopLoss === "string" ? state.orderStopLoss : undefined,
+      orderTakeProfit: typeof state.orderTakeProfit === "string" ? state.orderTakeProfit : undefined,
       positionSizeMode: state.positionSizeMode === "risk-percent" ? "risk-percent" : "fixed",
       riskPercent: typeof state.riskPercent === "number" && state.riskPercent > 0
         ? Math.min(100, state.riskPercent)
@@ -2240,7 +2589,8 @@ export function TrainingWorkbench() {
       setAppSettings(nextSettings);
       setSettingsDraft(nextSettings);
       setSpeed(nextSettings.defaultSpeed);
-      setOrderQty(nextSettings.defaultOrderQty);
+      setOrderQty(configuredDefaultOrderQuantity(nextSettings, instrument.market, instrument.id, marketRules));
+      setOrderType(nextSettings.orderType);
       window.localStorage.setItem(APP_SETTINGS_KEY, JSON.stringify(nextSettings));
     }
     if (Array.isArray(stored.patternPresets)) {
@@ -2342,7 +2692,7 @@ export function TrainingWorkbench() {
           : {}),
       });
     }
-  }, []);
+  }, [instrument.id, instrument.market, marketRules]);
 
   useEffect(() => {
     const timer = window.setTimeout(() => {
@@ -2355,7 +2705,10 @@ export function TrainingWorkbench() {
         setAppSettings(nextSettings);
         setSettingsDraft(nextSettings);
         setSpeed(nextSettings.defaultSpeed);
-        setOrderQty(nextSettings.defaultOrderQty);
+        setOrderType(nextSettings.orderType);
+        // The initial render is the CN seed screen; the market load below
+        // replaces this with the selected instrument's configured quantity.
+        setOrderQty(nextSettings.defaultOrderQtyByMarket.CN);
       } catch {
         window.localStorage.removeItem(APP_SETTINGS_KEY);
       } finally {
@@ -2727,7 +3080,7 @@ export function TrainingWorkbench() {
     eventSequenceRef.current = sequence;
     const event = createTrainingEvent(sequence, type, barTimestamp, payload);
     setEvents((items) => [...items, event]);
-    setSaveState("有未保存更改");
+    if (!nonMutatingTrainingEventTypes.has(type)) setSaveState("有未保存更改");
     return event;
   }, [currentBar?.timestamp]);
 
@@ -2740,7 +3093,7 @@ export function TrainingWorkbench() {
     setPendingOrders([]);
     setExecutions([]);
     setOrderRejections([]);
-    setOrderType("market");
+    setOrderType(appSettingsRef.current.orderType);
     setOrderTriggerPrice("");
     setOrderStopLoss("");
     setOrderTakeProfit("");
@@ -2888,8 +3241,12 @@ export function TrainingWorkbench() {
         setSelectedDecisionId("");
         setDecisionTarget(null);
         setEditingDecisionId("");
-        setOrderQty(loadedMarketRules.defaultOrderQuantity
-          ?? normalizeBuyQuantity(loadedMarketRules, appSettingsRef.current.defaultOrderQty));
+        setOrderQty(configuredDefaultOrderQuantity(
+          appSettingsRef.current,
+          data.instrument.market,
+          data.instrument.id,
+          loadedMarketRules,
+        ));
         setTradingMode(savedPortfolio?.tradingMode ?? appSettingsRef.current.tradingMode);
         setInitialCapital(savedPortfolio?.initialCapital ?? appSettingsRef.current.initialCapital);
         setCashBalance(savedPortfolio?.cashBalance ?? savedPortfolio?.initialCapital ?? appSettingsRef.current.initialCapital);
@@ -2911,9 +3268,15 @@ export function TrainingWorkbench() {
         setTrashPreview(isTrashPreview);
         setLiveMode(false);
         setLiveContext(null);
-        const timestampCursor = restoreRequest.state.cursorTimestamp == null
+        const evidenceCursor = restoreRequest.evidenceTimestamp == null
           ? -1
-          : data.candles.findIndex((bar) => bar.timestamp === restoreRequest.state.cursorTimestamp);
+          : data.candles.findIndex((bar) => bar.timestamp === restoreRequest.evidenceTimestamp);
+        const timestampCursor = restoreRequest.evidenceTimestamp != null
+          ? evidenceCursor
+          : restoreRequest.state.cursorTimestamp == null
+            ? -1
+            : data.candles.findIndex((bar) => bar.timestamp === restoreRequest.state.cursorTimestamp);
+        const evidenceMissing = restoreRequest.evidenceTimestamp != null && evidenceCursor < 0;
         const previousDataIndexOffset = restoreRequest.state.dataIndexOffset ?? 0;
         const restoredCursor = timestampCursor >= 0
           ? timestampCursor
@@ -2942,6 +3305,10 @@ export function TrainingWorkbench() {
         setDecisionTarget(null);
         setEditingDecisionId("");
         setOrderQty(restoreRequest.state.orderQty);
+        setOrderType(restoreRequest.state.orderType ?? appSettingsRef.current.orderType);
+        setOrderTriggerPrice(restoreRequest.state.orderTriggerPrice ?? "");
+        setOrderStopLoss(restoreRequest.state.orderStopLoss ?? "");
+        setOrderTakeProfit(restoreRequest.state.orderTakeProfit ?? "");
         setPositionSizeMode(restoreRequest.state.positionSizeMode);
         setRiskPercent(restoreRequest.state.riskPercent);
         setTradingMode(restoreRequest.state.tradingMode);
@@ -2972,7 +3339,11 @@ export function TrainingWorkbench() {
               marketRuleVersion: loadedMarketRules.version,
             }),
           ]);
-        setSaveState(isTrashPreview ? "回收站查看 · 未恢复" : "已恢复保存点");
+        setSaveState(isTrashPreview
+          ? "回收站查看 · 未恢复"
+          : evidenceMissing
+            ? "证据 K 线不在原始快照中，已保留训练当前位置"
+            : restoreRequest.evidenceTimestamp != null ? "已跳到证据 K 线" : "已恢复保存点");
       } else {
         setTrashPreview(false);
         setLiveMode(false);
@@ -3035,7 +3406,7 @@ export function TrainingWorkbench() {
         setPendingOrders([]);
         setExecutions([]);
         setOrderRejections([]);
-        setOrderType("market");
+        setOrderType(appSettingsRef.current.orderType);
         setOrderTriggerPrice("");
         setOrderStopLoss("");
         setOrderTakeProfit("");
@@ -3044,8 +3415,12 @@ export function TrainingWorkbench() {
         setSelectedDecisionId("");
         setDecisionTarget(null);
         setEditingDecisionId("");
-        setOrderQty(loadedMarketRules.defaultOrderQuantity
-          ?? normalizeBuyQuantity(loadedMarketRules, appSettingsRef.current.defaultOrderQty));
+        setOrderQty(configuredDefaultOrderQuantity(
+          appSettingsRef.current,
+          data.instrument.market,
+          data.instrument.id,
+          loadedMarketRules,
+        ));
         setPositionSizeMode(appSettingsRef.current.positionSizeMode);
         setRiskPercent(appSettingsRef.current.riskPercent);
         setTradingMode(isMarginEconomics(loadedMarketRules.instrumentEconomics)
@@ -3112,6 +3487,14 @@ export function TrainingWorkbench() {
     successMessage: string,
   ) => {
     const savedAt = new Date().toISOString();
+    const stateJson = JSON.stringify(state);
+    const cachedSessionFields = {
+      instrumentId,
+      timeframe,
+      dataSnapshotId: dataSnapshotId || undefined,
+      stateJson,
+      updatedAt: savedAt,
+    };
     window.localStorage.setItem(LAST_DRAFT_KEY, JSON.stringify({
       id: sessionId,
       instrumentId,
@@ -3119,6 +3502,27 @@ export function TrainingWorkbench() {
       state,
       updatedAt: savedAt,
     }));
+    // The floating training navigator keeps its own session list. Keep that
+    // list in sync immediately, otherwise switching away and back can restore
+    // the stale state captured when the navigator was opened.
+    setTrainingNavigatorSessions((items) => {
+      let changed = false;
+      const next = items.map((item) => {
+        if (item.id !== sessionId) return item;
+        changed = true;
+        return { ...item, ...cachedSessionFields };
+      });
+      return changed ? next : items;
+    });
+    setSessionSummaries((items) => {
+      let changed = false;
+      const next = items.map((summary) => {
+        if (summary.session.id !== sessionId) return summary;
+        changed = true;
+        return { ...summary, session: { ...summary.session, ...cachedSessionFields } };
+      });
+      return changed ? next : items;
+    });
     try {
       const response = await fetch("/api/sessions", {
         method: "POST",
@@ -3136,9 +3540,43 @@ export function TrainingWorkbench() {
   useEffect(() => {
     if (trashPreview || !trainingReady || !trainingComplete || !saveCompletedTrainingRef.current) return;
     saveCompletedTrainingRef.current = false;
+    trainingAutosaveSignatureRef.current = trainingMutationSignature;
     setSaveState("训练完成 · 正在保存…");
     void persistTrainingState(trainingState, "训练完成 · 已保存");
-  }, [persistTrainingState, trainingComplete, trainingReady, trainingState, trashPreview]);
+  }, [persistTrainingState, trainingComplete, trainingMutationSignature, trainingReady, trainingState, trashPreview]);
+
+  useEffect(() => {
+    if (trashPreview || liveMode || !trainingReady) {
+      if (trainingAutosaveTimerRef.current !== null) {
+        window.clearTimeout(trainingAutosaveTimerRef.current);
+        trainingAutosaveTimerRef.current = null;
+      }
+      trainingAutosaveInitializedRef.current = false;
+      trainingAutosaveSignatureRef.current = "";
+      return;
+    }
+    if (!trainingAutosaveInitializedRef.current) {
+      trainingAutosaveInitializedRef.current = true;
+      trainingAutosaveSignatureRef.current = trainingMutationSignature;
+      return;
+    }
+    if (trainingMutationSignature === trainingAutosaveSignatureRef.current) return;
+    if (trainingAutosaveTimerRef.current !== null) window.clearTimeout(trainingAutosaveTimerRef.current);
+    const signatureToSave = trainingMutationSignature;
+    const stateToSave = trainingState;
+    const timer = window.setTimeout(() => {
+      trainingAutosaveTimerRef.current = null;
+      setSaveState("自动保存中…");
+      void persistTrainingState(stateToSave, "已自动保存").then((saved) => {
+        if (saved) trainingAutosaveSignatureRef.current = signatureToSave;
+      });
+    }, 650);
+    trainingAutosaveTimerRef.current = timer;
+    return () => {
+      window.clearTimeout(timer);
+      if (trainingAutosaveTimerRef.current === timer) trainingAutosaveTimerRef.current = null;
+    };
+  }, [liveMode, persistTrainingState, trainingMutationSignature, trainingReady, trainingState, trashPreview]);
 
   const executeOrders = useCallback((
     orders: PendingOrder[],
@@ -3188,10 +3626,21 @@ export function TrainingWorkbench() {
       },
     });
     const orderById = new Map(orders.map((order) => [order.id, order]));
+    const basePositionById = new Map(basePositions.map((position) => [position.id, position]));
+    const nextPositions: PositionLot[] = result.positions.map((position) => {
+      const entryOrder = orderById.get(position.entryOrderId);
+      return {
+        ...position,
+        decisionSubmissionId: position.decisionSubmissionId ?? entryOrder?.decisionSubmissionId,
+      };
+    });
+    const nextPositionById = new Map(nextPositions.map((position) => [position.id, position]));
     const fills: Execution[] = result.fills.map((fill) => {
       const order = orderById.get(fill.orderId);
+      const relatedPosition = nextPositionById.get(fill.positionId) ?? basePositionById.get(fill.positionId);
       return {
         ...fill,
+        decisionSubmissionId: order?.decisionSubmissionId ?? relatedPosition?.decisionSubmissionId,
         ruleId: order?.ruleId ?? marketRules.id,
         ruleVersion: order?.ruleVersion ?? marketRules.version,
       };
@@ -3206,7 +3655,7 @@ export function TrainingWorkbench() {
       ruleVersion: marketRules.version,
     }));
 
-    setPositions(result.positions);
+    setPositions(nextPositions);
     if (tradingMode === "capital") setCashBalance(result.cashBalance);
     if (fills.length) {
       setExecutions((items) => [...items, ...fills]);
@@ -3239,7 +3688,7 @@ export function TrainingWorkbench() {
         engineVersion: EXECUTION_ENGINE_VERSION,
       }, bar.timestamp);
     }
-    return { ...result, fills, rejections };
+    return { ...result, positions: nextPositions, fills, rejections };
   }, [appendEvent, bars, cashBalance, executionProfile, instrument.timezone, liveMode, marketRules, positions, timeframe, tradingMode]);
 
   const settleTrainingAtBar = useCallback((
@@ -3256,6 +3705,7 @@ export function TrainingWorkbench() {
       qty: position.qty,
       createdAt: bar.timestamp,
       positionId: position.id,
+      decisionSubmissionId: position.decisionSubmissionId,
       orderType: "market",
       reason: "training_end",
       engineVersion: EXECUTION_ENGINE_VERSION,
@@ -3367,7 +3817,6 @@ export function TrainingWorkbench() {
         endCursor: completedTask.endCursor,
       }, bars[nextCursor]?.timestamp);
     }
-    setSaveState("有未保存更改");
   }, [appendEvent, bars, cashBalance, cursor, executeOrders, pendingOrders, positions, settleTrainingAtBar, trainingTask]);
 
   const revealNext = useCallback(() => revealMany(1), [revealMany]);
@@ -3379,6 +3828,7 @@ export function TrainingWorkbench() {
       if (decisionDraftBeforeBackfillRef.current) setDecision(decisionDraftBeforeBackfillRef.current);
       decisionDraftBeforeBackfillRef.current = null;
       setDecisionTarget(null);
+      setBackfillAssociation("associate");
       setEditingDecisionId("");
     }
     setCursor(nextCursor);
@@ -3413,8 +3863,8 @@ export function TrainingWorkbench() {
     stopLoss?: number,
     takeProfit?: number,
     reason = "protective_levels_attached_to_order",
-  ) => {
-    if (!currentBar || (stopLoss == null && takeProfit == null)) return;
+  ): string | undefined => {
+    if (!currentBar || (stopLoss == null && takeProfit == null)) return undefined;
     const stop = stopLoss == null ? decision.stop : protectionPriceText(stopLoss);
     const target = takeProfit == null ? decision.target : protectionPriceText(takeProfit);
     const linkedDecision: Decision = {
@@ -3430,11 +3880,17 @@ export function TrainingWorkbench() {
       && submission.decision.stop === stop
       && submission.decision.target === target
     ));
-    if (matchingManual) return;
+    const matchingManualSubmission = decisionSubmissions.find((submission) => (
+      !submission.autoGenerated
+      && submission.barTimestamp === currentBar.timestamp
+      && submission.decision.stop === stop
+      && submission.decision.target === target
+    ));
+    if (matchingManual) return matchingManualSubmission?.id;
     const existingAuto = decisionSubmissions.find((submission) => (
       submission.autoGenerated && submission.barTimestamp === currentBar.timestamp
     ));
-    if (existingAuto && JSON.stringify(existingAuto.decision) === JSON.stringify(linkedDecision)) return;
+    if (existingAuto && JSON.stringify(existingAuto.decision) === JSON.stringify(linkedDecision)) return existingAuto.id;
     const submission: DecisionSubmission = {
       id: existingAuto?.id ?? createUuid(),
       barTimestamp: currentBar.timestamp,
@@ -3466,6 +3922,7 @@ export function TrainingWorkbench() {
       reason,
       updated: Boolean(existingAuto),
     }, currentBar.timestamp);
+    return submission.id;
   };
 
   const applyDraftProtectionPrice = (kind: ProtectionPriceKind, rawPrice: number) => {
@@ -3536,7 +3993,7 @@ export function TrainingWorkbench() {
       side: position.side,
       initialRisk: position.initialRisk,
     }, currentBar.timestamp);
-    setSaveState(line.kind === "stop-loss" ? "移动止损已更新 · 请保存训练" : "止盈已更新 · 请保存训练");
+    setSaveState(line.kind === "stop-loss" ? "移动止损已更新 · 将自动保存" : "止盈已更新 · 将自动保存");
     return true;
   };
 
@@ -3634,7 +4091,11 @@ export function TrainingWorkbench() {
       }, { action: "open", side, qty, availableBuyingPower });
       return;
     }
-    if (!liveMode) ensureProtectiveDecisionCard(stopLoss, takeProfit);
+    const protectiveDecisionId = !liveMode
+      ? ensureProtectiveDecisionCard(stopLoss, takeProfit)
+      : undefined;
+    const decisionSubmissionId = protectiveDecisionId
+      ?? latestEntryDecisionId(decisionSubmissions, currentBar.timestamp);
     const priceBand = replayPriceBand(marketRules, bars, cursor, instrument.timezone, timeframe);
     const order: PendingOrder = {
       id: createUuid(),
@@ -3645,6 +4106,7 @@ export function TrainingWorkbench() {
       filledQty: 0,
       createdAt: currentBar.timestamp,
       positionId: createUuid(),
+      decisionSubmissionId,
       ruleId: marketRules.id,
       ruleVersion: marketRules.version,
       priceBand,
@@ -3709,6 +4171,7 @@ export function TrainingWorkbench() {
       qty: position.qty,
       createdAt: currentBar.timestamp,
       positionId,
+      decisionSubmissionId: position.decisionSubmissionId,
       ruleId: marketRules.id,
       ruleVersion: marketRules.version,
       priceBand,
@@ -3754,6 +4217,7 @@ export function TrainingWorkbench() {
         qty: position.qty,
         createdAt: currentBar.timestamp,
         positionId,
+        decisionSubmissionId: position.decisionSubmissionId,
         ruleId: marketRules.id,
         ruleVersion: marketRules.version,
         priceBand: replayPriceBand(marketRules, bars, cursor, instrument.timezone, timeframe),
@@ -3795,6 +4259,7 @@ export function TrainingWorkbench() {
       qty: position.qty,
       createdAt: currentBar.timestamp,
       positionId,
+      decisionSubmissionId: position.decisionSubmissionId,
       ruleId: marketRules.id,
       ruleVersion: marketRules.version,
       executeAtTimestamp: targetBar.timestamp,
@@ -3833,7 +4298,10 @@ export function TrainingWorkbench() {
   };
 
   const startFreshTraining = (nextInstrumentId: string, nextTimeframe: string) => {
+    const targetMarket = availableInstruments.find((item) => item.id === nextInstrumentId)?.market
+      ?? (/\.FX$/i.test(nextInstrumentId) ? "FX" : undefined);
     liveRequestRef.current = null;
+    setTrainingNavigatorActive(false);
     setLiveMode(false);
     setLiveContext(null);
     livePersistSignatureRef.current = "";
@@ -3841,7 +4309,7 @@ export function TrainingWorkbench() {
     setPendingOrders([]);
     setExecutions([]);
     setOrderRejections([]);
-    setOrderType("market");
+    setOrderType(appSettingsRef.current.orderType);
     setOrderTriggerPrice("");
     setOrderStopLoss("");
     setOrderTakeProfit("");
@@ -3853,6 +4321,7 @@ export function TrainingWorkbench() {
     setInitialCapital(appSettingsRef.current.initialCapital);
     setCashBalance(appSettingsRef.current.initialCapital);
     setExecutionProfile(appSettingsRef.current.executionProfile);
+    setOrderQty(configuredDefaultOrderQuantityForRequest(appSettingsRef.current, targetMarket, nextInstrumentId));
     setPositionSizeMode(appSettingsRef.current.positionSizeMode);
     setRiskPercent(appSettingsRef.current.riskPercent);
     setProtectionPriceSelection(null);
@@ -4063,12 +4532,13 @@ export function TrainingWorkbench() {
                 entryPrice: price.open,
                 entryTimestamp: price.timestamp,
                 entryOrderId: order.id,
+                decisionSubmissionId: order.decisionSubmissionId,
                 status: "open",
               });
               fills.push({
                 id: createUuid(), orderId: order.id, positionId: order.positionId,
                 action: "open", side: order.side, qty: order.qty, price: price.open,
-                timestamp: price.timestamp, realizedPnl: 0,
+                timestamp: price.timestamp, decisionSubmissionId: order.decisionSubmissionId, realizedPnl: 0,
                 ruleId: order.ruleId ?? marketRules.id,
                 ruleVersion: order.ruleVersion ?? marketRules.version,
               });
@@ -4090,6 +4560,7 @@ export function TrainingWorkbench() {
             fills.push({
               id: createUuid(), orderId: order.id, positionId: position.id,
               action: "close", side: order.side, qty: position.qty, price: price.open,
+              decisionSubmissionId: position.decisionSubmissionId,
               timestamp: price.timestamp, realizedPnl: realized,
               ruleId: order.ruleId ?? marketRules.id,
               ruleVersion: order.ruleVersion ?? marketRules.version,
@@ -4232,6 +4703,7 @@ export function TrainingWorkbench() {
       setInitialCapital(appSettingsRef.current.initialCapital);
       setCashBalance(appSettingsRef.current.initialCapital);
       setExecutionProfile(DEFAULT_EXECUTION_COST_PROFILE);
+      setOrderQty(configuredDefaultOrderQuantityForRequest(appSettingsRef.current, result.market, result.instrumentId));
       setPositionSizeMode("fixed");
       setRiskPercent(appSettingsRef.current.riskPercent);
       setProtectionPriceSelection(null);
@@ -4244,6 +4716,7 @@ export function TrainingWorkbench() {
       setEditingDecisionId("");
       setOrderPanelTab("positions");
     }
+    setTrainingNavigatorActive(false);
     livePersistSignatureRef.current = "";
     setShowLiveScan(false);
     const sourceResults = getLiveNavigatorResults(source);
@@ -4351,6 +4824,7 @@ export function TrainingWorkbench() {
     if (rewindLocked) return;
     saveCompletedTrainingRef.current = false;
     setShowRandomComplete(false);
+    setTrainingNavigatorActive(false);
     const nextRandomSeed = createUuid();
     const nextSessionId = createUuid();
     const baseTask = trainingTask ?? createLegacyTrainingTask(bars, Math.max(0, Math.floor(bars.length * 0.68)));
@@ -4367,7 +4841,7 @@ export function TrainingWorkbench() {
     setPendingOrders([]);
     setExecutions([]);
     setOrderRejections([]);
-    setOrderType("market");
+    setOrderType(appSettingsRef.current.orderType);
     setOrderTriggerPrice("");
     setOrderStopLoss("");
     setOrderTakeProfit("");
@@ -4378,8 +4852,7 @@ export function TrainingWorkbench() {
     setDecisionTarget(null);
     setEditingDecisionId("");
     decisionDraftBeforeBackfillRef.current = null;
-    setOrderQty(marketRules.defaultOrderQuantity
-      ?? normalizeBuyQuantity(marketRules, appSettingsRef.current.defaultOrderQty));
+    setOrderQty(configuredDefaultOrderQuantity(appSettingsRef.current, instrument.market, instrument.id, marketRules));
     setPositionSizeMode(appSettingsRef.current.positionSizeMode);
     setRiskPercent(appSettingsRef.current.riskPercent);
     setCashBalance(initialCapital);
@@ -4456,21 +4929,40 @@ export function TrainingWorkbench() {
     }
     setSaveState("保存中…");
     const savedEvent = appendEvent("session_manually_saved");
+    trainingAutosaveSignatureRef.current = trainingMutationSignature;
     await persistTrainingState({
       ...trainingState,
       events: [...trainingState.events, savedEvent],
     }, "已手动保存");
   };
 
-  const resumeSession = (session: TrainingSession, preview = false) => {
+  const resumeSession = (session: TrainingSession, preview = false, navigatorSessions?: TrainingSession[]) => {
     try {
       const state = parseTrainingState(JSON.parse(session.stateJson));
       if (!state) throw new Error("invalid session");
+      if (preview || !navigatorSessions?.length) {
+        setTrainingNavigatorActive(false);
+      } else {
+        const sessions = navigatorSessions.some((item) => item.id === session.id)
+          ? navigatorSessions
+          : [session, ...navigatorSessions];
+        setTrainingNavigatorSessions(sessions);
+        setTrainingNavigatorIndex(Math.max(0, sessions.findIndex((item) => item.id === session.id)));
+        setTrainingNavigatorActive(sessions.length > 1);
+      }
       setReviewedSession(null);
       queueRestore({ ...session, state, preview });
     } catch {
       setImportStatus(preview ? "这条训练记录不完整，无法查看训练。" : "这条训练记录不完整，暂时无法恢复。");
     }
+  };
+
+  const moveTrainingSession = (direction: -1 | 1) => {
+    if (!trainingNavigatorSessions.length) return;
+    const nextIndex = (trainingNavigatorIndex + direction + trainingNavigatorSessions.length) % trainingNavigatorSessions.length;
+    const nextSession = trainingNavigatorSessions[nextIndex];
+    if (!nextSession) return;
+    resumeSession(nextSession, false, trainingNavigatorSessions);
   };
 
   const resumeCurrentTraining = () => {
@@ -4625,6 +5117,7 @@ export function TrainingWorkbench() {
       setDecision(defaultDecision);
     }
     setEditingDecisionId("");
+    setBackfillAssociation("associate");
     setDecisionTarget({
       dataIndex: targetCursor,
       timestamp: targetBar.timestamp,
@@ -4640,6 +5133,7 @@ export function TrainingWorkbench() {
     if (decisionDraftBeforeBackfillRef.current) setDecision(decisionDraftBeforeBackfillRef.current);
     decisionDraftBeforeBackfillRef.current = null;
     setDecisionTarget(null);
+    setBackfillAssociation("associate");
     setEditingDecisionId("");
     setSaveState("已取消补写，原决策草稿已恢复");
   };
@@ -4675,6 +5169,7 @@ export function TrainingWorkbench() {
       if (decisionDraftBeforeBackfillRef.current) setDecision(decisionDraftBeforeBackfillRef.current);
       decisionDraftBeforeBackfillRef.current = null;
       setDecisionTarget(null);
+      setBackfillAssociation("associate");
       setEditingDecisionId("");
     }
     setSelectedDecisionId("");
@@ -4685,7 +5180,7 @@ export function TrainingWorkbench() {
       submittedAt: submission.submittedAt,
       backfilled: Boolean(submission.backfilled),
     }, submission.barTimestamp);
-    setSaveState("决策已删除 · 请保存训练");
+    setSaveState("决策已删除 · 将自动保存");
   };
 
   const submitDecision = () => {
@@ -4714,8 +5209,9 @@ export function TrainingWorkbench() {
       }, editingSubmission.barTimestamp);
       decisionDraftBeforeBackfillRef.current = null;
       setDecisionTarget(null);
+      setBackfillAssociation("associate");
       setEditingDecisionId("");
-      setSaveState("决策已更新 · 请保存训练");
+      setSaveState("决策已更新 · 将自动保存");
       return;
     }
     const autoSubmission = !backfillTarget
@@ -4734,9 +5230,21 @@ export function TrainingWorkbench() {
       backfilled: Boolean(backfillTarget),
       recordedAtCursor: backfillTarget ? cursor : undefined,
     };
+    const associatedBackfillPositionIds = backfillTarget && backfillAssociation === "associate"
+      ? backfillCandidates.map((position) => position.id)
+      : [];
     setDecisionSubmissions((items) => autoSubmission
       ? items.map((item) => item.id === autoSubmission.id ? submission : item)
       : [...items, submission]);
+    if (associatedBackfillPositionIds.length) {
+      const associatedIds = new Set(associatedBackfillPositionIds);
+      setPositions((items) => items.map((position) => associatedIds.has(position.id)
+        ? { ...position, decisionSubmissionId: submission.id }
+        : position));
+      setExecutions((items) => items.map((execution) => associatedIds.has(execution.positionId)
+        ? { ...execution, decisionSubmissionId: submission.id }
+        : execution));
+    }
     setSelectedDecisionId(submission.id);
     appendEvent("decision_submitted", {
       submissionId: submission.id,
@@ -4746,12 +5254,14 @@ export function TrainingWorkbench() {
       backfilled: Boolean(backfillTarget),
       recordedAtCursor: backfillTarget ? cursor : undefined,
       replacedAutoGenerated: Boolean(autoSubmission),
+      associatedPositionIds: associatedBackfillPositionIds,
     }, targetBar.timestamp);
     if (backfillTarget) {
       if (decisionDraftBeforeBackfillRef.current) setDecision(decisionDraftBeforeBackfillRef.current);
       decisionDraftBeforeBackfillRef.current = null;
       setDecisionTarget(null);
-      setSaveState(trainingComplete ? "补写决策已加入，请保存训练" : "补写决策已保存 · 回放位置未改变");
+      setBackfillAssociation("associate");
+      setSaveState(trainingComplete ? "补写决策已加入 · 将自动保存" : "补写决策已保存 · 回放位置未改变");
       return;
     }
     setSaveState("决策已提交");
@@ -4767,6 +5277,31 @@ export function TrainingWorkbench() {
     } catch {
       setImportStatus("这条训练记录不完整，无法查看复盘。");
     }
+  };
+
+  const openReviewEvidence = (timestamp: number, label: string) => {
+    if (!Number.isFinite(timestamp)) return;
+    if (reviewedSession) {
+      const session = reviewedSession.session;
+      setReviewedSession(null);
+      queueRestore({
+        ...session,
+        state: { ...reviewedSession.state, cursorTimestamp: timestamp },
+        preview: true,
+        evidenceTimestamp: timestamp,
+      });
+      return;
+    }
+    const targetCursor = bars.findIndex((bar) => bar.timestamp === timestamp);
+    if (targetCursor < 0) {
+      setSaveState("这条证据不在当前行情窗口中");
+      return;
+    }
+    setPlaying(false);
+    setSelectedDecisionId("");
+    setCursor(targetCursor);
+    setView("replay");
+    setSaveState(`已跳到${label} K 线`);
   };
 
   const handleDrawingsChange = (nextDrawings: PersistedDrawing[]) => {
@@ -4950,12 +5485,16 @@ export function TrainingWorkbench() {
         const data = await response.json() as {
           coverage: Coverage[];
           total: number;
-          summary: { barCount: number; timeframeCount: number };
+          summary: { barCount: number; timeframeCount: number; hasNonSampleData?: boolean };
         };
         setCoverage(data.coverage);
         setSelectedCoverageKeys([]);
         setCoverageTotal(data.total);
-        setCoverageSummary(data.summary);
+        setCoverageSummary({
+          barCount: Number(data.summary.barCount ?? 0),
+          timeframeCount: Number(data.summary.timeframeCount ?? 0),
+          hasNonSampleData: Boolean(data.summary.hasNonSampleData),
+        });
       }
     } finally {
       setCoverageLoading(false);
@@ -5003,24 +5542,48 @@ export function TrainingWorkbench() {
   };
 
   const loadInstrumentCatalog = useCallback(async () => {
+    // The local data service can answer before its full catalog has finished
+    // indexing.  Do not replace the seed catalog with that transient subset;
+    // retry until A-share data is visible, then only keep a seed market when a
+    // complete response still does not contain that market.
+    const retryDelays = [0, 500, 1000, 2000, 4000];
+    let catalog: AvailableInstrument[] = [];
     try {
-      const response = await fetch("/api/candles?instruments=1");
-      if (!response.ok) return;
-      const data = await response.json() as { instruments: Array<Instrument & { timeframes?: string[] }> };
-      const instruments = data.instruments
-        .map((item) => {
-          const market = item.market === "CN" ? "A股" : item.market === "US" ? "美股" : item.market;
-          return {
-            id: item.id,
-            short: item.symbol,
-            label: item.name,
-            market,
-            assetType: inferInstrumentAssetType(item.id, item.market, item.assetType),
-            timeframes: (item.timeframes ?? []).filter((value) => timeframes.includes(value)),
-          };
-        })
-        .filter((item) => item.timeframes.length > 0);
-      if (instruments.length) setAvailableInstruments(instruments);
+      const readCatalogTaskStatus = async () => {
+        try {
+          const response = await fetch("/api/local-data?action=catalog-status", { cache: "no-store" });
+          if (!response.ok) return null;
+          const data = await response.json() as { catalogTask?: { status?: string } };
+          return data.catalogTask?.status ?? null;
+        } catch {
+          return null;
+        }
+      };
+      for (let attempt = 0; attempt < retryDelays.length; attempt += 1) {
+        if (retryDelays[attempt] > 0) {
+          await new Promise<void>((resolve) => window.setTimeout(resolve, retryDelays[attempt]));
+        }
+        try {
+          const response = await fetch("/api/candles?instruments=1", { cache: "no-store" });
+          if (!response.ok) continue;
+          const data = await response.json() as { instruments?: Array<Instrument & { timeframes?: string[] }> };
+          const instruments = (data.instruments ?? [])
+            .map(normalizeAvailableInstrument)
+            .filter((item): item is AvailableInstrument => item !== null);
+          if (instruments.length) catalog = instruments;
+          const catalogTaskStatus = await readCatalogTaskStatus();
+          const catalogIndexing = catalogTaskStatus != null
+            && !["completed", "failed", "cancelled"].includes(catalogTaskStatus);
+          if (catalog.some((item) => marketRuleCode(item.market) === "CN") && !catalogIndexing) break;
+        } catch {
+          // The next attempt covers a data service that is still starting.
+        }
+      }
+
+      const loadedMarkets = new Set(catalog.map((item) => marketRuleCode(item.market)));
+      const fallbackMarkets = defaultInstruments.filter((item) => !loadedMarkets.has(marketRuleCode(item.market)));
+      const merged = [...fallbackMarkets, ...catalog];
+      if (merged.length) setAvailableInstruments(merged);
     } finally {
       setInstrumentCatalogReady(true);
     }
@@ -5033,7 +5596,7 @@ export function TrainingWorkbench() {
       const response = await fetch("/api/sessions?trash=1&all=1", { cache: "no-store" });
       const data = await response.json() as { sessions?: TrainingSession[]; error?: string };
       if (!response.ok) throw new Error(data.error ?? "读取回收站失败");
-      setTrashSessions(data.sessions ?? []);
+      setTrashSessions((data.sessions ?? []).sort(compareTrainingSessionsByCreatedAt));
     } catch (error) {
       setTrashError(error instanceof Error ? error.message : "读取回收站失败");
     } finally {
@@ -5117,14 +5680,19 @@ export function TrainingWorkbench() {
         ? patternFilter.matchedPresetIds
         : patternFilter?.presetIds ?? [];
       const attributedPatternNames = attributedPatternIds.map((id) => patternLabels.get(id) ?? id);
+      const decisionsById = new Map(state.decisionSubmissions.map((submission) => [submission.id, submission]));
       const sortedDecisions = [...state.decisionSubmissions]
         .sort((left, right) => left.barTimestamp - right.barTimestamp);
       const habitTrades: TrainingSessionHabitTrade[] = closedSessionPositions.map((position) => {
         const decisionsBeforeEntry = sortedDecisions
           .filter((submission) => submission.barTimestamp <= position.entryTimestamp);
-        const attributedDecision = decisionsBeforeEntry
-          .filter((submission) => !submission.backfilled)
-          .at(-1)
+        const explicitlyLinkedDecision = position.decisionSubmissionId
+          ? decisionsById.get(position.decisionSubmissionId)
+          : undefined;
+        const attributedDecision = explicitlyLinkedDecision
+          ?? decisionsBeforeEntry
+            .filter((submission) => !submission.backfilled)
+            .at(-1)
           ?? decisionsBeforeEntry.at(-1)
           ?? sortedDecisions.find((submission) => (
             submission.backfilled
@@ -5200,10 +5768,12 @@ export function TrainingWorkbench() {
     const response = await fetch(includeAll ? "/api/sessions?all=1" : "/api/sessions");
     if (response.ok) {
       const data = await response.json() as { sessions: TrainingSession[] };
-      setSessionSummaries(data.sessions.flatMap((session) => {
-        const summary = buildSessionSummary(session);
-        return summary ? [summary] : [];
-      }));
+      setSessionSummaries(data.sessions
+        .sort(compareTrainingSessionsByCreatedAt)
+        .flatMap((session) => {
+          const summary = buildSessionSummary(session);
+          return summary ? [summary] : [];
+        }));
     }
   }, [buildSessionSummary]);
 
@@ -5312,7 +5882,7 @@ export function TrainingWorkbench() {
         && updatedAt >= dateFrom
         && updatedAt <= dateTo
       );
-    });
+    }).sort(compareTrainingSessionSummariesByCreatedAt);
   }, [performanceFilters, performanceMarketByInstrument, performanceSessionSummaries]);
 
   const performanceUsesCapital = performanceFilters.accountingMode === "capital";
@@ -5508,6 +6078,7 @@ export function TrainingWorkbench() {
     const query = reviewSessionFilters.query.trim().toLocaleLowerCase();
     return sessionSummaries.filter((summary) => {
       const completed = summary.task?.status === "completed";
+      const hasPlan = summary.state.decisionSubmissions.length > 0;
       return (
         (!query
           || summary.session.instrumentId.toLocaleLowerCase().includes(query)
@@ -5517,8 +6088,10 @@ export function TrainingWorkbench() {
         && (reviewSessionFilters.modeLabel === "all" || summary.modeLabel === reviewSessionFilters.modeLabel)
         && (reviewSessionFilters.status === "all"
           || (reviewSessionFilters.status === "completed" ? completed : !completed))
+        && (reviewSessionFilters.planStatus === "all"
+          || (reviewSessionFilters.planStatus === "written" ? hasPlan : !hasPlan))
       );
-    });
+    }).sort(compareTrainingSessionSummariesByCreatedAt);
   }, [reviewSessionFilters, sessionSummaries]);
   const performanceHabitTrades = useMemo<HabitTrade[]>(() => filteredSessionSummaries.flatMap((summary) => (
     summary.habitTrades.map((trade) => {
@@ -5606,7 +6179,7 @@ export function TrainingWorkbench() {
     setAppSettings(nextSettings);
     setSettingsDraft(nextSettings);
     setSpeed(nextSettings.defaultSpeed);
-    setOrderQty(nextSettings.defaultOrderQty);
+    setOrderQty(configuredDefaultOrderQuantity(nextSettings, instrument.market, instrument.id, marketRules));
     setShowSettings(false);
   };
 
@@ -5708,7 +6281,7 @@ export function TrainingWorkbench() {
     const instrumentCandidates = config.instrumentMode === "current"
       ? allowedInstruments.filter((item) => item.id === config.anchorInstrumentId)
       : config.instrumentMode === "market"
-        ? allowedInstruments.filter((item) => item.market === config.market)
+        ? allowedInstruments.filter((item) => marketRuleCode(item.market) === marketRuleCode(config.market))
         : allowedInstruments;
     const requestedTimeframes = config.timeframeMode === "current"
       ? [config.anchorTimeframe]
@@ -5719,6 +6292,11 @@ export function TrainingWorkbench() {
       item.timeframes
         .filter((candidateTimeframe) => !allowedTimeframes || allowedTimeframes.includes(candidateTimeframe))
         .map((candidateTimeframe) => ({ instrument: item, timeframe: candidateTimeframe })));
+    if (config.instrumentMode === "market") {
+      const marketPairs = createPairs(instrumentCandidates, requestedTimeframes);
+      const marketFallback = marketPairs.length ? marketPairs : createPairs(instrumentCandidates);
+      return [...marketFallback].sort(() => randomUint32() / 0x1_0000_0000 - 0.5);
+    }
     const exactPairs = createPairs(instrumentCandidates, requestedTimeframes);
     const fallbackPairs = exactPairs.length
       ? exactPairs
@@ -5840,6 +6418,8 @@ export function TrainingWorkbench() {
     draft: TrainingTaskDraft,
     snapshotId?: string,
   ) => {
+    const targetMarket = availableInstruments.find((item) => item.id === requestInstrumentId)?.market
+      ?? (/\.FX$/i.test(requestInstrumentId) ? "FX" : undefined);
     setLoading(true);
     setChartLoadError("");
     setTrainingReady(false);
@@ -5855,6 +6435,7 @@ export function TrainingWorkbench() {
     setTimeframe(requestTimeframe);
     setReviewedSession(null);
     setShowRandomComplete(false);
+    setOrderQty(configuredDefaultOrderQuantityForRequest(appSettingsRef.current, targetMarket, requestInstrumentId));
     setView("replay");
     setShowTaskSetup(false);
     setLoadNonce((value) => value + 1);
@@ -6193,6 +6774,15 @@ export function TrainingWorkbench() {
   }, [loadInstrumentCatalog]);
 
   useEffect(() => {
+    const refreshAfterAutoUpdate = () => {
+      void loadInstrumentCatalog();
+      if (view === "database") void loadCoverage();
+    };
+    window.addEventListener("data-auto-update-updated", refreshAfterAutoUpdate);
+    return () => window.removeEventListener("data-auto-update-updated", refreshAfterAutoUpdate);
+  }, [loadCoverage, loadInstrumentCatalog, view]);
+
+  useEffect(() => {
     if (!settingsReady || !instrumentCatalogReady || startupRandomStartedRef.current) return;
     startupRandomStartedRef.current = true;
     let cancelled = false;
@@ -6317,6 +6907,7 @@ export function TrainingWorkbench() {
 
   return (
     <div className="app-shell">
+      <DataAutoUpdateController />
       <aside className="main-rail">
         <button className="brand-mark" aria-label="K线训练营">K</button>
         <nav aria-label="主导航">
@@ -6532,18 +7123,51 @@ export function TrainingWorkbench() {
                         />
                       </label>
                     )}
+                  </div>
+                  <div className="settings-rule">
+                    <span>不同市场默认下单数量 / 手数</span>
                     <div className="execution-settings-grid">
-                      <label>默认仓位计算
+                      {marketOrderQuantityFields.map((field) => (
+                        <label key={field.key}>{field.label}
+                          <input
+                            type="number"
+                            min={field.min}
+                            step={field.step}
+                            value={settingsDraft.defaultOrderQtyByMarket[field.key]}
+                            onChange={(event) => setSettingsDraft((draft) => ({
+                              ...draft,
+                              defaultOrderQtyByMarket: {
+                                ...draft.defaultOrderQtyByMarket,
+                                [field.key]: Number(event.target.value),
+                              },
+                            }))}
+                          />
+                        </label>
+                      ))}
+                    </div>
+                    <small>新建训练、切换到新市场或打开实盘观察时会按当前市场使用对应值；已保存训练继续沿用训练内记录的下单数量。外汇可按 0.01 手递增。</small>
+                  </div>
+                  <div className="settings-rule">
+                    <span>下单方式</span>
+                    <div className="execution-settings-grid">
+                      <label>默认下单方式
                         <select value={settingsDraft.positionSizeMode} onChange={(event) => setSettingsDraft((draft) => ({ ...draft, positionSizeMode: event.target.value as PositionSizeMode }))}>
                           <option value="fixed">固定数量</option>
-                          <option value="risk-percent">风险百分比</option>
+                          <option value="risk-percent">按止损风险（余额%）</option>
                         </select>
                       </label>
-                      {settingsDraft.positionSizeMode === "risk-percent" && <label>默认账户风险（%）
+                      <label>默认开仓委托
+                        <select value={settingsDraft.orderType} onChange={(event) => setSettingsDraft((draft) => ({ ...draft, orderType: event.target.value as OrderType }))}>
+                          <option value="market">市价 · 下一根开盘</option>
+                          <option value="limit">限价 · 触价或更优</option>
+                          <option value="stop">止损触发 · 突破后成交</option>
+                        </select>
+                      </label>
+                      {settingsDraft.positionSizeMode === "risk-percent" && <label>默认单笔风险（余额%）
                         <input type="number" min="0.1" max="100" step="0.1" value={settingsDraft.riskPercent} onChange={(event) => setSettingsDraft((draft) => ({ ...draft, riskPercent: Number(event.target.value) }))} />
                       </label>}
                     </div>
-                    <small>风险百分比按账户权益、止损距离、点差/滑点和双边佣金反算数量；没有止损时不会允许下单。</small>
+                    <small>按账户余额 × 风险比例，再结合止损距离、点差/滑点和双边佣金自动反算数量或手数；拖动图表上的止损线会实时重算，没有止损时不会允许下单。</small>
                     <small>切换只影响之后新建的训练；已开始和已保存训练会继续使用创建时锁定的账户模式。</small>
                   </div>
                   <div className="settings-rule">
@@ -6684,7 +7308,10 @@ export function TrainingWorkbench() {
                     {settingsDraft.randomInstrumentMode === "market" && (
                       <label>指定市场
                         <select value={settingsDraft.randomMarket} onChange={(event) => setSettingsDraft((draft) => ({ ...draft, randomMarket: event.target.value }))}>
-                          {[...new Set(availableInstruments.map((item) => item.market))].map((market) => <option key={market}>{market}</option>)}
+                          {[...new Set([
+                            ...availableInstruments.map((item) => marketSelectionLabel(item.market)),
+                            marketSelectionLabel(settingsDraft.randomMarket),
+                          ].filter(Boolean))].map((market) => <option key={market}>{market}</option>)}
                         </select>
                       </label>
                     )}
@@ -7082,7 +7709,7 @@ export function TrainingWorkbench() {
                 <div>
                   <span>{taskSetupKind === "random" ? "RANDOM REPLAY" : "TRAINING TASK"}</span>
                   <h2 id="task-modal-title">{taskSetupKind === "random" ? "随机训练" : "新建 Replay 训练"}</h2>
-                  <p>只有点击“保存训练”或训练自动结束后，才会出现在可恢复训练中。</p>
+                  <p>训练内容发生实际修改后会自动保存；也可以随时手动保存。单纯浏览 K 线不会触发保存。</p>
                 </div>
                 <button aria-label={taskSetupKind === "random" ? "关闭随机训练设置" : "关闭新建训练"} onClick={() => setShowTaskSetup(false)}><X size={19} /></button>
               </div>
@@ -7564,6 +8191,15 @@ export function TrainingWorkbench() {
                         <span>失效 <strong>{trainingTask?.hidePrice ? "训练结束后揭示" : selectedDecision.decision.stop || "未填写"}</strong></span>
                         <span>目标 <strong>{trainingTask?.hidePrice ? "训练结束后揭示" : selectedDecision.decision.target || "未填写"}</strong></span>
                       </div>
+                      <DecisionLinkedTradeSummary
+                        positions={linkedDecisionPositions}
+                        tradingMode={tradingMode}
+                        marginInstrument={marginInstrument}
+                        dateLabel={trainingDateLabel}
+                        priceLabel={trainingPriceLabel}
+                        onEvidence={openReviewEvidence}
+                        compact
+                      />
                       <p>{selectedDecision.decision.note || "没有填写计划说明"}</p>
                       <div className="decision-chart-actions">
                         <button type="button" className="ghost-button" onClick={() => editDecision(selectedDecision)}><Pencil size={14} />编辑</button>
@@ -7643,17 +8279,29 @@ export function TrainingWorkbench() {
                   )}
                 </div>
                 <div className="execution-order-controls">
-                  {!liveMode && <label>仓位计算
-                    <select aria-label="仓位计算方式" value={positionSizeMode} onChange={(event) => setPositionSizeMode(event.target.value as PositionSizeMode)}>
+                  {!liveMode && <label>下单方式
+                    <select aria-label="下单方式" value={positionSizeMode} onChange={(event) => {
+                      const value = event.target.value as PositionSizeMode;
+                      setPositionSizeMode(value);
+                      rememberOrderEntryPreference({ positionSizeMode: value });
+                    }}>
                       <option value="fixed">固定数量</option>
-                      <option value="risk-percent">风险百分比</option>
+                      <option value="risk-percent">按止损风险（余额%）</option>
                     </select>
                   </label>}
-                  {!liveMode && positionSizeMode === "risk-percent" && <label>账户风险（%）
-                    <input aria-label="账户风险百分比" type="number" min="0.1" max="100" step="0.1" value={riskPercent} onChange={(event) => setRiskPercent(Math.max(0.1, Math.min(100, Number(event.target.value) || 0.1)))} />
+                  {!liveMode && positionSizeMode === "risk-percent" && <label>单笔风险（余额%）
+                    <input aria-label="单笔风险百分比" type="number" min="0.1" max="100" step="0.1" value={riskPercent} onChange={(event) => {
+                      const value = Math.max(0.1, Math.min(100, Number(event.target.value) || 0.1));
+                      setRiskPercent(value);
+                      rememberOrderEntryPreference({ riskPercent: value });
+                    }} />
                   </label>}
                   <label>开仓委托
-                    <select aria-label="开仓委托类型" value={liveMode ? "market" : orderType} disabled={liveMode} onChange={(event) => setOrderType(event.target.value as OrderType)}>
+                    <select aria-label="开仓委托类型" value={liveMode ? "market" : orderType} disabled={liveMode} onChange={(event) => {
+                      const value = event.target.value as OrderType;
+                      setOrderType(value);
+                      rememberOrderEntryPreference({ orderType: value });
+                    }}>
                       <option value="market">市价 · 下一根开盘</option>
                       <option value="limit">限价 · 触价或更优</option>
                       <option value="stop">止损触发 · 突破后成交</option>
@@ -7691,6 +8339,11 @@ export function TrainingWorkbench() {
                     : marginInstrument
                       ? `成交模型 ${EXECUTION_ENGINE_VERSION} · BID K线 · 买入/回补用 Ask，卖出/平多用 Bid · 1 手 ${Number(instrumentEconomics?.contractSize ?? 100000).toLocaleString()} ${instrumentEconomics?.baseCurrency ?? "基础币"} · 每 Pip ${oneLotPipValue == null ? "待换算" : `${oneLotPipValue.toFixed(2)} ${instrumentEconomics?.accountCurrency ?? "USD"}`} · 杠杆 1:${instrumentEconomics?.leverage ?? 100} · 强平线 ${instrumentEconomics?.stopOutLevelPct ?? 50}%`
                       : `成交模型 ${EXECUTION_ENGINE_VERSION} · 佣金 ${executionProfile.commissionRateBps}bp · 滑点 ${executionProfile.slippageBps}bp · 价差 ${executionProfile.spreadBps}bp · 当根量参与 ${executionProfile.maxVolumeParticipationPct || "不限"}${executionProfile.maxVolumeParticipationPct ? "%" : ""}`}</small>
+                  {!liveMode && positionSizeMode === "risk-percent" && <small>
+                    {effectiveOrderStop
+                      ? `按账户余额 ${money(riskBalance)} × ${riskPercent}% 风险计算；拖动止损线后风险${marginInstrument ? "手数" : "数量"}会自动更新。`
+                      : "请先在图表点击或拖动止损线；系统会按账户余额和单笔风险自动计算数量/手数。"}
+                  </small>}
                 </div>
                 <div className="order-entry">
                   <label><span className="quantity-label">{marginInstrument ? (positionSizeMode === "risk-percent" && !liveMode ? "风险手数" : "手数") : positionSizeMode === "risk-percent" && !liveMode ? "风险数量" : "数量"}</span><input
@@ -7861,6 +8514,38 @@ export function TrainingWorkbench() {
                   <button type="button" onClick={cancelDecisionBackfill}>取消</button>
                 </div>
               )}
+              {decisionTarget && !editingDecisionId && (
+                <div className="decision-backfill-link">
+                  {backfillCandidates.length ? (
+                    <>
+                      <div>
+                        <strong>发现 {backfillCandidates.length} 笔过去交易</strong>
+                        <small>默认把这根 K 线之后、下一张计划之前的交易关联到本卡。</small>
+                      </div>
+                      <label className="decision-backfill-toggle">
+                        <input
+                          type="checkbox"
+                          checked={backfillAssociation === "associate"}
+                          onChange={(event) => setBackfillAssociation(event.target.checked ? "associate" : "none")}
+                        />
+                        <span>{backfillAssociation === "associate" ? "保存并关联" : "只保存计划"}</span>
+                      </label>
+                    </>
+                  ) : (
+                    <small>这段没有找到尚未关联的过去交易，本次只保存计划。</small>
+                  )}
+                </div>
+              )}
+              {activeDecisionSubmission && (
+                <DecisionLinkedTradeSummary
+                  positions={linkedDecisionPositions}
+                  tradingMode={tradingMode}
+                  marginInstrument={marginInstrument}
+                  dateLabel={trainingDateLabel}
+                  priceLabel={trainingPriceLabel}
+                  onEvidence={openReviewEvidence}
+                />
+              )}
               <label>市场状态
                 <select value={decision.marketState} onChange={(event) => updateDecision("marketState", event.target.value)}>
                   <option value="">请选择市场状态</option><option>趋势</option><option>宽通道</option><option>震荡区间</option><option>突破模式</option><option>反转尝试</option>
@@ -7990,7 +8675,7 @@ export function TrainingWorkbench() {
                 <div><strong>{decision.reasons.length >= 2 ? "条件已成形" : "再找一个独立理由"}</strong><span>评分关注过程，不用结果倒推理由</span></div>
               </div>
               <div className="submitted-plan-count">已提交 <strong>{decisionSubmissions.length}</strong> 份计划 · 右键或长按历史 K 线可补写</div>
-              <button className="commit-plan" disabled={trainingComplete && !decisionTarget} onClick={submitDecision}><ListChecks size={17} />{editingDecisionId ? "保存编辑" : decisionTarget ? "保存补写决策" : trainingComplete ? "训练已结束" : "提交决策并揭示下一根"}</button>
+              <button className="commit-plan" disabled={trainingComplete && !decisionTarget} onClick={submitDecision}><ListChecks size={17} />{editingDecisionId ? "保存编辑" : decisionTarget ? backfillCandidates.length && backfillAssociation === "associate" ? "保存并关联" : "只保存计划" : trainingComplete ? "训练已结束" : "提交决策并揭示下一根"}</button>
             </aside>
           </div>
         )}
@@ -8034,6 +8719,48 @@ export function TrainingWorkbench() {
                 setLiveMode(false);
                 setLiveContext(null);
                 startFreshTraining(instrumentId, timeframe);
+              }}
+            ><X size={14} /></button>
+          </div>
+        ) : null}
+
+        {view === "replay" && !liveMode && trainingNavigatorActive && trainingNavigatorSessions.length > 1 ? (
+          <div
+            className="live-scan-navigator training-session-navigator"
+            style={{ transform: `translate(calc(-50% + ${trainingNavigatorOffset.x}px), ${trainingNavigatorOffset.y}px)` }}
+            onPointerDown={(event) => {
+              if (event.button !== 0) return;
+              trainingBarDragRef.current = {
+                pointerId: event.pointerId,
+                startX: event.clientX,
+                startY: event.clientY,
+                offsetX: trainingNavigatorOffset.x,
+                offsetY: trainingNavigatorOffset.y,
+              };
+              event.currentTarget.setPointerCapture?.(event.pointerId);
+            }}
+            onPointerUp={(event) => {
+              if (trainingBarDragRef.current?.pointerId === event.pointerId) trainingBarDragRef.current = null;
+            }}
+            role="region"
+            aria-label="训练记录导航"
+          >
+            <button type="button" aria-label="上一场训练" title="上一场训练" onPointerDown={(event) => event.stopPropagation()} onClick={() => moveTrainingSession(-1)}><ChevronLeft size={16} /></button>
+            <div className="live-scan-navigator-label">
+              <span>训练切换</span>
+              <strong>{trainingNavigatorSessions[trainingNavigatorIndex]?.instrumentId ?? "--"} · {trainingNavigatorSessions[trainingNavigatorIndex]?.timeframe ?? "--"}</strong>
+              <small>{trainingNavigatorIndex + 1} / {trainingNavigatorSessions.length}</small>
+            </div>
+            <button type="button" aria-label="下一场训练" title="下一场训练" onPointerDown={(event) => event.stopPropagation()} onClick={() => moveTrainingSession(1)}><ChevronRight size={16} /></button>
+            <button
+              type="button"
+              className="live-scan-navigator-exit"
+              aria-label="关闭训练导航"
+              title="关闭训练导航"
+              onPointerDown={(event) => event.stopPropagation()}
+              onClick={() => {
+                trainingBarDragRef.current = null;
+                setTrainingNavigatorActive(false);
               }}
             ><X size={14} /></button>
           </div>
@@ -8353,7 +9080,7 @@ export function TrainingWorkbench() {
               {filteredSessionSummaries.length ? (
                 <div className="performance-session-list">
                   <div className="performance-session-header">
-                    <span>训练</span><span>模式 / 区间</span><span>状态</span><span>结果</span><span>保存时间</span><span>操作</span>
+                    <span>训练</span><span>模式 / 区间</span><span>状态</span><span>结果</span><span>创建时间</span><span>操作</span>
                   </div>
                   {filteredSessionSummaries.map((summary) => (
                     <div
@@ -8377,7 +9104,7 @@ export function TrainingWorkbench() {
                         <strong className={(summary.state.tradingMode === "capital" ? summary.pnl.total : summary.returnPct) >= 0 ? "up" : "down"}>{summary.state.tradingMode === "capital" ? money(summary.pnl.total) : percent(summary.returnPct)}</strong>
                         <small>{summary.closedTradePnls.length} 笔已平仓 · {summary.winningTrades}胜/{summary.losingTrades}负/{summary.flatTrades}平</small>
                       </span>
-                      <time>{new Date(summary.session.updatedAt).toLocaleString("zh-CN")}</time>
+                      <time>{new Date(summary.session.createdAt).toLocaleString("zh-CN")}</time>
                       <span className="performance-row-actions">
                         <button
                           className="review-session"
@@ -8390,7 +9117,7 @@ export function TrainingWorkbench() {
                           className="resume-session"
                           onClick={(event) => {
                             event.stopPropagation();
-                            resumeSession(summary.session);
+                            resumeSession(summary.session, false, filteredSessionSummaries.map((item) => item.session));
                           }}
                         ><RotateCcw size={14} />继续训练</button>
                       </span>
@@ -8441,8 +9168,10 @@ export function TrainingWorkbench() {
             </div>
             <DataSourceManager
               market={dataMarket}
+              hasData={coverageSummary.hasNonSampleData}
               onOpenSettings={() => openSettingsPanel("data")}
-              onDataChanged={() => {
+              onDataChanged={(changedMarket) => {
+                if (changedMarket !== dataMarket) return;
                 void Promise.all([loadCoverage(), loadInstrumentCatalog()]);
                 // Keep live-observation marks in sync when the database page
                 // finishes an import, incremental update, or repair.
@@ -8568,17 +9297,22 @@ export function TrainingWorkbench() {
                   <div className="deterministic-trades-wrap">
                     <table className="orders-table deterministic-trades-table">
                       <thead><tr><th>仓位</th><th>入场 → 出场</th><th>净盈亏 / R</th><th>MFE / MAE</th><th>出场效率</th><th>后续 1/3/5/10 根</th><th>证据</th></tr></thead>
-                      <tbody>{reviewMetrics.trades.length ? reviewMetrics.trades.map((trade) => (
-                        <tr key={trade.positionId}>
-                          <td data-label="仓位"><span className="position-id">#{trade.positionId.slice(0, 6)}</span><small>{trade.side === "long" ? "多" : "空"} · {trade.holdingBars} 根</small></td>
-                          <td data-label="入场 → 出场">{formatDate(trade.entryTimestamp, reviewedSession?.session.timeframe ?? timeframe)} → {formatDate(trade.exitTimestamp, reviewedSession?.session.timeframe ?? timeframe)}<small>{trade.entryPrice.toFixed(2)} → {trade.exitPrice.toFixed(2)} · {exitReasonLabel(trade.exitReason as ExecutionReason | undefined)}</small></td>
-                          <td data-label="净盈亏 / R"><strong className={trade.netPnl >= 0 ? "up" : "down"}>{money(trade.netPnl)}</strong><small>{trade.rMultiple == null ? "R —" : `${trade.rMultiple.toFixed(2)}R`} · 费 {trade.fees.toFixed(2)}</small></td>
-                          <td data-label="MFE / MAE"><strong>{money(trade.mfe)} / {money(trade.mae)}</strong><small>{formatDate(trade.mfeTimestamp, reviewedSession?.session.timeframe ?? timeframe)} / {formatDate(trade.maeTimestamp, reviewedSession?.session.timeframe ?? timeframe)}</small></td>
-                          <td data-label="出场效率">{trade.exitEfficiencyPct == null ? "—" : `${trade.exitEfficiencyPct.toFixed(1)}%`}<small>{trade.intrabarAmbiguous ? "止损止盈同根冲突" : "无同根冲突"}</small></td>
-                          <td data-label="后续 K 线">{trade.horizons.map((horizon) => horizon.returnPct == null ? `${horizon.bars}: —` : `${horizon.bars}: ${percent(horizon.returnPct)}`).join(" · ")}</td>
-                          <td data-label="证据"><span className={trade.evidenceComplete ? "evidence-ok" : "evidence-missing"}>{trade.evidenceComplete ? "完整" : "缺失"}</span></td>
-                        </tr>
-                      )) : <tr><td className="orders-empty" colSpan={7}>还没有已平仓交易；有成交后会生成逐笔证据。</td></tr>}</tbody>
+                      <tbody>{reviewMetrics.trades.length ? reviewMetrics.trades.map((trade) => {
+                        const linkedDecision = trade.decisionSubmissionId
+                          ? reviewDecisionById.get(trade.decisionSubmissionId)
+                          : undefined;
+                        return (
+                          <tr key={trade.positionId}>
+                            <td data-label="仓位"><span className="position-id">#{trade.positionId.slice(0, 6)}</span><small>{trade.side === "long" ? "多" : "空"} · {trade.holdingBars} 根</small><small>{linkedDecision ? `计划 · ${linkedDecision.decision.marketState || linkedDecision.decision.location || "已关联"}` : "未明确关联计划"}</small></td>
+                            <td data-label="入场 → 出场"><button type="button" className="evidence-link" onClick={() => openReviewEvidence(trade.entryTimestamp, "入场")}>{formatDate(trade.entryTimestamp, reviewedSession?.session.timeframe ?? timeframe)}</button> → <button type="button" className="evidence-link" onClick={() => openReviewEvidence(trade.exitTimestamp, "出场")}>{formatDate(trade.exitTimestamp, reviewedSession?.session.timeframe ?? timeframe)}</button><small>{trade.entryPrice.toFixed(2)} → {trade.exitPrice.toFixed(2)} · {exitReasonLabel(trade.exitReason as ExecutionReason | undefined)}</small></td>
+                            <td data-label="净盈亏 / R"><strong className={trade.netPnl >= 0 ? "up" : "down"}>{money(trade.netPnl)}</strong><small>{trade.rMultiple == null ? "R —" : `${trade.rMultiple.toFixed(2)}R`} · 费 {trade.fees.toFixed(2)}</small></td>
+                            <td data-label="MFE / MAE"><strong>{money(trade.mfe)} / {money(trade.mae)}</strong><small><button type="button" className="evidence-link" onClick={() => openReviewEvidence(trade.mfeTimestamp, "MFE")}>{formatDate(trade.mfeTimestamp, reviewedSession?.session.timeframe ?? timeframe)}</button> / <button type="button" className="evidence-link" onClick={() => openReviewEvidence(trade.maeTimestamp, "MAE")}>{formatDate(trade.maeTimestamp, reviewedSession?.session.timeframe ?? timeframe)}</button></small></td>
+                            <td data-label="出场效率">{trade.exitEfficiencyPct == null ? "—" : `${trade.exitEfficiencyPct.toFixed(1)}%`}<small>{trade.intrabarAmbiguous ? "止损止盈同根冲突" : "无同根冲突"}</small></td>
+                            <td data-label="后续 K 线">{trade.horizons.map((horizon) => horizon.returnPct == null ? `${horizon.bars}: —` : `${horizon.bars}: ${percent(horizon.returnPct)}`).join(" · ")}</td>
+                            <td data-label="证据"><span className={trade.evidenceComplete ? "evidence-ok" : "evidence-missing"}>{trade.evidenceComplete ? "完整" : "缺失"}</span></td>
+                          </tr>
+                        );
+                      }) : <tr><td className="orders-empty" colSpan={7}>还没有已平仓交易；有成交后会生成逐笔证据。</td></tr>}</tbody>
                     </table>
                   </div>
                 </>
@@ -8589,7 +9323,7 @@ export function TrainingWorkbench() {
               <article className="insight-card">
                 <div className="section-label">最近一份事前计划</div>
                 <h2>{reviewPlanScore >= 80 ? "计划完整，可以进入样本积累" : "先补齐失效点和目标"}</h2>
-                <p>{reviewLatestSubmission ? `提交于 ${formatDate(reviewLatestSubmission.barTimestamp, reviewedSession?.session.timeframe ?? timeframe)}` : "当前内容还是草稿，尚未形成正式提交记录。"}</p>
+                <p>{reviewLatestSubmission ? <>提交于 <button type="button" className="evidence-link" onClick={() => openReviewEvidence(reviewLatestSubmission.barTimestamp, "计划")}>{formatDate(reviewLatestSubmission.barTimestamp, reviewedSession?.session.timeframe ?? timeframe)}</button></> : "当前内容还是草稿，尚未形成正式提交记录。"}</p>
                 <div className="evidence-row"><span>市场状态</span><strong>{reviewDecision.marketState || "未填写"}</strong></div>
                 <div className="evidence-row"><span>位置</span><strong>{reviewDecision.location || "未填写"}</strong></div>
                 <div className="evidence-row"><span>交易理由</span><strong>{reviewDecision.reasons.join("、") || "未填写"}</strong></div>
@@ -8618,7 +9352,7 @@ export function TrainingWorkbench() {
                         <div className="decision-history-head">
                           <div>
                             <strong>计划 {reviewState.decisionSubmissions.length - reverseIndex}{submission.autoGenerated ? " · 自动关联保护价" : submission.backfilled ? " · 补写" : ""}</strong>
-                            <span>{formatDate(submission.barTimestamp, reviewedSession?.session.timeframe ?? timeframe)} · 参考价 {submission.referencePrice.toFixed(2)}</span>
+                            <span><button type="button" className="evidence-link" onClick={() => openReviewEvidence(submission.barTimestamp, "计划")}>{formatDate(submission.barTimestamp, reviewedSession?.session.timeframe ?? timeframe)}</button> · 参考价 {submission.referencePrice.toFixed(2)}</span>
                           </div>
                           <b>{decisionScore(submission.decision)}%</b>
                         </div>
@@ -8632,6 +9366,9 @@ export function TrainingWorkbench() {
                           <span>第一目标<strong>{submission.decision.target || "未填写"}</strong></span>
                         </div>
                         <p>{submission.decision.note || "没有填写计划说明"}</p>
+                        <small className="decision-history-linked">{reviewState.positions.filter((position) => position.decisionSubmissionId === submission.id).length
+                          ? `已关联 ${reviewState.positions.filter((position) => position.decisionSubmissionId === submission.id).length} 笔交易`
+                          : "尚未关联交易"}</small>
                       </div>
                     ))}
                   </div>
@@ -8684,6 +9421,14 @@ export function TrainingWorkbench() {
                       <option value="active">可继续</option>
                     </select>
                   </label>
+                  <label>
+                    <span>事前计划</span>
+                    <select value={reviewSessionFilters.planStatus} onChange={(event) => setReviewSessionFilters((filters) => ({ ...filters, planStatus: event.target.value as ReviewSessionFilters["planStatus"] }))}>
+                      <option value="all">全部计划</option>
+                      <option value="written">已写计划</option>
+                      <option value="unwritten">未写计划</option>
+                    </select>
+                  </label>
                 </div>
                 <div className="review-session-scroll" tabIndex={0} aria-label="全部可恢复训练，可滚动浏览">
                 {filteredReviewSessionSummaries.length ? filteredReviewSessionSummaries.map((summary) => (
@@ -8708,13 +9453,13 @@ export function TrainingWorkbench() {
                         <span>{summary.pnl.openPositions} 笔持仓 · {summary.pnl.closedPositions} 笔平仓</span>
                         <span>已平仓交易 {summary.winningTrades} 胜 / {summary.losingTrades} 负 / {summary.flatTrades} 平</span>
                       </div>
-                      <small>保存时间 {new Date(summary.session.updatedAt).toLocaleString("zh-CN")}</small>
+                      <small>创建时间 {new Date(summary.session.createdAt).toLocaleString("zh-CN")}</small>
                     </div>
                     <div className="session-actions">
                       <button className="review-session" onClick={() => inspectSession(summary.session)}>
                         <BookOpenCheck size={13} />查看复盘
                       </button>
-                      <button className="resume-session" onClick={() => resumeSession(summary.session)}>
+                      <button className="resume-session" onClick={() => resumeSession(summary.session, false, filteredReviewSessionSummaries.map((item) => item.session))}>
                         <RotateCcw size={13} />继续训练
                       </button>
                       <button className="delete-session" aria-label={`将 ${summary.session.instrumentId} 训练移入回收站`} onClick={() => deleteSession(summary.session)}>

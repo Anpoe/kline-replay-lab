@@ -1,4 +1,8 @@
 import { ensureSchema, getRawDb } from "../../../db/runtime";
+import {
+  readDataAutoUpdateSettings,
+  writeDataAutoUpdateSettings,
+} from "../../lib/dataAutoUpdateSettings";
 import { loadProviderSecrets } from "../../lib/providerCredentials";
 
 type ProviderSettingsInput = {
@@ -9,6 +13,7 @@ type ProviderSettingsInput = {
   tdxQuantEndpoint?: string;
   twelveDataApiKey?: string;
   dukascopyEndpoint?: string;
+  autoUpdateEnabled?: boolean;
 };
 
 function hint(value?: string) {
@@ -18,7 +23,11 @@ function hint(value?: string) {
 
 export async function GET() {
   await ensureSchema();
-  const { secrets, sources, tdxQuantEndpoint } = await loadProviderSecrets();
+  const db = getRawDb();
+  const [{ secrets, sources, tdxQuantEndpoint }, autoUpdate] = await Promise.all([
+    loadProviderSecrets(),
+    readDataAutoUpdateSettings(db),
+  ]);
   return Response.json({
     providers: {
       tushare: {
@@ -47,12 +56,25 @@ export async function GET() {
         endpoint: secrets.dukascopyEndpoint,
       },
     },
+    autoUpdate: {
+      enabled: autoUpdate.enabled,
+      lastCheckDate: autoUpdate.lastCheckDate,
+      lastFinishedAt: autoUpdate.lastFinishedAt,
+      lastStatus: autoUpdate.lastStatus,
+      lastMessage: autoUpdate.lastMessage,
+    },
   });
 }
 
 export async function PUT(request: Request) {
   await ensureSchema();
   const payload = await request.json() as ProviderSettingsInput;
+  if (typeof payload.autoUpdateEnabled === "boolean") {
+    const autoUpdate = await writeDataAutoUpdateSettings(getRawDb(), {
+      enabled: payload.autoUpdateEnabled,
+    });
+    return Response.json({ autoUpdate });
+  }
   let credentials: Record<string, string>;
   if (payload.provider === "tushare") {
     const token = payload.tushareToken?.trim();

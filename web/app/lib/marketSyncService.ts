@@ -343,6 +343,68 @@ export async function getActiveMarketSyncStatus() {
   return await getMarketSyncStatus(active.id);
 }
 
+/**
+ * Check whether an already populated US market has a closed session missing.
+ * This is deliberately separate from createMarketSyncRun so the startup
+ * updater can decide whether to create a worker run at all.
+ */
+export async function inspectMarketSyncUpdate(db: D1Database = getRawDb()) {
+  const { secrets } = await loadProviderSecrets();
+  const instruments = await loadUsInstruments(db, null);
+  const populated = instruments.filter((instrument) => hasHistory(instrument.lastTimestamp));
+  if (!populated.length) {
+    return {
+      existing: false,
+      configured: Boolean(secrets.alpacaKeyId && secrets.alpacaSecretKey),
+      needsUpdate: false,
+      totalSymbols: 0,
+      eligibleSymbols: 0,
+      latestSession: null,
+      reason: "美股尚无可更新的历史数据",
+    };
+  }
+  if (!secrets.alpacaKeyId || !secrets.alpacaSecretKey) {
+    return {
+      existing: true,
+      configured: false,
+      needsUpdate: false,
+      totalSymbols: populated.length,
+      eligibleSymbols: 0,
+      latestSession: null,
+      reason: "美股已有数据，但尚未配置 Alpaca",
+    };
+  }
+  const active = await getActiveRun(db);
+  if (active) {
+    return {
+      existing: true,
+      configured: true,
+      needsUpdate: true,
+      activeRunId: active.id,
+      totalSymbols: populated.length,
+      eligibleSymbols: populated.length,
+      latestSession: active.latestSession,
+      reason: "美股已有更新任务，启动后继续处理",
+    };
+  }
+  const calendar = await loadUsSyncCalendar(secrets);
+  const latestSession = latestClosedUsSession(calendar);
+  const eligibleSymbols = populated.reduce((count, instrument) => (
+    dateAfterTimestamp(Number(instrument.lastTimestamp)) <= latestSession ? count + 1 : count
+  ), 0);
+  return {
+    existing: true,
+    configured: true,
+    needsUpdate: eligibleSymbols > 0,
+    totalSymbols: populated.length,
+    eligibleSymbols,
+    latestSession,
+    reason: eligibleSymbols > 0
+      ? `美股有 ${eligibleSymbols.toLocaleString()} 个品种缺少最新收盘日`
+      : "美股已有数据已经覆盖最近收盘日",
+  };
+}
+
 function publicRun(run: RunRow) {
   return {
     id: run.id,

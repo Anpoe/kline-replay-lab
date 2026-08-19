@@ -1,6 +1,6 @@
 "use client";
 
-import { KeyRound, Link2, Save, Trash2 } from "lucide-react";
+import { KeyRound, Link2, RefreshCw, Save, Trash2 } from "lucide-react";
 import { useCallback, useEffect, useState } from "react";
 
 type ProviderState = {
@@ -18,6 +18,13 @@ type ProviderSettingsResponse = {
     tdxquant: ProviderState;
     twelvedata: ProviderState;
     dukascopy: ProviderState;
+  };
+  autoUpdate?: {
+    enabled: boolean;
+    lastCheckDate: string | null;
+    lastFinishedAt: string | null;
+    lastStatus: "idle" | "running" | "completed" | "partial" | "failed";
+    lastMessage: string;
   };
 };
 
@@ -46,6 +53,9 @@ export function ProviderSettingsPanel() {
   const [dukascopyEndpoint, setDukascopyEndpoint] = useState("");
   const [notice, setNotice] = useState("");
   const [saving, setSaving] = useState<"" | "tushare" | "alpaca" | "tdxquant" | "twelvedata" | "dukascopy">("");
+  const [autoUpdateEnabled, setAutoUpdateEnabled] = useState(false);
+  const [autoUpdateStatus, setAutoUpdateStatus] = useState<ProviderSettingsResponse["autoUpdate"]>();
+  const [autoUpdateSaving, setAutoUpdateSaving] = useState(false);
   const [statusLoaded, setStatusLoaded] = useState(false);
 
   const loadStatus = useCallback(async () => {
@@ -54,6 +64,8 @@ export function ProviderSettingsPanel() {
       if (!response.ok) return false;
       const data = await response.json() as ProviderSettingsResponse;
       setStatus(data.providers);
+      setAutoUpdateEnabled(Boolean(data.autoUpdate?.enabled));
+      setAutoUpdateStatus(data.autoUpdate);
       setStatusLoaded(true);
       if (data.providers.tdxquant.endpoint) setTdxQuantEndpoint(data.providers.tdxquant.endpoint);
       setDukascopyEndpoint(data.providers.dukascopy.endpoint ?? "");
@@ -79,6 +91,37 @@ export function ProviderSettingsPanel() {
       window.clearTimeout(retryTimer);
     };
   }, [loadStatus]);
+
+  useEffect(() => {
+    const refreshAutoUpdateStatus = () => {
+      void loadStatus();
+    };
+    window.addEventListener("data-auto-update-updated", refreshAutoUpdateStatus);
+    return () => window.removeEventListener("data-auto-update-updated", refreshAutoUpdateStatus);
+  }, [loadStatus]);
+
+  const saveAutoUpdate = async (enabled: boolean) => {
+    setAutoUpdateSaving(true);
+    setNotice("");
+    try {
+      const response = await fetch("/api/provider-settings", {
+        method: "PUT",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ autoUpdateEnabled: enabled }),
+      });
+      const result = await response.json() as { autoUpdate?: ProviderSettingsResponse["autoUpdate"]; error?: string };
+      if (!response.ok || !result.autoUpdate) throw new Error(result.error ?? "保存自动更新设置失败");
+      setAutoUpdateEnabled(result.autoUpdate.enabled);
+      setAutoUpdateStatus(result.autoUpdate);
+      window.dispatchEvent(new Event("provider-settings-updated"));
+      window.dispatchEvent(new Event("data-auto-update-settings-updated"));
+      setNotice(enabled ? "已开启：下次启动后会检查已有市场，只有发现缺口才会拉取。" : "每日启动自动更新已关闭。已有数据不会被删除。");
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : "保存自动更新设置失败");
+    } finally {
+      setAutoUpdateSaving(false);
+    }
+  };
 
   const saveProvider = async (provider: "tushare" | "alpaca" | "tdxquant" | "twelvedata" | "dukascopy") => {
     setSaving(provider);
@@ -139,6 +182,27 @@ export function ProviderSettingsPanel() {
         <strong>历史行情数据源</strong>
         <span>凭证只保存在这台电脑的本地数据库；界面不会回显完整内容，也不会写入 Git。</span>
       </div>
+
+      <article className="provider-setting-card auto-update-setting-card">
+        <div className="provider-setting-title">
+          <div><RefreshCw size={17} /><span><strong>每日启动自动检查更新</strong><small>只处理已经存在历史数据的市场</small></span></div>
+          <button
+            type="button"
+            className="indicator-switch"
+            role="switch"
+            aria-checked={autoUpdateEnabled}
+            aria-label="每日启动自动检查更新"
+            disabled={autoUpdateSaving || !statusLoaded}
+            onClick={() => void saveAutoUpdate(!autoUpdateEnabled)}
+          ><span /></button>
+        </div>
+        <p className="provider-setting-help">启动后先检查 A 股、美股和外汇的最新已收盘数据；已经是最新就跳过，不会为没有历史数据的市场创建初始化任务。</p>
+        <small className="auto-update-setting-status">
+          {autoUpdateStatus?.lastCheckDate
+            ? `上次检查：${autoUpdateStatus.lastCheckDate} · ${autoUpdateStatus.lastMessage || "已完成"}`
+            : "尚未执行过自动检查"}
+        </small>
+      </article>
 
       <article className="provider-setting-card">
         <div className="provider-setting-title">

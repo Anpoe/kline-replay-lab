@@ -11,7 +11,7 @@ function send(response, status, value) {
   response.writeHead(status, {
     "content-type": "application/json; charset=utf-8",
     "content-length": Buffer.byteLength(body),
-    "access-control-allow-origin": "http://localhost:3000",
+    "access-control-allow-origin": "http://localhost:3101",
     "access-control-allow-methods": "GET,POST,DELETE,OPTIONS",
     "access-control-allow-headers": "content-type",
     "cache-control": "no-store",

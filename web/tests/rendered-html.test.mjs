@@ -32,6 +32,9 @@ test("ships the K-line training workbench instead of the starter", async () => {
   assert.match(workbench, /queueClosePosition/);
   assert.match(workbench, /kline-replay-lab:last-training/);
   assert.match(workbench, /继续训练/);
+  assert.match(workbench, /trainingNavigatorSessions/);
+  assert.match(workbench, /moveTrainingSession/);
+  assert.match(workbench, /训练切换/);
   assert.match(workbench, /RECYCLE BIN/);
   assert.match(workbench, /loadTrashSessions/);
   assert.match(workbench, /inspectTrashedSession/);
@@ -50,6 +53,10 @@ test("ships the K-line training workbench instead of the starter", async () => {
   assert.match(workbench, /decision_updated/);
   assert.match(workbench, /decision_deleted/);
   assert.match(workbench, /编辑事前决策/);
+  assert.match(workbench, /DecisionLinkedTradeSummary/);
+  assert.match(workbench, /关联交易/);
+  assert.match(workbench, /跳到交易/);
+  assert.match(workbench, /点击入场 \/ 出场时间可跳回对应 K 线/);
   assert.match(workbench, /删除这份决策吗/);
   assert.match(workbench, /编辑交易理由标签/);
   assert.match(workbench, /删除交易理由标签/);
@@ -61,8 +68,16 @@ test("ships the K-line training workbench instead of the starter", async () => {
   assert.match(workbench, /事前决策记录/);
   assert.match(workbench, /查看复盘/);
   assert.match(workbench, /全部可恢复训练，可滚动浏览/);
+  assert.match(workbench, /reviewSessionFilters\.planStatus/);
+  assert.match(workbench, /已写计划/);
+  assert.match(workbench, /未写计划/);
+  assert.match(sessionsRoute, /migrate-next-bar-decision-links/);
+  assert.match(sessionsRoute, /migrate-same-bar-decision-links/);
+  assert.match(sessionsRoute, /plan_bar_same_candle_entry/);
+  assert.match(sessionsRoute, /plan_bar_then_next_candle_entry/);
   assert.match(workbench, /loadSessions\(true\)/);
-  assert.match(workbench, /只有点击“保存训练”或训练自动结束后/);
+  assert.match(workbench, /训练内容发生实际修改后会自动保存/);
+  assert.match(workbench, /单纯浏览 K 线不会触发保存/);
   assert.match(workbench, /随机训练规则/);
   assert.match(workbench, /RANDOM_TRAINING_PATTERN_PRESETS_KEY/);
   assert.match(workbench, /patternPresetIds: randomTrainingPatternPresetIds/);

@@ -236,11 +236,13 @@ function SetupProgress({ step }: { step: number }) {
 
 export function DataSourceManager({
   market,
+  hasData = false,
   onDataChanged,
   onOpenSettings,
 }: {
   market: DataMarket;
-  onDataChanged?: () => void;
+  hasData?: boolean;
+  onDataChanged?: (market: DataMarket) => void;
   onOpenSettings?: () => void;
 }) {
   const [providers, setProviders] = useState<Provider[]>([]);
@@ -254,10 +256,11 @@ export function DataSourceManager({
     failed: 0,
     insertedCount: 0,
   });
-  const [notice, setNotice] = useState("");
+  const [marketNotices, setMarketNotices] = useState<Record<DataMarket, string>>({ CN: "", US: "", FX: "", GOLD: "" });
   const [marketSync, setMarketSync] = useState<MarketSyncStatus | null>(null);
   const [marketSyncBusy, setMarketSyncBusy] = useState(false);
-  const [setupView, setSetupView] = useState<SetupView>("welcome");
+  const [setupView, setSetupView] = useState<SetupView>(market === "CN" ? "welcome" : "manager");
+  const effectiveSetupView: SetupView = market !== "CN" || hasData ? "manager" : setupView;
   const [advancedStep, setAdvancedStep] = useState(1);
   const [advanced, setAdvanced] = useState<AdvancedSetup>(defaultAdvancedSetup);
   const [savedPlan, setSavedPlan] = useState<Record<string, unknown> | null>(null);
@@ -272,6 +275,22 @@ export function DataSourceManager({
   const marketSyncLoopRef = useRef<string | null>(null);
   const fxTaskLoopRef = useRef<string | null>(null);
   const localServiceAvailableRef = useRef(true);
+  const activeMarketRef = useRef(market);
+
+  useEffect(() => {
+    activeMarketRef.current = market;
+  }, [market]);
+
+  const setNotice = useCallback((message: string) => {
+    setMarketNotices((current) => current[market] === message
+      ? current
+      : { ...current, [market]: message });
+  }, [market]);
+  const notice = marketNotices[market];
+  const notifyDataChanged = useCallback(() => {
+    if (activeMarketRef.current !== market) return;
+    onDataChanged?.(market);
+  }, [market, onDataChanged]);
 
   const loadProviders = useCallback(async () => {
     const response = await fetch("/api/data-providers");
@@ -281,12 +300,14 @@ export function DataSourceManager({
   }, []);
 
   const loadJobs = useCallback(async () => {
-    const response = await fetch(`/api/data-jobs?market=${market}`);
+    const requestMarket = market;
+    const response = await fetch(`/api/data-jobs?market=${requestMarket}`);
     if (!response.ok) return;
     const data = await response.json() as {
       jobs: DownloadJob[];
       summary?: Partial<DownloadJobSummary>;
     };
+    if (activeMarketRef.current !== requestMarket) return;
     setJobs(data.jobs);
     setJobSummary({
       total: Number(data.summary?.total ?? 0),
@@ -301,6 +322,7 @@ export function DataSourceManager({
 
   const loadMarketSync = useCallback(async (runId?: string) => {
     if (market !== "US") return null;
+    const requestMarket = market;
     const query = runId ? "?runId=" + encodeURIComponent(runId) : "";
     const response = await fetch("/api/data-jobs/market/sync" + query, { cache: "no-store" });
     if (!response.ok) return null;
@@ -311,6 +333,7 @@ export function DataSourceManager({
       runningBatches?: number;
       failedBatches?: number;
     };
+    if (activeMarketRef.current !== requestMarket) return null;
     if (!data.run) {
       setMarketSync(null);
       return null;
@@ -417,41 +440,42 @@ export function DataSourceManager({
   }, [loadCatalogTask, loadCnMaintenanceTask, loadFxTask, loadJobs, loadLocalTask, loadMarketSync, loadProviders]);
 
   useEffect(() => {
-    if (!localTask || !["queued", "running"].includes(localTask.status)) return;
+    if (market !== "CN" || !localTask || !["queued", "running"].includes(localTask.status)) return;
     const timer = window.setInterval(() => {
-      void loadLocalTask().then(() => onDataChanged?.());
+      void loadLocalTask().then(notifyDataChanged);
     }, 900);
     return () => window.clearInterval(timer);
-  }, [loadLocalTask, localTask, onDataChanged]);
+  }, [loadLocalTask, localTask, market, notifyDataChanged]);
 
   useEffect(() => {
+    if (market !== "CN") return;
     const timer = window.setInterval(() => {
       void loadLocalTask().then((result) => {
-        if (result.recovered) onDataChanged?.();
+        if (result.recovered) notifyDataChanged();
       });
     }, 4000);
     return () => window.clearInterval(timer);
-  }, [loadLocalTask, onDataChanged]);
+  }, [loadLocalTask, market, notifyDataChanged]);
 
   useEffect(() => {
-    if (catalogTask?.status !== "running") return;
+    if (market !== "CN" || catalogTask?.status !== "running") return;
     const timer = window.setInterval(() => {
       void loadCatalogTask().then((task) => {
-        if (task?.status === "completed") onDataChanged?.();
+        if (task?.status === "completed") notifyDataChanged();
       });
     }, 1200);
     return () => window.clearInterval(timer);
-  }, [catalogTask, loadCatalogTask, onDataChanged]);
+  }, [catalogTask, loadCatalogTask, market, notifyDataChanged]);
 
   useEffect(() => {
-    if (!cnMaintenanceTask || !["queued", "running"].includes(cnMaintenanceTask.status)) return;
+    if (market !== "CN" || !cnMaintenanceTask || !["queued", "running"].includes(cnMaintenanceTask.status)) return;
     const timer = window.setInterval(() => {
       void loadCnMaintenanceTask().then((task) => {
-        if (task?.status === "completed") onDataChanged?.();
+        if (task?.status === "completed") notifyDataChanged();
       });
     }, 1000);
     return () => window.clearInterval(timer);
-  }, [cnMaintenanceTask, loadCnMaintenanceTask, onDataChanged]);
+  }, [cnMaintenanceTask, loadCnMaintenanceTask, market, notifyDataChanged]);
 
   useEffect(() => {
     const reload = () => {
@@ -460,6 +484,20 @@ export function DataSourceManager({
     window.addEventListener("provider-settings-updated", reload);
     return () => window.removeEventListener("provider-settings-updated", reload);
   }, [loadProviders]);
+
+  useEffect(() => {
+    const reload = () => {
+      void Promise.all([
+        loadJobs(),
+        loadMarketSync(),
+        loadLocalTask(),
+        loadCnMaintenanceTask(),
+        loadFxTask(),
+      ]);
+    };
+    window.addEventListener("data-auto-update-updated", reload);
+    return () => window.removeEventListener("data-auto-update-updated", reload);
+  }, [loadCnMaintenanceTask, loadFxTask, loadJobs, loadLocalTask, loadMarketSync]);
 
   const configured = useMemo(
     () => Object.fromEntries(providers.map((provider) => [provider.id, provider.configured])) as Partial<Record<ProviderId, boolean>>,
@@ -585,7 +623,7 @@ export function DataSourceManager({
       setNotice(action === "pause"
         ? "任务已暂停，已经写入的日期和游标均已保存。"
         : result.maintenanceTask?.message ?? "任务已开始。");
-      if (result.maintenanceTask?.status === "completed") onDataChanged?.();
+      if (result.maintenanceTask?.status === "completed") notifyDataChanged();
     } catch (error) {
       setNotice(error instanceof Error ? error.message : "A 股维护任务操作失败");
     } finally {
@@ -615,7 +653,7 @@ export function DataSourceManager({
           setNotice(finalStatus === "paused"
             ? "任务已暂停，下载游标和已导入数据均已保存。"
             : `下载完成，累计处理 ${Number(result.insertedCount ?? 0).toLocaleString()} 根 K 线。`);
-          onDataChanged?.();
+          notifyDataChanged();
           return {
             status: finalStatus,
             insertedCount: Number(result.insertedCount ?? 0),
@@ -719,7 +757,7 @@ export function DataSourceManager({
           next.run.totalBatches.toLocaleString() + " 批，写入 " +
           next.run.insertedCount.toLocaleString() + " 根 K 线" + failed);
         if (["completed", "completed_with_errors", "cancelled", "paused"].includes(next.run.status)) {
-          onDataChanged?.();
+          notifyDataChanged();
           break;
         }
         await new Promise((resolve) => window.setTimeout(resolve, 250));
@@ -738,7 +776,7 @@ export function DataSourceManager({
         // The next status poll can refresh the job list after a transient failure.
       }
     }
-  }, [loadJobs, loadMarketSync, onDataChanged]);
+  }, [loadJobs, loadMarketSync, notifyDataChanged, setNotice]);
 
   const syncUsMarket = async (mode: "initialize" | "update") => {
     if (!configured.alpaca) {
@@ -839,7 +877,7 @@ export function DataSourceManager({
             setFxQuality(data.task.quality ?? null);
           }
           if (data.task && ["completed", "failed", "cancelled", "paused"].includes(data.task.status)) {
-            if (data.task.status === "completed") onDataChanged?.();
+            if (data.task.status === "completed") notifyDataChanged();
             break;
           }
           if (!response.ok || !data.task) {
@@ -863,7 +901,7 @@ export function DataSourceManager({
       fxTaskLoopRef.current = null;
       await loadFxTask();
     }
-  }, [loadFxTask, onDataChanged]);
+  }, [loadFxTask, notifyDataChanged, setNotice]);
 
   useEffect(() => {
     if (market !== "FX" || !fxTask || !["queued", "running"].includes(fxTask.status)) return;
@@ -910,7 +948,7 @@ export function DataSourceManager({
     await loadJobs();
   };
 
-  if (setupView === "welcome") {
+  if (effectiveSetupView === "welcome") {
     return (
       <section className="data-onboarding">
         <div className="onboarding-hero">
@@ -973,7 +1011,7 @@ export function DataSourceManager({
     );
   }
 
-  if (setupView === "quick") {
+  if (effectiveSetupView === "quick") {
     return (
       <section className="data-onboarding setup-detail">
         <button className="setup-back" onClick={() => setSetupView("welcome")}><ArrowLeft size={15} />返回</button>
@@ -1025,7 +1063,7 @@ export function DataSourceManager({
     );
   }
 
-  if (setupView === "advanced") {
+  if (effectiveSetupView === "advanced") {
     const needsTdxQuant = advanced.minimumTimeframe !== "1d";
     const assets = [
       advanced.stocks && "A股股票",
@@ -1245,7 +1283,7 @@ export function DataSourceManager({
           <p>{marketCopy.description}</p>
         </div>
         <div className="data-source-head-actions">
-          <button className="ghost-button" onClick={() => setSetupView("welcome")}><SlidersHorizontal size={15} />初始化设置</button>
+          {market === "CN" && <button className="ghost-button" onClick={() => setSetupView("welcome")}><SlidersHorizontal size={15} />初始化设置</button>}
           <CloudDownload size={24} />
         </div>
       </div>
@@ -1427,8 +1465,8 @@ export function DataSourceManager({
         <div className="market-maintenance-card unavailable">
           <div className="market-maintenance-icon"><Database size={22} /></div>
           <div>
-            <span>{market === "FX" ? "FOREX DATASET" : "METALS DATASET"}</span>
-            <strong>{market === "FX" ? "外汇数据源尚未接入" : "黄金数据源尚未接入"}</strong>
+            <span>METALS DATASET</span>
+            <strong>黄金数据源尚未接入</strong>
             <small>这里已经与 A 股、美股完全分开。接入数据源后会在本市场内完成初始化、更新、覆盖检查和删除。</small>
           </div>
           <div className="market-maintenance-actions"><button disabled>等待接入</button></div>

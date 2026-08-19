@@ -22,6 +22,7 @@ export type ReviewPosition = {
   entryPrice: number;
   entryTimestamp: number;
   entryIntrabar?: boolean;
+  decisionSubmissionId?: string;
   status: "open" | "closed";
   exitPrice?: number;
   exitTimestamp?: number;
@@ -45,6 +46,7 @@ export type HorizonMetric = {
 
 export type DeterministicTradeMetric = {
   positionId: string;
+  decisionSubmissionId?: string;
   side: "long" | "short";
   qty: number;
   entryTimestamp: number;
@@ -173,6 +175,7 @@ function tradeMetric(
 
   return {
     positionId: position.id,
+    decisionSubmissionId: position.decisionSubmissionId,
     side: position.side,
     qty: position.qty,
     entryTimestamp: position.entryTimestamp,
