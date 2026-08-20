@@ -5,12 +5,14 @@ import test from "node:test";
 const root = new URL("../", import.meta.url);
 
 test("ships the K-line training workbench instead of the starter", async () => {
-  const [page, layout, workbench, dataSourceManager, providerSettings, providerSettingsRoute, packageJson, replayChart, sessionsRoute, snapshotsRoute, marketRules, marketJobsRoute, dataJobsRoute, downloadRunner] = await Promise.all([
+  const [page, layout, workbench, dataSourceManager, providerSettings, settingsPanel, reviewHistory, providerSettingsRoute, packageJson, replayChart, sessionsRoute, snapshotsRoute, marketRules, marketJobsRoute, dataJobsRoute, downloadRunner] = await Promise.all([
     readFile(new URL("app/page.tsx", root), "utf8"),
     readFile(new URL("app/layout.tsx", root), "utf8"),
     readFile(new URL("app/components/TrainingWorkbench.tsx", root), "utf8"),
-    readFile(new URL("app/components/DataSourceManager.tsx", root), "utf8"),
-    readFile(new URL("app/components/ProviderSettingsPanel.tsx", root), "utf8"),
+    readFile(new URL("app/features/market-data/components/DataSourceManager.tsx", root), "utf8"),
+    readFile(new URL("app/features/market-data/components/ProviderSettingsPanel.tsx", root), "utf8"),
+    readFile(new URL("app/features/settings/components/SettingsPanel.tsx", root), "utf8"),
+    readFile(new URL("app/features/review/components/SessionHistoryPanel.tsx", root), "utf8"),
     readFile(new URL("app/api/provider-settings/route.ts", root), "utf8"),
     readFile(new URL("package.json", root), "utf8"),
     readFile(new URL("app/components/KLineReplayChart.tsx", root), "utf8"),
@@ -22,7 +24,7 @@ test("ships the K-line training workbench instead of the starter", async () => {
     readFile(new URL("app/api/data-jobs/run/route.ts", root), "utf8"),
   ]);
 
-  assert.match(page, /<TrainingWorkbench\s*\/>/);
+  assert.match(page, /<TrainingWorkbenchShell\s*\/>/);
   assert.match(layout, /K线训练营 2\.0/);
   assert.match(layout, /ResizeObserver loop completed with undelivered notifications/);
   assert.match(layout, /stopImmediatePropagation/);
@@ -67,10 +69,10 @@ test("ships the K-line training workbench instead of the starter", async () => {
   assert.match(workbench, /REASON_TAGS_KEY/);
   assert.match(workbench, /事前决策记录/);
   assert.match(workbench, /查看复盘/);
-  assert.match(workbench, /全部可恢复训练，可滚动浏览/);
-  assert.match(workbench, /reviewSessionFilters\.planStatus/);
-  assert.match(workbench, /已写计划/);
-  assert.match(workbench, /未写计划/);
+  assert.match(reviewHistory, /全部可恢复训练，可滚动浏览/);
+  assert.match(reviewHistory, /filters\.planStatus/);
+  assert.match(reviewHistory, /已写计划/);
+  assert.match(reviewHistory, /未写计划/);
   assert.match(sessionsRoute, /migrate-next-bar-decision-links/);
   assert.match(sessionsRoute, /migrate-same-bar-decision-links/);
   assert.match(sessionsRoute, /plan_bar_same_candle_entry/);
@@ -78,7 +80,7 @@ test("ships the K-line training workbench instead of the starter", async () => {
   assert.match(workbench, /loadSessions\(true\)/);
   assert.match(workbench, /训练内容发生实际修改后会自动保存/);
   assert.match(workbench, /单纯浏览 K 线不会触发保存/);
-  assert.match(workbench, /随机训练规则/);
+  assert.match(settingsPanel, /随机训练规则/);
   assert.match(workbench, /RANDOM_TRAINING_PATTERN_PRESETS_KEY/);
   assert.match(workbench, /patternPresetIds: randomTrainingPatternPresetIds/);
   assert.doesNotMatch(workbench, /className="restore-notice"/);
@@ -156,8 +158,8 @@ test("ships the K-line training workbench instead of the starter", async () => {
   assert.match(workbench, /Keeping intraday snapshots bounded prevents multi-million-bar/);
   assert.match(workbench, /const rewindLocked = Boolean\(trainingTask\?\.randomRun\)/);
   assert.match(workbench, /随机训练为单向揭示，不允许查看上一根/);
-  assert.match(workbench, /收益率模式/);
-  assert.match(workbench, /资金账户模式/);
+  assert.match(settingsPanel, /收益率模式/);
+  assert.match(settingsPanel, /资金账户模式/);
   assert.match(workbench, /insufficient_cash_at_fill/);
   assert.match(workbench, /次日开盘平仓/);
   assert.match(workbench, /order_queued_for_next_session/);

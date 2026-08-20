@@ -113,18 +113,19 @@ function isRetryableError(error: unknown) {
 }
 
 function waitForRetry(delayMs: number, signal?: AbortSignal) {
-  if (signal?.aborted) return Promise.reject(signal.reason ?? new Error("Request cancelled"));
+  const abortSignal = signal;
+  if (abortSignal?.aborted) return Promise.reject(abortSignal.reason ?? new Error("Request cancelled"));
   return new Promise<void>((resolve, reject) => {
     const timer = setTimeout(() => {
-      signal?.removeEventListener("abort", onAbort);
+      abortSignal?.removeEventListener("abort", onAbort);
       resolve();
     }, delayMs);
     const onAbort = () => {
       clearTimeout(timer);
-      signal?.removeEventListener("abort", onAbort);
-      reject(signal.reason ?? new Error("Request cancelled"));
+      abortSignal?.removeEventListener("abort", onAbort);
+      reject(abortSignal?.reason ?? new Error("Request cancelled"));
     };
-    signal?.addEventListener("abort", onAbort, { once: true });
+    abortSignal?.addEventListener("abort", onAbort, { once: true });
   });
 }
 

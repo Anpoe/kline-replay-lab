@@ -1,5 +1,7 @@
 import type { FxCandle } from "./dukascopyCsv";
 
+export type { FxCandle } from "./dukascopyCsv";
+
 export type FxTimeframe = "1m" | "5m" | "1h" | "1d" | "1w";
 
 export type FxSessionOptions = {

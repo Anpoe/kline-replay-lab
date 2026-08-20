@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
 
-const sourceUrl = new URL("../app/components/FxDataControlPanel.tsx", import.meta.url);
+const sourceUrl = new URL("../app/features/market-data/components/FxDataControlPanel.tsx", import.meta.url);
 
 test("FX 数据维护面板暴露宿主可注入的任务契约", async () => {
   const source = await readFile(sourceUrl, "utf8");

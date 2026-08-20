@@ -37,21 +37,21 @@ test("Twelve Data 增量以 M1 入库并由本地聚合 5m", async () => {
 });
 
 test("训练周期筛选和 K 线图支持 1m", async () => {
-  const [workbench, chart, panel] = await Promise.all([
-    readFile(new URL("app/components/TrainingWorkbench.tsx", root), "utf8"),
+  const [chart, panel, settings] = await Promise.all([
     readFile(new URL("app/components/KLineReplayChart.tsx", root), "utf8"),
-    readFile(new URL("app/components/FxDataControlPanel.tsx", root), "utf8"),
+    readFile(new URL("app/features/market-data/components/FxDataControlPanel.tsx", root), "utf8"),
+    readFile(new URL("app/features/settings/settingsContracts.ts", root), "utf8"),
   ]);
 
-  assert.match(workbench, /const timeframes = \["1m", "5m", "1h", "1d", "1w"\]/);
+  assert.match(settings, /export const timeframes: string\[\] = \["1m", "5m", "1h", "1d", "1w"\]/);
   assert.match(chart, /"1m": \{ type: "minute", span: 1 \}/);
   assert.match(panel, /const TARGET_TIMEFRAMES: readonly FxTimeframe\[\] = \["1m", "5m", "1h", "1d", "1w"\]/);
 });
 
 test("FX 界面区分首次排队与分片续跑并自动重试断线", async () => {
   const [panel, manager] = await Promise.all([
-    readFile(new URL("app/components/FxDataControlPanel.tsx", root), "utf8"),
-    readFile(new URL("app/components/DataSourceManager.tsx", root), "utf8"),
+    readFile(new URL("app/features/market-data/components/FxDataControlPanel.tsx", root), "utf8"),
+    readFile(new URL("app/features/market-data/components/DataSourceManager.tsx", root), "utf8"),
   ]);
 
   assert.match(panel, /return "等待下一分片"/);

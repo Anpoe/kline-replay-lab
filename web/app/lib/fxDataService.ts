@@ -4,6 +4,7 @@ import {
   getFxInstrumentDefinition,
   type FxInstrumentDefinition,
   type FxInstrumentId,
+  type FxTimeframe,
 } from "./fxDataContracts.ts";
 import {
   aggregate5mToTimeframe,
@@ -163,7 +164,9 @@ function totalDaysForTask(task: Pick<FxTaskRow, "startDate" | "endDate">) {
 
 function getTargetTimeframes(value: unknown) {
   const values = Array.isArray(value) ? value : DEFAULT_TARGET_TIMEFRAMES;
-  const result = [...new Set(values.filter((item): item is string => typeof item === "string" && VALID_TARGET_TIMEFRAMES.has(item)))];
+  const result = [...new Set(values.filter((item): item is FxTimeframe => (
+    typeof item === "string" && VALID_TARGET_TIMEFRAMES.has(item as FxTimeframe)
+  )))];
   return result.length ? result : [...DEFAULT_TARGET_TIMEFRAMES];
 }
 
@@ -387,7 +390,7 @@ async function ensureInstrument(db: D1Database, instrument: FxInstrumentDefiniti
 async function persistCandles(
   db: D1Database,
   task: FxTaskRow,
-  timeframe: string,
+  timeframe: FxTimeframe,
   source: string,
   candles: readonly FxCandle[],
   onProgress?: (completed: number, total: number) => void | Promise<void>,
@@ -664,10 +667,10 @@ async function runHistoricalTask(db: D1Database, task: FxTaskRow, instrument: Fx
   }
   if (await isTaskStopped(db, task.id)) return getFxTask(db, task.id);
 
-  const targetTimeframes = parseJson<string[]>(task.targetTimeframesJson, [...DEFAULT_TARGET_TIMEFRAMES]);
+  const targetTimeframes = getTargetTimeframes(parseJson<unknown>(task.targetTimeframesJson, [...DEFAULT_TARGET_TIMEFRAMES]));
   const currentChunkLastTimestamp = base.at(-1)?.timestamp ?? Date.parse(`${chunkEnd}T23:59:59Z`);
   const recent = await readRecentBaseCandles(db, task, currentChunkLastTimestamp, currentChunkLastTimestamp);
-  const higher: Array<[string, FxCandle[]]> = [];
+  const higher: Array<[FxTimeframe, FxCandle[]]> = [];
   if (targetTimeframes.includes("1h")) higher.push(["1h", aggregate5mToTimeframe(recent, "1h")]);
   if (targetTimeframes.includes("1d")) higher.push(["1d", aggregate5mToTimeframe(recent, "1d")]);
   if (targetTimeframes.includes("1w")) higher.push(["1w", aggregate5mToTimeframe(recent, "1w")]);
@@ -842,7 +845,7 @@ async function runIncrementalTask(db: D1Database, task: FxTaskRow, instrument: F
           fiveMinuteCandles.at(-1)?.timestamp ?? fiveMinuteCandles[0].timestamp,
         )
       : [];
-    const targetTimeframes = parseJson<string[]>(task.targetTimeframesJson, [...DEFAULT_TARGET_TIMEFRAMES]);
+    const targetTimeframes = getTargetTimeframes(parseJson<unknown>(task.targetTimeframesJson, [...DEFAULT_TARGET_TIMEFRAMES]));
     const higher: Array<["1h" | "1d" | "1w", FxCandle[]]> = [];
     if (targetTimeframes.includes("1h")) higher.push(["1h", aggregate5mToTimeframe(recent, "1h")]);
     if (targetTimeframes.includes("1d")) higher.push(["1d", aggregate5mToTimeframe(recent, "1d")]);

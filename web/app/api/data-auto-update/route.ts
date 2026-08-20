@@ -7,8 +7,8 @@ import {
 import { inspectExistingMarkets } from "../../lib/dataAutoUpdateService";
 
 function publicSettings(settings: Awaited<ReturnType<typeof readDataAutoUpdateSettings>>) {
-  const safe = { ...settings };
-  delete safe.lastRunToken;
+  const { lastRunToken, ...safe } = settings;
+  void lastRunToken;
   return safe;
 }
 

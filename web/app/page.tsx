@@ -1,5 +1,5 @@
-import { TrainingWorkbench } from "./components/TrainingWorkbench";
+import { TrainingWorkbenchShell } from "./features/training/components/TrainingWorkbenchShell";
 
 export default function Home() {
-  return <TrainingWorkbench />;
+  return <TrainingWorkbenchShell />;
 }

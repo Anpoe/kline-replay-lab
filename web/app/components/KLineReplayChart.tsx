@@ -8,7 +8,7 @@ import {
   type MouseEvent as ReactMouseEvent,
   type PointerEvent as ReactPointerEvent,
 } from "react";
-import type { Chart, KLineData, Overlay, OverlayTemplate, Period, Point } from "klinecharts";
+import type { CandleTooltipStyle, Chart, KLineData, Overlay, OverlayCreate, OverlayFigure, OverlayTemplate, Period, Point } from "klinecharts";
 import type { MovingAverageSettings } from "../lib/chartIndicators";
 
 export type DrawingRequest = {
@@ -134,7 +134,21 @@ type FigureStyleBag = {
   text?: { color?: string; size?: number };
 };
 
-const overlayIgnoreEvents = [
+type LegacyCandleTooltipStyle = Partial<CandleTooltipStyle> & {
+  text: { color: string };
+};
+
+type OverlayIgnoreEvent =
+  | "onClick"
+  | "onDoubleClick"
+  | "onRightClick"
+  | "onPressedMoveStart"
+  | "onPressedMoving"
+  | "onPressedMoveEnd"
+  | "onSelected"
+  | "onDeselected";
+
+const overlayIgnoreEvents: OverlayIgnoreEvent[] = [
   "onClick",
   "onDoubleClick",
   "onRightClick",
@@ -143,6 +157,13 @@ const overlayIgnoreEvents = [
   "onPressedMoveEnd",
   "onSelected",
   "onDeselected",
+];
+const overlayHoverIgnoreEvents: OverlayIgnoreEvent[] = [
+  "onDoubleClick",
+  "onRightClick",
+  "onPressedMoveStart",
+  "onPressedMoving",
+  "onPressedMoveEnd",
 ];
 
 function rgbaFromHex(hex: string, alpha: number) {
@@ -238,7 +259,7 @@ function ensureTrainingDrawingOverlays(registerOverlay: (template: OverlayTempla
           ? overlay.extendData as Record<string, unknown>
           : {};
         const labelsVisible = positionData.hovered === true;
-        const figures: Array<Record<string, unknown>> = [
+        const figures: OverlayFigure[] = [
           {
             type: "rect",
             attrs: {
@@ -405,7 +426,7 @@ function ensureTrainingDrawingOverlays(registerOverlay: (template: OverlayTempla
         return chunks;
       }).slice(0, maxLines);
 
-      const figures: Array<Record<string, unknown>> = selected ? [{
+      const figures: OverlayFigure[] = selected ? [{
         type: "rect",
         attrs: { x: left, y: top, width, height },
         styles: {
@@ -516,12 +537,12 @@ function ensureTradeOverlay(registerOverlay: (template: OverlayTemplate<TradeOve
       const pointAlpha = trade.hovered ? "ff" : "78";
       const lineAlpha = trade.hovered ? "9a" : "34";
       const entryText = (isLong ? "买" : "卖") + " " + trade.qty;
-      const figures = [
+      const figures: OverlayFigure[] = [
         {
           type: "circle",
           attrs: { x: entry.x, y: entry.y, r: 4 },
           styles: { style: "stroke_fill", color: "#0c1416", borderColor: entryColor + pointAlpha, borderSize: 2 },
-          ignoreEvent: ["onClick", "onDoubleClick", "onRightClick", "onPressedMoveStart", "onPressedMoving", "onPressedMoveEnd", "onSelected", "onDeselected"],
+          ignoreEvent: overlayIgnoreEvents,
         },
         {
           type: "text",
@@ -543,7 +564,7 @@ function ensureTradeOverlay(registerOverlay: (template: OverlayTemplate<TradeOve
             paddingTop: 3,
             paddingBottom: 3,
           },
-          ignoreEvent: ["onClick", "onDoubleClick", "onRightClick", "onPressedMoveStart", "onPressedMoving", "onPressedMoveEnd", "onSelected", "onDeselected"],
+          ignoreEvent: overlayIgnoreEvents,
         },
       ];
 
@@ -555,14 +576,14 @@ function ensureTradeOverlay(registerOverlay: (template: OverlayTemplate<TradeOve
           type: "line",
           attrs: { coordinates: [entry, exit] },
           styles: { style: "dashed", size: 1, color: "#d6e7e3" + lineAlpha, dashedValue: [5, 5] },
-          ignoreEvent: ["onClick", "onDoubleClick", "onRightClick", "onPressedMoveStart", "onPressedMoving", "onPressedMoveEnd", "onSelected", "onDeselected"],
+          ignoreEvent: overlayIgnoreEvents,
         });
         figures.push(
           {
             type: "circle",
             attrs: { x: exit.x, y: exit.y, r: 4 },
             styles: { style: "stroke_fill", color: "#0c1416", borderColor: "#d9e8e4" + pointAlpha, borderSize: 2 },
-            ignoreEvent: ["onClick", "onDoubleClick", "onRightClick", "onPressedMoveStart", "onPressedMoving", "onPressedMoveEnd", "onSelected", "onDeselected"],
+            ignoreEvent: overlayIgnoreEvents,
           },
           {
             type: "text",
@@ -584,7 +605,7 @@ function ensureTradeOverlay(registerOverlay: (template: OverlayTemplate<TradeOve
               paddingTop: 3,
               paddingBottom: 3,
             },
-            ignoreEvent: ["onClick", "onDoubleClick", "onRightClick", "onPressedMoveStart", "onPressedMoving", "onPressedMoveEnd", "onSelected", "onDeselected"],
+            ignoreEvent: overlayIgnoreEvents,
           },
         );
       }
@@ -629,7 +650,7 @@ function ensureDecisionOverlay(registerOverlay: (template: OverlayTemplate<Decis
             borderColor: "#f1c86a" + pointAlpha,
             borderSize: 2,
           },
-          ignoreEvent: ["onDoubleClick", "onRightClick", "onPressedMoveStart", "onPressedMoving", "onPressedMoveEnd"],
+          ignoreEvent: overlayHoverIgnoreEvents,
         },
         {
           type: "text",
@@ -651,7 +672,7 @@ function ensureDecisionOverlay(registerOverlay: (template: OverlayTemplate<Decis
             paddingTop: 3,
             paddingBottom: 3,
           },
-          ignoreEvent: ["onDoubleClick", "onRightClick", "onPressedMoveStart", "onPressedMoving", "onPressedMoveEnd"],
+          ignoreEvent: overlayHoverIgnoreEvents,
         },
       ];
     },
@@ -1015,7 +1036,7 @@ export function KLineReplayChart({
     visible: drawing.visible,
     zLevel: drawing.zLevel,
     mode: drawing.mode,
-    styles: drawing.styles,
+    styles: drawing.styles as OverlayCreate["styles"],
     extendData: drawing.extendData,
     onDrawEnd: ({ chart: eventChart, overlay }) => {
       syncTrainingTextBoxScale(eventChart, overlay, true);
@@ -1105,7 +1126,7 @@ export function KLineReplayChart({
             tooltip: {
               showRule: hideDate || hidePrice ? "none" : "follow_cross",
               text: { color: "#aab6ba" },
-            },
+            } as LegacyCandleTooltipStyle,
           },
           xAxis: {
             axisLine: { color: "rgba(133, 149, 158, 0.16)" },
@@ -1372,7 +1393,7 @@ export function KLineReplayChart({
       needDefaultPointFigure: drawingRequest.name === "trainingTextBox" ? false : undefined,
       mode: drawingRequest.mode ?? "normal",
       modeSensitivity: 8,
-      styles: drawingRequest.styles,
+      styles: drawingRequest.styles as OverlayCreate["styles"],
       extendData: drawingRequest.extendData,
       onDrawEnd: ({ chart: eventChart, overlay }) => {
         syncTrainingTextBoxScale(eventChart, overlay, true);
