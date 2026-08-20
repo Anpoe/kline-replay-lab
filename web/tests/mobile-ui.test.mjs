@@ -117,25 +117,28 @@ test("discards stale market loads when a newer random round starts", async () =>
 });
 
 test("starts a fresh random round and only samples available instrument-timeframe pairs", async () => {
-  const [workbench, candlesRoute] = await Promise.all([
+  const [workbench, settings, settingsPanel, candlesRoute] = await Promise.all([
     readFile(new URL("app/components/TrainingWorkbench.tsx", root), "utf8"),
+    readFile(new URL("app/features/settings/settingsContracts.ts", root), "utf8"),
+    readFile(new URL("app/features/settings/components/SettingsPanel.tsx", root), "utf8"),
     readFile(new URL("app/api/candles/route.ts", root), "utf8"),
   ]);
+  const settingsSource = `${settings}\n${settingsPanel}`;
 
   assert.doesNotMatch(workbench, /const findLastTraining/);
   assert.match(workbench, /startupRandomStartedRef/);
   assert.match(workbench, /createPairs\(instrumentCandidates, requestedTimeframes\)/);
   assert.match(workbench, /isRandomInstrumentAllowed\(item, config\.includeIndices\)/);
-  assert.match(workbench, /randomIncludeIndices: false/);
-  assert.match(workbench, /randomUsLiquidityFilter: true/);
-  assert.match(workbench, /randomUsMinAverageDailyDollarVolume: 1000000/);
-  assert.match(workbench, /过滤低流动性美股/);
-  assert.match(workbench, /settingsRandomIncludesCn &&/);
-  assert.match(workbench, /settingsRandomIncludesUs &&/);
+  assert.match(settingsSource, /randomIncludeIndices: false/);
+  assert.match(settingsSource, /randomUsLiquidityFilter: true/);
+  assert.match(settingsSource, /randomUsMinAverageDailyDollarVolume: 1000000/);
+  assert.match(settingsSource, /过滤低流动性美股/);
+  assert.match(settingsSource, /settingsRandomIncludesCn &&/);
+  assert.match(settingsSource, /settingsRandomIncludesUs &&/);
   assert.match(workbench, /completedTask\.randomConfig \?\? currentRandomConfig\(\)/);
   assert.match(workbench, /patternPresetId: "all"/);
   assert.match(workbench, /形态筛选/);
-  assert.match(workbench, /纳入指数（只看盘）/);
+  assert.match(settingsSource, /纳入指数（只看盘）/);
   assert.match(workbench, /指数仅供看盘训练，不能直接模拟买卖/);
   assert.match(workbench, /currentAssetType === "index" \? "指数不可交易"/);
   assert.match(workbench, /item\.timeframes[\s\S]*candidateTimeframe/);
@@ -145,18 +148,21 @@ test("starts a fresh random round and only samples available instrument-timefram
 });
 
 test("wires chart protection picking, trailing stops and risk sizing into the workbench", async () => {
-  const [workbench, chart] = await Promise.all([
+  const [workbench, settings, settingsPanel, chart] = await Promise.all([
     readFile(new URL("app/components/TrainingWorkbench.tsx", root), "utf8"),
+    readFile(new URL("app/features/settings/settingsContracts.ts", root), "utf8"),
+    readFile(new URL("app/features/settings/components/SettingsPanel.tsx", root), "utf8"),
     readFile(new URL("app/components/KLineReplayChart.tsx", root), "utf8"),
   ]);
+  const settingsSource = `${settings}\n${settingsPanel}`;
 
   assert.match(workbench, /positionSizeMode === "risk-percent"/);
-  assert.match(workbench, /按止损风险（余额%）/);
-  assert.match(workbench, /orderType: OrderType/);
+  assert.match(settingsPanel, /按止损风险（余额%）/);
+  assert.match(settingsSource, /orderType: OrderType/);
   assert.match(workbench, /orderStopLoss: orderStopLoss \|\| undefined/);
   assert.match(workbench, /rememberOrderEntryPreference/);
   assert.match(workbench, /restoreRequest\.state\.orderStopLoss/);
-  assert.match(workbench, /默认开仓委托/);
+  assert.match(settingsPanel, /默认开仓委托/);
   assert.match(workbench, /const riskBalance = tradingMode === "capital"/);
   assert.match(workbench, /equity: riskBalance/);
   assert.match(workbench, /拖动止损线后风险/);

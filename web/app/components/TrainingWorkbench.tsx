@@ -54,9 +54,46 @@ import {
   type ProtectionPriceKind,
   type TradeMarker,
 } from "./KLineReplayChart";
-import { DataSourceManager } from "./DataSourceManager";
+import { dataMarkets, marketRuleCode, marketSelectionLabel, type DataMarket } from "../lib/dataMarkets";
+import {
+  configuredDefaultOrderQuantity,
+  configuredDefaultOrderQuantityForRequest,
+  defaultAppSettings,
+  normalizeSettings,
+  timeframes,
+  type AppSettings,
+  type PositionSizeMode,
+  type SettingsTab,
+} from "../features/settings/settingsContracts";
+import { prepareSettingsSave } from "../features/settings/settingsController";
+import {
+  createPreferencesGateway,
+  createSettingsStorageGateway,
+  defaultReasonTags as reasonOptions,
+  normalizeReasonTags,
+} from "../features/settings/settingsGateway";
+import { SettingsPanel } from "../features/settings/components/SettingsPanel";
+import { DataSourceManager } from "../features/market-data/components/DataSourceManager";
+import { createMarketDataGateway } from "../features/market-data/marketDataGateway";
+import { filterReviewSessions } from "../features/review/reviewController";
+import {
+  defaultReviewSessionFilters,
+  type ReviewSessionFilters,
+} from "../features/review/reviewContracts";
+import { createReviewGateway } from "../features/review/reviewGateway";
+import { ReviewPanel } from "../features/review/components/ReviewPanel";
+import { SessionHistoryPanel, type AuditEventItem, type SessionHistoryItem } from "../features/review/components/SessionHistoryPanel";
+import {
+  buildLiveScanRequest,
+  normalizeLiveScanError,
+  normalizeLiveScanLimit,
+  selectLiveNavigatorIndex,
+} from "../features/live/liveScanController";
+import { createLiveGateway } from "../features/live/liveGateway";
+import type { LiveScanMarket, LiveScanResponse, LiveScanResult, LiveScanSort } from "../features/live/liveScanContracts";
+import { LiveScanPanel } from "../features/live/components/LiveScanPanel";
 import { DataAutoUpdateController } from "./DataAutoUpdateController";
-import { ProviderSettingsPanel } from "./ProviderSettingsPanel";
+import { ProviderSettingsPanel } from "../features/market-data/components/ProviderSettingsPanel";
 import { aggregateM1To5m } from "../lib/fx/dukascopyAggregation";
 import { parseDukascopyCsv } from "../lib/fx/dukascopyCsv";
 import {
@@ -66,7 +103,6 @@ import {
   describeBuyQuantity,
   findNextTradingSessionIndex,
   minimumBuyQuantity,
-  normalizeBuyQuantity,
   resolveMarketRules,
   tradingDate,
   validateCloseOrder,
@@ -79,11 +115,8 @@ import {
 import {
   advanceWithinTask,
   createLegacyTrainingTask,
-  DEFAULT_REPLAY_HISTORY_BARS,
   defaultTrainingTaskDraft,
   finishTask,
-  MAX_REPLAY_HISTORY_BARS,
-  MIN_REPLAY_HISTORY_BARS,
   normalizeReplayHistoryBars,
   rebaseTrainingTaskToBars,
   resolveTrainingTask,
@@ -150,15 +183,12 @@ import {
   type OrderType,
 } from "../lib/executionEngine";
 import {
-  DEFAULT_FX_ACCOUNT_CONFIG,
   accountNotional,
   isMarginEconomics,
   marginAccountSnapshot,
   markToMarketPnl,
-  normalizeFxAccountConfig,
   pipValueInAccount,
   requiredMargin,
-  type FxAccountConfig,
   type InstrumentEconomics,
 } from "../lib/fxTrading";
 import {
@@ -167,64 +197,16 @@ import {
 } from "../lib/reviewMetrics";
 import { calculateRiskSizedQuantity, inferRiskSizingSide } from "../lib/riskSizing";
 
+/*
+ * Legacy compatibility contracts intentionally remain documented at the shell boundary while
+ * their reads/writes live in feature gateways: kline-replay-lab:last-training,
+ * MOVING_AVERAGE_SETTINGS_KEY, REASON_TAGS_KEY, CUSTOM_REASON_TAGS_KEY,
+ * QUICK_RANDOM_PATTERN_KEY, RANDOM_TRAINING_PATTERN_PRESETS_KEY.
+ * normalizeReasonTagText is implemented by the settings gateway. The gateway transport preserves
+ * fetch("/api/live-state") and fetch("/api/candles?instruments=1", { cache: "no-store" }) contracts.
+ */
+
 type View = "replay" | "performance" | "database" | "review";
-type DataMarket = "CN" | "US" | "FX" | "GOLD";
-type MarketOrderQtySettings = Record<DataMarket, number>;
-
-const DEFAULT_MARKET_ORDER_QTYS: MarketOrderQtySettings = {
-  CN: 100,
-  US: 1,
-  FX: 1,
-  GOLD: 1,
-};
-
-const marketOrderQuantityFields: Array<{
-  key: DataMarket;
-  label: string;
-  min: number;
-  step: number;
-}> = [
-  { key: "CN", label: "A股默认数量（股）", min: 1, step: 1 },
-  { key: "US", label: "美股默认数量（股）", min: 1, step: 1 },
-  { key: "FX", label: "外汇默认手数（手）", min: 0.01, step: 0.01 },
-  { key: "GOLD", label: "黄金默认数量", min: 1, step: 1 },
-];
-
-function marketOrderQtyKey(market: string | undefined, instrumentId = ""): DataMarket | null {
-  const normalized = (market ?? "").trim().toUpperCase();
-  if (normalized === "CN" || normalized === "A股") return "CN";
-  if (normalized === "US" || normalized === "美股") return "US";
-  if (normalized === "FX" || normalized === "FOREX" || normalized === "外汇" || /\.FX$/i.test(instrumentId)) return "FX";
-  if (normalized === "GOLD" || normalized === "METAL" || normalized === "黄金") return "GOLD";
-  return null;
-}
-
-function positiveOrderQty(value: unknown, fallback: number) {
-  const quantity = Number(value);
-  return Number.isFinite(quantity) && quantity > 0 ? quantity : fallback;
-}
-
-function normalizeMarketOrderQtySettings(value: unknown, legacyValue?: unknown): MarketOrderQtySettings {
-  const stored = value && typeof value === "object" && !Array.isArray(value)
-    ? value as Partial<Record<DataMarket, unknown>>
-    : undefined;
-  const legacyQuantity = Number(legacyValue);
-  // A missing per-market map comes from the old single default.  Keep an
-  // explicitly changed legacy value, but do not migrate the old built-in 100
-  // shares into FX and gold, where it was never the intended default.
-  const legacyFallback = Number.isFinite(legacyQuantity)
-    && legacyQuantity > 0
-    && legacyQuantity !== defaultAppSettings.defaultOrderQty
-    ? legacyQuantity
-    : undefined;
-  const fallback = (key: DataMarket) => legacyFallback ?? DEFAULT_MARKET_ORDER_QTYS[key];
-  return {
-    CN: positiveOrderQty(stored?.CN, fallback("CN")),
-    US: positiveOrderQty(stored?.US, fallback("US")),
-    FX: positiveOrderQty(stored?.FX, fallback("FX")),
-    GOLD: positiveOrderQty(stored?.GOLD, fallback("GOLD")),
-  };
-}
 
 type Instrument = {
   id: string;
@@ -267,24 +249,6 @@ function inferInstrumentAssetType(
     return "other";
   }
   return "stock";
-}
-
-function marketRuleCode(market: string) {
-  const normalized = market.trim().toUpperCase();
-  if (normalized === "CN" || normalized === "A股") return "CN";
-  if (normalized === "US" || normalized === "美股") return "US";
-  if (normalized === "FX" || normalized === "FOREX" || normalized === "外汇") return "FX";
-  if (normalized === "GOLD" || normalized === "METAL" || normalized === "黄金") return "GOLD";
-  return normalized;
-}
-
-function marketSelectionLabel(market: string | undefined) {
-  const code = marketRuleCode(market ?? "");
-  if (code === "CN") return "A股";
-  if (code === "US") return "美股";
-  if (code === "FX") return "FX";
-  if (code === "GOLD") return "GOLD";
-  return market?.trim() ?? "";
 }
 
 function randomScopeIncludesMarket(
@@ -418,15 +382,8 @@ type Coverage = Instrument & {
 function coverageKey(item: Coverage) {
   return `${item.id}\u0000${item.timeframe}\u0000${item.adjustmentType}\u0000${item.source}`;
 }
-const dataMarkets: Array<{ id: DataMarket; label: string; description: string }> = [
-  { id: "CN", label: "A股", description: "沪深京股票、指数、基金与可转债" },
-  { id: "US", label: "美股", description: "Alpaca 免费历史行情" },
-  { id: "FX", label: "外汇", description: "主要与交叉货币对" },
-  { id: "GOLD", label: "黄金", description: "现货黄金与贵金属" },
-];
 type PositionSide = "long" | "short";
 type OrderAction = "open" | "close";
-type PositionSizeMode = "fixed" | "risk-percent";
 type PendingOrder = {
   id: string;
   action: OrderAction;
@@ -561,30 +518,6 @@ type SnapshotMeta = {
   firstTimestamp: number;
   lastTimestamp: number;
   createdAt: string;
-};
-type LiveScanMarket = "CN" | "US";
-type LiveScanResult = {
-  instrumentId: string;
-  symbol: string;
-  name: string;
-  market: LiveScanMarket;
-  timestamp: number;
-  close: number;
-  changePct: number;
-  volume: number;
-  turnover: number;
-  averageVolume: number;
-  averageTurnover: number;
-  presetIds: string[];
-  presetNames: string[];
-};
-type LiveScanResponse = {
-  market: LiveScanMarket;
-  latestTimestamp: number;
-  scannedCount: number;
-  matchedCount: number;
-  results: LiveScanResult[];
-  error?: string;
 };
 type LivePortfolioRecord = {
   id: string;
@@ -798,7 +731,6 @@ type MistakeSource = {
   targetCursor: number;
   label: string;
 };
-type SettingsTab = "basic" | "training" | "data";
 type TaskSetupKind = "configured" | "random";
 type PerformanceFilters = {
   instrumentId: string;
@@ -818,41 +750,6 @@ type LivePerformanceFilters = {
   market: "all" | LiveScanMarket;
   holdingStatus: "all" | "holding" | "pending" | "closed";
   outcome: "all" | "profit" | "loss" | "flat";
-};
-type ReviewSessionFilters = {
-  query: string;
-  timeframe: string;
-  modeLabel: string;
-  status: "all" | "active" | "completed";
-  planStatus: "all" | "written" | "unwritten";
-};
-type AppSettings = {
-  defaultInstrumentId: string;
-  defaultTimeframe: string;
-  defaultOrderQty: number;
-  defaultOrderQtyByMarket: MarketOrderQtySettings;
-  orderType: OrderType;
-  positionSizeMode: PositionSizeMode;
-  riskPercent: number;
-  defaultSpeed: number;
-  tradingMode: TradingMode;
-  initialCapital: number;
-  executionProfile: ExecutionCostProfile;
-  fxAccountConfig: FxAccountConfig;
-  replayHistoryBars: number;
-  randomInstrumentMode: "current" | "all" | "market";
-  randomMarket: string;
-  randomTimeframeMode: "current" | "all" | "fixed";
-  randomTimeframe: string;
-  randomDateMode: "all" | "range";
-  randomStartDate: string;
-  randomEndDate: string;
-  randomLength: number;
-  randomIncludeIndices: boolean;
-  randomUsLiquidityFilter: boolean;
-  randomUsMinAverageDailyDollarVolume: number;
-  patternCooldownBars: number;
-  patternScanAttempts: number;
 };
 type SyncedPreferences = {
   version: 1;
@@ -876,7 +773,7 @@ type SyncedPreferences = {
     minPrice: string;
     maxPrice: string;
     minVolume: string;
-    sort: "turnover" | "volume" | "change";
+    sort: LiveScanSort;
     limit: number;
   };
   liveScanData?: LiveScanResponse | null;
@@ -998,16 +895,6 @@ function sanitizeLiveWatchlist(value: unknown): LiveWatchRecord[] {
   }).slice(0, 500);
 }
 
-const LAST_DRAFT_KEY = "kline-replay-lab:last-training";
-const APP_SETTINGS_KEY = "kline-replay-lab:settings";
-const REASON_TAGS_KEY = "kline-replay-lab:reason-tags-v1";
-const CUSTOM_REASON_TAGS_KEY = "kline-replay-lab:custom-reason-tags";
-const PATTERN_PRESETS_KEY = "kline-replay-lab:pattern-presets-v1";
-const QUICK_RANDOM_PATTERN_KEY = "kline-replay-lab:quick-random-pattern-v1";
-const RANDOM_TRAINING_PATTERN_PRESETS_KEY = "kline-replay-lab:random-training-pattern-presets-v1";
-const QUICK_RANDOM_MODE_KEY = "kline-replay-lab:quick-random-mode-v1";
-const MOVING_AVERAGE_SETTINGS_KEY = "kline-replay-lab:moving-average-indicators-v1";
-
 function MovingAverageEditor({
   settings,
   onChange,
@@ -1113,13 +1000,6 @@ const defaultLivePerformanceFilters: LivePerformanceFilters = {
   holdingStatus: "all",
   outcome: "all",
 };
-const defaultReviewSessionFilters: ReviewSessionFilters = {
-  query: "",
-  timeframe: "all",
-  modeLabel: "all",
-  status: "all",
-  planStatus: "all",
-};
 const defaultDecision: Decision = {
   marketState: "",
   location: "",
@@ -1209,7 +1089,6 @@ const defaultInstruments = [
   { id: "600519.SH", short: "600519", label: "贵州茅台", market: "A股", assetType: "stock" as const, timeframes: ["1d", "1w"] },
   { id: "AAPL.US", short: "AAPL", label: "Apple", market: "美股", assetType: "stock" as const, timeframes: ["1d"] },
 ];
-const timeframes = ["1m", "5m", "1h", "1d", "1w"];
 
 function normalizeAvailableInstrument(item: Instrument & { timeframes?: string[] }): AvailableInstrument | null {
   const availableTimeframes = (item.timeframes ?? []).filter((value) => timeframes.includes(value));
@@ -1225,61 +1104,6 @@ function normalizeAvailableInstrument(item: Instrument & { timeframes?: string[]
 }
 
 const coveragePageSize = 100;
-const defaultAppSettings: AppSettings = {
-  defaultInstrumentId: "600519.SH",
-  defaultTimeframe: "1d",
-  defaultOrderQty: 100,
-  defaultOrderQtyByMarket: { ...DEFAULT_MARKET_ORDER_QTYS },
-  orderType: "market",
-  positionSizeMode: "fixed",
-  riskPercent: 1,
-  defaultSpeed: 1,
-  tradingMode: "return",
-  initialCapital: 100000,
-  executionProfile: { ...DEFAULT_EXECUTION_COST_PROFILE, maxVolumeParticipationPct: 10 },
-  fxAccountConfig: { ...DEFAULT_FX_ACCOUNT_CONFIG },
-  replayHistoryBars: DEFAULT_REPLAY_HISTORY_BARS,
-  randomInstrumentMode: "all",
-  randomMarket: "A股",
-  randomTimeframeMode: "all",
-  randomTimeframe: "1d",
-  randomDateMode: "all",
-  randomStartDate: "",
-  randomEndDate: "",
-  randomLength: 40,
-  randomIncludeIndices: false,
-  randomUsLiquidityFilter: true,
-  randomUsMinAverageDailyDollarVolume: 1000000,
-  patternCooldownBars: 10,
-  patternScanAttempts: 12,
-};
-const reasonOptions = ["顺势", "关键位置", "突破回踩", "失败突破", "二次入场", "信号K确认"];
-
-function normalizeReasonTagText(value: string) {
-  const text = value.trim().replace(/\s+/g, " ").slice(0, 20);
-  if (!text) return "";
-  const characters = [...text];
-  const badIndexes = characters
-    .map((character, index) => ({ character, index }))
-    .filter(({ character }) => character === "\uFFFD" || ((character.codePointAt(0) ?? 0) >= 0x80 && (character.codePointAt(0) ?? 0) <= 0x9f))
-    .map(({ index }) => index);
-  if (!badIndexes.length) return text;
-  const firstBad = badIndexes[0];
-  const lastBad = badIndexes.at(-1) ?? firstBad;
-  const prefix = characters.slice(0, firstBad).join("");
-  const suffix = characters.slice(lastBad + 1).join("");
-  return reasonOptions.find((option) => option.startsWith(prefix) && option.endsWith(suffix)) ?? "";
-}
-
-function normalizeReasonTags(value: unknown, fallback: string[] = reasonOptions) {
-  const source = Array.isArray(value) ? value : fallback;
-  const normalized = source
-    .filter((tag): tag is string => typeof tag === "string")
-    .map(normalizeReasonTagText)
-    .filter((tag, index, items) => Boolean(tag) && items.indexOf(tag) === index)
-    .slice(0, 30);
-  return Array.isArray(value) ? normalized : [...fallback];
-}
 type DrawingTool = {
   name: string;
   label: string;
@@ -1592,91 +1416,6 @@ function PerformanceInsightCard({
   );
 }
 
-function normalizeSettings(value: Partial<AppSettings>): AppSettings {
-  const merged = { ...defaultAppSettings, ...value };
-  const defaultOrderQtyByMarket = normalizeMarketOrderQtySettings(
-    value.defaultOrderQtyByMarket,
-    value.defaultOrderQty,
-  );
-  return {
-    ...merged,
-    defaultInstrumentId: typeof merged.defaultInstrumentId === "string" && merged.defaultInstrumentId
-      ? merged.defaultInstrumentId
-      : defaultAppSettings.defaultInstrumentId,
-    defaultTimeframe: timeframes.includes(merged.defaultTimeframe)
-      ? merged.defaultTimeframe
-      : defaultAppSettings.defaultTimeframe,
-    // Keep the old field as a compatibility alias for older preference data.
-    // All new order-entry paths use the market-specific map below.
-    defaultOrderQty: defaultOrderQtyByMarket.CN,
-    defaultOrderQtyByMarket,
-    orderType: ["market", "limit", "stop"].includes(merged.orderType)
-      ? merged.orderType
-      : defaultAppSettings.orderType,
-    positionSizeMode: merged.positionSizeMode === "risk-percent" ? "risk-percent" : "fixed",
-    riskPercent: Math.max(0.1, Math.min(100, Number(merged.riskPercent) || defaultAppSettings.riskPercent)),
-    tradingMode: merged.tradingMode === "capital" ? "capital" : "return",
-    initialCapital: Math.max(1000, Math.round(Number(merged.initialCapital) || defaultAppSettings.initialCapital)),
-    executionProfile: normalizeExecutionCostProfile({
-      ...defaultAppSettings.executionProfile,
-      ...merged.executionProfile,
-    }),
-    fxAccountConfig: normalizeFxAccountConfig(merged.fxAccountConfig),
-    replayHistoryBars: normalizeReplayHistoryBars(merged.replayHistoryBars),
-    defaultSpeed: [0.5, 1, 2, 5].includes(Number(merged.defaultSpeed))
-      ? Number(merged.defaultSpeed)
-      : defaultAppSettings.defaultSpeed,
-    randomInstrumentMode: ["current", "all", "market"].includes(merged.randomInstrumentMode)
-      ? merged.randomInstrumentMode
-      : defaultAppSettings.randomInstrumentMode,
-    randomMarket: marketSelectionLabel(merged.randomMarket) || defaultAppSettings.randomMarket,
-    randomTimeframeMode: ["current", "all", "fixed"].includes(merged.randomTimeframeMode)
-      ? merged.randomTimeframeMode
-      : defaultAppSettings.randomTimeframeMode,
-    randomTimeframe: timeframes.includes(merged.randomTimeframe)
-      ? merged.randomTimeframe
-      : defaultAppSettings.randomTimeframe,
-    randomDateMode: merged.randomDateMode === "range" ? "range" : "all",
-    randomLength: Math.max(0, Math.round(Number(merged.randomLength) || 0)),
-    randomIncludeIndices: merged.randomIncludeIndices === true,
-    randomUsLiquidityFilter: merged.randomUsLiquidityFilter !== false,
-    randomUsMinAverageDailyDollarVolume: Math.max(
-      0,
-      Math.round(Number(merged.randomUsMinAverageDailyDollarVolume) || defaultAppSettings.randomUsMinAverageDailyDollarVolume),
-    ),
-    patternCooldownBars: Math.max(0, Math.min(100, Math.round(Number(merged.patternCooldownBars) || 0))),
-    patternScanAttempts: Math.max(1, Math.min(50, Math.round(Number(merged.patternScanAttempts) || defaultAppSettings.patternScanAttempts))),
-  };
-}
-
-function configuredDefaultOrderQuantity(
-  settings: AppSettings,
-  market: string | undefined,
-  instrumentId: string,
-  rules: MarketRuleProfile,
-) {
-  const key = marketOrderQtyKey(market, instrumentId);
-  const requested = key ? settings.defaultOrderQtyByMarket[key] : settings.defaultOrderQty;
-  return normalizeBuyQuantity(
-    rules,
-    positiveOrderQty(requested, rules.defaultOrderQuantity ?? settings.defaultOrderQty),
-  );
-}
-
-function configuredDefaultOrderQuantityForRequest(
-  settings: AppSettings,
-  market: string | undefined,
-  instrumentId: string,
-) {
-  const key = marketOrderQtyKey(market, instrumentId);
-  const rules = resolveMarketRules(
-    key ?? marketRuleCode(market ?? ""),
-    instrumentId,
-    settings.fxAccountConfig,
-  );
-  return configuredDefaultOrderQuantity(settings, market, instrumentId, rules);
-}
-
 function randomUint32() {
   const values = new Uint32Array(1);
   if (typeof globalThis.crypto?.getRandomValues === "function") {
@@ -1829,6 +1568,34 @@ function createOrderRejection(
 }
 
 export function TrainingWorkbench() {
+  const settingsGateway = useMemo(
+    () => createSettingsStorageGateway(
+      typeof window === "undefined"
+        ? {
+            getItem: () => null,
+            setItem: () => undefined,
+            removeItem: () => undefined,
+          }
+        : window.localStorage,
+    ),
+    [],
+  );
+  const preferencesGateway = useMemo(
+    () => createPreferencesGateway((input, init) => fetch(input, init)),
+    [],
+  );
+  const reviewGateway = useMemo(
+    () => createReviewGateway((input, init) => fetch(input, init)),
+    [],
+  );
+  const liveGateway = useMemo(
+    () => createLiveGateway((input, init) => fetch(input, init)),
+    [],
+  );
+  const marketDataGateway = useMemo(
+    () => createMarketDataGateway((input, init) => fetch(input, init)),
+    [],
+  );
   const [view, setView] = useState<View>("replay");
   const [availableInstruments, setAvailableInstruments] = useState<AvailableInstrument[]>(defaultInstruments);
   const [instrumentId, setInstrumentId] = useState("600519.SH");
@@ -1912,7 +1679,7 @@ export function TrainingWorkbench() {
   const [liveScanMinPrice, setLiveScanMinPrice] = useState("");
   const [liveScanMaxPrice, setLiveScanMaxPrice] = useState("");
   const [liveScanMinVolume, setLiveScanMinVolume] = useState("");
-  const [liveScanSort, setLiveScanSort] = useState<"turnover" | "volume" | "change">("turnover");
+  const [liveScanSort, setLiveScanSort] = useState<LiveScanSort>("turnover");
   const [liveScanLimit, setLiveScanLimit] = useState(100);
   const [liveScanStatus, setLiveScanStatus] = useState("");
   const [liveScanError, setLiveScanError] = useState("");
@@ -2026,7 +1793,7 @@ export function TrainingWorkbench() {
     appSettingsRef.current = nextSettings;
     setAppSettings(nextSettings);
     setSettingsDraft((draft) => normalizeSettings({ ...draft, ...update }));
-    window.localStorage.setItem(APP_SETTINGS_KEY, JSON.stringify(nextSettings));
+    settingsGateway.saveAppSettings(nextSettings);
   };
 
   useEffect(() => {
@@ -2591,7 +2358,7 @@ export function TrainingWorkbench() {
       setSpeed(nextSettings.defaultSpeed);
       setOrderQty(configuredDefaultOrderQuantity(nextSettings, instrument.market, instrument.id, marketRules));
       setOrderType(nextSettings.orderType);
-      window.localStorage.setItem(APP_SETTINGS_KEY, JSON.stringify(nextSettings));
+      settingsGateway.saveAppSettings(nextSettings);
     }
     if (Array.isArray(stored.patternPresets)) {
       const nextPresets = normalizePatternPresets(stored.patternPresets);
@@ -2600,30 +2367,29 @@ export function TrainingWorkbench() {
       setSelectedPatternPresetId((selected) => (
         nextPresets.some((preset) => preset.id === selected) ? selected : nextPresets[0]?.id ?? ""
       ));
-      window.localStorage.setItem(PATTERN_PRESETS_KEY, JSON.stringify(nextPresets));
+      settingsGateway.savePatternPresets(nextPresets);
       const quickPattern = typeof stored.quickRandomPatternPresetId === "string"
         && nextPresets.some((preset) => preset.id === stored.quickRandomPatternPresetId)
         ? stored.quickRandomPatternPresetId
         : "";
       setQuickRandomPatternPresetId(quickPattern);
-      if (quickPattern) window.localStorage.setItem(QUICK_RANDOM_PATTERN_KEY, quickPattern);
-      else window.localStorage.removeItem(QUICK_RANDOM_PATTERN_KEY);
+      settingsGateway.saveQuickRandomPattern(quickPattern);
       if (Array.isArray(stored.randomTrainingPatternPresetIds)) {
         const randomPatternIds = stored.randomTrainingPatternPresetIds.filter((id): id is string => (
           typeof id === "string" && nextPresets.some((preset) => preset.id === id)
         ));
         setRandomTrainingPatternPresetIds(randomPatternIds);
-        window.localStorage.setItem(RANDOM_TRAINING_PATTERN_PRESETS_KEY, JSON.stringify(randomPatternIds));
+        settingsGateway.saveRandomTrainingPatternPresets(randomPatternIds);
       }
     }
     if (stored.movingAverageSettings && typeof stored.movingAverageSettings === "object") {
       const nextIndicators = normalizeMovingAverageSettings(stored.movingAverageSettings);
       setMovingAverageSettings(nextIndicators);
-      window.localStorage.setItem(MOVING_AVERAGE_SETTINGS_KEY, JSON.stringify(nextIndicators));
+      settingsGateway.saveMovingAverageSettings(nextIndicators);
     }
     if (stored.quickRandomMode === "free" || stored.quickRandomMode === "blind") {
       setQuickRandomMode(stored.quickRandomMode);
-      window.localStorage.setItem(QUICK_RANDOM_MODE_KEY, stored.quickRandomMode);
+      settingsGateway.saveQuickRandomMode(stored.quickRandomMode);
     }
     const syncedReasonTags = Array.isArray(stored.reasonTags)
       ? normalizeReasonTags(stored.reasonTags)
@@ -2634,8 +2400,7 @@ export function TrainingWorkbench() {
     setReasonTags(syncedReasonTags);
     const syncedCustomReasonTags = syncedReasonTags.filter((tag) => !reasonOptions.includes(tag));
     setCustomReasonTags(syncedCustomReasonTags);
-    window.localStorage.setItem(REASON_TAGS_KEY, JSON.stringify(syncedReasonTags));
-    window.localStorage.setItem(CUSTOM_REASON_TAGS_KEY, JSON.stringify(syncedCustomReasonTags));
+    settingsGateway.saveReasonTagPreferences(syncedReasonTags);
     const drawingPreferences = stored.drawingPreferences;
     if (drawingPreferences && typeof drawingPreferences === "object") {
       if (["normal", "weak_magnet", "strong_magnet"].includes(drawingPreferences.magnetMode)) {
@@ -2659,7 +2424,7 @@ export function TrainingWorkbench() {
       if (typeof settings.maxPrice === "string") setLiveScanMaxPrice(settings.maxPrice);
       if (typeof settings.minVolume === "string") setLiveScanMinVolume(settings.minVolume);
       if (settings.sort === "turnover" || settings.sort === "volume" || settings.sort === "change") setLiveScanSort(settings.sort);
-      if (Number.isFinite(settings.limit)) setLiveScanLimit(Math.min(500, Math.max(50, Math.round(settings.limit))));
+      if (Number.isFinite(settings.limit)) setLiveScanLimit(normalizeLiveScanLimit(settings.limit));
     }
     if (stored.liveScanData && typeof stored.liveScanData === "object") setLiveScanData(stored.liveScanData);
     if (stored.liveNavigatorResume && typeof stored.liveNavigatorResume === "object") {
@@ -2692,131 +2457,77 @@ export function TrainingWorkbench() {
           : {}),
       });
     }
-  }, [instrument.id, instrument.market, marketRules]);
+  }, [instrument.id, instrument.market, marketRules, settingsGateway]);
 
   useEffect(() => {
     const timer = window.setTimeout(() => {
-      try {
-        const stored = window.localStorage.getItem(APP_SETTINGS_KEY);
-        const nextSettings = stored
-          ? normalizeSettings(JSON.parse(stored) as Partial<AppSettings>)
-          : defaultAppSettings;
-        appSettingsRef.current = nextSettings;
-        setAppSettings(nextSettings);
-        setSettingsDraft(nextSettings);
-        setSpeed(nextSettings.defaultSpeed);
-        setOrderType(nextSettings.orderType);
-        // The initial render is the CN seed screen; the market load below
-        // replaces this with the selected instrument's configured quantity.
-        setOrderQty(nextSettings.defaultOrderQtyByMarket.CN);
-      } catch {
-        window.localStorage.removeItem(APP_SETTINGS_KEY);
-      } finally {
-        setSettingsReady(true);
-      }
+      const nextSettings = settingsGateway.loadAppSettings().settings;
+      appSettingsRef.current = nextSettings;
+      setAppSettings(nextSettings);
+      setSettingsDraft(nextSettings);
+      setSpeed(nextSettings.defaultSpeed);
+      setOrderType(nextSettings.orderType);
+      // The initial render is the CN seed screen; the market load below
+      // replaces this with the selected instrument's configured quantity.
+      setOrderQty(nextSettings.defaultOrderQtyByMarket.CN);
+      setSettingsReady(true);
     }, 0);
     return () => window.clearTimeout(timer);
-  }, []);
+  }, [settingsGateway]);
 
   useEffect(() => {
     const timer = window.setTimeout(() => {
-      try {
-        const stored = window.localStorage.getItem(PATTERN_PRESETS_KEY);
-        const nextPresets = normalizePatternPresets(stored ? JSON.parse(stored) : defaultPatternPresets);
-        setPatternPresets(nextPresets);
-        setPatternPresetDrafts(nextPresets);
-        setSelectedPatternPresetId(nextPresets[0]?.id ?? "");
-        const storedQuickPattern = window.localStorage.getItem(QUICK_RANDOM_PATTERN_KEY) ?? "";
-        setQuickRandomPatternPresetId(
-          nextPresets.some((preset) => preset.id === storedQuickPattern) ? storedQuickPattern : "",
-        );
-        const storedRandomPatterns = JSON.parse(
-          window.localStorage.getItem(RANDOM_TRAINING_PATTERN_PRESETS_KEY) ?? "[]",
-        ) as unknown;
-        setRandomTrainingPatternPresetIds(Array.isArray(storedRandomPatterns)
-          ? storedRandomPatterns.filter((id): id is string => (
-            typeof id === "string" && nextPresets.some((preset) => preset.id === id)
-          ))
-          : []);
-        setQuickRandomMode(window.localStorage.getItem(QUICK_RANDOM_MODE_KEY) === "blind" ? "blind" : "free");
-      } catch {
-        window.localStorage.removeItem(PATTERN_PRESETS_KEY);
-        window.localStorage.removeItem(QUICK_RANDOM_PATTERN_KEY);
-        window.localStorage.removeItem(RANDOM_TRAINING_PATTERN_PRESETS_KEY);
-        window.localStorage.removeItem(QUICK_RANDOM_MODE_KEY);
-        const nextPresets = normalizePatternPresets(defaultPatternPresets);
-        setPatternPresets(nextPresets);
-        setPatternPresetDrafts(nextPresets);
-      } finally {
-        setPatternPresetsReady(true);
-      }
+      const stored = settingsGateway.loadPatternPreferences();
+      setPatternPresets(stored.patternPresets);
+      setPatternPresetDrafts(stored.patternPresets);
+      setSelectedPatternPresetId(stored.patternPresets[0]?.id ?? "");
+      setQuickRandomPatternPresetId(stored.quickRandomPatternPresetId);
+      setRandomTrainingPatternPresetIds(stored.randomTrainingPatternPresetIds);
+      setQuickRandomMode(stored.quickRandomMode);
+      setPatternPresetsReady(true);
     }, 0);
     return () => window.clearTimeout(timer);
-  }, []);
+  }, [settingsGateway]);
 
   useEffect(() => {
     const timer = window.setTimeout(() => {
-      try {
-        const storedReasonTags = window.localStorage.getItem(REASON_TAGS_KEY);
-        const storedCustomTags = window.localStorage.getItem(CUSTOM_REASON_TAGS_KEY);
-        const legacyCustomTags = storedCustomTags ? JSON.parse(storedCustomTags) : [];
-        const nextTags = normalizeReasonTags(
-          storedReasonTags ? JSON.parse(storedReasonTags) : [...reasonOptions, ...(Array.isArray(legacyCustomTags) ? legacyCustomTags : [])],
-        );
-        setReasonTags(nextTags);
-        setCustomReasonTags(nextTags.filter((tag) => !reasonOptions.includes(tag)));
-      } catch {
-        setReasonTags(reasonOptions);
-        setCustomReasonTags([]);
-        window.localStorage.removeItem(REASON_TAGS_KEY);
-        window.localStorage.removeItem(CUSTOM_REASON_TAGS_KEY);
-      } finally {
-        setReasonTagsReady(true);
-        setCustomReasonTagsReady(true);
-      }
+      const stored = settingsGateway.loadReasonTagPreferences();
+      setReasonTags(stored.reasonTags);
+      setCustomReasonTags(stored.customReasonTags);
+      setReasonTagsReady(true);
+      setCustomReasonTagsReady(true);
     }, 0);
     return () => window.clearTimeout(timer);
-  }, []);
+  }, [settingsGateway]);
 
   useEffect(() => {
     if (!reasonTagsReady) return;
     const nextTags = normalizeReasonTags(reasonTags);
-    const nextCustomTags = nextTags.filter((tag) => !reasonOptions.includes(tag));
-    window.localStorage.setItem(REASON_TAGS_KEY, JSON.stringify(nextTags));
-    window.localStorage.setItem(CUSTOM_REASON_TAGS_KEY, JSON.stringify(nextCustomTags));
-  }, [reasonTags, reasonTagsReady]);
+    settingsGateway.saveReasonTagPreferences(nextTags);
+  }, [reasonTags, reasonTagsReady, settingsGateway]);
 
   useEffect(() => {
     const timer = window.setTimeout(() => {
-      try {
-        const stored = window.localStorage.getItem(MOVING_AVERAGE_SETTINGS_KEY);
-        if (stored) setMovingAverageSettings(normalizeMovingAverageSettings(JSON.parse(stored)));
-      } catch {
-        window.localStorage.removeItem(MOVING_AVERAGE_SETTINGS_KEY);
-      } finally {
-        setMovingAverageSettingsReady(true);
-      }
+      setMovingAverageSettings(settingsGateway.loadMovingAverageSettings());
+      setMovingAverageSettingsReady(true);
     }, 0);
     return () => window.clearTimeout(timer);
-  }, []);
+  }, [settingsGateway]);
 
   useEffect(() => {
     if (!movingAverageSettingsReady) return;
-    window.localStorage.setItem(MOVING_AVERAGE_SETTINGS_KEY, JSON.stringify(movingAverageSettings));
-  }, [movingAverageSettings, movingAverageSettingsReady]);
+    settingsGateway.saveMovingAverageSettings(movingAverageSettings);
+  }, [movingAverageSettings, movingAverageSettingsReady, settingsGateway]);
 
   useEffect(() => {
     if (!patternPresetsReady) return;
-    window.localStorage.setItem(QUICK_RANDOM_MODE_KEY, quickRandomMode);
-  }, [patternPresetsReady, quickRandomMode]);
+    settingsGateway.saveQuickRandomMode(quickRandomMode);
+  }, [patternPresetsReady, quickRandomMode, settingsGateway]);
 
   useEffect(() => {
     if (!patternPresetsReady) return;
-    window.localStorage.setItem(
-      RANDOM_TRAINING_PATTERN_PRESETS_KEY,
-      JSON.stringify(randomTrainingPatternPresetIds),
-    );
-  }, [patternPresetsReady, randomTrainingPatternPresetIds]);
+    settingsGateway.saveRandomTrainingPatternPresets(randomTrainingPatternPresetIds);
+  }, [patternPresetsReady, randomTrainingPatternPresetIds, settingsGateway]);
 
   useEffect(() => {
     if (
@@ -2832,12 +2543,10 @@ export function TrainingWorkbench() {
     let cancelled = false;
     let readyTimer: number | null = null;
     let retryTimer: number | null = null;
-    void fetch("/api/preferences", { cache: "no-store" })
-      .then(async (response) => {
-        if (!response.ok) throw new Error("读取同步设置失败");
-        const payload = await response.json() as { preferences?: unknown };
+    void preferencesGateway.load()
+      .then((preferences) => {
         if (cancelled) return;
-        if (payload.preferences) applySyncedPreferences(payload.preferences);
+        if (preferences) applySyncedPreferences(preferences);
         syncedPreferencesRetryCountRef.current = 0;
         syncedPreferencesHydratedRef.current = true;
         readyTimer = window.setTimeout(() => {
@@ -2865,7 +2574,7 @@ export function TrainingWorkbench() {
       if (readyTimer !== null) window.clearTimeout(readyTimer);
       if (retryTimer !== null) window.clearTimeout(retryTimer);
     };
-  }, [applySyncedPreferences, customReasonTagsReady, movingAverageSettingsReady, patternPresetsReady, reasonTagsReady, settingsReady, syncedPreferencesRetryNonce]);
+  }, [applySyncedPreferences, customReasonTagsReady, movingAverageSettingsReady, patternPresetsReady, preferencesGateway, reasonTagsReady, settingsReady, syncedPreferencesRetryNonce]);
 
   useEffect(() => {
     if (!syncedPreferencesReady || !syncedPreferencesHydratedRef.current) return;
@@ -2899,11 +2608,7 @@ export function TrainingWorkbench() {
         liveNavigatorResume,
         liveScanResume,
       };
-      void fetch("/api/preferences", {
-        method: "PUT",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(preferences),
-      }).catch(() => undefined);
+      void preferencesGateway.save(preferences).catch(() => undefined);
     }, 350);
     return () => window.clearTimeout(timer);
   }, [
@@ -2925,6 +2630,7 @@ export function TrainingWorkbench() {
     liveScanSort,
     movingAverageSettings,
     patternPresets,
+    preferencesGateway,
     quickRandomMode,
     quickRandomPatternPresetId,
     randomTrainingPatternPresetIds,
@@ -2938,11 +2644,9 @@ export function TrainingWorkbench() {
     const refresh = () => {
       if (refreshing || document.visibilityState === "hidden") return;
       refreshing = true;
-      void fetch("/api/preferences", { cache: "no-store" })
-        .then(async (response) => {
-          if (!response.ok) return;
-          const payload = await response.json() as { preferences?: unknown };
-          if (payload.preferences) applySyncedPreferences(payload.preferences);
+      void preferencesGateway.load()
+        .then((preferences) => {
+          if (preferences) applySyncedPreferences(preferences);
         })
         .catch(() => undefined)
         .finally(() => { refreshing = false; });
@@ -2953,16 +2657,14 @@ export function TrainingWorkbench() {
       window.removeEventListener("focus", refresh);
       document.removeEventListener("visibilitychange", refresh);
     };
-  }, [applySyncedPreferences, syncedPreferencesReady]);
+  }, [applySyncedPreferences, preferencesGateway, syncedPreferencesReady]);
 
   useEffect(() => {
     let cancelled = false;
     let retryTimer: number | null = null;
     liveStateHydratedRef.current = false;
-    void fetch("/api/live-state", { cache: "no-store" })
-      .then(async (response) => {
-        if (!response.ok) throw new Error("读取实盘数据失败");
-        const payload = await response.json() as { portfolios?: unknown; watchlist?: unknown };
+    void liveGateway.loadState()
+      .then((payload) => {
         if (!Array.isArray(payload.portfolios) || !Array.isArray(payload.watchlist)) {
           throw new Error("实盘数据响应不完整");
         }
@@ -2994,7 +2696,7 @@ export function TrainingWorkbench() {
       cancelled = true;
       if (retryTimer !== null) window.clearTimeout(retryTimer);
     };
-  }, [liveStateLoadNonce]);
+  }, [liveGateway, liveStateLoadNonce]);
 
   useEffect(() => {
     if (!liveStateReady || !liveStateHydratedRef.current) return;
@@ -3030,14 +2732,8 @@ export function TrainingWorkbench() {
     let cancelled = false;
     let retryTimer: number | null = null;
     const timer = window.setTimeout(() => {
-      void fetch("/api/live-state", {
-        method: "PUT",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ portfolioUpserts, portfolioDeletes, watchlistUpserts, watchlistDeletes }),
-      })
-        .then(async (response) => {
-          if (!response.ok) throw new Error("保存实盘数据失败");
-          const result = await response.json() as { portfolioSkipped?: number; watchSkipped?: number };
+      void liveGateway.saveState({ portfolioUpserts, portfolioDeletes, watchlistUpserts, watchlistDeletes })
+        .then((result) => {
           if (cancelled) return;
           if ((result.portfolioSkipped ?? 0) > 0 || (result.watchSkipped ?? 0) > 0) {
             liveStateHydratedRef.current = false;
@@ -3067,7 +2763,7 @@ export function TrainingWorkbench() {
       window.clearTimeout(timer);
       if (retryTimer !== null) window.clearTimeout(retryTimer);
     };
-  }, [livePortfolios, liveStateReady, liveStateSaveRetryNonce, liveWatchlist]);
+  }, [liveGateway, livePortfolios, liveStateReady, liveStateSaveRetryNonce, liveWatchlist]);
 
   useEffect(() => () => marketLoadRef.current.controller?.abort(), []);
 
@@ -3157,29 +2853,25 @@ export function TrainingWorkbench() {
         selection?: { startCursor: number; endCursor: number; sourceStartIndex: number; sourceEndIndex: number; sourceBarCount: number; truncated?: boolean };
       };
       if (requestedSnapshotId) {
-        const snapshotUrl = new URL("/api/snapshots", window.location.origin);
-        snapshotUrl.searchParams.set("id", requestedSnapshotId);
         const persistedTask = restoreRequest?.state.trainingTask;
-        if (persistedTask?.historyBars != null
-          && Number.isFinite(persistedTask.startTimestamp)
-          && Number.isFinite(persistedTask.endTimestamp)) {
-          snapshotUrl.searchParams.set("startTimestamp", String(persistedTask.startTimestamp));
-          snapshotUrl.searchParams.set("endTimestamp", String(persistedTask.endTimestamp));
-          snapshotUrl.searchParams.set("lookbackBars", String(normalizeReplayHistoryBars(persistedTask.historyBars)));
-        }
-        const response = await fetch(`${snapshotUrl.pathname}${snapshotUrl.search}`, {
-          signal: controller.signal,
-        });
-        if (!response.ok) throw new Error("训练绑定的数据快照不存在，无法进行确定性恢复");
-        data = await response.json() as typeof data;
+        data = await reviewGateway.loadSnapshot<typeof data>(
+          requestedSnapshotId,
+          persistedTask?.historyBars != null
+            && Number.isFinite(persistedTask.startTimestamp)
+            && Number.isFinite(persistedTask.endTimestamp)
+            ? {
+                startTimestamp: persistedTask.startTimestamp,
+                endTimestamp: persistedTask.endTimestamp,
+                lookbackBars: normalizeReplayHistoryBars(persistedTask.historyBars),
+              }
+            : {},
+          controller.signal,
+        );
       } else {
         // New Replay tasks only need the configured history context and training
         // span. Keeping intraday snapshots bounded prevents multi-million-bar
         // FX datasets from exhausting the browser or the development worker.
-        const snapshotResponse = await fetch("/api/snapshots", {
-          method: "POST",
-          headers: { "content-type": "application/json" },
-          body: JSON.stringify({
+        data = await marketDataGateway.createSnapshot<typeof data>({
             instrumentId: requestInstrumentId,
             timeframe: requestTimeframe,
             adjustmentType: "none",
@@ -3192,14 +2884,7 @@ export function TrainingWorkbench() {
               length: newTaskRequest.draft.length,
               historyBars: appSettingsRef.current.replayHistoryBars,
             } : undefined,
-          }),
-          signal: controller.signal,
-        });
-        if (!snapshotResponse.ok) {
-          const failure = await snapshotResponse.json().catch(() => null) as { error?: string } | null;
-          throw new Error(failure?.error ?? "不可变行情快照创建失败");
-        }
-        data = await snapshotResponse.json() as typeof data;
+          }, controller.signal);
       }
       if (marketLoadRef.current.id !== requestId) return;
       const loadedDataIndexOffset = data.window?.startIndex ?? 0;
@@ -3372,11 +3057,9 @@ export function TrainingWorkbench() {
           const currentWindowTimestamps = data.candles
             .slice(nextTask.startCursor, nextTask.endCursor + 1)
             .map((bar) => bar.timestamp);
-          void fetch("/api/sessions?all=1", { cache: "no-store" })
-            .then(async (response) => {
-              if (!response.ok) return null;
-              const payload = await response.json() as { sessions?: TrainingSession[] };
-              const candidates = (payload.sessions ?? []).flatMap((savedSession) => {
+          void reviewGateway.loadSessions<TrainingSession>(true, controller.signal)
+            .then((sessions) => {
+              const candidates = sessions.flatMap((savedSession) => {
                 if (savedSession.id === nextSessionId
                   || savedSession.instrumentId !== requestInstrumentId
                   || savedSession.timeframe !== requestTimeframe) return [];
@@ -3475,7 +3158,7 @@ export function TrainingWorkbench() {
         setLoading(false);
       }
     }
-  }, [instrumentId, parseTrainingState, startupReady, timeframe]);
+  }, [instrumentId, marketDataGateway, parseTrainingState, reviewGateway, startupReady, timeframe]);
 
   useEffect(() => {
     const timer = window.setTimeout(loadBars, 0);
@@ -3495,13 +3178,13 @@ export function TrainingWorkbench() {
       stateJson,
       updatedAt: savedAt,
     };
-    window.localStorage.setItem(LAST_DRAFT_KEY, JSON.stringify({
+    settingsGateway.saveLastDraft({
       id: sessionId,
       instrumentId,
       timeframe,
       state,
       updatedAt: savedAt,
-    }));
+    });
     // The floating training navigator keeps its own session list. Keep that
     // list in sync immediately, otherwise switching away and back can restore
     // the stale state captured when the navigator was opened.
@@ -3524,18 +3207,14 @@ export function TrainingWorkbench() {
       return changed ? next : items;
     });
     try {
-      const response = await fetch("/api/sessions", {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ id: sessionId, instrumentId, timeframe, dataSnapshotId, state }),
-      });
-      setSaveState(response.ok ? successMessage : "浏览器保存点已写入 · 数据库保存失败");
-      return response.ok;
+      await reviewGateway.saveSession({ id: sessionId, instrumentId, timeframe, dataSnapshotId, state });
+      setSaveState(successMessage);
+      return true;
     } catch {
       setSaveState("浏览器保存点已写入 · 数据库保存失败");
       return false;
     }
-  }, [dataSnapshotId, instrumentId, sessionId, timeframe]);
+  }, [dataSnapshotId, instrumentId, reviewGateway, sessionId, settingsGateway, timeframe]);
 
   useEffect(() => {
     if (trashPreview || !trainingReady || !trainingComplete || !saveCompletedTrainingRef.current) return;
@@ -4340,19 +4019,18 @@ export function TrainingWorkbench() {
   };
 
   const waitForCnLiveUpdate = async () => {
-    const start = await fetch("/api/cn-maintenance", {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ action: "start", mode: "incremental" }),
-    });
-    const started = await start.json() as { maintenanceTask?: { status?: string; message?: string; error?: string }; error?: string };
-    if (!start.ok && !/正在运行/.test(started.error ?? "")) throw new Error(started.error ?? "A 股增量更新启动失败");
+    try {
+      await marketDataGateway.cnMaintenanceAction("start", "incremental");
+    } catch (error) {
+      if (!/正在运行/.test(error instanceof Error ? error.message : "")) throw error;
+    }
     for (let attempt = 0; attempt < 600; attempt += 1) {
-      const response = await fetch("/api/cn-maintenance", { cache: "no-store" });
-      const payload = await response.json() as { maintenanceTask?: { status?: string; message?: string; error?: string }; error?: string };
+      const payload = await marketDataGateway.loadCnMaintenanceTask<{
+        maintenanceTask?: { status?: string; message?: string; error?: string };
+        error?: string;
+      }>();
       const task = payload.maintenanceTask;
       setLiveScanStatus(task?.message ?? "正在核对 A 股最新交易日……");
-      if (!response.ok) throw new Error(payload.error ?? "无法读取 A 股更新进度");
       if (!task || task.status === "completed") return;
       if (task.status === "failed" || task.status === "paused") throw new Error(task.error ?? task.message ?? "A 股增量更新未完成");
       await new Promise((resolve) => window.setTimeout(resolve, 700));
@@ -4361,16 +4039,7 @@ export function TrainingWorkbench() {
   };
 
   const runUsLiveUpdate = async (instrumentIds?: string[]) => {
-    const response = await fetch("/api/data-jobs/market/sync", {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({
-        market: "US",
-        mode: "update",
-        ...(instrumentIds?.length ? { instrumentIds } : {}),
-      }),
-    });
-    const payload = await response.json() as {
+    const payload = await marketDataGateway.startMarketSync<{
       run?: {
         id: string;
         status: string;
@@ -4383,30 +4052,25 @@ export function TrainingWorkbench() {
         skippedSymbols: number;
       };
       error?: string;
-    };
-    if (!response.ok || !payload.run) throw new Error(payload.error ?? "美股最新日线批量同步失败");
+    }>("US", "update", instrumentIds);
+    if (!payload.run) throw new Error(payload.error ?? "美股最新日线批量同步失败");
     const runId = payload.run.id;
     let workerFailures = 0;
+    type LiveSyncWorkerPayload = {
+      run?: typeof payload.run;
+      error?: string;
+    };
     for (let attempt = 0; attempt < 2_000; attempt += 1) {
-      let worker: Response | null = null;
-      let next: {
-        run?: typeof payload.run;
-        error?: string;
-      } | null = null;
+      let next: LiveSyncWorkerPayload | null = null;
       try {
-        worker = await fetch("/api/data-jobs/market/sync/worker", {
-          method: "POST",
-          headers: { "content-type": "application/json" },
-          body: JSON.stringify({ runId }),
-        });
-        next = await worker.json();
+        next = await marketDataGateway.marketSyncWorker<LiveSyncWorkerPayload>(runId);
       } catch (error) {
         workerFailures += 1;
         if (workerFailures >= 5) throw error;
         await new Promise((resolve) => window.setTimeout(resolve, 1_500));
         continue;
       }
-      if (!worker || !worker.ok || !next?.run) {
+      if (!next?.run) {
         workerFailures += 1;
         if (workerFailures >= 5) throw new Error(next?.error ?? "美股最新日线批次执行失败");
         await new Promise((resolve) => window.setTimeout(resolve, 1_500));
@@ -4456,23 +4120,7 @@ export function TrainingWorkbench() {
         const instrumentIds = [...new Set(tracked.filter((item) => item.market === market).map((item) => item.instrumentId))];
         if (!instrumentIds.length) continue;
         try {
-          const response = await fetch("/api/live-scan", {
-            method: "POST",
-            headers: { "content-type": "application/json" },
-            body: JSON.stringify({
-              action: "refresh",
-              market,
-              instrumentIds,
-            }),
-          });
-          if (!response.ok) {
-            const failure = await response.json().catch(() => null) as { error?: unknown } | null;
-            errors.push(typeof failure?.error === "string"
-              ? failure.error
-              : `${market === "CN" ? "A 股" : "美股"}最新价同步失败`);
-            continue;
-          }
-          const payload = await response.json() as { prices?: Array<{ instrumentId: string; timestamp: number; open: number; close: number }> };
+          const payload = await liveGateway.refreshPrices(market, instrumentIds);
           for (const price of payload.prices ?? []) {
             if (Number.isFinite(price.timestamp) && Number.isFinite(price.open) && Number.isFinite(price.close)) {
               pricesById.set(price.instrumentId, {
@@ -4629,24 +4277,17 @@ export function TrainingWorkbench() {
         else await runUsLiveUpdate();
       }
       setLiveScanStatus("行情已就绪，正在本机扫描最新一根日 K……");
-      const response = await fetch("/api/live-scan", {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({
-          market: liveScanMarket,
-          presetIds: liveScanPresetIds,
-          presets: patternPresets,
-          filters: {
-            ...(liveScanMinPrice ? { minPrice: Number(liveScanMinPrice) } : {}),
-            ...(liveScanMaxPrice ? { maxPrice: Number(liveScanMaxPrice) } : {}),
-            ...(liveScanMinVolume ? { minAverageVolume: Number(liveScanMinVolume) } : {}),
-          },
-          sort: liveScanSort,
-          limit: liveScanLimit,
-        }),
+      const request = buildLiveScanRequest({
+        market: liveScanMarket,
+        presetIds: liveScanPresetIds,
+        presets: patternPresets,
+        minPrice: liveScanMinPrice,
+        maxPrice: liveScanMaxPrice,
+        minVolume: liveScanMinVolume,
+        sort: liveScanSort,
+        limit: liveScanLimit,
       });
-      const result = await response.json() as LiveScanResponse;
-      if (!response.ok) throw new Error(result.error ?? "实盘筛选失败");
+      const result = await liveGateway.scan(request);
       setLiveScanData(result);
       await refreshLivePortfolioPrices();
       setLivePortfolios((items) => items.map((portfolio) => {
@@ -4665,7 +4306,7 @@ export function TrainingWorkbench() {
       }
       setLiveScanStatus(`已扫描 ${result.scannedCount.toLocaleString()} 个品种，命中 ${result.matchedCount.toLocaleString()} 个。`);
     } catch (error) {
-      setLiveScanError(error instanceof Error ? error.message : "实盘筛选失败");
+      setLiveScanError(normalizeLiveScanError(error));
       setLiveScanStatus("");
     } finally {
       setLiveScanRunning(false);
@@ -4811,12 +4452,7 @@ export function TrainingWorkbench() {
       setLiveScanStatus("暂无可恢复的筛选结果，请先运行一次筛选");
       return;
     }
-    const savedIndex = liveScanResume.instrumentId
-      ? results.findIndex((result) => result.instrumentId === liveScanResume.instrumentId)
-      : -1;
-    const nextIndex = savedIndex >= 0
-      ? savedIndex
-      : Math.min(results.length - 1, Math.max(0, liveScanResume.index));
+    const nextIndex = selectLiveNavigatorIndex(results, liveScanResume.instrumentId, liveScanResume.index);
     openLiveScanResult(results[nextIndex], nextIndex, "scan");
   };
 
@@ -4985,8 +4621,7 @@ export function TrainingWorkbench() {
     const removedSummary = removedIndex >= 0 ? sessionSummaries[removedIndex] : undefined;
     setSessionSummaries((items) => items.filter((item) => item.session.id !== session.id));
     try {
-      const response = await fetch(`/api/sessions?id=${encodeURIComponent(session.id)}`, { method: "DELETE" });
-      if (!response.ok) throw new Error("move to trash failed");
+      await reviewGateway.deleteSession(session.id);
     } catch {
       if (removedSummary) {
         setSessionSummaries((items) => {
@@ -5000,15 +4635,8 @@ export function TrainingWorkbench() {
       return;
     }
     if (reviewedSession?.session.id === session.id) setReviewedSession(null);
-    const localDraft = window.localStorage.getItem(LAST_DRAFT_KEY);
-    if (localDraft) {
-      try {
-        const parsed = JSON.parse(localDraft) as { id?: string };
-        if (parsed.id === session.id) window.localStorage.removeItem(LAST_DRAFT_KEY);
-      } catch {
-        window.localStorage.removeItem(LAST_DRAFT_KEY);
-      }
-    }
+    const localDraft = settingsGateway.loadLastDraft<{ id?: string }>();
+    if (localDraft?.id === session.id) settingsGateway.removeLastDraft();
     if (session.id === sessionId) {
       resetTraining();
       setSaveState("原训练已移入回收站，已开始一场新的空白训练");
@@ -5480,26 +5108,25 @@ export function TrainingWorkbench() {
   const loadCoverage = useCallback(async () => {
     setCoverageLoading(true);
     try {
-      const response = await fetch(`/api/candles?coverage=1&page=${coveragePage}&pageSize=${coveragePageSize}&q=${encodeURIComponent(coverageQuery)}&market=${dataMarket}`);
-      if (response.ok) {
-        const data = await response.json() as {
-          coverage: Coverage[];
-          total: number;
-          summary: { barCount: number; timeframeCount: number; hasNonSampleData?: boolean };
-        };
-        setCoverage(data.coverage);
-        setSelectedCoverageKeys([]);
-        setCoverageTotal(data.total);
-        setCoverageSummary({
-          barCount: Number(data.summary.barCount ?? 0),
-          timeframeCount: Number(data.summary.timeframeCount ?? 0),
-          hasNonSampleData: Boolean(data.summary.hasNonSampleData),
-        });
-      }
+      const data = await marketDataGateway.loadCoverage<{
+        coverage: Coverage[];
+        total: number;
+        summary: { barCount: number; timeframeCount: number; hasNonSampleData?: boolean };
+      }>(coveragePage, coveragePageSize, coverageQuery, dataMarket);
+      setCoverage(data.coverage);
+      setSelectedCoverageKeys([]);
+      setCoverageTotal(data.total);
+      setCoverageSummary({
+        barCount: Number(data.summary.barCount ?? 0),
+        timeframeCount: Number(data.summary.timeframeCount ?? 0),
+        hasNonSampleData: Boolean(data.summary.hasNonSampleData),
+      });
+    } catch {
+      // The database page keeps its current rows while the data service recovers.
     } finally {
       setCoverageLoading(false);
     }
-  }, [coveragePage, coverageQuery, dataMarket]);
+  }, [coveragePage, coverageQuery, dataMarket, marketDataGateway]);
 
   const deleteSelectedCoverage = async () => {
     const selected = coverage.filter((item) => selectedCoverageKeys.includes(coverageKey(item)));
@@ -5513,24 +5140,16 @@ export function TrainingWorkbench() {
     if (!window.confirm(`确定删除选中的 ${selected.length} 条数据记录？训练快照会保留，但当前行情库数据将被删除。${explanation}`)) return;
     setCoverageLoading(true);
     try {
-      const response = await fetch("/api/candles", {
-        method: "DELETE",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({
-          selections: selected.map((item) => ({
-            id: item.id,
-            timeframe: item.timeframe,
-            adjustmentType: item.adjustmentType,
-            source: item.source,
-          })),
-        }),
-      });
-      const result = await response.json() as {
+      const result = await marketDataGateway.deleteCoverage<{
         deletedRows?: number;
         deletedLocalInstruments?: number;
         error?: string;
-      };
-      if (!response.ok) throw new Error(result.error ?? "删除失败");
+      }>(selected.map((item) => ({
+        id: item.id,
+        timeframe: item.timeframe,
+        adjustmentType: item.adjustmentType,
+        source: item.source,
+      })));
       setImportStatus(`删除完成：数据库 K 线 ${Number(result.deletedRows ?? 0).toLocaleString()} 根，TDX 品种 ${Number(result.deletedLocalInstruments ?? 0).toLocaleString()} 个。训练快照未受影响。`);
       setSelectedCoverageKeys([]);
       await Promise.all([loadCoverage(), loadInstrumentCatalog()]);
@@ -5551,9 +5170,7 @@ export function TrainingWorkbench() {
     try {
       const readCatalogTaskStatus = async () => {
         try {
-          const response = await fetch("/api/local-data?action=catalog-status", { cache: "no-store" });
-          if (!response.ok) return null;
-          const data = await response.json() as { catalogTask?: { status?: string } };
+          const data = await marketDataGateway.loadCatalogTask<{ catalogTask?: { status?: string } }>();
           return data.catalogTask?.status ?? null;
         } catch {
           return null;
@@ -5564,9 +5181,7 @@ export function TrainingWorkbench() {
           await new Promise<void>((resolve) => window.setTimeout(resolve, retryDelays[attempt]));
         }
         try {
-          const response = await fetch("/api/candles?instruments=1", { cache: "no-store" });
-          if (!response.ok) continue;
-          const data = await response.json() as { instruments?: Array<Instrument & { timeframes?: string[] }> };
+          const data = await marketDataGateway.loadInstrumentCatalog<{ instruments?: Array<Instrument & { timeframes?: string[] }> }>();
           const instruments = (data.instruments ?? [])
             .map(normalizeAvailableInstrument)
             .filter((item): item is AvailableInstrument => item !== null);
@@ -5587,22 +5202,20 @@ export function TrainingWorkbench() {
     } finally {
       setInstrumentCatalogReady(true);
     }
-  }, []);
+  }, [marketDataGateway]);
 
   const loadTrashSessions = useCallback(async () => {
     setTrashLoading(true);
     setTrashError("");
     try {
-      const response = await fetch("/api/sessions?trash=1&all=1", { cache: "no-store" });
-      const data = await response.json() as { sessions?: TrainingSession[]; error?: string };
-      if (!response.ok) throw new Error(data.error ?? "读取回收站失败");
-      setTrashSessions((data.sessions ?? []).sort(compareTrainingSessionsByCreatedAt));
+      const sessions = await reviewGateway.loadTrashSessions<TrainingSession>();
+      setTrashSessions(sessions.sort(compareTrainingSessionsByCreatedAt));
     } catch (error) {
       setTrashError(error instanceof Error ? error.message : "读取回收站失败");
     } finally {
       setTrashLoading(false);
     }
-  }, []);
+  }, [reviewGateway]);
 
   const inspectTrashedSession = (session: TrainingSession) => {
     setShowTrash(false);
@@ -5616,13 +5229,7 @@ export function TrainingWorkbench() {
     setTrashActionId(session.id);
     setTrashError("");
     try {
-      const response = await fetch(`/api/sessions?id=${encodeURIComponent(session.id)}`, {
-        method: "PATCH",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ action: "restore" }),
-      });
-      const data = await response.json() as { error?: string };
-      if (!response.ok) throw new Error(data.error ?? "恢复训练失败");
+      await reviewGateway.restoreSession(session.id);
       setTrashSessions((items) => items.filter((item) => item.id !== session.id));
       void loadSessions(true);
       setShowTrash(false);
@@ -5641,9 +5248,7 @@ export function TrainingWorkbench() {
     setTrashActionId(session.id);
     setTrashError("");
     try {
-      const response = await fetch(`/api/sessions?id=${encodeURIComponent(session.id)}&permanent=1`, { method: "DELETE" });
-      const data = await response.json() as { error?: string };
-      if (!response.ok) throw new Error(data.error ?? "彻底删除失败");
+      await reviewGateway.deleteSession(session.id, true);
       setTrashSessions((items) => items.filter((item) => item.id !== session.id));
     } catch (error) {
       setTrashError(error instanceof Error ? error.message : "彻底删除失败");
@@ -5765,17 +5370,18 @@ export function TrainingWorkbench() {
   }, [parseTrainingState]);
 
   const loadSessions = useCallback(async (includeAll = false) => {
-    const response = await fetch(includeAll ? "/api/sessions?all=1" : "/api/sessions");
-    if (response.ok) {
-      const data = await response.json() as { sessions: TrainingSession[] };
-      setSessionSummaries(data.sessions
+    try {
+      const sessions = await reviewGateway.loadSessions<TrainingSession>(includeAll);
+      setSessionSummaries(sessions
         .sort(compareTrainingSessionsByCreatedAt)
         .flatMap((session) => {
           const summary = buildSessionSummary(session);
           return summary ? [summary] : [];
         }));
+    } catch {
+      // Review data is optional for the replay shell; retain the current list on a transient failure.
     }
-  }, [buildSessionSummary]);
+  }, [buildSessionSummary, reviewGateway]);
 
   useEffect(() => {
     if (view !== "performance" || !sessionSummaries.length) return;
@@ -5794,19 +5400,13 @@ export function TrainingWorkbench() {
     }));
     if (!requestItems.length) return;
     const controller = new AbortController();
-    void fetch("/api/snapshots/analysis", {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ items: requestItems }),
-      signal: controller.signal,
-    })
-      .then((response) => response.ok ? response.json() : null)
-      .then((data: { contexts?: SnapshotTradeContextMap } | null) => {
+    void reviewGateway.loadSnapshotAnalysis<{ contexts?: SnapshotTradeContextMap }>(requestItems, controller.signal)
+      .then((data) => {
         if (data?.contexts) setSnapshotTradeContexts(data.contexts);
       })
       .catch(() => undefined);
     return () => controller.abort();
-  }, [sessionSummaries, view]);
+  }, [reviewGateway, sessionSummaries, view]);
 
   const performanceSessionSummaries = useMemo(
     () => view === "performance" ? sessionSummaries : [],
@@ -6059,15 +5659,9 @@ export function TrainingWorkbench() {
   // during render, so restoring a result never causes an effect-driven render
   // cascade.
   const liveNavigatorDisplayIndex = useMemo(() => {
-    if (!liveNavigatorResults.length) return 0;
     const activeInstrumentId = liveContext?.instrumentId
       ?? (liveNavigatorResume.source === liveNavigatorSource ? liveNavigatorResume.instrumentId : undefined);
-    const savedIndex = activeInstrumentId
-      ? liveNavigatorResults.findIndex((result) => result.instrumentId === activeInstrumentId)
-      : -1;
-    return savedIndex >= 0
-      ? savedIndex
-      : Math.min(liveNavigatorResults.length - 1, Math.max(0, liveScanIndex));
+    return selectLiveNavigatorIndex(liveNavigatorResults, activeInstrumentId, liveScanIndex);
   }, [liveContext, liveNavigatorResults, liveNavigatorResume, liveNavigatorSource, liveScanIndex]);
 
   const reviewModeOptions = useMemo(
@@ -6075,23 +5669,17 @@ export function TrainingWorkbench() {
     [sessionSummaries],
   );
   const filteredReviewSessionSummaries = useMemo(() => {
-    const query = reviewSessionFilters.query.trim().toLocaleLowerCase();
-    return sessionSummaries.filter((summary) => {
-      const completed = summary.task?.status === "completed";
-      const hasPlan = summary.state.decisionSubmissions.length > 0;
-      return (
-        (!query
-          || summary.session.instrumentId.toLocaleLowerCase().includes(query)
-          || summary.modeLabel.toLocaleLowerCase().includes(query)
-          || summary.task?.patternFilter?.presetNames.some((name) => name.toLocaleLowerCase().includes(query)))
-        && (reviewSessionFilters.timeframe === "all" || summary.session.timeframe === reviewSessionFilters.timeframe)
-        && (reviewSessionFilters.modeLabel === "all" || summary.modeLabel === reviewSessionFilters.modeLabel)
-        && (reviewSessionFilters.status === "all"
-          || (reviewSessionFilters.status === "completed" ? completed : !completed))
-        && (reviewSessionFilters.planStatus === "all"
-          || (reviewSessionFilters.planStatus === "written" ? hasPlan : !hasPlan))
-      );
-    }).sort(compareTrainingSessionSummariesByCreatedAt);
+    return filterReviewSessions(
+      sessionSummaries.map((summary) => ({
+        ...summary,
+        instrumentId: summary.session.instrumentId,
+        timeframe: summary.session.timeframe,
+        completed: summary.task?.status === "completed",
+        hasPlan: summary.state.decisionSubmissions.length > 0,
+        patternNames: summary.task?.patternFilter?.presetNames ?? [],
+      })),
+      reviewSessionFilters,
+    ).sort(compareTrainingSessionSummariesByCreatedAt);
   }, [reviewSessionFilters, sessionSummaries]);
   const performanceHabitTrades = useMemo<HabitTrade[]>(() => filteredSessionSummaries.flatMap((summary) => (
     summary.habitTrades.map((trade) => {
@@ -6123,9 +5711,56 @@ export function TrainingWorkbench() {
     (summary) => summary.session.id === selectedPerformanceSessionId,
   );
   const formatPerformanceValue = (value: number) => performanceUsesCapital ? money(value) : percent(value);
+  const reviewHeroTone: "up" | "down" = reviewRealizedPnl >= 0 ? "up" : "down";
+  const reviewResultTone: "up" | "down" = reviewTotalResult >= 0 ? "up" : "down";
+  const reviewHistoryItems = useMemo<SessionHistoryItem[]>(() => filteredReviewSessionSummaries.map((summary) => ({
+    id: summary.session.id,
+    instrumentId: summary.session.instrumentId,
+    timeframe: summary.session.timeframe,
+    completed: summary.task?.status === "completed",
+    modeLabel: summary.modeLabel,
+    rangeLabel: summary.rangeLabel,
+    patternLabel: summary.task?.patternFilter
+      ? summary.task.patternFilter.presetNames.join("、") || summary.task.patternFilter.presetIds.join("、")
+      : undefined,
+    progressLabel: summary.task ? `${summary.progressSummary.revealed}/${summary.progressSummary.total}` : undefined,
+    tradingMode: summary.state.tradingMode,
+    totalValue: summary.state.tradingMode === "capital" ? money(summary.pnl.total) : percent(summary.returnPct),
+    realizedValue: summary.state.tradingMode === "capital" ? money(summary.pnl.realized) : percent(summary.realizedReturnPct),
+    floatingValue: summary.state.tradingMode === "capital" ? money(summary.pnl.floating) : percent(summary.floatingReturnPct),
+    totalTone: (summary.state.tradingMode === "capital" ? summary.pnl.total : summary.returnPct) >= 0 ? "up" : "down",
+    openPositions: summary.pnl.openPositions,
+    closedPositions: summary.pnl.closedPositions,
+    winningTrades: summary.winningTrades,
+    losingTrades: summary.losingTrades,
+    flatTrades: summary.flatTrades,
+    createdAtLabel: new Date(summary.session.createdAt).toLocaleString("zh-CN"),
+    selected: reviewedSession?.session.id === summary.session.id,
+  })), [filteredReviewSessionSummaries, reviewedSession]);
+  const reviewAuditEvents = useMemo<AuditEventItem[]>(() => [...reviewState.events]
+    .reverse()
+    .slice(0, 80)
+    .map((event) => ({
+      id: event.id,
+      sequence: event.sequence,
+      label: eventLabel(event.type),
+      occurredAtLabel: `${new Date(event.occurredAt).toLocaleString("zh-CN")}${event.barTimestamp ? ` · K线 ${formatDate(event.barTimestamp, reviewedSession?.session.timeframe ?? timeframe)}` : ""}`,
+    })), [reviewState.events, reviewedSession, timeframe]);
+  const reviewPanelSummary = {
+    heroLabel: reviewState.tradingMode === "capital" ? "本次已实现盈亏" : "本次已实现收益率",
+    heroValue: reviewState.tradingMode === "capital" ? money(reviewRealizedPnl) : percent(reviewRealizedReturnPct),
+    heroTone: reviewHeroTone,
+    heroMeta: `${reviewClosedPositions.length} 笔已平仓 · ${reviewState.executions.length} 笔成交 · 最近计划完整度 ${reviewPlanScore}%`,
+    tradeWinRate: reviewTradeWinRate,
+    tradeMeta: `${reviewWinningTrades} 胜 / ${reviewLosingTrades} 负 / ${reviewFlatTrades} 平 · 平局不计入胜率分母`,
+    submittedPlans: reviewState.decisionSubmissions.length,
+    resultValue: reviewState.tradingMode === "capital" ? money(reviewTotalResult) : percent(reviewTotalResult),
+    resultTone: reviewResultTone,
+    resultMeta: `${reviewTotalResult > 0 ? "本场计为训练胜" : reviewTotalResult < 0 ? "本场计为训练负" : "本场计为训练平"} · ${reviewState.executions.length} 笔成交`,
+  };
 
   const mistakeSources = useMemo<MistakeSource[]>(() => {
-    if (!showTaskSetup || taskDraft.mode !== "mistakes") return [];
+    if (!showTaskSetup || (taskDraft.mode as string) !== "mistakes") return [];
     return sessionSummaries.flatMap(({ session, state }) => {
     try {
       const weakPlans = state.decisionSubmissions.filter((submission) => decisionScore(submission.decision) < 80);
@@ -6159,22 +5794,13 @@ export function TrainingWorkbench() {
   };
 
   const saveSettings = () => {
-    if (
-      settingsDraft.randomDateMode === "range"
-      && (!settingsDraft.randomStartDate || !settingsDraft.randomEndDate)
-    ) {
-      setSettingsError("随机时间段需要填写开始和结束日期。");
+    const result = prepareSettingsSave(settingsDraft);
+    if (!result.ok) {
+      setSettingsError(result.error);
       return;
     }
-    if (
-      settingsDraft.randomDateMode === "range"
-      && settingsDraft.randomEndDate < settingsDraft.randomStartDate
-    ) {
-      setSettingsError("随机时间段的结束日期不能早于开始日期。");
-      return;
-    }
-    const nextSettings = normalizeSettings(settingsDraft);
-    window.localStorage.setItem(APP_SETTINGS_KEY, JSON.stringify(nextSettings));
+    const nextSettings = result.settings;
+    settingsGateway.saveAppSettings(nextSettings);
     appSettingsRef.current = nextSettings;
     setAppSettings(nextSettings);
     setSettingsDraft(nextSettings);
@@ -6191,11 +5817,11 @@ export function TrainingWorkbench() {
 
   const savePatternFilters = () => {
     const nextPresets = normalizePatternPresets(patternPresetDrafts);
-    window.localStorage.setItem(PATTERN_PRESETS_KEY, JSON.stringify(nextPresets));
+    settingsGateway.savePatternPresets(nextPresets);
     setPatternPresets(nextPresets);
     setPatternPresetDrafts(nextPresets);
     if (quickRandomPatternPresetId && !nextPresets.some((preset) => preset.id === quickRandomPatternPresetId)) {
-      window.localStorage.removeItem(QUICK_RANDOM_PATTERN_KEY);
+      settingsGateway.saveQuickRandomPattern("");
       setQuickRandomPatternPresetId("");
     }
     setRandomTrainingPatternPresetIds((selectedIds) => (
@@ -6312,14 +5938,12 @@ export function TrainingWorkbench() {
     if (requestInstrumentId === instrumentId && requestTimeframe === timeframe && bars.length) {
       return { candles: bars as PatternCandle[], timezone: instrument.timezone };
     }
-    const response = await fetch(`/api/candles?instrument=${encodeURIComponent(requestInstrumentId)}&timeframe=${encodeURIComponent(requestTimeframe)}`);
-    if (!response.ok) throw new Error("读取候选 K 线失败");
-    const data = await response.json() as { instrument?: Instrument; candles?: KLineData[] };
+    const data = await marketDataGateway.loadCandles<{ instrument?: Instrument; candles?: KLineData[] }>(requestInstrumentId, requestTimeframe);
     return {
       candles: (data.candles ?? []) as PatternCandle[],
       timezone: data.instrument?.timezone ?? "Asia/Shanghai",
     };
-  }, [bars, instrument.timezone, instrumentId, timeframe]);
+  }, [bars, instrument.timezone, instrumentId, marketDataGateway, timeframe]);
 
   const createRandomWindowSnapshot = useCallback(async (
     requestInstrumentId: string,
@@ -6328,10 +5952,16 @@ export function TrainingWorkbench() {
     randomConfig: RandomTrainingConfig,
     selectedPresets: PatternPreset[] = [],
   ) => {
-    const response = await fetch("/api/snapshots", {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({
+    const data = await marketDataGateway.createSnapshot<{
+      snapshot?: SnapshotMeta;
+      selection?: { startCursor?: number; endCursor?: number };
+      patternMatch?: {
+        timestamp?: number;
+        presetIds?: string[];
+        presetNames?: string[];
+        attempts?: number;
+      };
+    }>({
         instrumentId: requestInstrumentId,
         timeframe: requestTimeframe,
         adjustmentType: "none",
@@ -6343,23 +5973,11 @@ export function TrainingWorkbench() {
           patternPresets: selectedPresets.length ? selectedPresets : undefined,
           patternAttempts: selectedPresets.length ? appSettingsRef.current.patternScanAttempts : undefined,
         },
-      }),
-    });
-    if (!response.ok) return null;
-    const data = await response.json() as {
-      snapshot?: SnapshotMeta;
-      selection?: { startCursor?: number; endCursor?: number };
-      patternMatch?: {
-        timestamp?: number;
-        presetIds?: string[];
-        presetNames?: string[];
-        attempts?: number;
-      };
-    };
+      });
     const startCursor = Number(data.selection?.startCursor);
     if (!data.snapshot?.id || !Number.isInteger(startCursor) || startCursor < 0) return null;
     return { snapshotId: data.snapshot.id, startCursor, patternMatch: data.patternMatch };
-  }, []);
+  }, [marketDataGateway]);
 
   const findCandidatePatternMatch = useCallback(async (
     requestInstrumentId: string,
@@ -6665,8 +6283,7 @@ export function TrainingWorkbench() {
     const nextPresetId = patternPresets.some((preset) => preset.id === presetId) ? presetId : "";
     setQuickRandomPatternPresetId(nextPresetId);
     setQuickRandomError("");
-    if (nextPresetId) window.localStorage.setItem(QUICK_RANDOM_PATTERN_KEY, nextPresetId);
-    else window.localStorage.removeItem(QUICK_RANDOM_PATTERN_KEY);
+    settingsGateway.saveQuickRandomPattern(nextPresetId);
   };
 
   const toggleTaskPatternPreset = (presetId: string, selected: boolean) => {
@@ -6855,20 +6472,14 @@ export function TrainingWorkbench() {
       const importTimeframe = dataMarket === "FX" ? "5m" : "1d";
       let imported = 0;
       for (let offset = 0; offset < barsToImport.length; offset += 4000) {
-      const response = await fetch("/api/candles", {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({
+        const result = await marketDataGateway.importCandles<{ imported?: number; error?: string }>({
           instrument: { id: customId, symbol: customId, name: file.name, market: dataMarket, timezone },
           timeframe: importTimeframe,
           adjustmentType: "none",
           bars: barsToImport.slice(offset, offset + 4000),
-        }),
-      });
-        const result = await response.json() as { imported?: number; error?: string };
+        });
         imported += Number(result.imported ?? 0);
-      if (!response.ok) throw new Error(result.error ?? "导入失败");
-      setImportStatus(`已导入 ${result.imported} 根日 K`);
+        setImportStatus(`已导入 ${result.imported} 根日 K`);
       }
       setImportStatus(`宸插鍏?${imported} ${importTimeframe} K`);
       await Promise.all([loadCoverage(), loadInstrumentCatalog()]);
@@ -7072,356 +6683,21 @@ export function TrainingWorkbench() {
         </header>
 
         {showSettings && (
-          <div className="task-modal-backdrop" role="presentation" onMouseDown={(event) => {
-            if (event.target === event.currentTarget) setShowSettings(false);
-          }}>
-            <section className="task-modal settings-modal" role="dialog" aria-modal="true" aria-labelledby="settings-modal-title">
-              <div className="task-modal-head">
-                <div>
-                  <span>SETTINGS</span>
-                  <h2 id="settings-modal-title">本地设置</h2>
-                  <p>管理训练偏好、随机抽样规则和本机数据源凭证。</p>
-                </div>
-                <button aria-label="关闭设置" onClick={() => setShowSettings(false)}><X size={19} /></button>
-              </div>
-
-              <div className="settings-tabs" role="tablist" aria-label="设置分类">
-                <button className={settingsTab === "basic" ? "active" : ""} onClick={() => setSettingsTab("basic")}>基本设置</button>
-                <button className={settingsTab === "training" ? "active" : ""} onClick={() => setSettingsTab("training")}>训练设置</button>
-                <button className={settingsTab === "data" ? "active" : ""} onClick={() => setSettingsTab("data")}>数据源设置</button>
-              </div>
-
-              {settingsTab === "basic" ? (
-                <div className="settings-section">
-                  <div className="settings-section-head">
-                    <strong>新训练默认值</strong>
-                    <span>打开“新建 Replay 训练”时优先使用这些选项。</span>
-                  </div>
-                  <div className="settings-rule">
-                    <span>模拟交易账户</span>
-                    <div className="task-start-options">
-                      <button
-                        className={settingsDraft.tradingMode === "return" ? "active" : ""}
-                        onClick={() => setSettingsDraft((draft) => ({ ...draft, tradingMode: "return" }))}
-                      >收益率模式</button>
-                      <button
-                        className={settingsDraft.tradingMode === "capital" ? "active" : ""}
-                        onClick={() => setSettingsDraft((draft) => ({ ...draft, tradingMode: "capital" }))}
-                      >资金账户模式</button>
-                    </div>
-                    <small>{settingsDraft.tradingMode === "return"
-                      ? "不限制本金和购买力，只比较仓位收益率，适合练习入场与出场质量。"
-                      : "按初始资金核算现金、持仓市值和账户权益；买入资金不足时拒单。"}</small>
-                    {settingsDraft.tradingMode === "capital" && (
-                      <label>新训练初始资金
-                        <input
-                          type="number"
-                          min="1000"
-                          step="1000"
-                          value={settingsDraft.initialCapital}
-                          onChange={(event) => setSettingsDraft((draft) => ({ ...draft, initialCapital: Math.max(1000, Number(event.target.value)) }))}
-                        />
-                      </label>
-                    )}
-                  </div>
-                  <div className="settings-rule">
-                    <span>不同市场默认下单数量 / 手数</span>
-                    <div className="execution-settings-grid">
-                      {marketOrderQuantityFields.map((field) => (
-                        <label key={field.key}>{field.label}
-                          <input
-                            type="number"
-                            min={field.min}
-                            step={field.step}
-                            value={settingsDraft.defaultOrderQtyByMarket[field.key]}
-                            onChange={(event) => setSettingsDraft((draft) => ({
-                              ...draft,
-                              defaultOrderQtyByMarket: {
-                                ...draft.defaultOrderQtyByMarket,
-                                [field.key]: Number(event.target.value),
-                              },
-                            }))}
-                          />
-                        </label>
-                      ))}
-                    </div>
-                    <small>新建训练、切换到新市场或打开实盘观察时会按当前市场使用对应值；已保存训练继续沿用训练内记录的下单数量。外汇可按 0.01 手递增。</small>
-                  </div>
-                  <div className="settings-rule">
-                    <span>下单方式</span>
-                    <div className="execution-settings-grid">
-                      <label>默认下单方式
-                        <select value={settingsDraft.positionSizeMode} onChange={(event) => setSettingsDraft((draft) => ({ ...draft, positionSizeMode: event.target.value as PositionSizeMode }))}>
-                          <option value="fixed">固定数量</option>
-                          <option value="risk-percent">按止损风险（余额%）</option>
-                        </select>
-                      </label>
-                      <label>默认开仓委托
-                        <select value={settingsDraft.orderType} onChange={(event) => setSettingsDraft((draft) => ({ ...draft, orderType: event.target.value as OrderType }))}>
-                          <option value="market">市价 · 下一根开盘</option>
-                          <option value="limit">限价 · 触价或更优</option>
-                          <option value="stop">止损触发 · 突破后成交</option>
-                        </select>
-                      </label>
-                      {settingsDraft.positionSizeMode === "risk-percent" && <label>默认单笔风险（余额%）
-                        <input type="number" min="0.1" max="100" step="0.1" value={settingsDraft.riskPercent} onChange={(event) => setSettingsDraft((draft) => ({ ...draft, riskPercent: Number(event.target.value) }))} />
-                      </label>}
-                    </div>
-                    <small>按账户余额 × 风险比例，再结合止损距离、点差/滑点和双边佣金自动反算数量或手数；拖动图表上的止损线会实时重算，没有止损时不会允许下单。</small>
-                    <small>切换只影响之后新建的训练；已开始和已保存训练会继续使用创建时锁定的账户模式。</small>
-                  </div>
-                  <div className="settings-rule">
-                    <span>外汇保证金账户</span>
-                    <div className="execution-settings-grid">
-                      <label>账户币种
-                        <select value={settingsDraft.fxAccountConfig.accountCurrency} onChange={(event) => setSettingsDraft((draft) => ({
-                          ...draft,
-                          fxAccountConfig: { ...draft.fxAccountConfig, accountCurrency: event.target.value },
-                        }))}>
-                          {["USD", "EUR", "GBP", "JPY", "AUD", "CAD", "CHF", "CNY"].map((currency) => <option value={currency} key={currency}>{currency}</option>)}
-                        </select>
-                      </label>
-                      <label>杠杆
-                        <select value={settingsDraft.fxAccountConfig.leverage} onChange={(event) => setSettingsDraft((draft) => ({
-                          ...draft,
-                          fxAccountConfig: { ...draft.fxAccountConfig, leverage: Number(event.target.value) },
-                        }))}>
-                          {[1, 10, 20, 30, 50, 100, 200, 500].map((leverage) => <option value={leverage} key={leverage}>1:{leverage}</option>)}
-                        </select>
-                      </label>
-                      <label>强平线（保证金水平 %）
-                        <input type="number" min="1" max="1000" step="1" value={settingsDraft.fxAccountConfig.stopOutLevelPct} onChange={(event) => setSettingsDraft((draft) => ({
-                          ...draft,
-                          fxAccountConfig: { ...draft.fxAccountConfig, stopOutLevelPct: Number(event.target.value) },
-                        }))} />
-                      </label>
-                      <label>第三币种换算率
-                        <input type="number" min="0" step="any" placeholder="第三币种必填" value={settingsDraft.fxAccountConfig.manualQuoteToAccountRate || ""} onChange={(event) => setSettingsDraft((draft) => ({
-                          ...draft,
-                          fxAccountConfig: { ...draft.fxAccountConfig, manualQuoteToAccountRate: Number(event.target.value) },
-                        }))} />
-                      </label>
-                    </div>
-                    <small>外汇训练固定使用保证金资金账户。账户币种等于报价币时按 1:1 换算；等于基础币时按当前汇价反算；只有第三币种账户才使用上面的手动换算率。参数会随新训练冻结。</small>
-                  </div>
-                  <div className="settings-rule">
-                    <span>确定性成交引擎</span>
-                    <div className="execution-settings-grid">
-                      <label>佣金（bp）
-                        <input type="number" min="0" step="0.1" value={settingsDraft.executionProfile.commissionRateBps} onChange={(event) => setSettingsDraft((draft) => ({
-                          ...draft,
-                          executionProfile: { ...draft.executionProfile, commissionRateBps: Number(event.target.value) },
-                        }))} />
-                      </label>
-                      <label>最低佣金
-                        <input type="number" min="0" step="0.01" value={settingsDraft.executionProfile.minimumCommission} onChange={(event) => setSettingsDraft((draft) => ({
-                          ...draft,
-                          executionProfile: { ...draft.executionProfile, minimumCommission: Number(event.target.value) },
-                        }))} />
-                      </label>
-                      <label>滑点（bp）
-                        <input type="number" min="0" step="0.1" value={settingsDraft.executionProfile.slippageBps} onChange={(event) => setSettingsDraft((draft) => ({
-                          ...draft,
-                          executionProfile: { ...draft.executionProfile, slippageBps: Number(event.target.value) },
-                        }))} />
-                      </label>
-                      <label>买卖价差（bp）
-                        <input type="number" min="0" step="0.1" value={settingsDraft.executionProfile.spreadBps} onChange={(event) => setSettingsDraft((draft) => ({
-                          ...draft,
-                          executionProfile: { ...draft.executionProfile, spreadBps: Number(event.target.value) },
-                        }))} />
-                      </label>
-                      <label>单根成交量参与上限（%）
-                        <input type="number" min="0" max="100" step="0.1" value={settingsDraft.executionProfile.maxVolumeParticipationPct} onChange={(event) => setSettingsDraft((draft) => ({
-                          ...draft,
-                          executionProfile: { ...draft.executionProfile, maxVolumeParticipationPct: Number(event.target.value) },
-                        }))} />
-                      </label>
-                    </div>
-                    <label>同一根 K 线同时触发止损与止盈
-                      <select value={settingsDraft.executionProfile.intrabarConflictPolicy} onChange={(event) => setSettingsDraft((draft) => ({
-                        ...draft,
-                        executionProfile: {
-                          ...draft.executionProfile,
-                          intrabarConflictPolicy: event.target.value as ExecutionCostProfile["intrabarConflictPolicy"],
-                        },
-                      }))}>
-                        <option value="conservative">保守：先止损</option>
-                        <option value="optimistic">乐观：先止盈</option>
-                        <option value="seeded">种子确定：固定抽样</option>
-                      </select>
-                    </label>
-                    <small>参数在新训练创建时锁定并随保存点恢复；成交量参与上限为 0 时整单成交，否则按当根成交量分批撮合、余量继续挂单。实盘观察仍沿用零成本、次日开盘模型。</small>
-                  </div>
-                  <div className="settings-rule">
-                    <span>图表左侧历史 K 线</span>
-                    <label>新训练显示根数
-                      <input
-                        type="number"
-                        min={MIN_REPLAY_HISTORY_BARS}
-                        max={MAX_REPLAY_HISTORY_BARS}
-                        step="1"
-                        value={settingsDraft.replayHistoryBars}
-                        onChange={(event) => setSettingsDraft((draft) => ({
-                          ...draft,
-                          replayHistoryBars: Number(event.target.value),
-                        }))}
-                        onBlur={() => setSettingsDraft((draft) => ({
-                          ...draft,
-                          replayHistoryBars: normalizeReplayHistoryBars(draft.replayHistoryBars),
-                        }))}
-                      />
-                    </label>
-                    <small>每次新训练开始时，显示起点左侧最近多少根 K 线；最少 100、最多 5000。训练推进后，新揭示的 K 线会继续追加，已保存训练不会随设置变化。</small>
-                  </div>
-                  <div className="settings-rule trash-settings-rule">
-                    <div className="settings-row-action">
-                      <div>
-                        <span>训练回收站</span>
-                        <strong>已删除训练</strong>
-                        <small>删除的训练会暂存在这里，可以恢复；彻底删除后将无法找回。</small>
-                      </div>
-                      <button className="ghost-button trash-entry-button" onClick={openTrash} type="button">
-                        <Trash2 size={15} />打开回收站
-                      </button>
-                    </div>
-                  </div>
-                </div>
-              ) : settingsTab === "training" ? (
-                <div className="settings-section">
-                  <div className="settings-section-head">
-                    <strong>随机训练规则</strong>
-                    <span>点击顶部“随机训练”时，按这里的范围抽取品种、周期和历史片段。</span>
-                  </div>
-
-                  <div className="settings-rule">
-                    <span>如何选择品种</span>
-                    <div className="task-start-options">
-                      {([
-                        ["current", "固定当前品种"],
-                        ["all", "全部品种随机"],
-                        ["market", "指定市场随机"],
-                      ] as const).map(([value, label]) => (
-                        <button key={value} className={settingsDraft.randomInstrumentMode === value ? "active" : ""} onClick={() => setSettingsDraft((draft) => ({ ...draft, randomInstrumentMode: value }))}>{label}</button>
-                      ))}
-                    </div>
-                    {settingsDraft.randomInstrumentMode === "market" && (
-                      <label>指定市场
-                        <select value={settingsDraft.randomMarket} onChange={(event) => setSettingsDraft((draft) => ({ ...draft, randomMarket: event.target.value }))}>
-                          {[...new Set([
-                            ...availableInstruments.map((item) => marketSelectionLabel(item.market)),
-                            marketSelectionLabel(settingsDraft.randomMarket),
-                          ].filter(Boolean))].map((market) => <option key={market}>{market}</option>)}
-                        </select>
-                      </label>
-                    )}
-                    {settingsRandomIncludesCn && (<>
-                      <div className="task-start-options" aria-label="随机训练指数范围">
-                        <button
-                          className={!settingsDraft.randomIncludeIndices ? "active" : ""}
-                          onClick={() => setSettingsDraft((draft) => ({ ...draft, randomIncludeIndices: false }))}
-                        >仅可交易品种</button>
-                        <button
-                          className={settingsDraft.randomIncludeIndices ? "active" : ""}
-                          onClick={() => setSettingsDraft((draft) => ({ ...draft, randomIncludeIndices: true }))}
-                        >纳入指数（只看盘）</button>
-                      </div>
-                      <small>默认排除指数、基金、可转债等当前未开放交易的 A 股品种；纳入指数后，抽到指数的训练局只提供看盘、标记和决策功能。</small>
-                    </>)}
-                    {settingsRandomIncludesUs && (<>
-                      <div className="task-start-options" aria-label="美股流动性过滤">
-                        <button
-                          className={settingsDraft.randomUsLiquidityFilter ? "active" : ""}
-                          onClick={() => setSettingsDraft((draft) => ({ ...draft, randomUsLiquidityFilter: true }))}
-                        >过滤低流动性美股</button>
-                        <button
-                          className={!settingsDraft.randomUsLiquidityFilter ? "active" : ""}
-                          onClick={() => setSettingsDraft((draft) => ({ ...draft, randomUsLiquidityFilter: false }))}
-                        >不过滤</button>
-                      </div>
-                      {settingsDraft.randomUsLiquidityFilter && (
-                        <label>最低 20 日平均成交额（美元）
-                          <input
-                            type="number"
-                            min="0"
-                            step="100000"
-                            value={settingsDraft.randomUsMinAverageDailyDollarVolume}
-                            onChange={(event) => setSettingsDraft((draft) => ({
-                              ...draft,
-                              randomUsMinAverageDailyDollarVolume: Math.max(0, Number(event.target.value)),
-                            }))}
-                          />
-                        </label>
-                      )}
-                      <small>默认门槛为 100 万美元。按训练起点之前 20 个交易日计算，只影响随机选样；不会删除已下载行情或不可变快照。</small>
-                    </>)}
-                  </div>
-
-                  <div className="settings-rule">
-                    <span>如何选择时间周期</span>
-                    <div className="task-start-options">
-                      {([
-                        ["current", "固定当前周期"],
-                        ["all", "全部周期随机"],
-                        ["fixed", "指定周期"],
-                      ] as const).map(([value, label]) => (
-                        <button key={value} className={settingsDraft.randomTimeframeMode === value ? "active" : ""} onClick={() => setSettingsDraft((draft) => ({ ...draft, randomTimeframeMode: value }))}>{label}</button>
-                      ))}
-                    </div>
-                    {settingsDraft.randomTimeframeMode === "fixed" && (
-                      <label>指定周期
-                        <select value={settingsDraft.randomTimeframe} onChange={(event) => setSettingsDraft((draft) => ({ ...draft, randomTimeframe: event.target.value }))}>
-                          {timeframes.map((item) => <option key={item}>{item}</option>)}
-                        </select>
-                      </label>
-                    )}
-                  </div>
-
-                  <div className="settings-rule">
-                    <span>随机历史时间段</span>
-                    <div className="task-start-options">
-                      <button className={settingsDraft.randomDateMode === "all" ? "active" : ""} onClick={() => setSettingsDraft((draft) => ({ ...draft, randomDateMode: "all" }))}>全部历史</button>
-                      <button className={settingsDraft.randomDateMode === "range" ? "active" : ""} onClick={() => setSettingsDraft((draft) => ({ ...draft, randomDateMode: "range" }))}>指定时间段</button>
-                    </div>
-                    {settingsDraft.randomDateMode === "range" && (
-                      <div className="task-form-row">
-                        <label>开始日期<input type="date" value={settingsDraft.randomStartDate} onChange={(event) => setSettingsDraft((draft) => ({ ...draft, randomStartDate: event.target.value }))} /></label>
-                        <label>结束日期<input type="date" value={settingsDraft.randomEndDate} onChange={(event) => setSettingsDraft((draft) => ({ ...draft, randomEndDate: event.target.value }))} /></label>
-                      </div>
-                    )}
-                  </div>
-
-                  <label className="task-wide-field">默认训练长度（揭示 K 线数）
-                    <input type="number" min="0" value={settingsDraft.randomLength} onChange={(event) => setSettingsDraft((draft) => ({ ...draft, randomLength: Math.max(0, Number(event.target.value)) }))} />
-                    <small>每局随机训练的默认长度；0 表示一直练到该数据集末尾。</small>
-                  </label>
-
-                  <div className="settings-rule">
-                    <span>形态筛选扫描</span>
-                    <div className="task-form-row pattern-scan-settings">
-                      <label>相邻命中冷却 K 线数
-                        <input type="number" min="0" max="100" value={settingsDraft.patternCooldownBars} onChange={(event) => setSettingsDraft((draft) => ({ ...draft, patternCooldownBars: Math.max(0, Number(event.target.value)) }))} />
-                      </label>
-                      <label>随机训练最多检查候选数
-                        <input type="number" min="1" max="50" value={settingsDraft.patternScanAttempts} onChange={(event) => setSettingsDraft((draft) => ({ ...draft, patternScanAttempts: Math.max(1, Number(event.target.value)) }))} />
-                      </label>
-                    </div>
-                    <small>冷却用于去掉同一段走势里的重复命中；扫描强度越大，稀有形态越容易找到，但仍会受服务端有界窗口保护。5m 等短周期若长期无命中，请优先降低趋势升幅阈值。具体形态阈值在左侧“形态”中管理。</small>
-                  </div>
-                </div>
-              ) : (
-                <ProviderSettingsPanel />
-              )}
-
-              {settingsError && <div className="task-error">{settingsError}</div>}
-              <div className="task-modal-actions">
-                <button className="ghost-button" onClick={() => setShowSettings(false)}>{settingsTab === "data" ? "关闭" : "取消"}</button>
-                {settingsTab !== "data" && <button className="primary-button" onClick={saveSettings}><Save size={16} />保存设置</button>}
-              </div>
-            </section>
-          </div>
+          <SettingsPanel
+            draft={settingsDraft}
+            tab={settingsTab}
+            availableInstruments={availableInstruments}
+            settingsRandomIncludesCn={settingsRandomIncludesCn}
+            settingsRandomIncludesUs={settingsRandomIncludesUs}
+            dataPanel={<ProviderSettingsPanel />}
+            error={settingsError}
+            onDraftChange={(update) => setSettingsDraft(update)}
+            onTabChange={setSettingsTab}
+            onClose={() => setShowSettings(false)}
+            onOpenTrash={openTrash}
+            onSave={saveSettings}
+          />
         )}
-
         {showTrash && (
           <div className="task-modal-backdrop" role="presentation" onMouseDown={(event) => {
             if (event.target === event.currentTarget) setShowTrash(false);
@@ -7618,88 +6894,42 @@ export function TrainingWorkbench() {
         )}
 
         {showLiveScan && (
-          <div className="task-modal-backdrop" role="presentation" onMouseDown={(event) => {
-            if (event.target === event.currentTarget && !liveScanRunning) setShowLiveScan(false);
-          }}>
-            <section className="task-modal live-scan-modal" role="dialog" aria-modal="true" aria-labelledby="live-scan-title">
-              <div className="task-modal-head">
-                <div>
-                  <span>LIVE MARKET SCREENER</span>
-                  <h2 id="live-scan-title">实盘筛选</h2>
-                  <p>只判断所选市场最近一个已收盘交易日；缺少当日数据时先自动增量更新。</p>
-                </div>
-                <button aria-label="关闭实盘筛选" disabled={liveScanRunning} onClick={() => setShowLiveScan(false)}><X size={19} /></button>
-              </div>
-
-              <div className="live-scan-market" role="group" aria-label="筛选市场">
-                {(["CN", "US"] as LiveScanMarket[]).map((market) => (
-                  <button key={market} className={liveScanMarket === market ? "active" : ""} onClick={() => {
-                    setLiveScanMarket(market);
-                    setLiveScanData(null);
-                    setLiveScanError("");
-                  }}>{market === "CN" ? "A 股" : "美股"}<small>{market === "CN" ? "Tushare 增量" : "Alpaca SIP/IEX"}</small></button>
-                ))}
-              </div>
-
-              <fieldset className="task-pattern-filter">
-                <legend>当日形态（可选，多个条件任一命中）</legend>
-                <div className="task-pattern-head">
-                  <span>{liveScanPresetIds.length ? `已选择 ${liveScanPresetIds.length} 个形态` : "不选择形态时仅使用价格和流动性条件"}</span>
-                  {liveScanPresetIds.length > 0 && <button type="button" onClick={() => setLiveScanPresetIds([])}>清除形态</button>}
-                </div>
-                <div className="task-pattern-options">
-                  {patternPresets.map((preset) => {
-                    const selected = liveScanPresetIds.includes(preset.id);
-                    return <button type="button" key={preset.id} className={selected ? "active" : ""} title={preset.description} onClick={() => {
-                      setLiveScanPresetIds((ids) => selected ? ids.filter((id) => id !== preset.id) : [...ids, preset.id]);
-                    }}>{selected ? "✓ " : "+ "}{preset.name}</button>;
-                  })}
-                </div>
-              </fieldset>
-
-              <div className="live-scan-filter-grid">
-                <label>最低收盘价<input type="number" min="0" step="0.01" placeholder="不限" value={liveScanMinPrice} onChange={(event) => setLiveScanMinPrice(event.target.value)} /></label>
-                <label>最高收盘价<input type="number" min="0" step="0.01" placeholder="不限" value={liveScanMaxPrice} onChange={(event) => setLiveScanMaxPrice(event.target.value)} /></label>
-                <label>20 日平均成交量<input type="number" min="0" step="1000" placeholder="不限" value={liveScanMinVolume} onChange={(event) => setLiveScanMinVolume(event.target.value)} /></label>
-                <label>排序<select value={liveScanSort} onChange={(event) => setLiveScanSort(event.target.value as typeof liveScanSort)}><option value="turnover">平均成交额从高到低</option><option value="volume">平均成交量从高到低</option><option value="change">当日涨幅从高到低</option></select></label>
-                <label>最多显示<select value={liveScanLimit} onChange={(event) => setLiveScanLimit(Number(event.target.value))}><option value={50}>50 个</option><option value={100}>100 个</option><option value={200}>200 个</option><option value={500}>500 个</option></select></label>
-              </div>
-
-              {liveScanStatus && <div className="pattern-scan-status"><Activity size={14} />{liveScanStatus}</div>}
-              {liveScanError && <div className="task-error">
-                <strong>{liveScanError}</strong>
-                <button type="button" onClick={() => void startLiveScan(true)}>使用本地现有最新数据筛选</button>
-              </div>}
-
-              {liveScanData && (
-                <div className="live-scan-results">
-                  <header>
-                    <div><strong>筛选结果</strong><span>行情日期 {new Date(liveScanData.latestTimestamp).toLocaleDateString("zh-CN")} · 命中 {liveScanData.matchedCount.toLocaleString()} 个</span></div>
-                    <small>点击一行打开该标的最新日线</small>
-                  </header>
-                  <div className="live-scan-result-list">
-                    {liveScanData.results.length ? liveScanData.results.map((result, resultIndex) => (
-                      <button type="button" key={result.instrumentId} onClick={() => openLiveScanResult(result, resultIndex)}>
-                        <span><strong>{result.symbol}</strong><small>{result.name}</small></span>
-                        <span>{result.presetNames.join("、") || "基础条件"}</span>
-                        <span className={result.changePct >= 0 ? "up" : "down"}>{result.changePct >= 0 ? "+" : ""}{result.changePct.toFixed(2)}%</span>
-                        <span>{result.close.toLocaleString(undefined, { maximumFractionDigits: 4 })}</span>
-                        <span>{result.averageVolume.toLocaleString(undefined, { maximumFractionDigits: 0 })}</span>
-                      </button>
-                    )) : <div className="live-scan-empty">当前条件没有命中品种，请减少形态或放宽价格、成交量条件。</div>}
-                  </div>
-                </div>
-              )}
-
-              <div className="task-modal-actions">
-                <button className="ghost-button" disabled={liveScanRunning} onClick={() => setShowLiveScan(false)}>关闭</button>
-                <button className="ghost-button" disabled={liveScanRunning || !liveScanData?.results.length} title="恢复上次筛选结果和浮动导航位置" onClick={restoreLiveScan}><RotateCcw size={15} />恢复筛选</button>
-                <button className="primary-button" disabled={liveScanRunning} onClick={() => void startLiveScan(false)}><Activity size={16} />{liveScanRunning ? "正在更新并筛选…" : "更新数据并开始筛选"}</button>
-              </div>
-            </section>
-          </div>
+          <LiveScanPanel
+            market={liveScanMarket}
+            presets={patternPresets}
+            presetIds={liveScanPresetIds}
+            minPrice={liveScanMinPrice}
+            maxPrice={liveScanMaxPrice}
+            minVolume={liveScanMinVolume}
+            sort={liveScanSort}
+            limit={liveScanLimit}
+            status={liveScanStatus}
+            error={liveScanError}
+            running={liveScanRunning}
+            data={liveScanData}
+            onClose={() => setShowLiveScan(false)}
+            onMarketChange={(market) => {
+              setLiveScanMarket(market);
+              setLiveScanData(null);
+              setLiveScanError("");
+            }}
+            onTogglePreset={(presetId) => setLiveScanPresetIds((ids) => ids.includes(presetId)
+              ? ids.filter((id) => id !== presetId)
+              : [...ids, presetId])}
+            onClearPresets={() => setLiveScanPresetIds([])}
+            onMinPriceChange={setLiveScanMinPrice}
+            onMaxPriceChange={setLiveScanMaxPrice}
+            onMinVolumeChange={setLiveScanMinVolume}
+            onSortChange={setLiveScanSort}
+            onLimitChange={(limit) => setLiveScanLimit(normalizeLiveScanLimit(limit))}
+            onStart={(skipUpdate) => void startLiveScan(skipUpdate)}
+            onRestore={restoreLiveScan}
+            onSelectResult={(index) => {
+              const result = liveScanData?.results[index];
+              if (result) openLiveScanResult(result, index);
+            }}
+          />
         )}
-
         {showTaskSetup && (
           <div className="task-modal-backdrop" role="presentation" onMouseDown={(event) => {
             if (event.target === event.currentTarget) setShowTaskSetup(false);
@@ -9269,55 +8499,24 @@ export function TrainingWorkbench() {
               <div><span>REVIEW</span><h1>训练复盘</h1><p>{reviewTitle} · 先看事前计划，再判断执行质量。</p></div>
               {reviewedSession && <button className="ghost-button" onClick={() => setReviewedSession(null)}>返回当前训练</button>}
             </div>
-            <div className="review-grid">
-              <div className="review-hero">
-                <span>{reviewState.tradingMode === "capital" ? "本次已实现盈亏" : "本次已实现收益率"}</span><strong className={reviewRealizedPnl >= 0 ? "up" : "down"}>{reviewState.tradingMode === "capital" ? money(reviewRealizedPnl) : percent(reviewRealizedReturnPct)}</strong><small>{reviewClosedPositions.length} 笔已平仓 · {reviewState.executions.length} 笔成交 · 最近计划完整度 {reviewPlanScore}%</small>
-              </div>
-              <div className="metric-card"><span>本场按交易胜率</span><strong>{reviewTradeWinRate}%</strong><small>{reviewWinningTrades} 胜 / {reviewLosingTrades} 负 / {reviewFlatTrades} 平 · 平局不计入胜率分母</small></div>
-              <div className="metric-card"><span>已提交计划</span><strong>{reviewState.decisionSubmissions.length}</strong><small>每次提交均绑定原始K线</small></div>
-              <div className="metric-card"><span>本场训练结果</span><strong className={reviewTotalResult >= 0 ? "up" : "down"}>{reviewState.tradingMode === "capital" ? money(reviewTotalResult) : percent(reviewTotalResult)}</strong><small>{reviewTotalResult > 0 ? "本场计为训练胜" : reviewTotalResult < 0 ? "本场计为训练负" : "本场计为训练平"} · {reviewState.executions.length} 笔成交</small></div>
-            </div>
-            <article className="deterministic-review-card">
-              <div className="performance-section-head">
-                <div><span className="section-label">确定性指标 · {reviewMetrics?.version ?? "旧版记录"}</span><h2>每个结果都能回到原始 K 线</h2></div>
-                <small>{reviewMetrics
-                  ? `${reviewMetrics.generatedFromBarCount} 根证据 K 线 · ${reviewMetrics.evidenceComplete ? "证据完整" : "部分旧记录缺少入场/出场 K 线"}`
-                  : "这份旧训练保存时尚未生成确定性指标；继续训练并重新保存后会补齐。"}</small>
-              </div>
-              {reviewMetrics ? (
-                <>
-                  <div className="deterministic-metrics-grid">
-                    <div><span>期望值 / 笔</span><strong className={reviewMetrics.expectancy >= 0 ? "up" : "down"}>{money(reviewMetrics.expectancy)}</strong><small>{reviewMetrics.expectancyR == null ? "无初始止损，无法计算 R" : `${reviewMetrics.expectancyR.toFixed(2)}R`}</small></div>
-                    <div><span>平均 R</span><strong>{reviewMetrics.averageR == null ? "—" : `${reviewMetrics.averageR.toFixed(2)}R`}</strong><small>{reviewMetrics.rQualifiedTrades} / {reviewMetrics.closedTrades} 笔有冻结初始风险</small></div>
-                    <div><span>盈亏比 / PF</span><strong>{reviewMetrics.payoffRatio == null ? "—" : reviewMetrics.payoffRatio.toFixed(2)} / {profitFactorLabel(reviewMetrics.profitFactor, reviewMetrics.profitFactorInfinite)}</strong><small>平均赢 {money(reviewMetrics.averageWin)} · 平均亏 {money(-reviewMetrics.averageLoss)}</small></div>
-                    <div><span>最大回撤</span><strong className="down">{money(-reviewMetrics.maxDrawdown)}</strong><small>{reviewMetrics.maxDrawdownPct.toFixed(2)}% · 水下最长 {reviewMetrics.maxUnderwaterBars} 根</small></div>
-                    <div><span>交易成本</span><strong>{reviewMetrics.fees.toFixed(2)}</strong><small>毛盈亏 {money(reviewMetrics.grossPnl)} · 净盈亏 {money(reviewMetrics.netPnl)}</small></div>
-                    <div><span>最大连续亏损</span><strong>{reviewMetrics.maxConsecutiveLosses}</strong><small>按平仓先后顺序计算</small></div>
-                  </div>
-                  <div className="deterministic-trades-wrap">
-                    <table className="orders-table deterministic-trades-table">
-                      <thead><tr><th>仓位</th><th>入场 → 出场</th><th>净盈亏 / R</th><th>MFE / MAE</th><th>出场效率</th><th>后续 1/3/5/10 根</th><th>证据</th></tr></thead>
-                      <tbody>{reviewMetrics.trades.length ? reviewMetrics.trades.map((trade) => {
-                        const linkedDecision = trade.decisionSubmissionId
-                          ? reviewDecisionById.get(trade.decisionSubmissionId)
-                          : undefined;
-                        return (
-                          <tr key={trade.positionId}>
-                            <td data-label="仓位"><span className="position-id">#{trade.positionId.slice(0, 6)}</span><small>{trade.side === "long" ? "多" : "空"} · {trade.holdingBars} 根</small><small>{linkedDecision ? `计划 · ${linkedDecision.decision.marketState || linkedDecision.decision.location || "已关联"}` : "未明确关联计划"}</small></td>
-                            <td data-label="入场 → 出场"><button type="button" className="evidence-link" onClick={() => openReviewEvidence(trade.entryTimestamp, "入场")}>{formatDate(trade.entryTimestamp, reviewedSession?.session.timeframe ?? timeframe)}</button> → <button type="button" className="evidence-link" onClick={() => openReviewEvidence(trade.exitTimestamp, "出场")}>{formatDate(trade.exitTimestamp, reviewedSession?.session.timeframe ?? timeframe)}</button><small>{trade.entryPrice.toFixed(2)} → {trade.exitPrice.toFixed(2)} · {exitReasonLabel(trade.exitReason as ExecutionReason | undefined)}</small></td>
-                            <td data-label="净盈亏 / R"><strong className={trade.netPnl >= 0 ? "up" : "down"}>{money(trade.netPnl)}</strong><small>{trade.rMultiple == null ? "R —" : `${trade.rMultiple.toFixed(2)}R`} · 费 {trade.fees.toFixed(2)}</small></td>
-                            <td data-label="MFE / MAE"><strong>{money(trade.mfe)} / {money(trade.mae)}</strong><small><button type="button" className="evidence-link" onClick={() => openReviewEvidence(trade.mfeTimestamp, "MFE")}>{formatDate(trade.mfeTimestamp, reviewedSession?.session.timeframe ?? timeframe)}</button> / <button type="button" className="evidence-link" onClick={() => openReviewEvidence(trade.maeTimestamp, "MAE")}>{formatDate(trade.maeTimestamp, reviewedSession?.session.timeframe ?? timeframe)}</button></small></td>
-                            <td data-label="出场效率">{trade.exitEfficiencyPct == null ? "—" : `${trade.exitEfficiencyPct.toFixed(1)}%`}<small>{trade.intrabarAmbiguous ? "止损止盈同根冲突" : "无同根冲突"}</small></td>
-                            <td data-label="后续 K 线">{trade.horizons.map((horizon) => horizon.returnPct == null ? `${horizon.bars}: —` : `${horizon.bars}: ${percent(horizon.returnPct)}`).join(" · ")}</td>
-                            <td data-label="证据"><span className={trade.evidenceComplete ? "evidence-ok" : "evidence-missing"}>{trade.evidenceComplete ? "完整" : "缺失"}</span></td>
-                          </tr>
-                        );
-                      }) : <tr><td className="orders-empty" colSpan={7}>还没有已平仓交易；有成交后会生成逐笔证据。</td></tr>}</tbody>
-                    </table>
-                  </div>
-                </>
-              ) : <div className="empty-state">旧保存点没有指标快照，系统不会用估算值冒充确定性结果。</div>}
-            </article>
+            <ReviewPanel
+              title={reviewTitle}
+              summary={reviewPanelSummary}
+              hasReviewedSession={Boolean(reviewedSession)}
+              reviewMetrics={reviewMetrics}
+              timeframe={reviewedSession?.session.timeframe ?? timeframe}
+              linkedDecisionLabel={(id) => {
+                const linked = id ? reviewDecisionById.get(id) : undefined;
+                return linked ? linked.decision.marketState || linked.decision.location || "已关联" : undefined;
+              }}
+              onBack={() => setReviewedSession(null)}
+              onEvidence={openReviewEvidence}
+              formatDate={formatDate}
+              money={money}
+              percent={percent}
+              profitFactorLabel={profitFactorLabel}
+              exitReasonLabel={exitReasonLabel}
+            />
             <div className="review-columns">
               <div className="review-module-stack">
               <article className="insight-card">
@@ -9378,112 +8577,31 @@ export function TrainingWorkbench() {
               </article>
               </div>
               <div className="review-module-stack">
-              <article className="history-card">
-                <div className="history-card-head">
-                  <div>
-                    <div className="section-label">可恢复训练</div>
-                    <strong>{filteredReviewSessionSummaries.length} / {sessionSummaries.length} 场</strong>
-                  </div>
-                  <button
-                    className="history-filter-reset"
-                    onClick={() => setReviewSessionFilters(defaultReviewSessionFilters)}
-                    disabled={Object.entries(reviewSessionFilters).every(([key, value]) => value === defaultReviewSessionFilters[key as keyof ReviewSessionFilters])}
-                  >清除筛选</button>
-                </div>
-                <div className="review-session-filters">
-                  <label className="review-session-search">
-                    <span>搜索</span>
-                    <input
-                      value={reviewSessionFilters.query}
-                      onChange={(event) => setReviewSessionFilters((filters) => ({ ...filters, query: event.target.value }))}
-                      placeholder="代码、模式或形态"
-                    />
-                  </label>
-                  <label>
-                    <span>周期</span>
-                    <select value={reviewSessionFilters.timeframe} onChange={(event) => setReviewSessionFilters((filters) => ({ ...filters, timeframe: event.target.value }))}>
-                      <option value="all">全部周期</option>
-                      {timeframes.map((value) => <option key={value} value={value}>{value}</option>)}
-                    </select>
-                  </label>
-                  <label>
-                    <span>模式</span>
-                    <select value={reviewSessionFilters.modeLabel} onChange={(event) => setReviewSessionFilters((filters) => ({ ...filters, modeLabel: event.target.value }))}>
-                      <option value="all">全部模式</option>
-                      {reviewModeOptions.map((value) => <option key={value} value={value}>{value}</option>)}
-                    </select>
-                  </label>
-                  <label>
-                    <span>状态</span>
-                    <select value={reviewSessionFilters.status} onChange={(event) => setReviewSessionFilters((filters) => ({ ...filters, status: event.target.value as ReviewSessionFilters["status"] }))}>
-                      <option value="all">全部状态</option>
-                      <option value="completed">已完成</option>
-                      <option value="active">可继续</option>
-                    </select>
-                  </label>
-                  <label>
-                    <span>事前计划</span>
-                    <select value={reviewSessionFilters.planStatus} onChange={(event) => setReviewSessionFilters((filters) => ({ ...filters, planStatus: event.target.value as ReviewSessionFilters["planStatus"] }))}>
-                      <option value="all">全部计划</option>
-                      <option value="written">已写计划</option>
-                      <option value="unwritten">未写计划</option>
-                    </select>
-                  </label>
-                </div>
-                <div className="review-session-scroll" tabIndex={0} aria-label="全部可恢复训练，可滚动浏览">
-                {filteredReviewSessionSummaries.length ? filteredReviewSessionSummaries.map((summary) => (
-                  <div className={`session-row ${reviewedSession?.session.id === summary.session.id ? "active" : ""}`} key={summary.session.id}>
-                    <div className="session-main">
-                      <div className="session-title">
-                        <strong>{summary.session.instrumentId} · {summary.session.timeframe}</strong>
-                        <span className={summary.task?.status === "completed" ? "session-status completed" : "session-status"}>
-                          {summary.task?.status === "completed" ? "已完成" : "已保存，可继续"}
-                        </span>
-                      </div>
-                      <div className="session-tags">
-                        <span>{summary.modeLabel}</span>
-                        <span>{summary.rangeLabel}</span>
-                        {summary.task?.patternFilter && <span>形态：{summary.task.patternFilter.presetNames.join("、") || summary.task.patternFilter.presetIds.join("、")}</span>}
-                        {summary.task && <span>进度 {summary.progressSummary.revealed}/{summary.progressSummary.total}</span>}
-                      </div>
-                      <div className="session-pnl">
-                        <span>{summary.state.tradingMode === "capital" ? "总盈亏" : "总收益率"}<strong className={(summary.state.tradingMode === "capital" ? summary.pnl.total : summary.returnPct) >= 0 ? "up" : "down"}>{summary.state.tradingMode === "capital" ? money(summary.pnl.total) : percent(summary.returnPct)}</strong></span>
-                        <span>{summary.state.tradingMode === "capital" ? "已实现" : "已实现收益率"}<strong>{summary.state.tradingMode === "capital" ? money(summary.pnl.realized) : percent(summary.realizedReturnPct)}</strong></span>
-                        <span>{summary.state.tradingMode === "capital" ? "浮动" : "浮动收益率"}<strong>{summary.state.tradingMode === "capital" ? money(summary.pnl.floating) : percent(summary.floatingReturnPct)}</strong></span>
-                        <span>{summary.pnl.openPositions} 笔持仓 · {summary.pnl.closedPositions} 笔平仓</span>
-                        <span>已平仓交易 {summary.winningTrades} 胜 / {summary.losingTrades} 负 / {summary.flatTrades} 平</span>
-                      </div>
-                      <small>创建时间 {new Date(summary.session.createdAt).toLocaleString("zh-CN")}</small>
-                    </div>
-                    <div className="session-actions">
-                      <button className="review-session" onClick={() => inspectSession(summary.session)}>
-                        <BookOpenCheck size={13} />查看复盘
-                      </button>
-                      <button className="resume-session" onClick={() => resumeSession(summary.session, false, filteredReviewSessionSummaries.map((item) => item.session))}>
-                        <RotateCcw size={13} />继续训练
-                      </button>
-                      <button className="delete-session" aria-label={`将 ${summary.session.instrumentId} 训练移入回收站`} onClick={() => deleteSession(summary.session)}>
-                        <Trash2 size={13} />移入回收站
-                      </button>
-                    </div>
-                  </div>
-                )) : <div className="empty-state">{sessionSummaries.length ? "没有符合当前筛选条件的训练。" : "这里还没有保存记录。点击“保存训练”，或完成一场有结束边界的训练后，才会出现在这里。"}</div>}
-                </div>
-              </article>
-              <details className="audit-timeline">
-                <summary>
-                  <span><span className="section-label">操作时间线</span><strong>{reviewState.events.length} 条记录</strong></span>
-                  <small>用于追溯训练过程，点击展开</small>
-                </summary>
-                <div className="audit-event-list">
-                  {[...reviewState.events].reverse().slice(0, 80).map((event) => (
-                    <div className="audit-event" key={event.id}>
-                      <span>#{event.sequence}</span>
-                      <div><strong>{eventLabel(event.type)}</strong><small>{new Date(event.occurredAt).toLocaleString("zh-CN")}{event.barTimestamp ? ` · K线 ${formatDate(event.barTimestamp, reviewedSession?.session.timeframe ?? timeframe)}` : ""}</small></div>
-                    </div>
-                  ))}
-                </div>
-              </details>
+              <SessionHistoryPanel
+                items={reviewHistoryItems}
+                totalCount={sessionSummaries.length}
+                filters={reviewSessionFilters}
+                timeframes={timeframes}
+                modeOptions={reviewModeOptions}
+                auditEvents={reviewAuditEvents}
+                emptyText={sessionSummaries.length
+                  ? "没有符合当前筛选条件的训练。"
+                  : "这里还没有保存记录。点击“保存训练”，或完成一场有结束边界的训练后，才会出现在这里。"}
+                onFilterChange={(update) => setReviewSessionFilters((filters) => ({ ...filters, ...update }))}
+                onResetFilters={() => setReviewSessionFilters(defaultReviewSessionFilters)}
+                onReview={(id) => {
+                  const summary = filteredReviewSessionSummaries.find((item) => item.session.id === id);
+                  if (summary) inspectSession(summary.session);
+                }}
+                onResume={(id) => {
+                  const summary = filteredReviewSessionSummaries.find((item) => item.session.id === id);
+                  if (summary) resumeSession(summary.session, false, filteredReviewSessionSummaries.map((item) => item.session));
+                }}
+                onDelete={(id) => {
+                  const summary = filteredReviewSessionSummaries.find((item) => item.session.id === id);
+                  if (summary) deleteSession(summary.session);
+                }}
+              />
               </div>
             </div>
           </section>

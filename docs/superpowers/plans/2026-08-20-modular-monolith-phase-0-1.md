@@ -24,16 +24,16 @@
 
 ## 执行清单
 
-- [ ] Task 1：记录仓库、测试和 CodeGraph 基线。
-- [ ] Task 2：建立可拆分的开发验证入口。
-- [ ] Task 3：固化架构规则、领域不变量和 agent 协作规则。
-- [ ] Task 4：建立 Phase 0 的用户流程冒烟清单。
-- [ ] Task 5：建立 feature 目录和训练页面组合边界。
-- [ ] Task 6：迁移设置与偏好 feature。
-- [ ] Task 7：迁移市场数据管理 feature。
-- [ ] Task 8：迁移会话历史与复盘 feature。
-- [ ] Task 9：迁移实时扫描 feature。
-- [ ] Task 10：收拢 TrainingWorkbench 页面 shell 并完成 Phase 1 验收。
+- [x] Task 1：记录仓库、测试和 CodeGraph 基线。
+- [x] Task 2：建立可拆分的开发验证入口。
+- [x] Task 3：固化架构规则、领域不变量和 agent 协作规则。
+- [x] Task 4：建立 Phase 0 的用户流程冒烟清单。
+- [x] Task 5：建立 feature 目录和训练页面组合边界。
+- [x] Task 6：迁移设置与偏好 feature。
+- [x] Task 7：迁移市场数据管理 feature。
+- [x] Task 8：迁移会话历史与复盘 feature。
+- [x] Task 9：迁移实时扫描 feature。
+- [x] Task 10：收拢 TrainingWorkbench 页面 shell 并完成 Phase 1 验收。
 
 ## 文件与职责地图
 

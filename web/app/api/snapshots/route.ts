@@ -489,7 +489,7 @@ async function selectDatabaseRandomWindow(
   };
 }
 
-function d1SourceMetadata(candles: SourceCoverageRow[]) {
+function d1SourceMetadata(candles: Array<SnapshotCandle & { source?: string }>) {
   const grouped = new Map<string, { source: string; barCount: number; firstTimestamp: number; lastTimestamp: number }>();
   for (const candle of candles) {
     const source = String(candle.source || "unknown");
