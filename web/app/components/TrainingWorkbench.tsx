@@ -73,6 +73,13 @@ import {
   normalizeReasonTags,
 } from "../features/settings/settingsGateway";
 import { SettingsPanel } from "../features/settings/components/SettingsPanel";
+import {
+  buildCurrentBarDecisionSave,
+  markDecisionSubmissionAsManuallyEdited,
+} from "../features/training/decisionController";
+import { SopPage } from "../features/sop/components/SopPage";
+import { buildSopProfileViews, evaluateSopGate, findSopProfile } from "../features/sop/sopController";
+import type { SopProfileId, SopTradeSample } from "../features/sop/sopContracts";
 import { DataSourceManager } from "../features/market-data/components/DataSourceManager";
 import { createMarketDataGateway } from "../features/market-data/marketDataGateway";
 import { filterReviewSessions } from "../features/review/reviewController";
@@ -94,8 +101,14 @@ import type { LiveScanMarket, LiveScanResponse, LiveScanResult, LiveScanSort } f
 import { LiveScanPanel } from "../features/live/components/LiveScanPanel";
 import { DataAutoUpdateController } from "./DataAutoUpdateController";
 import { ProviderSettingsPanel } from "../features/market-data/components/ProviderSettingsPanel";
-import { aggregateM1To5m } from "../lib/fx/dukascopyAggregation";
+import {
+  aggregateCandles as aggregateFxCandles,
+  aggregateM1To5m,
+  type FxTimeframe,
+} from "../lib/fx/dukascopyAggregation";
 import { parseDukascopyCsv } from "../lib/fx/dukascopyCsv";
+import { aggregateCandlesToTimeframe, canAggregateTimeframe, type SupportedTimeframe } from "../lib/timeframeAggregation";
+import { visibleTimeframeViewBars } from "../lib/timeframeView";
 import {
   CN_A_MAINBOARD_RULES_V1,
   buyQuantityStep,
@@ -206,7 +219,7 @@ import { calculateRiskSizedQuantity, inferRiskSizingSide } from "../lib/riskSizi
  * fetch("/api/live-state") and fetch("/api/candles?instruments=1", { cache: "no-store" }) contracts.
  */
 
-type View = "replay" | "performance" | "database" | "review";
+type View = "replay" | "performance" | "sop" | "database" | "review";
 
 type Instrument = {
   id: string;
@@ -1567,6 +1580,12 @@ function createOrderRejection(
   };
 }
 
+const ignoreProtectionPriceSelect = () => undefined;
+const rejectProtectionLineMove = () => false;
+const ignoreCandleContextMenu = () => undefined;
+const ignoreDrawingsChange = () => undefined;
+const ignoreDrawingSelect = () => undefined;
+
 export function TrainingWorkbench() {
   const settingsGateway = useMemo(
     () => createSettingsStorageGateway(
@@ -1609,6 +1628,11 @@ export function TrainingWorkbench() {
     pricePrecision: 2,
   });
   const [bars, setBars] = useState<KLineData[]>([]);
+  const [chartTimeframe, setChartTimeframe] = useState("1d");
+  const [chartBars, setChartBars] = useState<KLineData[]>([]);
+  const [chartViewLoading, setChartViewLoading] = useState(false);
+  const [chartViewError, setChartViewError] = useState("");
+  const [chartViewSnapshotId, setChartViewSnapshotId] = useState("");
   const [snapshotDataIndexOffset, setSnapshotDataIndexOffset] = useState(0);
   const [cursor, setCursor] = useState(0);
   const [loading, setLoading] = useState(true);
@@ -1701,6 +1725,8 @@ export function TrainingWorkbench() {
   const [trainingNavigatorActive, setTrainingNavigatorActive] = useState(false);
   const [trainingNavigatorOffset, setTrainingNavigatorOffset] = useState({ x: 0, y: 0 });
   const [performanceSection, setPerformanceSection] = useState<"training" | "live" | "watch">("training");
+  const [sopSelectedProfileId, setSopSelectedProfileId] = useState<SopProfileId>("cn-daily");
+  const [sopProfileSelectionTouched, setSopProfileSelectionTouched] = useState(false);
   const [taskSetupKind, setTaskSetupKind] = useState<TaskSetupKind>("configured");
   const [showRandomComplete, setShowRandomComplete] = useState(false);
   const [trashPreview, setTrashPreview] = useState(false);
@@ -1768,6 +1794,7 @@ export function TrainingWorkbench() {
   const decisionPanelRef = useRef<HTMLElement | null>(null);
   const decisionDraftBeforeBackfillRef = useRef<Decision | null>(null);
   const marketLoadRef = useRef<{ id: number; controller: AbortController | null }>({ id: 0, controller: null });
+  const timeframeViewLoadRef = useRef<{ id: number; controller: AbortController | null }>({ id: 0, controller: null });
   const liveRequestRef = useRef<LiveScanResult | null>(null);
   const livePortfoliosRef = useRef<LivePortfolioRecord[]>([]);
   const liveWatchlistRef = useRef<LiveWatchRecord[]>([]);
@@ -1810,6 +1837,7 @@ export function TrainingWorkbench() {
     () => bars.slice(visibleBarStartIndex, cursor + 1),
     [bars, cursor, visibleBarStartIndex],
   );
+  const showingCanonicalChart = chartTimeframe === timeframe;
   const selectedCatalogInstrument = availableInstruments.find((item) => item.id === instrumentId);
   const currentAssetType = inferInstrumentAssetType(
     instrument.id,
@@ -1835,6 +1863,38 @@ export function TrainingWorkbench() {
   }).length, [availableInstruments, dataMarket]);
   const dataMarketLabel = dataMarkets.find((market) => market.id === dataMarket)?.label ?? dataMarket;
   const currentBar = bars[cursor];
+  const renderedChartBars = useMemo(() => {
+    if (showingCanonicalChart) return visibleBars;
+    if (!currentBar) return [];
+    const canBuildPartialBar = canAggregateTimeframe(timeframe, chartTimeframe);
+    const viewStartTimestamp = bars[visibleBarStartIndex]?.timestamp ?? Number.NEGATIVE_INFINITY;
+    const visible = visibleTimeframeViewBars(chartBars, currentBar.timestamp, canBuildPartialBar)
+      .filter((bar) => bar.timestamp >= viewStartTimestamp);
+    if (!canBuildPartialBar) return visible;
+    const sourceCandles = bars.slice(visibleBarStartIndex, cursor + 1).map((bar) => ({
+        timestamp: bar.timestamp,
+        open: bar.open,
+        high: bar.high,
+        low: bar.low,
+        close: bar.close,
+        volume: bar.volume ?? null,
+        turnover: null,
+      }));
+    const isFxInstrument = instrument.market.toUpperCase() === "FX" || /\.FX$/i.test(instrument.id);
+    const partialCandles = isFxInstrument
+      ? aggregateFxCandles(sourceCandles, chartTimeframe as FxTimeframe, {
+          timeZone: instrument.timezone,
+          sessionStartHour: 17,
+          sessionStartMinute: 0,
+          weekStartsOn: 0,
+        })
+      : aggregateCandlesToTimeframe(
+          sourceCandles,
+          chartTimeframe as SupportedTimeframe,
+          instrument.timezone,
+        );
+    return partialCandles as unknown as KLineData[];
+  }, [bars, chartBars, chartTimeframe, cursor, currentBar, instrument.id, instrument.market, instrument.timezone, showingCanonicalChart, timeframe, visibleBarStartIndex, visibleBars]);
   const selectedPatternPresetDraft = patternPresetDrafts.find((preset) => preset.id === selectedPatternPresetId)
     ?? patternPresetDrafts[0];
   const trainingDateLabel = (timestamp: number) => {
@@ -2817,6 +2877,12 @@ export function TrainingWorkbench() {
 
   const loadBars = useCallback(async () => {
     if (!startupReady) return;
+    timeframeViewLoadRef.current.controller?.abort();
+    timeframeViewLoadRef.current = {
+      id: timeframeViewLoadRef.current.id + 1,
+      controller: null,
+    };
+    setChartViewLoading(false);
     marketLoadRef.current.controller?.abort();
     const requestId = marketLoadRef.current.id + 1;
     const controller = new AbortController();
@@ -2890,6 +2956,10 @@ export function TrainingWorkbench() {
       const loadedDataIndexOffset = data.window?.startIndex ?? 0;
       setInstrument(data.instrument);
       setBars(data.candles);
+      setChartTimeframe(requestTimeframe);
+      setChartBars(data.candles);
+      setChartViewError("");
+      setChartViewSnapshotId("");
       setSnapshotDataIndexOffset(loadedDataIndexOffset);
       setDataSnapshotId(data.snapshot.id);
       setSnapshotHash(data.snapshot.contentHash);
@@ -3164,6 +3234,62 @@ export function TrainingWorkbench() {
     const timer = window.setTimeout(loadBars, 0);
     return () => window.clearTimeout(timer);
   }, [loadBars, loadNonce]);
+
+  useEffect(() => () => {
+    timeframeViewLoadRef.current.controller?.abort();
+  }, []);
+
+  const loadTimeframeView = useCallback(async (nextTimeframe: string) => {
+    if (nextTimeframe === chartTimeframe) return;
+    timeframeViewLoadRef.current.controller?.abort();
+    if (nextTimeframe === timeframe) {
+      timeframeViewLoadRef.current = { id: timeframeViewLoadRef.current.id + 1, controller: null };
+      setChartTimeframe(timeframe);
+      setChartBars(bars);
+      setChartViewSnapshotId("");
+      setChartViewError("");
+      setChartViewLoading(false);
+      return;
+    }
+    if (!trainingTask?.randomRun || !dataSnapshotId) {
+      setChartViewError("当前训练没有可复用的来源快照，暂时不能切换观察周期。");
+      return;
+    }
+    setProtectionPriceSelection(null);
+    setDrawingRequest(null);
+    const requestId = timeframeViewLoadRef.current.id + 1;
+    const controller = new AbortController();
+    timeframeViewLoadRef.current = { id: requestId, controller };
+    setChartViewLoading(true);
+    setChartViewError("");
+    try {
+      const data = await marketDataGateway.createSnapshot<{
+        candles: KLineData[];
+        snapshot: SnapshotMeta;
+      }>({
+        instrumentId,
+        timeframe: nextTimeframe,
+        adjustmentType: "none",
+        timeframeView: {
+          sourceSnapshotId: dataSnapshotId,
+          sourceTimeframe: timeframe,
+        },
+      }, controller.signal);
+      if (timeframeViewLoadRef.current.id !== requestId) return;
+      setChartBars(data.candles);
+      setChartTimeframe(nextTimeframe);
+      setChartViewSnapshotId(data.snapshot.id);
+      setChartViewError("");
+    } catch (error) {
+      if (controller.signal.aborted || timeframeViewLoadRef.current.id !== requestId) return;
+      setChartViewError(error instanceof Error ? error.message : "观察周期加载失败");
+    } finally {
+      if (timeframeViewLoadRef.current.id === requestId) {
+        timeframeViewLoadRef.current.controller = null;
+        setChartViewLoading(false);
+      }
+    }
+  }, [bars, chartTimeframe, dataSnapshotId, instrumentId, marketDataGateway, timeframe, trainingTask?.randomRun]);
 
   const persistTrainingState = useCallback(async (
     state: TrainingState,
@@ -3532,6 +3658,23 @@ export function TrainingWorkbench() {
     setSaveState("市场规则已拒绝委托");
   };
 
+  const rejectSopGate = (gate: ReturnType<typeof evaluateSopGate>) => {
+    if (!currentBar || gate.allowed) return;
+    const rejection = createOrderRejection({
+      ok: false,
+      code: "sop_gate_blocked",
+      message: gate.message,
+    }, marketRules, currentBar.timestamp);
+    setOrderRejections((items) => [...items, rejection]);
+    setRuleNotice(rejection.message);
+    appendEvent("sop_gate_blocked", {
+      rejection,
+      profileId: gate.profile?.id ?? null,
+      checks: gate.checks,
+    }, currentBar.timestamp);
+    setSaveState("严格模式已拒绝开仓");
+  };
+
   const protectionPriceText = (price: number) => {
     const tick = Math.max(Number(marketRules.priceTick) || 0, 10 ** -instrument.pricePrecision);
     const rounded = Math.round(price / tick) * tick;
@@ -3679,6 +3822,24 @@ export function TrainingWorkbench() {
   const queueOpenOrder = (side: "buy" | "sell") => {
     let qty = orderQty;
     if (!currentBar || qty <= 0 || (!liveMode && (cursor >= (trainingTask?.endCursor ?? bars.length - 1) || trainingComplete))) return;
+    if (!liveMode) {
+      const sopGate = evaluateSopGate({
+        strictModeEnabled: appSettingsRef.current.strictModeEnabled,
+        requirePretradePlan: appSettingsRef.current.requirePretradePlan,
+        requiredPretradeFields: appSettingsRef.current.requiredPretradeFields,
+        sopCheckEnabled: appSettingsRef.current.sopCheckEnabled,
+        market: instrument.market,
+        instrumentId: instrument.id,
+        timeframe,
+        currentTimestamp: currentBar.timestamp,
+        decision,
+        submissions: decisionSubmissions,
+      });
+      if (!sopGate.allowed) {
+        rejectSopGate(sopGate);
+        return;
+      }
+    }
     const selectedOrderType: OrderType = liveMode ? "market" : orderType;
     const triggerPrice = selectedOrderType === "market" ? undefined : Number(orderTriggerPrice);
     if (selectedOrderType !== "market" && (!Number.isFinite(triggerPrice) || Number(triggerPrice) <= 0)) {
@@ -3995,7 +4156,7 @@ export function TrainingWorkbench() {
     setDrawings([]);
     setDrawingUndoStack([]);
     setDrawingRedoStack([]);
-    setClearNonce(Date.now());
+    setClearNonce((nonce) => nonce + 1);
     setTradingMode(appSettingsRef.current.tradingMode);
     setInitialCapital(appSettingsRef.current.initialCapital);
     setCashBalance(appSettingsRef.current.initialCapital);
@@ -4016,6 +4177,14 @@ export function TrainingWorkbench() {
     setInstrumentId(nextInstrumentId);
     setTimeframe(nextTimeframe);
     setLoadNonce((value) => value + 1);
+  };
+
+  const handleTimeframeChange = (nextTimeframe: string) => {
+    if (trainingTask?.randomRun) {
+      void loadTimeframeView(nextTimeframe);
+      return;
+    }
+    startFreshTraining(instrumentId, nextTimeframe);
   };
 
   const waitForCnLiveUpdate = async () => {
@@ -4824,9 +4993,11 @@ export function TrainingWorkbench() {
         ...decision,
         reasons: [...decision.reasons],
       };
-      setDecisionSubmissions((items) => items.map((item) => item.id === editingSubmission.id
-        ? { ...item, decision: nextDecision }
-        : item));
+      const updatedSubmission = markDecisionSubmissionAsManuallyEdited(editingSubmission, nextDecision);
+      setDecisionSubmissions((items) => items.map((item) => item.id === editingSubmission.id ? {
+        ...item,
+        ...updatedSubmission,
+      } : item));
       setSelectedDecisionId(editingSubmission.id);
       appendEvent("decision_updated", {
         submissionId: editingSubmission.id,
@@ -4845,23 +5016,39 @@ export function TrainingWorkbench() {
     const autoSubmission = !backfillTarget
       ? decisionSubmissions.find((item) => item.autoGenerated && item.barTimestamp === targetBar.timestamp)
       : undefined;
-    const submission: DecisionSubmission = {
-      id: autoSubmission?.id ?? createUuid(),
-      barTimestamp: targetBar.timestamp,
-      cursor: targetCursor,
-      referencePrice: targetBar.close,
-      decision: {
-        ...decision,
-        reasons: [...decision.reasons],
-      },
-      submittedAt: new Date().toISOString(),
-      backfilled: Boolean(backfillTarget),
-      recordedAtCursor: backfillTarget ? cursor : undefined,
-    };
+    const currentBarSave = !backfillTarget
+      ? buildCurrentBarDecisionSave({
+          existingAutoSubmission: autoSubmission,
+          fallbackId: createUuid(),
+          barTimestamp: targetBar.timestamp,
+          cursor: targetCursor,
+          referencePrice: targetBar.close,
+          decision: {
+            ...decision,
+            reasons: [...decision.reasons],
+          },
+          submittedAt: new Date().toISOString(),
+        })
+      : null;
+    const submission: DecisionSubmission = backfillTarget
+      ? {
+          id: createUuid(),
+          barTimestamp: targetBar.timestamp,
+          cursor: targetCursor,
+          referencePrice: targetBar.close,
+          decision: {
+            ...decision,
+            reasons: [...decision.reasons],
+          },
+          submittedAt: new Date().toISOString(),
+          backfilled: true,
+          recordedAtCursor: cursor,
+        }
+      : currentBarSave!.submission;
     const associatedBackfillPositionIds = backfillTarget && backfillAssociation === "associate"
       ? backfillCandidates.map((position) => position.id)
       : [];
-    setDecisionSubmissions((items) => autoSubmission
+    setDecisionSubmissions((items) => autoSubmission && !backfillTarget
       ? items.map((item) => item.id === autoSubmission.id ? submission : item)
       : [...items, submission]);
     if (associatedBackfillPositionIds.length) {
@@ -4881,7 +5068,7 @@ export function TrainingWorkbench() {
       decision: submission.decision,
       backfilled: Boolean(backfillTarget),
       recordedAtCursor: backfillTarget ? cursor : undefined,
-      replacedAutoGenerated: Boolean(autoSubmission),
+      replacedAutoGenerated: Boolean(currentBarSave?.replacedAutoGenerated),
       associatedPositionIds: associatedBackfillPositionIds,
     }, targetBar.timestamp);
     if (backfillTarget) {
@@ -4892,8 +5079,8 @@ export function TrainingWorkbench() {
       setSaveState(trainingComplete ? "补写决策已加入 · 将自动保存" : "补写决策已保存 · 回放位置未改变");
       return;
     }
-    setSaveState("决策已提交");
-    revealNext();
+    setSaveState("决策已保存");
+    if (currentBarSave?.advancesReplay) revealNext();
   };
 
   const inspectSession = (session: TrainingSession, openReview = false) => {
@@ -5707,6 +5894,24 @@ export function TrainingWorkbench() {
     () => analyzePerformanceHabits(performanceHabitTrades),
     [performanceHabitTrades],
   );
+  const sopSamples = useMemo<SopTradeSample[]>(() => sessionSummaries.flatMap((summary) => (
+    summary.habitTrades.map((trade) => ({
+      market: trade.market,
+      instrumentId: summary.session.instrumentId,
+      timeframe: summary.session.timeframe,
+      result: trade.returnPct,
+      hasPretradePlan: trade.decision?.source === "pretrade",
+      planScore: trade.decision?.score ?? 0,
+    }))
+  )), [sessionSummaries]);
+  const sopProfileViews = useMemo(() => buildSopProfileViews(sopSamples), [sopSamples]);
+  const currentSopProfileId = useMemo(
+    () => findSopProfile(instrument.market, instrument.id, timeframe)?.id ?? null,
+    [instrument.id, instrument.market, timeframe],
+  );
+  const displayedSopProfileId = sopProfileSelectionTouched
+    ? sopSelectedProfileId
+    : currentSopProfileId ?? sopSelectedProfileId;
   const selectedPerformanceSession = filteredSessionSummaries.find(
     (summary) => summary.session.id === selectedPerformanceSessionId,
   );
@@ -6378,7 +6583,7 @@ export function TrainingWorkbench() {
   useEffect(() => {
     const timer = window.setTimeout(() => {
       if (view === "database") loadCoverage();
-      if (view === "review" || view === "performance") loadSessions(true);
+      if (view === "review" || view === "performance" || view === "sop") loadSessions(true);
     }, 0);
     return () => window.clearTimeout(timer);
   }, [loadCoverage, loadSessions, view]);
@@ -6528,6 +6733,9 @@ export function TrainingWorkbench() {
           <button className={view === "performance" ? "active" : ""} onClick={() => setView("performance")}>
             <Activity size={20} /><span>表现</span>
           </button>
+          <button className={view === "sop" ? "active" : ""} onClick={() => setView("sop")}>
+            <ListChecks size={20} /><span>SOP</span>
+          </button>
           <button className={view === "database" ? "active" : ""} onClick={() => setView("database")}>
             <Database size={20} /><span>数据</span>
           </button>
@@ -6575,9 +6783,13 @@ export function TrainingWorkbench() {
             )}
             <div className="timeframes" aria-label="周期">
               {timeframes.map((item) => (
-                <button key={item} className={timeframe === item ? "active" : ""} onClick={() => startFreshTraining(instrumentId, item)}>{item}</button>
+                <button key={item} className={chartTimeframe === item ? "active" : ""} disabled={chartViewLoading} onClick={() => handleTimeframeChange(item)}>{item}</button>
               ))}
             </div>
+            {chartViewLoading && <span className="chart-view-status">正在切换观察周期…</span>}
+            {chartViewError && <span className="chart-view-status error" role="alert">{chartViewError}</span>}
+            {chartViewSnapshotId && !chartViewLoading && !chartViewError && <span className="chart-view-status">观察数据已缓存</span>}
+            {!showingCanonicalChart && <span className="chart-view-status">训练基准 {timeframe} · 仅观察</span>}
             <div className="indicator-toolbar">
               <button
                 type="button"
@@ -6638,22 +6850,25 @@ export function TrainingWorkbench() {
             aria-controls="mobile-training-toolbar"
             onClick={() => setMobileToolbarOpen((value) => !value)}
           >
-            <span>{timeframe}</span><ChevronDown size={15} />
+            <span>{chartTimeframe}</span><ChevronDown size={15} />
           </button>
           {mobileToolbarOpen && (
             <div className="mobile-toolbar-popover" id="mobile-training-toolbar">
               <div className="mobile-toolbar-meta">
                 <span>{trainingTask ? trainingModeLabels[trainingTask.mode] : "自由训练"}</span>
                 <span>{tradingMode === "capital" ? "资金账户" : "收益率"}</span>
+                {!showingCanonicalChart && <span>训练基准 {timeframe} · 仅观察</span>}
               </div>
               <div className="mobile-timeframes" aria-label="手机端周期">
                 {timeframes.map((item) => (
-                  <button key={item} className={timeframe === item ? "active" : ""} onClick={() => {
+                  <button key={item} className={chartTimeframe === item ? "active" : ""} disabled={chartViewLoading} onClick={() => {
                     setMobileToolbarOpen(false);
-                    startFreshTraining(instrumentId, item);
+                    handleTimeframeChange(item);
                   }}>{item}</button>
                 ))}
               </div>
+              {chartViewLoading && <div className="mobile-random-status"><Activity size={12} />正在切换观察周期…</div>}
+              {chartViewError && <div className="mobile-random-error" role="alert">{chartViewError}</div>}
               <div className="mobile-indicator-settings">
                 <strong><LineChart size={13} />主图指标</strong>
                 <MovingAverageEditor compact settings={movingAverageSettings} onChange={setMovingAverageSettings} />
@@ -7148,7 +7363,9 @@ export function TrainingWorkbench() {
               <div className="chart-heading">
                 <div>
                   <strong>{trainingTask?.hideInstrument ? "BLIND" : instrument.symbol}</strong>
-                  <span>{trainingTask?.hideInstrument ? `品种已隐藏 · ${timeframe}` : `${instrument.name} · ${timeframe} · 历史训练`}</span>
+                  <span>{trainingTask?.hideInstrument
+                    ? `品种已隐藏 · ${chartTimeframe}${showingCanonicalChart ? "" : ` · 训练基准 ${timeframe}`}`
+                    : `${instrument.name} · ${chartTimeframe}${showingCanonicalChart ? "" : ` · 训练基准 ${timeframe}`} · 历史训练`}</span>
                 </div>
                 {currentBar && (
                   <div className="ohlc-line">
@@ -7183,7 +7400,7 @@ export function TrainingWorkbench() {
               )}
 
               <div className="chart-area">
-                <div className="drawing-rail" aria-label="画图工具">
+                <div className={`drawing-rail${showingCanonicalChart ? "" : " observation-only"}`} aria-label="画图工具">
                   <button
                     className={!selectedDrawingId && !drawingGroupOpen && !drawingRequest && !drawingTextOpen ? "active" : ""}
                     title="光标"
@@ -7370,30 +7587,30 @@ export function TrainingWorkbench() {
                     </div>
                   ) : (
                     <KLineReplayChart
-                      bars={visibleBars}
-                      dataIndexOffset={chartDataIndexOffset}
+                      bars={renderedChartBars}
+                      dataIndexOffset={showingCanonicalChart ? chartDataIndexOffset : 0}
                       symbol={trainingTask?.hideInstrument ? "BLIND" : instrument.symbol}
                       timezone={instrument.timezone}
-                      timeframe={timeframe}
+                      timeframe={chartTimeframe}
                       pricePrecision={instrument.pricePrecision}
                       movingAverageSettings={movingAverageSettings}
-                      drawingRequest={drawingRequest}
+                      drawingRequest={showingCanonicalChart ? drawingRequest : null}
                       clearNonce={clearNonce}
                       tradeMarkers={tradeMarkers}
                       decisionMarkers={decisionMarkers}
                       protectionLines={protectionLines}
-                      priceSelectionMode={protectionPriceSelection}
-                      drawings={drawings}
-                      selectedDrawingId={selectedDrawingId}
-                      drawingsRestoreNonce={drawingsRestoreNonce}
+                      priceSelectionMode={showingCanonicalChart ? protectionPriceSelection : null}
+                      drawings={showingCanonicalChart ? drawings : []}
+                      selectedDrawingId={showingCanonicalChart ? selectedDrawingId : ""}
+                      drawingsRestoreNonce={showingCanonicalChart ? drawingsRestoreNonce : 0}
                       hideDate={Boolean(trainingTask?.hideDate)}
                       hidePrice={Boolean(trainingTask?.hidePrice)}
                       onDecisionSelect={setSelectedDecisionId}
-                      onProtectionPriceSelect={applyDraftProtectionPrice}
-                      onProtectionLineMove={moveProtectionLine}
-                      onCandleContextMenu={openDecisionForCandle}
-                      onDrawingsChange={handleDrawingsChange}
-                      onDrawingSelect={(id) => setSelectedDrawingId(id ?? "")}
+                      onProtectionPriceSelect={showingCanonicalChart ? applyDraftProtectionPrice : ignoreProtectionPriceSelect}
+                      onProtectionLineMove={showingCanonicalChart ? moveProtectionLine : rejectProtectionLineMove}
+                      onCandleContextMenu={showingCanonicalChart ? openDecisionForCandle : ignoreCandleContextMenu}
+                      onDrawingsChange={showingCanonicalChart ? handleDrawingsChange : ignoreDrawingsChange}
+                      onDrawingSelect={showingCanonicalChart ? (id) => setSelectedDrawingId(id ?? "") : ignoreDrawingSelect}
                     />
                   )}
                   {protectionPriceSelection && (
@@ -7732,7 +7949,7 @@ export function TrainingWorkbench() {
             <aside className="decision-panel" ref={decisionPanelRef}>
               <div className="panel-title">
                 <div><span>{editingDecisionId ? "编辑事前决策" : decisionTarget ? "补写事前决策" : "事前决策卡"}</span><strong>{planScore}%</strong></div>
-                <p>{editingDecisionId ? "修改后会替换原记录，并保留原 K 线绑定" : decisionTarget ? "仅补充记录，不回退行情，也不改变持仓" : "先写计划，再揭示下一根"}</p>
+                <p>{editingDecisionId ? "修改后会替换原记录，并保留原 K 线绑定" : decisionTarget ? "仅补充记录，不回退行情，也不改变持仓" : "先写计划，保存后留在当前 K 线"}</p>
               </div>
               {decisionTarget && (
                 <div className="decision-backfill-target">
@@ -7905,7 +8122,7 @@ export function TrainingWorkbench() {
                 <div><strong>{decision.reasons.length >= 2 ? "条件已成形" : "再找一个独立理由"}</strong><span>评分关注过程，不用结果倒推理由</span></div>
               </div>
               <div className="submitted-plan-count">已提交 <strong>{decisionSubmissions.length}</strong> 份计划 · 右键或长按历史 K 线可补写</div>
-              <button className="commit-plan" disabled={trainingComplete && !decisionTarget} onClick={submitDecision}><ListChecks size={17} />{editingDecisionId ? "保存编辑" : decisionTarget ? backfillCandidates.length && backfillAssociation === "associate" ? "保存并关联" : "只保存计划" : trainingComplete ? "训练已结束" : "提交决策并揭示下一根"}</button>
+              <button className="commit-plan" disabled={trainingComplete && !decisionTarget} onClick={submitDecision}><Save size={17} />{editingDecisionId ? "保存编辑" : decisionTarget ? backfillCandidates.length && backfillAssociation === "associate" ? "保存并关联" : "只保存计划" : trainingComplete ? "训练已结束" : "保存"}</button>
             </aside>
           </div>
         )}
@@ -8362,6 +8579,22 @@ export function TrainingWorkbench() {
               </>
             )}
           </section>
+        )}
+
+        {view === "sop" && (
+          <SopPage
+            profiles={sopProfileViews}
+            selectedProfileId={displayedSopProfileId}
+            currentProfileId={currentSopProfileId}
+            strictModeEnabled={appSettings.strictModeEnabled}
+            requirePretradePlan={appSettings.requirePretradePlan}
+            sopCheckEnabled={appSettings.sopCheckEnabled}
+            onSelectProfile={(id) => {
+              setSopProfileSelectionTouched(true);
+              setSopSelectedProfileId(id);
+            }}
+            onOpenSettings={() => openSettingsPanel("discipline")}
+          />
         )}
 
         {view === "database" && (

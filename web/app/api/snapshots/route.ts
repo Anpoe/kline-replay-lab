@@ -8,15 +8,35 @@ import {
   type PatternPreset,
 } from "../../lib/patternFilters";
 import {
+  aggregateCandles as aggregateFxCandles,
+  bucketStartTimestamp,
+  DEFAULT_FX_SESSION,
+  type FxTimeframe,
+} from "../../lib/fx/dukascopyAggregation";
+import {
+  aggregateCandlesToTimeframe,
+  canAggregateTimeframe,
+  timeframeBucketKey,
+  timeframeMinutes,
+  type SupportedTimeframe,
+} from "../../lib/timeframeAggregation";
+import {
+  buildTimeframeViewSourceMetadata,
+  type TimeframeViewSourceMode,
+} from "../../lib/timeframeView";
+import {
   buildSnapshotChunks,
   buildSnapshotContentHash,
   canonicalStringify,
   getSnapshotByContentHash,
   getSnapshotRow,
+  materializeSnapshotCandles,
   SNAPSHOT_FORMAT_VERSION,
   SNAPSHOT_NORMALIZATION_VERSION,
+  snapshotColumns,
   snapshotResponse,
   type SnapshotChunk,
+  type SnapshotRow,
   type SnapshotReadRange,
 } from "../../lib/snapshotStorage";
 
@@ -57,6 +77,11 @@ type ReplayWindowRequest = {
   endDate?: string;
   length?: number;
   historyBars?: number;
+};
+
+type TimeframeViewRequest = {
+  sourceSnapshotId?: string;
+  sourceTimeframe?: string;
 };
 
 type RandomWindowSelection = {
@@ -555,6 +580,122 @@ async function mapSnapshotChunks(db: SnapshotDatabase, snapshotId: string, chunk
   }
 }
 
+async function readDirectTimeframeViewCandles(
+  db: SnapshotDatabase,
+  instrumentId: string,
+  timeframe: string,
+  adjustmentType: string,
+  firstTimestamp: number,
+  lastTimestamp: number,
+) {
+  const minutes = timeframeMinutes(timeframe);
+  if (minutes == null) return null;
+  const lookbackMs = minutes * 60_000;
+  const database = await db.prepare(`SELECT timestamp, open, high, low, close, volume, turnover
+      FROM candles
+      WHERE instrument_id = ? AND timeframe = ? AND adjustment_type = ?
+        AND timestamp >= ? AND timestamp <= ?
+      ORDER BY timestamp ASC`)
+    .bind(
+      instrumentId,
+      timeframe,
+      adjustmentType,
+      firstTimestamp - lookbackMs,
+      lastTimestamp,
+    )
+    .all<SnapshotCandle>();
+  if (database.results.length) return database.results;
+
+  const local = await readLocalDataJson<LocalCandleResponse>(
+    `/candles?instrument=${encodeURIComponent(instrumentId)}&timeframe=${encodeURIComponent(timeframe)}`,
+    15000,
+  );
+  if (!local?.candles?.length) return null;
+  return local.candles.filter((candle) => (
+    Number(candle.timestamp) >= firstTimestamp - lookbackMs
+    && Number(candle.timestamp) <= lastTimestamp
+  ));
+}
+
+async function getCachedTimeframeView(
+  db: SnapshotDatabase,
+  instrumentId: string,
+  timeframe: string,
+  adjustmentType: string,
+  sourceJson: string,
+) {
+  return db.prepare(`SELECT ${snapshotColumns} FROM data_snapshots
+      WHERE instrument_id = ? AND timeframe = ? AND adjustment_type = ?
+        AND source_json = ? AND status = 'ready'
+      ORDER BY created_at DESC LIMIT 1`)
+    .bind(instrumentId, timeframe, adjustmentType, sourceJson)
+    .first<SnapshotRow>();
+}
+
+function isFxInstrument(instrumentId: string, instrument: Record<string, unknown>) {
+  return String(instrument.market ?? "").toUpperCase() === "FX" || /\.FX$/i.test(instrumentId);
+}
+
+function aggregateTimeframeViewCandles(
+  sourceCandles: SnapshotCandle[],
+  targetTimeframe: string,
+  instrumentId: string,
+  instrument: Record<string, unknown>,
+) {
+  const timeZone = String(instrument.timezone ?? "UTC");
+  if (isFxInstrument(instrumentId, instrument)) {
+    return aggregateFxCandles(
+      sourceCandles,
+      targetTimeframe as FxTimeframe,
+      { ...DEFAULT_FX_SESSION, timeZone },
+    );
+  }
+  return aggregateCandlesToTimeframe(
+    sourceCandles,
+    targetTimeframe as SupportedTimeframe,
+    timeZone,
+  );
+}
+
+function timeframeViewCandleKey(
+  timestamp: number,
+  targetTimeframe: string,
+  instrumentId: string,
+  instrument: Record<string, unknown>,
+) {
+  const timeZone = String(instrument.timezone ?? "UTC");
+  if (isFxInstrument(instrumentId, instrument)) {
+    return String(bucketStartTimestamp(
+      timestamp,
+      targetTimeframe as FxTimeframe,
+      { ...DEFAULT_FX_SESSION, timeZone },
+    ));
+  }
+  return timeframeBucketKey(timestamp, targetTimeframe as SupportedTimeframe, timeZone);
+}
+
+function coversTimeframeViewWindow(
+  directCandles: SnapshotCandle[],
+  aggregatedCandles: SnapshotCandle[],
+  targetTimeframe: string,
+  instrumentId: string,
+  instrument: Record<string, unknown>,
+) {
+  const expectedBuckets = new Set(aggregatedCandles.map((candle) => timeframeViewCandleKey(
+    candle.timestamp,
+    targetTimeframe,
+    instrumentId,
+    instrument,
+  )));
+  const actualBuckets = new Set(directCandles.map((candle) => timeframeViewCandleKey(
+    candle.timestamp,
+    targetTimeframe,
+    instrumentId,
+    instrument,
+  )));
+  return expectedBuckets.size > 0 && [...expectedBuckets].every((bucket) => actualBuckets.has(bucket));
+}
+
 export async function GET(request: Request) {
   await ensureSchema();
   const url = new URL(request.url);
@@ -599,6 +740,7 @@ export async function POST(request: Request) {
     adjustmentType?: string;
     randomWindow?: RandomWindowRequest;
     replayWindow?: ReplayWindowRequest;
+    timeframeView?: TimeframeViewRequest;
   };
   if (!payload.instrumentId || !payload.timeframe) {
     return Response.json({ error: "缺少品种或周期" }, { status: 400 });
@@ -606,12 +748,37 @@ export async function POST(request: Request) {
 
   const adjustmentType = payload.adjustmentType ?? "none";
   const db = getRawDb();
+  let sourceViewRow: SnapshotRow | null = null;
+  if (payload.timeframeView) {
+    const sourceSnapshotId = String(payload.timeframeView.sourceSnapshotId ?? "").trim();
+    const sourceTimeframe = String(payload.timeframeView.sourceTimeframe ?? "").trim();
+    if (!sourceSnapshotId || !sourceTimeframe) {
+      return Response.json({ error: "缺少观察周期的来源快照" }, { status: 400 });
+    }
+    sourceViewRow = await getSnapshotRow(db, sourceSnapshotId);
+    if (!sourceViewRow) {
+      return Response.json({ error: "训练来源快照不存在或尚未就绪" }, { status: 404 });
+    }
+    if (
+      sourceViewRow.instrumentId !== payload.instrumentId
+      || sourceViewRow.timeframe !== sourceTimeframe
+      || sourceViewRow.adjustmentType !== adjustmentType
+    ) {
+      return Response.json({ error: "观察周期来源快照与当前训练不匹配" }, { status: 409 });
+    }
+    if (payload.timeframe === sourceTimeframe) {
+      return Response.json(await snapshotResponse(db, sourceViewRow));
+    }
+    if (timeframeMinutes(payload.timeframe) == null) {
+      return Response.json({ error: `不支持的观察周期：${payload.timeframe}` }, { status: 400 });
+    }
+  }
   let instrument = await db
     .prepare(`SELECT id, symbol, name, market, timezone, price_precision AS pricePrecision
       FROM instruments WHERE id = ?`)
     .bind(payload.instrumentId)
     .first<Record<string, unknown>>();
-  const databaseWindowResult = instrument && payload.randomWindow
+  const databaseWindowResult = !sourceViewRow && instrument && payload.randomWindow
     ? await selectDatabaseRandomWindow(
         db,
         payload.instrumentId,
@@ -621,7 +788,7 @@ export async function POST(request: Request) {
         payload.randomWindow,
       )
     : null;
-  const databaseReplayWindowResult = instrument && payload.replayWindow
+  const databaseReplayWindowResult = !sourceViewRow && instrument && payload.replayWindow
     ? await selectDatabaseReplayWindow(
         db,
         payload.instrumentId,
@@ -644,7 +811,7 @@ export async function POST(request: Request) {
     return Response.json({ error: "没有足够的 K 线可创建 Replay 窗口" }, { status: 422 });
   }
   const boundedWindowRequested = Boolean(payload.randomWindow || payload.replayWindow);
-  const candlesResult = boundedWindowRequested ? null : await db
+  const candlesResult = sourceViewRow || boundedWindowRequested ? null : await db
     .prepare(`SELECT timestamp, open, high, low, close, volume, turnover, source
       FROM candles WHERE instrument_id = ? AND timeframe = ? AND adjustment_type = ?
       ORDER BY timestamp ASC`)
@@ -653,10 +820,96 @@ export async function POST(request: Request) {
   const d1Candles = databaseWindow?.candles ?? candlesResult?.results ?? [];
   let candles: SnapshotCandle[] = d1Candles;
   let sourceMetadata: unknown = null;
+  let timeframeViewMetadata: ReturnType<typeof buildTimeframeViewSourceMetadata> | null = null;
+  let sourceJsonOverride: string | null = null;
   let windowSelection: RandomWindowSelection | null = databaseWindow?.selection ?? null;
   let randomPatternMatch: RandomWindowPatternMatch | null = databaseWindow?.patternMatch ?? null;
 
-  if (instrument && d1Candles.length) {
+  if (sourceViewRow) {
+    try {
+      instrument = JSON.parse(sourceViewRow.instrumentJson) as Record<string, unknown>;
+      const firstTimestamp = Number(sourceViewRow.firstTimestamp);
+      const lastTimestamp = Number(sourceViewRow.lastTimestamp);
+      const aggregateMetadata = canAggregateTimeframe(sourceViewRow.timeframe, payload.timeframe)
+        ? buildTimeframeViewSourceMetadata({
+            sourceSnapshotId: sourceViewRow.id,
+            sourceTimeframe: sourceViewRow.timeframe,
+            targetTimeframe: payload.timeframe,
+            mode: "aggregated",
+            firstTimestamp,
+            lastTimestamp,
+          })
+        : null;
+      const directMetadata = buildTimeframeViewSourceMetadata({
+        sourceSnapshotId: sourceViewRow.id,
+        sourceTimeframe: sourceViewRow.timeframe,
+        targetTimeframe: payload.timeframe,
+        mode: "direct",
+        firstTimestamp,
+        lastTimestamp,
+      });
+      for (const candidateMetadata of [aggregateMetadata, directMetadata]) {
+        if (!candidateMetadata) continue;
+        const cached = await getCachedTimeframeView(
+          db,
+          payload.instrumentId,
+          payload.timeframe,
+          adjustmentType,
+          canonicalStringify(candidateMetadata),
+        );
+        if (cached) {
+          return Response.json({
+            ...await snapshotResponse(db, cached),
+            timeframeView: candidateMetadata,
+          });
+        }
+      }
+      const directCandles = await readDirectTimeframeViewCandles(
+        db,
+        payload.instrumentId,
+        payload.timeframe,
+        adjustmentType,
+        firstTimestamp,
+        lastTimestamp,
+      );
+      const sourceCandles = aggregateMetadata
+        ? await materializeSnapshotCandles(db, sourceViewRow)
+        : null;
+      const aggregatedCandles = aggregateMetadata
+        ? aggregateTimeframeViewCandles(
+            sourceCandles ?? [],
+            payload.timeframe,
+            payload.instrumentId,
+            instrument,
+          )
+        : null;
+      const directIsComplete = Boolean(
+        directCandles?.length
+        && (!aggregatedCandles
+          || coversTimeframeViewWindow(
+            directCandles,
+            aggregatedCandles,
+            payload.timeframe,
+            payload.instrumentId,
+            instrument,
+          )),
+      );
+      const mode: TimeframeViewSourceMode = directIsComplete ? "direct" : "aggregated";
+      if (mode === "aggregated" && !aggregateMetadata) {
+        return Response.json({
+          error: `没有 ${payload.timeframe} 数据，无法从 ${sourceViewRow.timeframe} 自动聚合`,
+        }, { status: 422 });
+      }
+      timeframeViewMetadata = mode === "aggregated" ? aggregateMetadata : directMetadata;
+      sourceMetadata = timeframeViewMetadata;
+      sourceJsonOverride = canonicalStringify(sourceMetadata);
+      candles = directIsComplete ? directCandles ?? [] : aggregatedCandles ?? [];
+    } catch (error) {
+      return Response.json({
+        error: error instanceof Error ? error.message : "观察周期数据创建失败",
+      }, { status: 500 });
+    }
+  } else if (instrument && d1Candles.length) {
     const windowMetadata = payload.randomWindow ? "randomWindow" : "replayWindow";
     sourceMetadata = {
       ...d1SourceMetadata(d1Candles),
@@ -707,9 +960,10 @@ export async function POST(request: Request) {
       ...await snapshotResponse(db, row),
       ...(windowSelection ? { selection: windowSelection } : {}),
       ...(randomPatternMatch ? { patternMatch: randomPatternMatch } : {}),
+      ...(timeframeViewMetadata ? { timeframeView: timeframeViewMetadata } : {}),
     });
     const chunks = await buildSnapshotChunks(candles, payload.timeframe);
-    const sourceJson = canonicalStringify(sourceMetadata);
+    const sourceJson = sourceJsonOverride ?? canonicalStringify(sourceMetadata);
     const contentHash = await buildSnapshotContentHash({
       instrument,
       timeframe: payload.timeframe,

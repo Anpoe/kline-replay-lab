@@ -75,3 +75,27 @@ test("does not call the persistence adapter after validation fails", () => {
   assert.equal(result.ok, false);
   assert.equal(writes, 0);
 });
+
+test("normalizes strict mode switches independently", () => {
+  const settings = normalizeSettings({
+    ...defaultAppSettings,
+    strictModeEnabled: true,
+    requirePretradePlan: false,
+    sopCheckEnabled: true,
+    requiredPretradeFields: ["target", "target", "unknown"],
+  });
+
+  assert.equal(settings.strictModeEnabled, true);
+  assert.equal(settings.requirePretradePlan, false);
+  assert.equal(settings.sopCheckEnabled, true);
+  assert.deepEqual(settings.requiredPretradeFields, ["target"]);
+});
+
+test("old settings keep strict mode disabled until the user opts in", () => {
+  const settings = normalizeSettings({ defaultInstrumentId: "AAPL" });
+
+  assert.equal(settings.strictModeEnabled, false);
+  assert.equal(settings.requirePretradePlan, true);
+  assert.equal(settings.sopCheckEnabled, true);
+  assert.deepEqual(settings.requiredPretradeFields, defaultAppSettings.requiredPretradeFields);
+});

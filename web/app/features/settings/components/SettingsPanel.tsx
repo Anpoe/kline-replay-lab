@@ -2,6 +2,7 @@ import type { ReactNode } from "react";
 import { Save, Trash2, X } from "lucide-react";
 import { marketSelectionLabel } from "../../../lib/dataMarkets";
 import type { ExecutionCostProfile, OrderType } from "../../../lib/executionEngine";
+import { pretradePlanFieldOptions } from "../../../lib/tradingDiscipline";
 import {
   marketOrderQuantityFields,
   MAX_REPLAY_HISTORY_BARS,
@@ -63,6 +64,7 @@ export function SettingsPanel({
         <div className="settings-tabs" role="tablist" aria-label="设置分类">
           <button className={tab === "basic" ? "active" : ""} onClick={() => onTabChange("basic")}>基本设置</button>
           <button className={tab === "training" ? "active" : ""} onClick={() => onTabChange("training")}>训练设置</button>
+          <button className={tab === "discipline" ? "active" : ""} onClick={() => onTabChange("discipline")}>交易纪律</button>
           <button className={tab === "data" ? "active" : ""} onClick={() => onTabChange("data")}>数据源设置</button>
         </div>
 
@@ -377,6 +379,103 @@ export function SettingsPanel({
               </div>
               <small>冷却用于去掉同一段走势里的重复命中；扫描强度越大，稀有形态越容易找到，但仍会受服务端有界窗口保护。5m 等短周期若长期无命中，请优先降低趋势升幅阈值。具体形态阈值在左侧“形态”中管理。</small>
             </div>
+          </div>
+        ) : tab === "discipline" ? (
+          <div className="settings-section discipline-settings">
+            <div className="settings-section-head">
+              <strong>严格模式</strong>
+              <span>把交易纪律放到训练开仓入口，设置保存后立即用于当前训练。</span>
+            </div>
+
+            <div className={`discipline-master-card${draft.strictModeEnabled ? " enabled" : ""}`}>
+              <div>
+                <span className="section-label">EXECUTION DISCIPLINE</span>
+                <strong>{draft.strictModeEnabled ? "严格模式已开启" : "严格模式未开启"}</strong>
+                <small>{draft.strictModeEnabled ? "不满足已开启的门禁时，训练开仓会被拒绝并留下原因。" : "先以普通模式训练；开启后才会拦截不完整的开仓计划。"}</small>
+              </div>
+              <button
+                type="button"
+                className={`discipline-switch${draft.strictModeEnabled ? " active" : ""}`}
+                aria-label={draft.strictModeEnabled ? "关闭严格模式" : "开启严格模式"}
+                aria-pressed={draft.strictModeEnabled}
+                onClick={() => onDraftChange((next) => ({ ...next, strictModeEnabled: !next.strictModeEnabled }))}
+              ><span aria-hidden="true" /></button>
+            </div>
+
+            <div className="settings-rule discipline-rule">
+              <div className="discipline-option-row">
+                <div>
+                  <strong>需要事前规划卡</strong>
+                  <small>开仓前必须在当前 K 线上手动提交计划；自动关联保护价和补写记录不算事前计划。</small>
+                </div>
+                <button
+                  type="button"
+                  className={`discipline-switch small${draft.requirePretradePlan ? " active" : ""}`}
+                  aria-label={draft.requirePretradePlan ? "关闭事前规划卡" : "开启事前规划卡"}
+                  aria-pressed={draft.requirePretradePlan}
+                  onClick={() => onDraftChange((next) => ({ ...next, requirePretradePlan: !next.requirePretradePlan }))}
+                ><span aria-hidden="true" /></button>
+              </div>
+              <div className="discipline-field-settings">
+                <div className="discipline-field-settings-head">
+                  <div>
+                    <strong>规划卡必填项</strong>
+                    <small>可选项包括计划说明；关闭某项后，只影响事前规划卡，不会因为该项为空拦截；SOP 检查仍单独生效。</small>
+                  </div>
+                  <span>{draft.requiredPretradeFields.length}/{pretradePlanFieldOptions.length}</span>
+                </div>
+                <div className="discipline-field-list">
+                  {pretradePlanFieldOptions.map((field) => {
+                    const enabled = draft.requiredPretradeFields.includes(field.key);
+                    return (
+                      <div className="discipline-field-row" key={field.key}>
+                        <div>
+                          <strong>{field.label}</strong>
+                          <small>{field.description}</small>
+                        </div>
+                        <button
+                          type="button"
+                          className={`discipline-switch small${enabled ? " active" : ""}`}
+                          aria-label={`${enabled ? "关闭" : "开启"}规划卡必填项：${field.label}`}
+                          aria-pressed={enabled}
+                          onClick={() => onDraftChange((next) => ({
+                            ...next,
+                            requiredPretradeFields: enabled
+                              ? next.requiredPretradeFields.filter((item) => item !== field.key)
+                              : [...next.requiredPretradeFields, field.key],
+                          }))}
+                        ><span aria-hidden="true" /></button>
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+            </div>
+
+            <div className="settings-rule discipline-rule">
+              <div className="discipline-option-row">
+                <div>
+                  <strong>启用 SOP 检查</strong>
+                  <small>按当前市场和周期匹配 SOP；第一阶段检查市场状态、位置、至少两个理由、失效点和第一目标。</small>
+                </div>
+                <button
+                  type="button"
+                  className={`discipline-switch small${draft.sopCheckEnabled ? " active" : ""}`}
+                  aria-label={draft.sopCheckEnabled ? "关闭 SOP 检查" : "开启 SOP 检查"}
+                  aria-pressed={draft.sopCheckEnabled}
+                  onClick={() => onDraftChange((next) => ({ ...next, sopCheckEnabled: !next.sopCheckEnabled }))}
+                ><span aria-hidden="true" /></button>
+              </div>
+            </div>
+
+            <div className="discipline-profile-list">
+              <div className="settings-section-head"><strong>当前 SOP 版本</strong><span>三个版本先作为 v1.0 基线，页面中的样本反馈会持续更新。</span></div>
+              <div className="discipline-profile-row"><span><b>美股日线版</b><small>趋势延续与突破回踩</small></span><em>US · 1d · v1.0</em></div>
+              <div className="discipline-profile-row"><span><b>A 股日线版</b><small>趋势位置与交易规则</small></span><em>CN · 1d · v1.0</em></div>
+              <div className="discipline-profile-row"><span><b>EURUSD 5 分钟版</b><small>高周期背景与盘中触发</small></span><em>FX · 5m · v1.0</em></div>
+            </div>
+
+            <div className="discipline-note"><strong>使用说明</strong><span>严格模式关闭时，三个开关只保存偏好，不改变下单。没有适用 SOP 的其他市场不会被 SOP 检查拦截；原有市场规则仍照常生效。</span></div>
           </div>
         ) : (
           dataPanel

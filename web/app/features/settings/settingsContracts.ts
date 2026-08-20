@@ -22,12 +22,17 @@ import {
   normalizeReplayHistoryBars,
 } from "../../lib/trainingTasks.ts";
 import type { TradingMode } from "../../lib/tradingAccount.ts";
+import {
+  defaultRequiredPretradeFields,
+  pretradePlanFieldOptions,
+  type PretradePlanField,
+} from "../../lib/tradingDiscipline.ts";
 
 export type { DataMarket } from "../../lib/dataMarkets.ts";
 
 export type PositionSizeMode = "fixed" | "risk-percent";
 export type MarketOrderQtySettings = Record<DataMarket, number>;
-export type SettingsTab = "basic" | "training" | "data";
+export type SettingsTab = "basic" | "training" | "discipline" | "data";
 
 export const timeframes: string[] = ["1m", "5m", "1h", "1d", "1w"];
 
@@ -77,6 +82,10 @@ export type AppSettings = {
   randomUsMinAverageDailyDollarVolume: number;
   patternCooldownBars: number;
   patternScanAttempts: number;
+  strictModeEnabled: boolean;
+  requirePretradePlan: boolean;
+  requiredPretradeFields: PretradePlanField[];
+  sopCheckEnabled: boolean;
 };
 
 export const defaultAppSettings: AppSettings = {
@@ -106,6 +115,10 @@ export const defaultAppSettings: AppSettings = {
   randomUsMinAverageDailyDollarVolume: 1000000,
   patternCooldownBars: 10,
   patternScanAttempts: 12,
+  strictModeEnabled: false,
+  requirePretradePlan: true,
+  requiredPretradeFields: [...defaultRequiredPretradeFields],
+  sopCheckEnabled: true,
 };
 
 export function marketOrderQtyKey(market: string | undefined, instrumentId = ""): DataMarket | null {
@@ -120,6 +133,14 @@ export function marketOrderQtyKey(market: string | undefined, instrumentId = "")
 export function positiveOrderQty(value: unknown, fallback: number) {
   const quantity = Number(value);
   return Number.isFinite(quantity) && quantity > 0 ? quantity : fallback;
+}
+
+export function normalizeRequiredPretradeFields(value: unknown): PretradePlanField[] {
+  if (!Array.isArray(value)) return [...defaultRequiredPretradeFields];
+  const allowed = new Set(pretradePlanFieldOptions.map((field) => field.key));
+  return value.filter((field): field is PretradePlanField => (
+    typeof field === "string" && allowed.has(field as PretradePlanField)
+  )).filter((field, index, fields) => fields.indexOf(field) === index);
 }
 
 export function normalizeMarketOrderQtySettings(value: unknown, legacyValue?: unknown): MarketOrderQtySettings {
@@ -198,6 +219,10 @@ export function normalizeSettings(value: Partial<AppSettings>): AppSettings {
     ),
     patternCooldownBars: Math.max(0, Math.min(100, Math.round(Number(merged.patternCooldownBars) || 0))),
     patternScanAttempts: Math.max(1, Math.min(50, Math.round(Number(merged.patternScanAttempts) || defaultAppSettings.patternScanAttempts))),
+    strictModeEnabled: merged.strictModeEnabled === true,
+    requirePretradePlan: merged.requirePretradePlan !== false,
+    requiredPretradeFields: normalizeRequiredPretradeFields(value.requiredPretradeFields),
+    sopCheckEnabled: merged.sopCheckEnabled !== false,
   };
 }
 
