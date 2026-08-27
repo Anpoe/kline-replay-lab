@@ -10,14 +10,15 @@ import {
 export async function GET(request: Request) {
   await ensureSchema();
   const url = new URL(request.url);
+  const market = url.searchParams.get("market")?.trim().toUpperCase() === "GOLD" ? "GOLD" : "FX";
   const task = await getFxTask(getRawDb(), url.searchParams.get("taskId") ?? undefined, url.searchParams.get("pairId") ?? undefined);
-  return Response.json({ task: getFxTaskView(task), pairs: getFxCatalog(), qualitySummary: task ? getFxTaskView(task)?.quality ?? null : null });
+  return Response.json({ task: getFxTaskView(task), pairs: getFxCatalog(market), qualitySummary: task ? getFxTaskView(task)?.quality ?? null : null });
 }
 
 export async function POST(request: Request) {
   await ensureSchema();
   const body = await request.json() as { mode?: FxTaskMode; pairId?: unknown; startDate?: unknown; endDate?: unknown; rawTimeframe?: unknown; targetTimeframes?: unknown; keepRawCsv?: unknown };
-  if (body.mode !== "initialize" && body.mode !== "update") return Response.json({ error: "缺少外汇任务模式" }, { status: 400 });
+  if (body.mode !== "initialize" && body.mode !== "update") return Response.json({ error: "缺少行情任务模式" }, { status: 400 });
   try {
     const task = await createFxTask(getRawDb(), body.mode, body);
     return Response.json({ task: getFxTaskView(task) }, { status: 201 });

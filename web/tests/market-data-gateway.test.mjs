@@ -60,6 +60,23 @@ test("preserves provider, job, and task polling endpoints", async () => {
   assert.equal(requests[6].init.cache, "no-store");
 });
 
+test("filters FX task polling by pair without breaking the legacy signal argument", async () => {
+  const requests = [];
+  const gateway = createMarketDataGateway(async (input, init) => {
+    requests.push({ input, init });
+    return response({ payload: { task: null } });
+  });
+  const signal = new AbortController().signal;
+
+  await gateway.loadFxTask("XAUUSD.GOLD");
+  await gateway.loadFxTask(signal);
+
+  assert.equal(requests[0].input, "/api/fx-data?pairId=XAUUSD.GOLD");
+  assert.equal(requests[0].init.signal, undefined);
+  assert.equal(requests[1].input, "/api/fx-data");
+  assert.equal(requests[1].init.signal, signal);
+});
+
 test("preserves data task actions and provider setting payloads", async () => {
   const requests = [];
   const gateway = createMarketDataGateway(async (input, init) => {

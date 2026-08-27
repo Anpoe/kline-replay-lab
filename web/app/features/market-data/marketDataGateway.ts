@@ -140,12 +140,16 @@ export function createMarketDataGateway(fetcher: MarketDataGatewayFetch) {
     "读取 A 股维护任务失败",
   );
 
-  const loadFxTask = <T = unknown>(signal?: AbortSignal) => requestJson<T>(
-    fetcher,
-    "/api/fx-data",
-    withSignal({ cache: "no-store" }, signal),
-    "读取外汇数据任务失败",
-  );
+  const loadFxTask = <T = unknown>(pairIdOrSignal?: string | AbortSignal, signal?: AbortSignal) => {
+    const pairId = typeof pairIdOrSignal === "string" ? pairIdOrSignal : undefined;
+    const requestSignal = typeof pairIdOrSignal === "string" ? signal : pairIdOrSignal ?? signal;
+    return requestJson<T>(
+      fetcher,
+      `/api/fx-data${pairId ? `?pairId=${encodeURIComponent(pairId)}` : ""}`,
+      withSignal({ cache: "no-store" }, requestSignal),
+      "读取行情数据任务失败",
+    );
+  };
 
   const startLocalInitialization = <T = unknown>(plan: unknown, signal?: AbortSignal) => requestJson<T>(
     fetcher,
@@ -258,7 +262,7 @@ export function createMarketDataGateway(fetcher: MarketDataGatewayFetch) {
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ taskId }),
     }, signal),
-    "外汇任务请求失败",
+      "行情任务请求失败",
   );
 
   const fxDataAction = <T = unknown>(action: MarketDataFxAction, signal?: AbortSignal) => {
@@ -278,7 +282,7 @@ export function createMarketDataGateway(fetcher: MarketDataGatewayFetch) {
         headers: { "content-type": "application/json" },
         body: JSON.stringify(body),
       }, signal),
-      "外汇任务操作失败",
+      "行情任务操作失败",
     );
   };
 

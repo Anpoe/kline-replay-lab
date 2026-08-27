@@ -1,7 +1,7 @@
 import { readLocalDataJson } from "./localDataService";
 import { inspectMarketSyncUpdate } from "./marketSyncService";
 import { loadProviderSecrets } from "./providerCredentials";
-import { FX_INSTRUMENT_CATALOG, getFxInstrumentDefinition } from "./fxDataContracts";
+import { FX_INSTRUMENT_CATALOG, getMarketInstrumentDefinition, GOLD_INSTRUMENT_CATALOG } from "./fxDataContracts";
 import { fetchTwelveDataOneMinuteChunk } from "./fx/twelveDataClient";
 
 type DatabaseMarketRow = {
@@ -213,6 +213,7 @@ async function inspectCnUpdate(
 async function inspectFxUpdates(
   rows: Array<{ instrumentId: string; lastTimestamp: number | null }>,
   twelveDataApiKey: string | undefined,
+  marketLabel = "外汇",
 ) {
   const pairs = [] as Array<{
     pairId: string;
@@ -228,7 +229,7 @@ async function inspectFxUpdates(
       needsUpdate: false,
       duePairIds: [] as string[],
       pairs,
-      reason: "外汇尚无可更新的历史数据",
+      reason: `${marketLabel}尚无可更新的历史数据`,
     };
   }
   if (!twelveDataApiKey) {
@@ -243,11 +244,11 @@ async function inspectFxUpdates(
         providerLatestTimestamp: null,
         needsUpdate: false,
       })),
-      reason: "外汇已有数据，但尚未配置 Twelve Data API Key",
+      reason: `${marketLabel}已有数据，但尚未配置 Twelve Data API Key`,
     };
   }
   for (const row of rows) {
-    const instrument = getFxInstrumentDefinition(row.instrumentId);
+    const instrument = getMarketInstrumentDefinition(row.instrumentId);
     if (!instrument) continue;
     try {
       const latest = await fetchTwelveDataOneMinuteChunk({
@@ -285,10 +286,10 @@ async function inspectFxUpdates(
     duePairIds,
     pairs,
     reason: duePairIds.length
-      ? `外汇有 ${duePairIds.length} 个货币对存在新收盘分钟数据`
+      ? `${marketLabel}有 ${duePairIds.length} 个品种存在新收盘分钟数据`
       : errors
-        ? `${errors} 个货币对无法完成最新状态检查，已跳过自动更新`
-        : "外汇已有数据已经是最新",
+        ? `${errors} 个${marketLabel}品种无法完成最新状态检查，已跳过自动更新`
+        : `${marketLabel}已有数据已经是最新`,
   };
 }
 
@@ -299,22 +300,32 @@ export async function inspectExistingMarkets(db: D1Database) {
     readLocalCnSummary(),
   ]);
   const byMarket = new Map(databaseRows.map((row) => [row.market, row]));
-  const fxRows = await db.prepare(`SELECT i.id AS instrumentId, MAX(c.last_timestamp) AS lastTimestamp
+  const marketRows = await db.prepare(`SELECT i.id AS instrumentId, i.market AS market, MAX(c.last_timestamp) AS lastTimestamp
     FROM instruments i
     JOIN candle_coverage c ON c.instrument_id = i.id
-    WHERE (UPPER(i.market) = 'FX' OR UPPER(i.market) = 'FOREX')
+    WHERE UPPER(i.market) IN ('FX', 'FOREX', 'GOLD', 'METAL')
       AND c.bar_count > 0 AND c.source <> 'sample'
-    GROUP BY i.id`).all<{ instrumentId: string; lastTimestamp: number | null }>();
+    GROUP BY i.id, i.market`).all<{ instrumentId: string; market: string; lastTimestamp: number | null }>();
+  const fxRows = marketRows.results.filter((row) => marketCode(row.market) === "FX");
+  const goldRows = marketRows.results.filter((row) => marketCode(row.market) === "GOLD");
 
-  const [cn, us, fx] = await Promise.all([
+  const [cn, us, fx, gold] = await Promise.all([
     inspectCnUpdate(byMarket.get("CN"), localCn, secrets.tushareToken),
     inspectMarketSyncUpdate(db),
     inspectFxUpdates(
-      fxRows.results.map((row) => ({
+      fxRows.map((row) => ({
         instrumentId: String(row.instrumentId),
         lastTimestamp: finiteTimestamp(row.lastTimestamp),
       })),
       secrets.twelveDataApiKey,
+    ),
+    inspectFxUpdates(
+      goldRows.map((row) => ({
+        instrumentId: String(row.instrumentId),
+        lastTimestamp: finiteTimestamp(row.lastTimestamp),
+      })),
+      secrets.twelveDataApiKey,
+      "黄金",
     ),
   ]);
   return {
@@ -323,13 +334,9 @@ export async function inspectExistingMarkets(db: D1Database) {
       CN: cn,
       US: us,
       FX: fx,
-      GOLD: {
-        existing: Boolean(byMarket.get("GOLD")?.barCount),
-        configured: false,
-        needsUpdate: false,
-        reason: "黄金数据源尚未接入自动更新",
-      },
+      GOLD: gold,
     },
     fxCatalogCount: FX_INSTRUMENT_CATALOG.length,
+    goldCatalogCount: GOLD_INSTRUMENT_CATALOG.length,
   };
 }

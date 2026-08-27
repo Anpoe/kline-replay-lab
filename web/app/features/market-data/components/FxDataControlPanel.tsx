@@ -32,6 +32,10 @@ export const DEFAULT_FX_CURRENCY_PAIRS = [
   { id: "USDCHF.FX", label: "USD/CHF", dukascopySymbol: "USDCHF", twelveDataSymbol: "USD/CHF", pricePrecision: 5 },
 ] as const satisfies readonly FxCurrencyPair[];
 
+export const DEFAULT_GOLD_INSTRUMENTS = [
+  { id: "XAUUSD.GOLD", label: "XAU/USD", dukascopySymbol: "XAUUSD", twelveDataSymbol: "XAU/USD", pricePrecision: 2 },
+] as const satisfies readonly FxCurrencyPair[];
+
 export type FxDataControlApiPaths = {
   initialize: string;
   update: string;
@@ -122,6 +126,10 @@ export type FxDataControlPanelProps = {
   defaultPairId?: string;
   defaultStartDate?: string;
   defaultEndDate?: string;
+  datasetLabel?: string;
+  instrumentNoun?: string;
+  historicalSourceLabel?: string;
+  incrementalSourceLabel?: string;
   disabled?: boolean;
   onAction: (action: FxDataControlAction) => void | Promise<void>;
   onActionSettled?: (action: FxDataControlAction) => void | Promise<void>;
@@ -159,7 +167,7 @@ const ACTION_LABELS: Record<FxTaskAction, string> = {
 type BusyAction = "initialize" | "update" | "refresh" | FxTaskAction;
 
 function asError(value: unknown) {
-  return value instanceof Error ? value : new Error(typeof value === "string" ? value : "外汇数据任务操作失败");
+  return value instanceof Error ? value : new Error(typeof value === "string" ? value : "行情数据任务操作失败");
 }
 function clampPercent(value: number) {
   return Math.max(0, Math.min(100, Number.isFinite(value) ? value : 0));
@@ -206,6 +214,10 @@ export function FxDataControlPanel({
   defaultPairId,
   defaultStartDate = "",
   defaultEndDate = "",
+  datasetLabel = "外汇",
+  instrumentNoun = "货币对",
+  historicalSourceLabel = "Dukascopy CSV",
+  incrementalSourceLabel = "Twelve Data REST",
   disabled = false,
   onAction,
   onActionSettled,
@@ -253,7 +265,7 @@ export function FxDataControlPanel({
 
   const initialize = () => {
     if (!effectivePairId) {
-      setNotice("请先传入至少一个可用货币对。");
+      setNotice(`请先传入至少一个可用${instrumentNoun}。`);
       return;
     }
     if (!startDate || !endDate) {
@@ -275,12 +287,12 @@ export function FxDataControlPanel({
         targetTimeframes: TARGET_TIMEFRAMES,
         keepRawCsv,
       },
-    }, "initialize", "Dukascopy 历史初始化任务已提交。");
+    }, "initialize", `${historicalSourceLabel} 历史初始化任务已提交。`);
   };
 
   const update = () => {
     if (!effectivePairId) {
-      setNotice("请先传入至少一个可用货币对。");
+      setNotice(`请先传入至少一个可用${instrumentNoun}。`);
       return;
     }
     void dispatch({
@@ -291,7 +303,7 @@ export function FxDataControlPanel({
         ...(startDate ? { startDate } : {}),
         ...(endDate ? { endDate } : {}),
       },
-    }, "update", "Twelve Data 增量更新任务已提交。");
+    }, "update", `${incrementalSourceLabel} 增量更新任务已提交。`);
   };
 
   const taskAction = (action: FxTaskAction) => {
@@ -330,21 +342,21 @@ export function FxDataControlPanel({
   return (
     <section className="settings-section provider-settings-section" aria-labelledby={titleId} aria-busy={busy}>
       <div className="settings-section-head">
-        <strong id={titleId}>外汇数据维护</strong>
-        <span>Dukascopy CSV 建立历史基准，Twelve Data REST 负责后续增量；组件只提交动作，不直接实现数据层。</span>
+        <strong id={titleId}>{datasetLabel}数据维护</strong>
+        <span>{historicalSourceLabel} 建立历史基准，{incrementalSourceLabel} 负责后续增量；组件只提交动作，不直接实现数据层。</span>
       </div>
 
       <div className="provider-setting-card">
         <div className="provider-setting-title">
           <div>
             <Database size={17} />
-            <span><strong>初始化与增量更新</strong><small>统一保存 UTC 的 {TIMEFRAME_IDS.map((value) => timeframeLabel(value)).join(" / ")} 外汇训练数据</small></span>
+            <span><strong>初始化与增量更新</strong><small>统一保存 UTC 的 {TIMEFRAME_IDS.map((value) => timeframeLabel(value)).join(" / ")} {datasetLabel}训练数据</small></span>
           </div>
-          <span>{selectedPair?.label ?? "未选择货币对"}</span>
+          <span>{selectedPair?.label ?? `未选择${instrumentNoun}`}</span>
         </div>
 
         <div className="source-routing">
-          <label>货币对
+          <label>{instrumentNoun}
             <select value={effectivePairId} onChange={(event) => setPairId(event.target.value)} disabled={disabled || busy}>
               {pairs.map((pair) => <option key={pair.id} value={pair.id}>{pair.label} · {pair.id}</option>)}
             </select>
@@ -367,7 +379,7 @@ export function FxDataControlPanel({
           <span><strong>保留原始 Dukascopy CSV</strong><small>关闭时只保留解析后的 K 线和质量报告，节省本地磁盘空间。</small></span>
         </label>
 
-        <div className="setup-pipeline" aria-label="外汇数据处理阶段">
+        <div className="setup-pipeline" aria-label={`${datasetLabel}数据处理阶段`}>
           {STAGE_ORDER.map((stage, index) => {
             const reached = currentStageIndex >= index || currentTask?.status === "completed";
             return (
@@ -393,7 +405,7 @@ export function FxDataControlPanel({
           )}
         </div>
 
-        {!pairs.length && <div className="setup-warning">当前没有可用货币对，请由主组件传入 currencyPairs。</div>}
+        {!pairs.length && <div className="setup-warning">当前没有可用{instrumentNoun}，请由主组件传入 currencyPairs。</div>}
         {!rangeIsValid && <small className="provider-setting-help">历史初始化需要有效的日期范围；增量更新日期可留空，留空时由服务端从最后一根完整 M1 K 线继续。</small>}
       </div>
 
@@ -403,8 +415,8 @@ export function FxDataControlPanel({
           <span>FX DATA TASK · {currentTask?.mode === "update" ? "INCREMENTAL" : "HISTORY"}</span>
           <strong>{currentTask
             ? `${currentTask.pairLabel ?? selectedPair?.label ?? currentTask.pairId} · ${getTaskStatusLabel(currentTask)}`
-            : "尚未启动外汇任务"}</strong>
-          <small>{currentTask?.error || currentTask?.message || "选择货币对和日期后，可以创建 Dukascopy 历史初始化或 Twelve Data 增量任务。"}</small>
+            : `尚未启动${datasetLabel}任务`}</strong>
+          <small>{currentTask?.error || currentTask?.message || `选择${instrumentNoun}和日期后，可以创建 ${historicalSourceLabel} 历史初始化或 ${incrementalSourceLabel} 增量任务。`}</small>
 
           {currentTask && (
             <>

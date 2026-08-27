@@ -4,9 +4,9 @@ import { getFxTask, getFxTaskView, patchFxTask } from "../../../lib/fxDataServic
 export async function GET(request: Request) {
   await ensureSchema();
   const taskId = new URL(request.url).searchParams.get("taskId");
-  if (!taskId) return Response.json({ error: "缺少外汇任务 ID" }, { status: 400 });
+  if (!taskId) return Response.json({ error: "缺少行情任务 ID" }, { status: 400 });
   const task = await getFxTask(getRawDb(), taskId);
-  if (!task) return Response.json({ error: "外汇任务不存在" }, { status: 404 });
+  if (!task) return Response.json({ error: "行情任务不存在" }, { status: 404 });
   return Response.json({ task: getFxTaskView(task) });
 }
 

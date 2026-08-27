@@ -6,6 +6,7 @@ import {
   MARKET_INSTRUMENT_CATALOG,
   normalizeMarketInstrument,
 } from "../app/lib/fxDataContracts.ts";
+import { normalizeTwelveDataFxSymbol } from "../app/lib/fx/twelveDataClient.ts";
 
 test("标准化黄金内部品种并保留两个供应商映射", () => {
   assert.equal(normalizeMarketInstrument("XAUUSD.GOLD"), "XAUUSD.GOLD");
@@ -29,4 +30,9 @@ test("黄金目录独立于 FX 目录，但包含在市场总目录", () => {
 test("不把未知贵金属或 FX 品种误认成黄金", () => {
   assert.equal(normalizeMarketInstrument("XAG/USD"), null);
   assert.equal(normalizeMarketInstrument("EUR/USD"), "EURUSD.FX");
+});
+
+test("Twelve Data 接收黄金的无分隔符和斜杠写法", () => {
+  assert.equal(normalizeTwelveDataFxSymbol("XAUUSD"), "XAU/USD");
+  assert.equal(normalizeTwelveDataFxSymbol("XAU/USD"), "XAU/USD");
 });

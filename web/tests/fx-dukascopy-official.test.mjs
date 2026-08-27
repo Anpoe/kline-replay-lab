@@ -73,6 +73,35 @@ test("official client resolves Jetta config, decodes delta candles, and reuses t
   assert.equal(result.candles[0].volume, 1_000_000);
 });
 
+test("official client uses the XAU-USD instrument path for gold", async () => {
+  const requested = [];
+  const client = new DukascopyOfficialClient({
+    serverUrl: "https://jetta.dukascopy.com",
+    fetcher: async (url) => {
+      const parsed = new URL(url);
+      requested.push(parsed.pathname);
+      if (parsed.pathname === "/v1/instruments/XAU-USD") {
+        return jsonResponse({ code: "XAU/USD", histories: [{ period: "MINUTE", from: firstMinute }] });
+      }
+      if (parsed.pathname === "/v1/candles/minute/XAU-USD/BID/2026/1/5") {
+        return jsonResponse({ ...candlePayload(), multiplier: 0.01 });
+      }
+      return jsonResponse({ error: "not found" }, 404);
+    },
+  });
+
+  const result = await client.downloadAndParseCsv({
+    instrument: "XAUUSD",
+    start: "2026-01-05",
+    end: "2026-01-05",
+    timeframe: "1m",
+  });
+
+  assert.equal(result.report.accepted, 3);
+  assert.ok(requested.includes("/v1/instruments/XAU-USD"));
+  assert.ok(requested.includes("/v1/candles/minute/XAU-USD/BID/2026/1/5"));
+});
+
 test("official client reports an empty range instead of treating pre-history as a provider failure", async () => {
   const requested = [];
   const client = new DukascopyOfficialClient({
@@ -96,6 +125,32 @@ test("official client reports an empty range instead of treating pre-history as 
   assert.equal(result.report.accepted, 0);
   assert.equal(result.availableFrom, firstMinute);
   assert.deepEqual(requested, ["/v1/instruments/EUR-USD"]);
+});
+
+test("official client treats a too-late final day as an empty range", async () => {
+  const client = new DukascopyOfficialClient({
+    serverUrl: "https://jetta.dukascopy.com",
+    dailyConcurrency: 1,
+    fetcher: async (url) => {
+      const parsed = new URL(url);
+      if (parsed.pathname === "/v1/instruments/EUR-USD") return jsonResponse(instrumentPayload());
+      if (parsed.pathname === "/v1/candles/minute/EUR-USD/BID/2026/1/5") return jsonResponse(candlePayload());
+      if (parsed.pathname === "/v1/candles/minute/EUR-USD/BID/2026/1/6") {
+        return jsonResponse({ error: "From time is too late" }, 400);
+      }
+      return jsonResponse({ error: "not found" }, 404);
+    },
+  });
+
+  const result = await client.downloadAndParseCsv({
+    instrument: "EURUSD",
+    start: "2026-01-05",
+    end: "2026-01-06",
+    timeframe: "1m",
+  });
+
+  assert.equal(result.report.accepted, 3);
+  assert.equal(result.candles.length, 3);
 });
 
 test("formats the built-in adapter result as a normal CSV response", () => {

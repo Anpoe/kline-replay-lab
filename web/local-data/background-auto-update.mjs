@@ -270,7 +270,7 @@ export function createBackgroundAutoUpdateRunner({
     throw new Error("美股自动更新等待超时，请到数据页查看任务状态");
   }
 
-  async function getOrCreateFxTask(pairId) {
+  async function getOrCreateFxTask(pairId, marketLabel = "外汇") {
     const current = await requestJson(`/api/fx-data?pairId=${encodeURIComponent(pairId)}`);
     const task = current?.task;
     if (task && ["queued", "running"].includes(task.status)) return task;
@@ -285,7 +285,7 @@ export function createBackgroundAutoUpdateRunner({
       method: "POST",
       body: JSON.stringify({ pairId }),
     });
-    if (!created?.task) throw new Error(`${pairId} 外汇自动更新任务创建失败`);
+    if (!created?.task) throw new Error(`${pairId} ${marketLabel}自动更新任务创建失败`);
     return created.task;
   }
 
@@ -394,6 +394,7 @@ export function createBackgroundAutoUpdateRunner({
       const cn = asObject(markets.CN);
       const us = asObject(markets.US);
       const fx = asObject(markets.FX);
+      const gold = asObject(markets.GOLD);
 
       if (cn.needsUpdate) {
         try {
@@ -438,7 +439,22 @@ export function createBackgroundAutoUpdateRunner({
         }
       }
       if (!duePairIds.length && fx.existing) skipped.push(`外汇（${fx.reason ?? "无需更新"}）`);
-      if (!cn.existing && !us.existing && !fx.existing) skipped.push("没有发现已有历史数据的市场");
+      const dueGoldPairIds = Array.isArray(gold.duePairIds) ? gold.duePairIds : [];
+      for (const pairId of dueGoldPairIds) {
+        try {
+          setMarket("GOLD", `正在更新黄金 ${pairId}`);
+          const task = await getOrCreateFxTask(pairId, "黄金");
+          updateState({ taskId: task.id, message: `正在更新黄金 ${pairId}` });
+          await runFxTask(task);
+          updated.push(pairId);
+        } catch (error) {
+          const message = `${pairId}：${errorMessage(error)}`;
+          failures.push(message);
+          log("error", message, { market: "GOLD", pairId });
+        }
+      }
+      if (!dueGoldPairIds.length && gold.existing) skipped.push(`黄金（${gold.reason ?? "无需更新"}）`);
+      if (!cn.existing && !us.existing && !fx.existing && !gold.existing) skipped.push("没有发现已有历史数据的市场");
 
       const status = failures.length ? (updated.length ? "partial" : "failed") : "completed";
       const message = [

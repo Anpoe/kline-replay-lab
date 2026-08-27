@@ -22,6 +22,7 @@ import {
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   DEFAULT_FX_CURRENCY_PAIRS,
+  DEFAULT_GOLD_INSTRUMENTS,
   FxDataControlPanel,
   type FxDataControlAction,
   type FxDataTask,
@@ -428,9 +429,10 @@ export function DataSourceManager({
   }, [marketDataGateway]);
 
   const loadFxTask = useCallback(async () => {
-    if (market !== "FX") return null;
+    if (market !== "FX" && market !== "GOLD") return null;
     try {
-      const data = await marketDataGateway.loadFxTask<{ task?: FxDataTask | null; qualitySummary?: FxQualitySummary | null }>();
+      const pairId = market === "GOLD" ? "XAUUSD.GOLD" : undefined;
+      const data = await marketDataGateway.loadFxTask<{ task?: FxDataTask | null; qualitySummary?: FxQualitySummary | null }>(pairId);
       const task = data.task ?? null;
       setFxTask(task);
       setFxQuality(data.qualitySummary ?? task?.quality ?? null);
@@ -857,7 +859,7 @@ export function DataSourceManager({
           if (!data.task) {
             failures += 1;
             retryDelayMs = Math.min(30_000, 1_000 * 2 ** Math.min(failures - 1, 5));
-            setNotice(`${data.error ?? "外汇任务请求暂时失败"}，${Math.ceil(retryDelayMs / 1_000)} 秒后自动重试（第 ${failures} 次）`);
+            setNotice(`${data.error ?? `${market === "GOLD" ? "黄金" : "外汇"}任务请求暂时失败`}，${Math.ceil(retryDelayMs / 1_000)} 秒后自动重试（第 ${failures} 次）`);
           } else {
             if (failures) setNotice("");
             failures = 0;
@@ -866,7 +868,7 @@ export function DataSourceManager({
         } catch (error) {
           failures += 1;
           retryDelayMs = Math.min(30_000, 1_000 * 2 ** Math.min(failures - 1, 5));
-          const message = error instanceof Error ? error.message : "外汇任务网络请求失败";
+          const message = error instanceof Error ? error.message : `${market === "GOLD" ? "黄金" : "外汇"}任务网络请求失败`;
           setNotice(`${message}，${Math.ceil(retryDelayMs / 1_000)} 秒后自动重试（第 ${failures} 次）`);
         }
         await new Promise((resolve) => window.setTimeout(resolve, retryDelayMs));
@@ -875,16 +877,16 @@ export function DataSourceManager({
       fxTaskLoopRef.current = null;
       await loadFxTask();
     }
-  }, [loadFxTask, marketDataGateway, notifyDataChanged, setNotice]);
+  }, [loadFxTask, market, marketDataGateway, notifyDataChanged, setNotice]);
 
   useEffect(() => {
-    if (market !== "FX" || !fxTask || !["queued", "running"].includes(fxTask.status)) return;
+    if ((market !== "FX" && market !== "GOLD") || !fxTask || !["queued", "running"].includes(fxTask.status)) return;
     if (fxTaskLoopRef.current !== fxTask.id) void runFxTask(fxTask.id);
   }, [fxTask, market, runFxTask]);
 
   const handleFxAction = async (action: FxDataControlAction) => {
     const data = await marketDataGateway.fxDataAction<{ task?: FxDataTask | null; error?: string }>(action);
-    if (!data.task) throw new Error(data.error ?? "外汇任务操作失败");
+    if (!data.task) throw new Error(data.error ?? "行情任务操作失败");
     setFxTask(data.task);
     setFxQuality(data.task.quality ?? null);
     if (action.type !== "task" || action.action === "resume" || action.action === "retry") void runFxTask(data.task.id);
@@ -1421,29 +1423,19 @@ export function DataSourceManager({
         </div>
       )}
 
-      {market === "FX" && (
+      {(market === "FX" || market === "GOLD") && (
         <FxDataControlPanel
           apiPaths={{ initialize: "/api/fx-data/initialize", update: "/api/fx-data/update", task: "/api/fx-data/task" }}
           currentTask={fxTask}
           qualitySummary={fxQuality}
-          currencyPairs={DEFAULT_FX_CURRENCY_PAIRS}
+          currencyPairs={market === "GOLD" ? DEFAULT_GOLD_INSTRUMENTS : DEFAULT_FX_CURRENCY_PAIRS}
           defaultStartDate="2020-01-01"
           defaultEndDate={new Date().toISOString().slice(0, 10)}
+          datasetLabel={market === "GOLD" ? "黄金" : "外汇"}
+          instrumentNoun={market === "GOLD" ? "品种" : "货币对"}
           onAction={handleFxAction}
           onRefreshStatus={async () => { await loadFxTask(); }}
         />
-      )}
-
-      {market === "GOLD" && (
-        <div className="market-maintenance-card unavailable">
-          <div className="market-maintenance-icon"><Database size={22} /></div>
-          <div>
-            <span>METALS DATASET</span>
-            <strong>黄金数据源尚未接入</strong>
-            <small>这里已经与 A 股、美股完全分开。接入数据源后会在本市场内完成初始化、更新、覆盖检查和删除。</small>
-          </div>
-          <div className="market-maintenance-actions"><button disabled>等待接入</button></div>
-        </div>
       )}
 
       <div className="storage-policy-card">

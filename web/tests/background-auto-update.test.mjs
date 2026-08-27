@@ -203,6 +203,41 @@ test("按 A 股、美股、外汇顺序执行并用同一 token 完成", async (
   assert.doesNotMatch(JSON.stringify(logs), /safe-token/);
 });
 
+test("已有黄金数据且有新 M1 时会调度 XAUUSD.GOLD 增量任务", async () => {
+  const { fetchImpl, calls } = createFakeFetch({
+    "GET /api/data-auto-update": { settings: { enabled: true, lastStatus: "idle" } },
+    "POST /api/data-auto-update": ({ calls: currentCalls }) => {
+      const body = currentCalls.at(-1).body;
+      return body.action === "claim"
+        ? { shouldRun: true, runToken: "gold-token" }
+        : { completed: true };
+    },
+    "GET /api/data-auto-update?scope=existing": {
+      markets: {
+        CN: { existing: false, needsUpdate: false },
+        US: { existing: false, needsUpdate: false },
+        FX: { existing: false, needsUpdate: false, duePairIds: [] },
+        GOLD: { existing: true, needsUpdate: true, duePairIds: ["XAUUSD.GOLD"] },
+      },
+    },
+    "GET /api/fx-data?pairId=XAUUSD.GOLD": { task: null },
+    "POST /api/fx-data/update": { task: { id: "gold-task", status: "queued" } },
+    "POST /api/fx-data/run": { task: { id: "gold-task", status: "completed" } },
+  });
+  const runner = createBackgroundAutoUpdateRunner({
+    fetchImpl,
+    now: () => new Date("2026-08-23T08:00:00.000Z"),
+    randomUUID: () => "gold-token",
+    sleep: async () => undefined,
+  });
+
+  const result = await runner.runIfDue();
+
+  assert.equal(result.status, "completed");
+  assert.deepEqual(result.updated, ["XAUUSD.GOLD"]);
+  assert.ok(calls.some((call) => call.key === "POST /api/fx-data/update" && call.body.pairId === "XAUUSD.GOLD"));
+});
+
 test("长任务会用 claim token 续租", async () => {
   const { fetchImpl, calls } = createFakeFetch({
     "GET /api/data-auto-update": { settings: { enabled: true, lastStatus: "idle" } },

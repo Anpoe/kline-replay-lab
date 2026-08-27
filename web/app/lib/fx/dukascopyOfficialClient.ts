@@ -88,6 +88,12 @@ export class DukascopyOfficialClientError extends Error {
   }
 }
 
+function isTooLateForOfficialRange(error: unknown) {
+  return error instanceof DukascopyOfficialClientError
+    && error.status === 400
+    && /from time is too late/i.test(error.message);
+}
+
 function positiveInteger(value: unknown, fallback: number, maximum: number) {
   const number = Number(value);
   if (!Number.isFinite(number) || number <= 0) return fallback;
@@ -549,30 +555,38 @@ export class DukascopyOfficialClient {
     const days: number[] = [];
     for (let day = firstDay.getTime(); day < end; day += 86_400_000) days.push(day);
     const dailyCandles = await mapWithConcurrency(days, this.dailyConcurrency, async (day) => {
-      const date = new Date(day);
-      let payload: unknown = null;
-      let requestedPath = "";
-      for (const pathCode of instrument.pathCodes) {
-        requestedPath = pathUrl(instrument.serverUrl, [
-          "candles",
-          "minute",
-          pathCode,
-          request.offerSide ?? "BID",
-          String(date.getUTCFullYear()),
-          String(date.getUTCMonth() + 1),
-          String(date.getUTCDate()),
-        ]);
-        payload = await this.requestJsonAllowMissing(requestedPath, request.signal);
-        if (payload !== null) break;
-      }
-      if (payload === null) return [];
       try {
-        return decodeCandlePayload(payload, start, end);
+        const date = new Date(day);
+        let payload: unknown = null;
+        let requestedPath = "";
+        for (const pathCode of instrument.pathCodes) {
+          requestedPath = pathUrl(instrument.serverUrl, [
+            "candles",
+            "minute",
+            pathCode,
+            request.offerSide ?? "BID",
+            String(date.getUTCFullYear()),
+            String(date.getUTCMonth() + 1),
+            String(date.getUTCDate()),
+          ]);
+          payload = await this.requestJsonAllowMissing(requestedPath, request.signal);
+          if (payload !== null) break;
+        }
+        if (payload === null) return [];
+        try {
+          return decodeCandlePayload(payload, start, end);
+        } catch (error) {
+          throw new DukascopyOfficialClientError(
+            error instanceof Error ? error.message : "Dukascopy 官方分钟数据无法解码",
+            requestedPath,
+          );
+        }
       } catch (error) {
-        throw new DukascopyOfficialClientError(
-          error instanceof Error ? error.message : "Dukascopy 官方分钟数据无法解码",
-          requestedPath,
-        );
+        // The official feed uses HTTP 400 when a requested day is newer than
+        // its current minute-data horizon. Treat that day as empty so a range
+        // ending near the present can finish without discarding prior days.
+        if (isTooLateForOfficialRange(error)) return [];
+        throw error;
       }
     });
 

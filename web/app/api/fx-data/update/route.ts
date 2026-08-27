@@ -8,6 +8,6 @@ export async function POST(request: Request) {
     const task = await createFxTask(getRawDb(), "update", body);
     return Response.json({ task: getFxTaskView(task) }, { status: 201 });
   } catch (error) {
-    return Response.json({ error: error instanceof Error ? error.message : "外汇增量任务创建失败" }, { status: 400 });
+    return Response.json({ error: error instanceof Error ? error.message : "增量行情任务创建失败" }, { status: 400 });
   }
 }

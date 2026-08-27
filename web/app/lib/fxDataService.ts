@@ -6,7 +6,6 @@ import {
   getMarketInstrumentDefinition,
   type MarketInstrumentDefinition,
   type MarketInstrumentId,
-  type FxInstrumentDefinition,
   type FxInstrumentId,
   type FxTimeframe,
 } from "./fxDataContracts.ts";
@@ -254,7 +253,7 @@ export async function getFxTask(db: D1Database, taskId?: string, pairId?: string
 }
 
 export async function createFxTask(db: D1Database, mode: FxTaskMode, input: FxTaskCreateInput) {
-  const instrument = getMarketInstrumentDefinition(input.pairId) as MarketInstrumentDefinition | null;
+  const instrument = getMarketInstrumentDefinition(input.pairId);
   if (!instrument) throw new Error("请选择受支持的外汇或黄金品种");
   const startDate = dateOnly(input.startDate, mode === "update" ? daysAgoDate(7) : DEFAULT_DATE);
   const endDate = dateOnly(input.endDate, new Date().toISOString().slice(0, 10));
