@@ -1,5 +1,6 @@
 import { ensureSchema, getRawDb } from "../../../db/runtime";
 import {
+  isValidDataAutoUpdateScheduleTime,
   readDataAutoUpdateSettings,
   writeDataAutoUpdateSettings,
 } from "../../lib/dataAutoUpdateSettings";
@@ -13,12 +14,20 @@ type ProviderSettingsInput = {
   tdxQuantEndpoint?: string;
   twelveDataApiKey?: string;
   dukascopyEndpoint?: string;
-  autoUpdateEnabled?: boolean;
+  autoUpdateEnabled?: unknown;
+  autoUpdateScheduledEnabled?: unknown;
+  autoUpdateScheduleTime?: unknown;
 };
 
 function hint(value?: string) {
   if (!value) return "";
   return value.length <= 4 ? "••••" : `••••${value.slice(-4)}`;
+}
+
+function publicAutoUpdateSettings(settings: Awaited<ReturnType<typeof readDataAutoUpdateSettings>>) {
+  const { lastRunToken, ...safe } = settings;
+  void lastRunToken;
+  return safe;
 }
 
 export async function GET() {
@@ -58,6 +67,8 @@ export async function GET() {
     },
     autoUpdate: {
       enabled: autoUpdate.enabled,
+      scheduledEnabled: autoUpdate.scheduledEnabled,
+      scheduledTime: autoUpdate.scheduledTime,
       lastCheckDate: autoUpdate.lastCheckDate,
       lastFinishedAt: autoUpdate.lastFinishedAt,
       lastStatus: autoUpdate.lastStatus,
@@ -69,11 +80,32 @@ export async function GET() {
 export async function PUT(request: Request) {
   await ensureSchema();
   const payload = await request.json() as ProviderSettingsInput;
-  if (typeof payload.autoUpdateEnabled === "boolean") {
-    const autoUpdate = await writeDataAutoUpdateSettings(getRawDb(), {
-      enabled: payload.autoUpdateEnabled,
-    });
-    return Response.json({ autoUpdate });
+  const autoUpdatePatch: {
+    enabled?: boolean;
+    scheduledEnabled?: boolean;
+    scheduledTime?: string;
+  } = {};
+  if (payload.autoUpdateEnabled !== undefined) {
+    if (typeof payload.autoUpdateEnabled !== "boolean") {
+      return Response.json({ error: "自动更新开关参数不正确" }, { status: 400 });
+    }
+    autoUpdatePatch.enabled = payload.autoUpdateEnabled;
+  }
+  if (payload.autoUpdateScheduledEnabled !== undefined) {
+    if (typeof payload.autoUpdateScheduledEnabled !== "boolean") {
+      return Response.json({ error: "定时自动更新开关参数不正确" }, { status: 400 });
+    }
+    autoUpdatePatch.scheduledEnabled = payload.autoUpdateScheduledEnabled;
+  }
+  if (payload.autoUpdateScheduleTime !== undefined) {
+    if (!isValidDataAutoUpdateScheduleTime(payload.autoUpdateScheduleTime)) {
+      return Response.json({ error: "定时检查时间格式不正确" }, { status: 400 });
+    }
+    autoUpdatePatch.scheduledTime = payload.autoUpdateScheduleTime;
+  }
+  if (Object.keys(autoUpdatePatch).length) {
+    const autoUpdate = await writeDataAutoUpdateSettings(getRawDb(), autoUpdatePatch);
+    return Response.json({ autoUpdate: publicAutoUpdateSettings(autoUpdate) });
   }
   let credentials: Record<string, string>;
   if (payload.provider === "tushare") {

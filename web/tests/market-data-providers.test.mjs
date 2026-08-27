@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
+  AlpacaApiError,
   fetchAlpacaMultiSymbolChunk,
   fetchProviderChunk,
   filterTradableUsAssets,
@@ -86,6 +87,35 @@ test("Alpaca 多品种日线请求按 symbols 返回并保留分页游标", asyn
   assert.equal(result.candlesBySymbol.get("MSFT")[0].close, 21);
   assert.deepEqual(result.cursor, { pageToken: "page-2", feed: "iex" });
   assert.equal(result.complete, false);
+});
+
+test("Alpaca 响应体读取卡住时也会触发请求超时", async () => {
+  let aborted = false;
+  const request = fetchAlpacaMultiSymbolChunk({
+    symbols: ["AAPL"],
+    timeframe: "1d",
+    startDate: "2026-08-03",
+    endDate: "2026-08-03",
+    feed: "sip",
+    limit: 10000,
+  }, {
+    alpacaKeyId: "local-key",
+    alpacaSecretKey: "local-secret",
+  }, async (_url, init) => ({
+    ok: true,
+    json: () => new Promise((_resolve, reject) => {
+      init.signal.addEventListener("abort", () => {
+        aborted = true;
+        reject(new AlpacaApiError("响应体读取超时", 400));
+      }, { once: true });
+    }),
+  }), { timeoutMs: 10 });
+
+  await assert.rejects(Promise.race([
+    request,
+    new Promise((_, reject) => setTimeout(() => reject(new Error("响应体超时未生效")), 100)),
+  ]), /响应体读取超时/);
+  assert.equal(aborted, true);
 });
 
 test("通用校验按时间升序输出", () => {

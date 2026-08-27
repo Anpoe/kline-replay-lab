@@ -7,7 +7,7 @@ const root = new URL("../", import.meta.url);
 test("FX 历史任务同时持久化 M1 与聚合后的 5m 数据", async () => {
   const source = await readFile(new URL("app/lib/fxDataService.ts", root), "utf8");
 
-  assert.match(source, /const DEFAULT_TARGET_TIMEFRAMES = \["1m", "5m", "1h", "1d", "1w"\]/);
+  assert.match(source, /const DEFAULT_TARGET_TIMEFRAMES = \[\.\.\.TIMEFRAME_IDS\] as const/);
   assert.match(source, /persistCandles\([\s\S]*?"1m",[\s\S]*?FX_SOURCE_DUKASCOPY,[\s\S]*?parsed\.candles/);
   assert.match(source, /persistCandles\(db, task, "5m", FX_SOURCE_DUKASCOPY, base\)/);
 });
@@ -21,10 +21,12 @@ test("FX M1 写库使用可恢复的小分片和有界覆盖统计", async () =>
   assert.match(source, /timestamp BETWEEN \? AND \?/);
   assert.match(source, /uniqueTimestampCount - Number\(existingRange\?\.barCount \?\? 0\)/);
   assert.match(source, /readRecentBaseCandles\(db, task, currentChunkLastTimestamp, currentChunkLastTimestamp\)/);
+  assert.match(source, /HIGHER_TIMEFRAME_LOOKBACK_DAYS = 42/);
   assert.match(source, /throughTimestamp/);
   assert.match(source, /chunkElapsedSeconds\.toFixed\(1\)/);
   assert.match(source, /isCandleRangeCovered\(db, task, "5m", FX_SOURCE_DUKASCOPY, base\)/);
-  assert.match(source, /isCandleRangeCovered\(db, task, timeframe, FX_SOURCE_DUKASCOPY, candles\)/);
+  assert.match(source, /Re-write every affected higher-period bucket/);
+  assert.match(source, /getTargetTimeframes\(parseJson<unknown>\(task\.targetTimeframesJson, \[\.\.\.DEFAULT_TARGET_TIMEFRAMES\]\), true\)/);
 });
 
 test("Twelve Data 增量以 M1 入库并由本地聚合 5m", async () => {
@@ -43,9 +45,9 @@ test("训练周期筛选和 K 线图支持 1m", async () => {
     readFile(new URL("app/features/settings/settingsContracts.ts", root), "utf8"),
   ]);
 
-  assert.match(settings, /export const timeframes: string\[\] = \["1m", "5m", "1h", "1d", "1w"\]/);
+  assert.match(settings, /export const timeframes: string\[\] = \[\.\.\.TIMEFRAME_IDS\]/);
   assert.match(chart, /"1m": \{ type: "minute", span: 1 \}/);
-  assert.match(panel, /const TARGET_TIMEFRAMES: readonly FxTimeframe\[\] = \["1m", "5m", "1h", "1d", "1w"\]/);
+  assert.match(panel, /const TARGET_TIMEFRAMES: readonly FxTimeframe\[\] = TIMEFRAME_IDS/);
 });
 
 test("FX 界面区分首次排队与分片续跑并自动重试断线", async () => {

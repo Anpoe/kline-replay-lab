@@ -26,6 +26,14 @@ function createMemoryStorage(initial = {}) {
   };
 }
 
+function createDeferred() {
+  let resolve = () => undefined;
+  const promise = new Promise((next) => {
+    resolve = next;
+  });
+  return { promise, resolve };
+}
+
 test("loads and normalizes legacy settings without changing the storage key", () => {
   const storage = createMemoryStorage({
     [settingsStorageKeys.appSettings]: JSON.stringify({
@@ -133,4 +141,81 @@ test("preferences gateway exposes a stable error for non-OK responses", async ()
 
   await assert.rejects(() => gateway.load(), { message: "读取同步设置失败" });
   await assert.rejects(() => gateway.save({ version: 1 }), { message: "保存同步设置失败" });
+});
+
+test("serializes preference saves so a slower old write cannot overwrite the latest settings", async () => {
+  const firstWriteStarted = createDeferred();
+  const releaseFirstWrite = createDeferred();
+  const persistedTimeframes = [];
+  let putCount = 0;
+  const gateway = createPreferencesGateway(async (_input, init) => {
+    if (init?.method === "PUT") {
+      putCount += 1;
+      const preferences = JSON.parse(init.body);
+      if (putCount === 1) {
+        firstWriteStarted.resolve();
+        await releaseFirstWrite.promise;
+      }
+      persistedTimeframes.push(preferences.appSettings.defaultTimeframe);
+    }
+    return {
+      ok: true,
+      async json() {
+        return { saved: true };
+      },
+    };
+  });
+
+  const oldSave = gateway.save({
+    version: 1,
+    appSettings: { ...defaultAppSettings, defaultTimeframe: "1m" },
+  });
+  await firstWriteStarted.promise;
+  const latestSave = gateway.save({
+    version: 1,
+    appSettings: { ...defaultAppSettings, defaultTimeframe: "5m" },
+  });
+  await new Promise((resolve) => setImmediate(resolve));
+
+  releaseFirstWrite.resolve();
+  await Promise.all([oldSave, latestSave]);
+
+  assert.deepEqual(persistedTimeframes, ["1m", "5m"]);
+});
+
+test("discards a preference read that became stale while newer settings were saved", async () => {
+  const loadStarted = createDeferred();
+  const releaseLoad = createDeferred();
+  const oldPreferences = {
+    version: 1,
+    appSettings: { ...defaultAppSettings, defaultTimeframe: "1m" },
+  };
+  const gateway = createPreferencesGateway(async (_input, init) => {
+    if (init?.method === "PUT") {
+      return {
+        ok: true,
+        async json() {
+          return { saved: true };
+        },
+      };
+    }
+    loadStarted.resolve();
+    await releaseLoad.promise;
+    return {
+      ok: true,
+      async json() {
+        return { preferences: oldPreferences };
+      },
+    };
+  });
+
+  const pendingLoad = gateway.load();
+  await loadStarted.promise;
+  await gateway.save({
+    version: 1,
+    appSettings: { ...defaultAppSettings, defaultTimeframe: "5m" },
+  });
+  releaseLoad.resolve();
+
+  assert.equal(await pendingLoad, undefined);
 });

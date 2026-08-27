@@ -36,6 +36,12 @@ export type PerformanceMetrics = {
 export type HabitTrade = {
   result: number;
   holdingBars: number;
+  closedTimestamp?: number;
+  scope?: {
+    market: string;
+    timeframe: string;
+    instrumentId?: string;
+  };
   instrument?: {
     market: string;
     entryPrice: number;

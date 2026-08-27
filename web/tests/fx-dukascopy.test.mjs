@@ -125,6 +125,43 @@ test("5m 可按纽约 17:00 交易日切分为日线和周线", () => {
   assert.equal(weekly[0].close, 12);
 });
 
+test("5m 可聚合为 M15、M30 和 H4，并在自然月边界生成 MN", () => {
+  const start = Date.UTC(2026, 0, 5, 8, 0);
+  const intraday = [
+    candle(start, 10, 1),
+    candle(start + 15 * 60_000, 11, 2),
+    candle(start + 30 * 60_000, 12, 3),
+    candle(start + 4 * 60 * 60_000, 13, 4),
+  ];
+  const m15 = aggregate5mToTimeframe(intraday, "15m");
+  assert.deepEqual(m15.map((bar) => bar.timestamp), [
+    start,
+    start + 15 * 60_000,
+    start + 30 * 60_000,
+    start + 4 * 60 * 60_000,
+  ]);
+  assert.deepEqual(m15.map((bar) => bar.volume), [1, 2, 3, 4]);
+
+  const m30 = aggregate5mToTimeframe(intraday, "30m");
+  assert.deepEqual(m30.map((bar) => bar.timestamp), [start, start + 30 * 60_000, start + 4 * 60 * 60_000]);
+  assert.deepEqual(m30.map((bar) => bar.volume), [3, 3, 4]);
+
+  const h4 = aggregate5mToTimeframe(intraday, "4h");
+  assert.deepEqual(h4.map((bar) => bar.timestamp), [start, start + 4 * 60 * 60_000]);
+  assert.deepEqual(h4.map((bar) => bar.volume), [6, 4]);
+
+  const monthly = aggregate5mToTimeframe([
+    candle(Date.parse("2026-01-31T22:00:00Z"), 20, 5),
+    candle(Date.parse("2026-02-01T22:00:00Z"), 21, 6),
+    candle(Date.parse("2026-02-28T22:00:00Z"), 22, 7),
+  ], "1mo");
+  assert.deepEqual(monthly.map((bar) => bar.timestamp), [
+    Date.parse("2026-01-01T22:00:00Z"),
+    Date.parse("2026-02-01T22:00:00Z"),
+  ]);
+  assert.deepEqual(monthly.map((bar) => bar.volume), [5, 13]);
+});
+
 test("周末闭市被标记为 weekend，工作日断档才是普通 missing", () => {
   const fridayLast = Date.UTC(2026, 0, 9, 21, 55);
   const sundayOpen = Date.UTC(2026, 0, 11, 22, 0);
@@ -138,4 +175,3 @@ test("周末闭市被标记为 weekend，工作日断档才是普通 missing", (
   assert.equal(workdayGaps[0].kind, "missing");
   assert.equal(workdayGaps[0].missingBuckets, 1);
 });
-

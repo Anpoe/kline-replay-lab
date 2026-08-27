@@ -28,8 +28,8 @@ export function trailingAverageDailyDollarVolume(
   }
   if (sessions.size < Math.min(10, lookbackSessions)) return 0;
   const total = [...sessions.values()].reduce((sum, value) => sum + value, 0);
-  const weeklyDivisor = timeframe === "1w" ? 5 : 1;
-  return total / sessions.size / weeklyDivisor;
+  const dailyActivityDivisor = timeframe === "1w" ? 5 : timeframe === "1mo" ? 21 : 1;
+  return total / sessions.size / dailyActivityDivisor;
 }
 
 export function randomEligibleStartIndices(

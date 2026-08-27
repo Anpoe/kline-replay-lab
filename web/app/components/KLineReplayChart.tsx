@@ -10,6 +10,10 @@ import {
 } from "react";
 import type { CandleTooltipStyle, Chart, KLineData, Overlay, OverlayCreate, OverlayFigure, OverlayTemplate, Period, Point } from "klinecharts";
 import type { MovingAverageSettings } from "../lib/chartIndicators";
+import type { ProtectionLine, ProtectionPriceKind } from "../lib/tradeProtection";
+import type { TimeframeId } from "../lib/timeframeCatalog";
+
+export type { ProtectionLine, ProtectionPriceKind } from "../lib/tradeProtection";
 
 export type DrawingRequest = {
   name: string;
@@ -56,20 +60,6 @@ export type CandleContextTarget = {
   dataIndex: number;
   timestamp: number;
   referencePrice: number;
-};
-
-export type ProtectionPriceKind = "stop-loss" | "take-profit";
-
-export type ProtectionLine = {
-  id: string;
-  kind: ProtectionPriceKind;
-  price: number;
-  timestamp: number;
-  label: string;
-  movable: boolean;
-  source: "draft" | "position";
-  positionId?: string;
-  side?: "long" | "short";
 };
 
 type TradeOverlayData = TradeMarker;
@@ -910,12 +900,16 @@ function getPersistedDrawings(chart: Chart, dataIndexOffset: number) {
     .map((overlay) => serializeDrawing(overlay, dataIndexOffset));
 }
 
-const periods: Record<string, Period> = {
+const periods: Record<TimeframeId, Period> = {
   "1m": { type: "minute", span: 1 },
   "5m": { type: "minute", span: 5 },
+  "15m": { type: "minute", span: 15 },
+  "30m": { type: "minute", span: 30 },
   "1h": { type: "hour", span: 1 },
+  "4h": { type: "hour", span: 4 },
   "1d": { type: "day", span: 1 },
   "1w": { type: "week", span: 1 },
+  "1mo": { type: "month", span: 1 },
 };
 
 export function KLineReplayChart({
@@ -1159,7 +1153,7 @@ export function KLineReplayChart({
       if (!chart) return;
       chartRef.current = chart;
       chart.setSymbol({ ticker: symbol, pricePrecision, volumePrecision: 0 });
-      chart.setPeriod(periods[timeframe] ?? periods["1d"]);
+      chart.setPeriod(periods[timeframe as TimeframeId] ?? periods["1d"]);
       chart.setDataLoader({
         getBars: ({ callback }) => {
           const currentBars = [...barsRef.current];
@@ -1559,6 +1553,16 @@ export function KLineReplayChart({
     if (price != null) onProtectionPriceSelectRef.current(priceSelectionMode, price);
   };
 
+  const handlePointerUp = (event: ReactPointerEvent<HTMLDivElement>) => {
+    if (priceSelectionMode && !drawingActive && event.pointerType === "touch") {
+      const price = resolvePriceAt(event.clientX, event.clientY);
+      if (price != null) {
+        onProtectionPriceSelectRef.current(priceSelectionMode, price);
+      }
+    }
+    cancelLongPress();
+  };
+
   return <div
     ref={containerRef}
     className={`chart-canvas${drawingActive ? " drawing-active" : ""}${priceSelectionMode ? " price-selecting" : ""}`}
@@ -1576,7 +1580,7 @@ export function KLineReplayChart({
     onContextMenu={handleContextMenu}
     onPointerDown={handlePointerDown}
     onPointerMove={handlePointerMove}
-    onPointerUp={cancelLongPress}
+    onPointerUp={handlePointerUp}
     onPointerCancel={cancelLongPress}
     onPointerLeave={cancelLongPress}
   />;

@@ -34,14 +34,14 @@ function averageDailyActivity(
     sessions.set(session, current);
   }
   if (sessions.size < 5) return {};
-  const weeklyDivisor = timeframe === "1w" ? 5 : 1;
+  const dailyActivityDivisor = timeframe === "1w" ? 5 : timeframe === "1mo" ? 21 : 1;
   const totals = [...sessions.values()].reduce((sum, session) => ({
     volume: sum.volume + session.volume,
     turnover: sum.turnover + session.turnover,
   }), { volume: 0, turnover: 0 });
   return {
-    averageDailyVolume: totals.volume / sessions.size / weeklyDivisor,
-    averageDailyTurnover: totals.turnover / sessions.size / weeklyDivisor,
+    averageDailyVolume: totals.volume / sessions.size / dailyActivityDivisor,
+    averageDailyTurnover: totals.turnover / sessions.size / dailyActivityDivisor,
   };
 }
 

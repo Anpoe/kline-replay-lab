@@ -1,8 +1,12 @@
 import type { FxCandle } from "./dukascopyCsv";
+import {
+  timeframeMinutes,
+  type TimeframeId,
+} from "../timeframeCatalog.ts";
 
 export type { FxCandle } from "./dukascopyCsv";
 
-export type FxTimeframe = "1m" | "5m" | "1h" | "1d" | "1w";
+export type FxTimeframe = TimeframeId;
 
 export type FxSessionOptions = {
   /** The local time at which an FX trading day starts. */
@@ -90,6 +94,12 @@ function addCalendarDays(date: LocalDateParts, amount: number): LocalDateParts {
   return { year: value.getUTCFullYear(), month: value.getUTCMonth() + 1, day: value.getUTCDate() };
 }
 
+function addCalendarMonths(date: LocalDateParts, amount: number): LocalDateParts {
+  const value = new Date(Date.UTC(date.year, date.month - 1, date.day));
+  value.setUTCMonth(value.getUTCMonth() + amount);
+  return { year: value.getUTCFullYear(), month: value.getUTCMonth() + 1, day: value.getUTCDate() };
+}
+
 function zonedDateTimeToUtcMs(date: LocalDateParts, hour: number, minute: number, timeZone: string) {
   const wallClockAsUtc = datePartsToUtcMs({ ...date, hour, minute, second: 0 });
   if (wallClockAsUtc == null) return null;
@@ -117,13 +127,8 @@ function dayOfWeek(date: LocalDateParts) {
 }
 
 export function timeframeDurationMs(timeframe: FxTimeframe) {
-  switch (timeframe) {
-    case "1m": return 60_000;
-    case "5m": return 5 * 60_000;
-    case "1h": return 60 * 60_000;
-    case "1d": return 24 * 60 * 60_000;
-    case "1w": return 7 * 24 * 60 * 60_000;
-  }
+  const minutes = timeframeMinutes(timeframe);
+  return minutes == null ? null : minutes * 60_000;
 }
 
 /** Returns the UTC start bucket without creating empty buckets. */
@@ -131,13 +136,35 @@ export function bucketStartTimestamp(timestamp: number, timeframe: FxTimeframe, 
   if (!Number.isFinite(timestamp)) throw new Error("timestamp 必须是有限数值");
   const session = resolveSession(inputSession);
   const duration = timeframeDurationMs(timeframe);
-  if (timeframe === "1m" || timeframe === "5m" || timeframe === "1h") return Math.floor(timestamp / duration) * duration;
+  if (duration != null && timeframe !== "1d" && timeframe !== "1w") return Math.floor(timestamp / duration) * duration;
 
   const date = tradingDate(timestamp, session);
   if (timeframe === "1d") return zonedDateTimeToUtcMs(date, session.sessionStartHour, session.sessionStartMinute, session.timeZone) as number;
-  const offset = (dayOfWeek(date) - session.weekStartsOn + 7) % 7;
-  const weekStart = addCalendarDays(date, -offset);
-  return zonedDateTimeToUtcMs(weekStart, session.sessionStartHour, session.sessionStartMinute, session.timeZone) as number;
+  if (timeframe === "1w") {
+    const offset = (dayOfWeek(date) - session.weekStartsOn + 7) % 7;
+    const weekStart = addCalendarDays(date, -offset);
+    return zonedDateTimeToUtcMs(weekStart, session.sessionStartHour, session.sessionStartMinute, session.timeZone) as number;
+  }
+  const monthStart = { year: date.year, month: date.month, day: 1 };
+  return zonedDateTimeToUtcMs(monthStart, session.sessionStartHour, session.sessionStartMinute, session.timeZone) as number;
+}
+
+export function nextBucketStartTimestamp(timestamp: number, timeframe: FxTimeframe, inputSession: FxSessionOptions = {}) {
+  if (!Number.isFinite(timestamp)) throw new Error("timestamp 必须是有限数值");
+  const session = resolveSession(inputSession);
+  const duration = timeframeDurationMs(timeframe);
+  if (duration != null && timeframe !== "1d" && timeframe !== "1w") return timestamp + duration;
+  const local = localDateTimeParts(timestamp, session.timeZone);
+  if (timeframe === "1d") {
+    const date = addCalendarDays({ year: local.year, month: local.month, day: local.day }, 1);
+    return zonedDateTimeToUtcMs(date, session.sessionStartHour, session.sessionStartMinute, session.timeZone) as number;
+  }
+  if (timeframe === "1w") {
+    const date = addCalendarDays({ year: local.year, month: local.month, day: local.day }, 7);
+    return zonedDateTimeToUtcMs(date, session.sessionStartHour, session.sessionStartMinute, session.timeZone) as number;
+  }
+  const date = addCalendarMonths({ year: local.year, month: local.month, day: 1 }, 1);
+  return zonedDateTimeToUtcMs(date, session.sessionStartHour, session.sessionStartMinute, session.timeZone) as number;
 }
 
 function mergeCandle(current: FxCandle, next: FxCandle): FxCandle {
@@ -181,7 +208,7 @@ export function aggregateM1To5m(candles: Iterable<FxCandle>, inputSession: FxSes
   return aggregateCandles(candles, "5m", inputSession);
 }
 
-export function aggregate5mToTimeframe(candles: Iterable<FxCandle>, timeframe: "1h" | "1d" | "1w", inputSession: FxSessionOptions = {}) {
+export function aggregate5mToTimeframe(candles: Iterable<FxCandle>, timeframe: FxTimeframe, inputSession: FxSessionOptions = {}) {
   return aggregateCandles(candles, timeframe, inputSession);
 }
 
@@ -240,10 +267,7 @@ export function* aggregateCandleChunks(chunks: Iterable<Iterable<FxCandle>>, tim
 }
 
 function nextExpectedBucket(timestamp: number, timeframe: FxTimeframe, session: Required<FxSessionOptions>) {
-  if (timeframe === "1m" || timeframe === "5m" || timeframe === "1h") return timestamp + timeframeDurationMs(timeframe);
-  const local = localDateTimeParts(timestamp, session.timeZone);
-  const date = addCalendarDays({ year: local.year, month: local.month, day: local.day }, timeframe === "1w" ? 7 : 1);
-  return zonedDateTimeToUtcMs(date, session.sessionStartHour, session.sessionStartMinute, session.timeZone) as number;
+  return nextBucketStartTimestamp(timestamp, timeframe, session);
 }
 
 function isFxSessionClosed(timestamp: number, session: Required<FxSessionOptions>) {
@@ -287,7 +311,10 @@ export function findFxCandleGaps(candles: Iterable<FxCandle>, timeframe: FxTimef
       missingBuckets += 1;
       cursor = nextExpectedBucket(cursor, timeframe, session);
     }
-    if (cursor < toTimestamp) missingBuckets = Math.max(missingBuckets, Math.floor((toTimestamp - expectedFirstTimestamp) / timeframeDurationMs(timeframe)));
+    const duration = timeframeDurationMs(timeframe);
+    if (cursor < toTimestamp && duration != null) {
+      missingBuckets = Math.max(missingBuckets, Math.floor((toTimestamp - expectedFirstTimestamp) / duration));
+    }
     const weekend = weekendOnlyGap(expectedFirstTimestamp, missingBuckets, timeframe, session);
     gaps.push({
       fromTimestamp,

@@ -1,5 +1,32 @@
+import { canAggregateTimeframe, timeframeRank, type TimeframeId } from "./timeframeCatalog.ts";
+
 export type MarketDataProviderId = "tushare" | "alpaca";
-export type SupportedTimeframe = "5m" | "1h" | "1d" | "1w";
+export type SupportedTimeframe = TimeframeId;
+
+export const DIRECT_PROVIDER_TIMEFRAMES: Record<MarketDataProviderId, readonly SupportedTimeframe[]> = {
+  tushare: ["5m", "1h", "1d", "1w"],
+  alpaca: ["5m", "1h", "1d", "1w"],
+};
+
+/**
+ * Resolves the smallest direct source needed to build a requested target.
+ * Direct provider capabilities stay truthful; derived targets are fetched
+ * from the largest valid lower source to keep the provider request bounded.
+ */
+export function resolveProviderSourceTimeframe(
+  provider: MarketDataProviderId,
+  targetTimeframe: SupportedTimeframe,
+): SupportedTimeframe {
+  const direct = DIRECT_PROVIDER_TIMEFRAMES[provider];
+  if (direct.includes(targetTimeframe)) return targetTimeframe;
+  const source = [...direct]
+    .filter((candidate) => canAggregateTimeframe(candidate, targetTimeframe))
+    .sort((left, right) => (timeframeRank(right) ?? -1) - (timeframeRank(left) ?? -1))[0];
+  if (!source) {
+    throw new Error(`${provider} 没有可用于生成 ${targetTimeframe} 的更小直接周期`);
+  }
+  return source;
+}
 
 export type NormalizedCandle = {
   timestamp: number;
@@ -100,6 +127,10 @@ export type AlpacaMultiSymbolChunk = {
   source: string;
 };
 
+export type AlpacaRequestOptions = {
+  timeoutMs?: number;
+};
+
 export class AlpacaApiError extends Error {
   readonly status: number;
   feed?: AlpacaFeed;
@@ -121,12 +152,25 @@ export type AlpacaAsset = {
   asset_class?: string;
 };
 
-const timeframeToAlpaca: Record<SupportedTimeframe, string> = {
+const timeframeToAlpaca: Partial<Record<SupportedTimeframe, string>> = {
   "5m": "5Min",
   "1h": "1Hour",
   "1d": "1Day",
   "1w": "1Week",
 };
+
+function requireAlpacaTimeframe(timeframe: SupportedTimeframe) {
+  const value = timeframeToAlpaca[timeframe];
+  if (!value) throw new Error(`Alpaca 不支持直接请求 ${timeframe} 周期`);
+  return value;
+}
+
+function requireTushareTimeframe(timeframe: SupportedTimeframe) {
+  if (!DIRECT_PROVIDER_TIMEFRAMES.tushare.includes(timeframe)) {
+    throw new Error(`Tushare 不支持直接请求 ${timeframe} 周期`);
+  }
+  return timeframe;
+}
 
 function addUtcDays(date: string, days: number) {
   const value = new Date(`${date}T00:00:00Z`);
@@ -161,23 +205,30 @@ async function fetchAlpacaJson<T extends { message?: string }>(
   url: string,
   init: RequestInit,
   fetcher: typeof fetch,
+  timeoutMs = 30_000,
 ) {
   let lastError: unknown;
   for (let attempt = 0; attempt < 5; attempt += 1) {
     let response: Response | null = null;
     try {
       const controller = new AbortController();
-      const timeout = setTimeout(() => controller.abort(), 30_000);
+      const timeout = setTimeout(() => controller.abort(), timeoutMs);
       try {
         response = await fetcher(url, { ...init, signal: controller.signal });
+        let payload: T;
+        try {
+          payload = await response.json() as T;
+        } catch (error) {
+          if (response.ok) throw error;
+          payload = {} as T;
+        }
+        if (response.ok) return { response, payload };
+        const error = new AlpacaApiError(errorMessage(payload, response.status), response.status);
+        if (!isRetryableAlpacaStatus(response.status) || attempt === 4) throw error;
+        lastError = error;
       } finally {
         clearTimeout(timeout);
       }
-      const payload = await response.json().catch(() => ({})) as T;
-      if (response.ok) return { response, payload };
-      const error = new AlpacaApiError(errorMessage(payload, response.status), response.status);
-      if (!isRetryableAlpacaStatus(response.status) || attempt === 4) throw error;
-      lastError = error;
     } catch (error) {
       if (error instanceof AlpacaApiError && !isRetryableAlpacaStatus(error.status)) throw error;
       lastError = error;
@@ -245,6 +296,7 @@ export function normalizeTusharePayload(
   payload: TusharePayload,
   timeframe: SupportedTimeframe,
 ) {
+  requireTushareTimeframe(timeframe);
   if (payload.code !== 0) throw new Error(payload.msg || `Tushare 返回错误 ${payload.code ?? "unknown"}`);
   const fields = payload.data?.fields ?? [];
   const rows = payload.data?.items ?? [];
@@ -279,7 +331,7 @@ export function buildAlpacaMultiSymbolUrl(request: AlpacaMultiSymbolChunkRequest
   const symbols = [...new Set(request.symbols.map((value) => String(value).trim().toUpperCase()).filter(Boolean))];
   const params = new URLSearchParams({
     symbols: symbols.join(","),
-    timeframe: timeframeToAlpaca[request.timeframe],
+    timeframe: requireAlpacaTimeframe(request.timeframe),
     start: request.startDate,
     end: request.endDate,
     limit: String(Math.min(10_000, Math.max(1, request.limit ?? 10_000))),
@@ -295,6 +347,7 @@ export async function fetchAlpacaMultiSymbolChunk(
   request: AlpacaMultiSymbolChunkRequest,
   secrets: ProviderSecrets,
   fetcher: typeof fetch = fetch,
+  options: AlpacaRequestOptions = {},
 ): Promise<AlpacaMultiSymbolChunk> {
   if (!secrets.alpacaKeyId || !secrets.alpacaSecretKey) {
     throw new Error("尚未配置 APCA_API_KEY_ID 和 APCA_API_SECRET_KEY");
@@ -311,7 +364,7 @@ export async function fetchAlpacaMultiSymbolChunk(
         "APCA-API-KEY-ID": secrets.alpacaKeyId,
         "APCA-API-SECRET-KEY": secrets.alpacaSecretKey,
       },
-    }, fetcher);
+    }, fetcher, options.timeoutMs);
   } catch (error) {
     if (error instanceof AlpacaApiError) error.feed = request.feed;
     throw error;
@@ -338,6 +391,7 @@ export function filterTradableUsAssets(assets: AlpacaAsset[]) {
 }
 
 function tushareChunkRequest(request: ProviderChunkRequest) {
+  requireTushareTimeframe(request.timeframe);
   const cursorStart = request.cursor.nextStartDate ?? request.startDate;
   const chunkDays = request.timeframe === "5m" ? 120 : request.timeframe === "1h" ? 900 : request.timeframe === "1d" ? 3000 : 6000;
   const chunkEnd = minDate(addUtcDays(cursorStart, chunkDays - 1), request.endDate);
@@ -403,7 +457,7 @@ export async function fetchProviderChunk(
   // halfway through its history.  A SIP failure must be visible to the user.
   const feed: AlpacaFeed = "sip";
   const params = new URLSearchParams({
-    timeframe: timeframeToAlpaca[request.timeframe],
+    timeframe: requireAlpacaTimeframe(request.timeframe),
     start: request.startDate,
     end: request.endDate,
     limit: "10000",

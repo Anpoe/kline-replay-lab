@@ -36,6 +36,8 @@ export default defineConfig(async () => {
       // The companion market-data service remains bound to 127.0.0.1 and is
       // reached only by the server-side API routes.
       host: "::",
+      // The worker owns 3102, so never let Vite move WebUI off its fixed port.
+      strictPort: true,
       // Keep Vite's DNS-rebinding protection and add only the user's dynv6
       // hostname. localhost and literal IP addresses remain allowed by Vite.
       allowedHosts: ["kline42.dynv6.net"],

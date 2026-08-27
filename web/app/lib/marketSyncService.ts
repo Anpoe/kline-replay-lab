@@ -20,6 +20,7 @@ import {
   type MarketSyncMode,
 } from "./marketSync";
 import { loadProviderSecrets } from "./providerCredentials";
+import { createMarketSyncWorkerGate } from "./marketSyncWorkerCoordinator.ts";
 import {
   latestClosedUsSession,
   newYorkDate,
@@ -30,6 +31,7 @@ export const US_HISTORY_START_DATE = "2016-01-01";
 const US_MARKET = "US";
 const RUNNING_LEASE_MS = 10 * 60 * 1000;
 const MAX_SELECTED_INSTRUMENTS = 2_000;
+const marketSyncWorkerGate = createMarketSyncWorkerGate();
 
 type ProviderSecrets = {
   alpacaKeyId?: string;
@@ -883,8 +885,10 @@ async function processBatch(db: D1Database, run: RunRow, originalBatch: BatchRow
   const claimTime = nowIso();
   const claim = await db.prepare("UPDATE market_sync_batches SET status = 'running', " +
     "attempt_count = attempt_count + 1, started_at = COALESCE(started_at, ?), " +
-    "updated_at = ? WHERE id = ? AND status = 'queued'")
-    .bind(claimTime, claimTime, originalBatch.id).run();
+    "updated_at = ? WHERE id = ? AND status = 'queued' " +
+    "AND NOT EXISTS (SELECT 1 FROM market_sync_batches AS active " +
+    "WHERE active.run_id = ? AND active.status = 'running')")
+    .bind(claimTime, claimTime, originalBatch.id, originalBatch.runId).run();
   if (!claim.meta.changes) return;
   const batch = await db.prepare(batchSelect() + " WHERE id = ?").bind(originalBatch.id).first<BatchRow>();
   if (!batch) return;
@@ -980,7 +984,7 @@ async function processBatch(db: D1Database, run: RunRow, originalBatch: BatchRow
   await updateRunProgress(db, run.id);
 }
 
-export async function processNextMarketSyncBatch(runId: string) {
+async function processNextMarketSyncBatchInternal(runId: string) {
   await ensureSchema();
   const db = getRawDb();
   const status = await getMarketSyncStatus(runId);
@@ -1010,6 +1014,18 @@ export async function processNextMarketSyncBatch(runId: string) {
     .bind(startedAt, startedAt, runId).run();
   await processBatch(db, run, batch, secrets);
   return await getMarketSyncStatus(runId);
+}
+
+export async function processNextMarketSyncBatch(runId: string) {
+  return await marketSyncWorkerGate.run(
+    runId,
+    () => processNextMarketSyncBatchInternal(runId),
+    async () => {
+      const status = await getMarketSyncStatus(runId);
+      if (!status) throw new MarketSyncError("同步任务不存在", 404);
+      return status;
+    },
+  );
 }
 
 export async function controlMarketSync(

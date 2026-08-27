@@ -1,5 +1,6 @@
 import { ensureSchema, getRawDb } from "../../../db/runtime";
 import type { MarketDataProviderId, SupportedTimeframe } from "../../lib/marketDataProviders";
+import { TIMEFRAME_IDS } from "../../lib/timeframeCatalog";
 
 type DownloadJobInput = {
   provider?: MarketDataProviderId;
@@ -13,7 +14,7 @@ type DownloadJobInput = {
 };
 
 const providers = new Set(["tushare", "alpaca"]);
-const timeframes = new Set(["5m", "1h", "1d", "1w"]);
+const timeframes = new Set<string>(TIMEFRAME_IDS);
 
 export async function GET(request: Request) {
   await ensureSchema();

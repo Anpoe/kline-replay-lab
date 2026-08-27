@@ -1,3 +1,5 @@
+import { marketSyncWorkerCoordinator } from "../../lib/marketSyncWorkerCoordinator.ts";
+
 export type MarketDataGatewayFetchInit = {
   cache?: "no-store";
   method?: string;
@@ -225,16 +227,17 @@ export function createMarketDataGateway(fetcher: MarketDataGatewayFetch) {
       "市场同步任务创建失败",
     );
 
-  const marketSyncWorker = <T = unknown>(runId: string, signal?: AbortSignal) => requestJson<T>(
-    fetcher,
-    "/api/data-jobs/market/sync/worker",
-    withSignal({
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ runId }),
-    }, signal),
-    "市场同步批次执行失败",
-  );
+  const marketSyncWorker = <T = unknown>(runId: string, signal?: AbortSignal) =>
+    marketSyncWorkerCoordinator.request(runId, () => requestJson<T>(
+      fetcher,
+      "/api/data-jobs/market/sync/worker",
+      withSignal({
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ runId }),
+      }, signal),
+      "市场同步批次执行失败",
+    ));
 
   const marketSyncAction = <T = unknown>(runId: string, action: "pause" | "resume" | "cancel" | "retry", signal?: AbortSignal) => requestJson<T>(
     fetcher,

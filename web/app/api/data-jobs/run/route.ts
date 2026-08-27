@@ -1,11 +1,13 @@
 import { ensureSchema, getRawDb } from "../../../../db/runtime";
 import {
   fetchProviderChunk,
+  resolveProviderSourceTimeframe,
   type MarketDataProviderId,
   type ProviderCursor,
   type QualityReport,
   type SupportedTimeframe,
 } from "../../../lib/marketDataProviders";
+import { aggregateCandlesToTimeframe } from "../../../lib/timeframeAggregation";
 import { loadProviderSecrets } from "../../../lib/providerCredentials";
 
 type DownloadJobRow = {
@@ -74,14 +76,25 @@ export async function POST(request: Request) {
     const cursor = job.market === "US" && storedCursor.feed === "iex"
       ? {}
       : storedCursor;
-    const chunk = await fetchProviderChunk({
+    const sourceTimeframe = resolveProviderSourceTimeframe(job.provider, job.timeframe);
+    const sourceChunk = await fetchProviderChunk({
       provider: job.provider,
       vendorSymbol: job.vendorSymbol,
-      timeframe: job.timeframe,
+      timeframe: sourceTimeframe,
       startDate: job.startDate,
       endDate: job.endDate,
       cursor,
     }, secrets);
+    const chunk = sourceTimeframe === job.timeframe
+      ? sourceChunk
+      : {
+          ...sourceChunk,
+          candles: aggregateCandlesToTimeframe(
+            sourceChunk.candles,
+            job.timeframe,
+            job.market === "CN" ? "Asia/Shanghai" : "America/New_York",
+          ),
+        };
 
     await db.prepare(`INSERT INTO instruments
       (id, symbol, name, market, timezone, price_precision)

@@ -1,11 +1,16 @@
 import {
+  GOLD_INSTRUMENT_CATALOG,
   FX_INSTRUMENT_CATALOG,
   FX_TIMEFRAME_MS,
-  getFxInstrumentDefinition,
+  getFxCandleEndTimestamp,
+  getMarketInstrumentDefinition,
+  type MarketInstrumentDefinition,
+  type MarketInstrumentId,
   type FxInstrumentDefinition,
   type FxInstrumentId,
   type FxTimeframe,
 } from "./fxDataContracts.ts";
+import { TIMEFRAME_IDS, timeframeLabel } from "./timeframeCatalog.ts";
 import {
   aggregate5mToTimeframe,
   aggregateM1To5m,
@@ -35,7 +40,7 @@ export type FxTaskStage = "queued" | "download" | "parse" | "aggregate" | "valid
 export type FxTaskRow = {
   id: string;
   mode: FxTaskMode;
-  instrumentId: FxInstrumentId;
+  instrumentId: MarketInstrumentId;
   pairLabel: string;
   vendorSymbol: string;
   dukascopySymbol: string;
@@ -63,7 +68,7 @@ export type FxTaskRow = {
 export type FxTaskView = {
   id: string;
   mode: FxTaskMode;
-  pairId: FxInstrumentId;
+  pairId: MarketInstrumentId;
   pairLabel: string;
   status: FxTaskStatus;
   stage: FxTaskStage;
@@ -109,8 +114,12 @@ type QualitySummary = {
   checkedAt: string;
 };
 
-const DEFAULT_TARGET_TIMEFRAMES = ["1m", "5m", "1h", "1d", "1w"] as const;
+const DEFAULT_TARGET_TIMEFRAMES = [...TIMEFRAME_IDS] as const;
 const VALID_TARGET_TIMEFRAMES = new Set(DEFAULT_TARGET_TIMEFRAMES);
+const FX_DERIVED_TIMEFRAME_LABELS = TIMEFRAME_IDS
+  .filter((timeframe) => timeframe !== "1m" && timeframe !== "5m")
+  .map((timeframe) => timeframeLabel(timeframe))
+  .join("、");
 const FX_SOURCE_DUKASCOPY = "dukascopy";
 const FX_SOURCE_TWELVE_DATA = "twelvedata";
 const DEFAULT_DATE = "1970-01-01";
@@ -118,6 +127,7 @@ const DEFAULT_DATE = "1970-01-01";
 // page cache between chunks. Large M1 ranges can otherwise make the UI and
 // status endpoint appear offline while a multi-gigabyte database is writing.
 const HISTORICAL_CHUNK_DAYS = 7;
+const HIGHER_TIMEFRAME_LOOKBACK_DAYS = 42;
 const activeFxTaskRuns = new Set<string>();
 const sharedDukascopyOfficialClient = new DukascopyOfficialClient();
 
@@ -162,12 +172,13 @@ function totalDaysForTask(task: Pick<FxTaskRow, "startDate" | "endDate">) {
   return Math.max(1, Math.floor((Date.parse(`${task.endDate}T00:00:00Z`) - Date.parse(`${task.startDate}T00:00:00Z`)) / 86_400_000) + 1);
 }
 
-function getTargetTimeframes(value: unknown) {
+function getTargetTimeframes(value: unknown, includeMissingDefaults = false) {
   const values = Array.isArray(value) ? value : DEFAULT_TARGET_TIMEFRAMES;
   const result = [...new Set(values.filter((item): item is FxTimeframe => (
     typeof item === "string" && VALID_TARGET_TIMEFRAMES.has(item as FxTimeframe)
   )))];
-  return result.length ? result : [...DEFAULT_TARGET_TIMEFRAMES];
+  if (!result.length || includeMissingDefaults) return [...DEFAULT_TARGET_TIMEFRAMES];
+  return result;
 }
 
 function rowView(row: FxTaskRow | null): FxTaskView | null {
@@ -192,8 +203,9 @@ export function getFxTaskView(row: FxTaskRow | null) {
   return rowView(row);
 }
 
-export function getFxCatalog() {
-  return FX_INSTRUMENT_CATALOG.map((instrument) => ({
+export function getFxCatalog(market: "FX" | "GOLD" = "FX") {
+  const catalog = market === "GOLD" ? GOLD_INSTRUMENT_CATALOG : FX_INSTRUMENT_CATALOG;
+  return catalog.map((instrument) => ({
     id: instrument.id,
     label: instrument.displayName,
     dukascopySymbol: instrument.dukascopySymbol,
@@ -242,8 +254,8 @@ export async function getFxTask(db: D1Database, taskId?: string, pairId?: string
 }
 
 export async function createFxTask(db: D1Database, mode: FxTaskMode, input: FxTaskCreateInput) {
-  const instrument = getFxInstrumentDefinition(input.pairId) as FxInstrumentDefinition | null;
-  if (!instrument) throw new Error("请选择受支持的外汇货币对");
+  const instrument = getMarketInstrumentDefinition(input.pairId) as MarketInstrumentDefinition | null;
+  if (!instrument) throw new Error("请选择受支持的外汇或黄金品种");
   const startDate = dateOnly(input.startDate, mode === "update" ? daysAgoDate(7) : DEFAULT_DATE);
   const endDate = dateOnly(input.endDate, new Date().toISOString().slice(0, 10));
   if (mode === "initialize" && (startDate === DEFAULT_DATE || endDate < startDate)) {
@@ -378,12 +390,12 @@ function asCandle(row: Record<string, unknown>): FxCandle {
   };
 }
 
-async function ensureInstrument(db: D1Database, instrument: FxInstrumentDefinition) {
+async function ensureInstrument(db: D1Database, instrument: MarketInstrumentDefinition) {
   await db.prepare(`INSERT INTO instruments (id, symbol, name, market, timezone, price_precision)
-    VALUES (?, ?, ?, 'FX', 'America/New_York', ?)
+    VALUES (?, ?, ?, ?, 'America/New_York', ?)
     ON CONFLICT(id) DO UPDATE SET symbol = excluded.symbol, name = excluded.name,
     market = excluded.market, timezone = excluded.timezone, price_precision = excluded.price_precision`)
-    .bind(instrument.id, instrument.id, instrument.displayName, instrument.pricePrecision)
+    .bind(instrument.id, instrument.id, instrument.displayName, instrument.market, instrument.pricePrecision)
     .run();
 }
 
@@ -565,7 +577,7 @@ function mergeQuality(previous: Partial<QualitySummary>, current: QualitySummary
   };
 }
 
-async function runHistoricalTask(db: D1Database, task: FxTaskRow, instrument: FxInstrumentDefinition) {
+async function runHistoricalTask(db: D1Database, task: FxTaskRow, instrument: MarketInstrumentDefinition) {
   const { secrets } = await loadProviderSecrets();
   const cursor = parseJson<FxTaskCursor>(task.cursorJson, {});
   const officialClient = secrets.dukascopyEndpoint ? null : sharedDukascopyOfficialClient;
@@ -644,7 +656,7 @@ async function runHistoricalTask(db: D1Database, task: FxTaskRow, instrument: Fx
     progress: { completed: completedDays, total: totalDays, unit: "days", percent: progressPercent },
     message: `CSV 已解析 ${parsed.report.accepted.toLocaleString()} 行`,
   });
-  await updateTask(db, task.id, { stage: "aggregate", stageProgress: Math.min(98, progressPercent + 15), message: "正在保存 M1 并聚合统一 5m 基准" });
+  await updateTask(db, task.id, { stage: "aggregate", stageProgress: Math.min(98, progressPercent + 15), message: `正在保存 M1、M5，并聚合 ${FX_DERIVED_TIMEFRAME_LABELS}` });
   const base = aggregateM1To5m(parsed.candles);
   await ensureInstrument(db, instrument);
   await updateTask(db, task.id, { stage: "persist", stageProgress: Math.min(99, progressPercent + 20), message: "正在写入本次分片的 1m / 5m 基准" });
@@ -667,17 +679,19 @@ async function runHistoricalTask(db: D1Database, task: FxTaskRow, instrument: Fx
   }
   if (await isTaskStopped(db, task.id)) return getFxTask(db, task.id);
 
-  const targetTimeframes = getTargetTimeframes(parseJson<unknown>(task.targetTimeframesJson, [...DEFAULT_TARGET_TIMEFRAMES]));
+  const targetTimeframes = getTargetTimeframes(parseJson<unknown>(task.targetTimeframesJson, [...DEFAULT_TARGET_TIMEFRAMES]), true);
   const currentChunkLastTimestamp = base.at(-1)?.timestamp ?? Date.parse(`${chunkEnd}T23:59:59Z`);
   const recent = await readRecentBaseCandles(db, task, currentChunkLastTimestamp, currentChunkLastTimestamp);
   const higher: Array<[FxTimeframe, FxCandle[]]> = [];
-  if (targetTimeframes.includes("1h")) higher.push(["1h", aggregate5mToTimeframe(recent, "1h")]);
-  if (targetTimeframes.includes("1d")) higher.push(["1d", aggregate5mToTimeframe(recent, "1d")]);
-  if (targetTimeframes.includes("1w")) higher.push(["1w", aggregate5mToTimeframe(recent, "1w")]);
+  for (const timeframe of targetTimeframes) {
+    if (timeframe === "1m" || timeframe === "5m") continue;
+    higher.push([timeframe, aggregate5mToTimeframe(recent, timeframe)]);
+  }
   for (const [timeframe, candles] of higher) {
-    if (!(await isCandleRangeCovered(db, task, timeframe, FX_SOURCE_DUKASCOPY, candles))) {
-      inserted += await persistCandles(db, task, timeframe, FX_SOURCE_DUKASCOPY, candles);
-    }
+    // Re-write every affected higher-period bucket. A monthly bucket can be
+    // persisted partially by an earlier chunk while keeping the same first and
+    // last timestamps, so range coverage alone cannot detect an OHLCV change.
+    inserted += await persistCandles(db, task, timeframe, FX_SOURCE_DUKASCOPY, candles);
   }
   const currentQuality = qualityFromDukascopy(parsed.report, base, inserted, null);
   const previousQuality = parseJson<Partial<QualitySummary>>(task.qualityReportJson, {});
@@ -734,7 +748,7 @@ async function readRecentBaseCandles(
     AND timestamp BETWEEN ? AND ? ORDER BY timestamp ASC`)
     .bind(
       task.instrumentId,
-      Math.max(0, fromTimestamp - 8 * 24 * 60 * 60 * 1000),
+      Math.max(0, fromTimestamp - HIGHER_TIMEFRAME_LOOKBACK_DAYS * 24 * 60 * 60 * 1000),
       throughTimestamp,
     )
     .all<Record<string, unknown>>();
@@ -763,7 +777,7 @@ function rowTimestamp(row: { lastTimestamp: number | null } | null) {
   return Number.isFinite(Number(row?.lastTimestamp)) ? Number(row?.lastTimestamp) : null;
 }
 
-async function runIncrementalTask(db: D1Database, task: FxTaskRow, instrument: FxInstrumentDefinition) {
+async function runIncrementalTask(db: D1Database, task: FxTaskRow, instrument: MarketInstrumentDefinition) {
   const { secrets } = await loadProviderSecrets();
   if (!secrets.twelveDataApiKey) throw new Error("尚未配置 Twelve Data API Key，请在“设置 → 数据源设置”中保存凭证");
   const [historyMinuteRow, historyFiveMinuteRow, latestIncrementalRow] = await Promise.all([
@@ -813,7 +827,7 @@ async function runIncrementalTask(db: D1Database, task: FxTaskRow, instrument: F
   if (writeCandles.length) inserted += await persistCandles(db, task, "1m", FX_SOURCE_TWELVE_DATA, writeCandles);
   if (await isTaskStopped(db, task.id)) return getFxTask(db, task.id);
   if (writeCandles.length) {
-    await updateTask(db, task.id, { stage: "aggregate", stageProgress: 75, message: "正在由 M1 刷新 5m、小时、日线和周线" });
+    await updateTask(db, task.id, { stage: "aggregate", stageProgress: 75, message: `正在由 M1 刷新 M5，并重算 ${FX_DERIVED_TIMEFRAME_LABELS}` });
     const incrementalStart = historyBoundary == null
       ? Date.parse(`${task.startDate}T00:00:00Z`)
       : historyBoundary + FX_TIMEFRAME_MS["1m"];
@@ -845,11 +859,12 @@ async function runIncrementalTask(db: D1Database, task: FxTaskRow, instrument: F
           fiveMinuteCandles.at(-1)?.timestamp ?? fiveMinuteCandles[0].timestamp,
         )
       : [];
-    const targetTimeframes = getTargetTimeframes(parseJson<unknown>(task.targetTimeframesJson, [...DEFAULT_TARGET_TIMEFRAMES]));
-    const higher: Array<["1h" | "1d" | "1w", FxCandle[]]> = [];
-    if (targetTimeframes.includes("1h")) higher.push(["1h", aggregate5mToTimeframe(recent, "1h")]);
-    if (targetTimeframes.includes("1d")) higher.push(["1d", aggregate5mToTimeframe(recent, "1d")]);
-    if (targetTimeframes.includes("1w")) higher.push(["1w", aggregate5mToTimeframe(recent, "1w")]);
+    const targetTimeframes = getTargetTimeframes(parseJson<unknown>(task.targetTimeframesJson, [...DEFAULT_TARGET_TIMEFRAMES]), true);
+    const higher: Array<[FxTimeframe, FxCandle[]]> = [];
+    for (const timeframe of targetTimeframes) {
+      if (timeframe === "1m" || timeframe === "5m") continue;
+      higher.push([timeframe, aggregate5mToTimeframe(recent, timeframe)]);
+    }
     for (const [timeframe, candles] of higher) {
       const refreshStart = Math.max(
         fiveMinuteWriteStart,
@@ -857,7 +872,7 @@ async function runIncrementalTask(db: D1Database, task: FxTaskRow, instrument: F
       );
       const completed = candles.filter((candle) => (
         candle.timestamp >= refreshStart
-        && candle.timestamp + FX_TIMEFRAME_MS[timeframe] <= completeThroughExclusive
+        && getFxCandleEndTimestamp(candle.timestamp, timeframe) <= completeThroughExclusive
       ));
       inserted += await persistCandles(db, task, timeframe, FX_SOURCE_TWELVE_DATA, completed);
     }
@@ -890,18 +905,18 @@ async function runIncrementalTask(db: D1Database, task: FxTaskRow, instrument: F
 
 export async function runFxTask(db: D1Database, taskId: string) {
   const task = await getFxTask(db, taskId);
-  if (!task) throw new Error("外汇任务不存在");
+  if (!task) throw new Error("行情任务不存在");
   if (["paused", "cancelled", "completed"].includes(task.status)) return task;
   if (activeFxTaskRuns.has(taskId)) return task;
   activeFxTaskRuns.add(taskId);
   try {
-    const instrument = getFxInstrumentDefinition(task.instrumentId);
-    if (!instrument) throw new Error("任务中的外汇品种已不再受支持");
+    const instrument = getMarketInstrumentDefinition(task.instrumentId);
+    if (!instrument) throw new Error("任务中的品种已不再受支持");
     const startedAt = task.startedAt ?? nowIso();
     await updateTask(db, task.id, {
       status: "running",
       stage: task.stage === "queued" ? "download" : task.stage,
-      message: task.mode === "initialize" ? "外汇历史任务正在处理" : "外汇增量任务正在处理",
+      message: task.mode === "initialize" ? "历史行情任务正在处理" : "增量行情任务正在处理",
       startedAt,
       error: null,
     });
@@ -918,12 +933,12 @@ export async function failFxTask(db: D1Database, taskId: string, error: unknown)
     status: "failed",
     stage: "validate",
     stageProgress: 0,
-    message: "外汇任务失败",
+    message: "行情任务失败",
     error: message,
     finishedAt: nowIso(),
   });
 }
 
 export function isFxPairId(value: unknown): value is FxInstrumentId {
-  return Boolean(getFxInstrumentDefinition(value));
+  return Boolean(getMarketInstrumentDefinition(value)?.market === "FX");
 }

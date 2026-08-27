@@ -4,6 +4,68 @@ import type {
   ReviewSessionFilters,
 } from "./reviewContracts.ts";
 
+export const REVIEW_SESSION_PAGE_SIZE = 50;
+export const REVIEW_SESSION_SUMMARY_BATCH_SIZE = 24;
+
+type ReviewSessionSummaryBatchOptions = {
+  batchSize?: number;
+  shouldCancel?: () => boolean;
+  yieldToBrowser?: () => Promise<void>;
+};
+
+export function nextReviewSessionVisibleCount(
+  currentCount: number,
+  totalCount: number,
+  pageSize = REVIEW_SESSION_PAGE_SIZE,
+) {
+  const safeCurrentCount = Number.isFinite(currentCount) ? Math.max(0, Math.floor(currentCount)) : 0;
+  const safeTotalCount = Number.isFinite(totalCount) ? Math.max(0, Math.floor(totalCount)) : 0;
+  const safePageSize = Number.isFinite(pageSize) && pageSize > 0 ? Math.floor(pageSize) : REVIEW_SESSION_PAGE_SIZE;
+  return Math.min(safeTotalCount, safeCurrentCount + safePageSize);
+}
+
+export function visibleReviewSessionItems<T extends { selected?: boolean }>(
+  items: readonly T[],
+  visibleCount: number,
+) {
+  const safeVisibleCount = Number.isFinite(visibleCount) ? Math.max(0, Math.floor(visibleCount)) : 0;
+  const visible = items.slice(0, safeVisibleCount);
+  const selectedIndex = items.findIndex((item) => item.selected === true);
+  if (selectedIndex < safeVisibleCount || selectedIndex < 0) return visible;
+  return [...visible, items[selectedIndex]];
+}
+
+export async function buildReviewSessionSummariesInBatches<TSession, TSummary>(
+  sessions: readonly TSession[],
+  buildSummary: (session: TSession) => TSummary | null,
+  options: ReviewSessionSummaryBatchOptions = {},
+): Promise<{ status: "completed" | "cancelled"; summaries: TSummary[] }> {
+  const batchSize = Number.isFinite(options.batchSize) && (options.batchSize ?? 0) > 0
+    ? Math.floor(options.batchSize as number)
+    : REVIEW_SESSION_SUMMARY_BATCH_SIZE;
+  const shouldCancel = options.shouldCancel ?? (() => false);
+  const yieldToBrowser = options.yieldToBrowser ?? (() => new Promise<void>((resolve) => {
+    if (typeof window !== "undefined" && typeof window.setTimeout === "function") {
+      window.setTimeout(resolve, 0);
+      return;
+    }
+    setTimeout(resolve, 0);
+  }));
+  const summaries: TSummary[] = [];
+
+  for (let start = 0; start < sessions.length; start += batchSize) {
+    if (shouldCancel()) return { status: "cancelled", summaries };
+    const end = Math.min(sessions.length, start + batchSize);
+    for (let index = start; index < end; index += 1) {
+      const summary = buildSummary(sessions[index]);
+      if (summary !== null) summaries.push(summary);
+    }
+    if (end < sessions.length) await yieldToBrowser();
+  }
+
+  return { status: "completed", summaries };
+}
+
 export function filterReviewSessions<T extends ReviewSessionFilterRecord>(
   sessions: readonly T[],
   filters: ReviewSessionFilters,

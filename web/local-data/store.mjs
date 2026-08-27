@@ -16,6 +16,7 @@ import { pipeline } from "node:stream/promises";
 import { fileURLToPath } from "node:url";
 import unzipper from "unzipper";
 import {
+  aggregateMonthly,
   aggregateWeekly,
   classifyTdxInstrument,
   fallbackInstrumentName,
@@ -954,6 +955,7 @@ export class TdxLocalStore {
           barCount: bars.length,
           firstTimestamp: bars[0].timestamp,
           lastTimestamp: bars.at(-1).timestamp,
+          timeframes: ["1d", "1w", "1mo"],
         });
       }
       this.task.progress.processedFiles += 1;
@@ -976,7 +978,7 @@ export class TdxLocalStore {
     await writeJsonAtomic(this.manifestFile, manifest);
     this.manifestCache = manifest;
     this.task.stage = "weekly-ready";
-    this.task.message = "日线索引已建立；周线将在首次打开品种时自动聚合并缓存于内存。";
+    this.task.message = "日线索引已建立；周线和月线将在首次打开品种时自动聚合并缓存于内存。";
     await this.persistTask(true);
     return manifest;
   }
@@ -989,7 +991,11 @@ export class TdxLocalStore {
   }
 
   async getInstruments() {
-    return (await this.getManifest())?.instruments ?? [];
+    const instruments = (await this.getManifest())?.instruments ?? [];
+    return instruments.map((instrument) => ({
+      ...instrument,
+      timeframes: instrument.timeframes?.length ? instrument.timeframes : ["1d", "1w", "1mo"],
+    }));
   }
 
   async getCoverage({ offset = 0, limit = 100, query = "" } = {}) {
@@ -1009,11 +1015,11 @@ export class TdxLocalStore {
       : manifest.instruments;
     const safeOffset = Math.max(0, Math.trunc(Number(offset) || 0));
     const safeLimit = Math.min(500, Math.max(1, Math.trunc(Number(limit) || 100)));
-    const total = matched.length * 2;
+    const total = matched.length * 3;
     const coverage = [];
     for (let rowIndex = safeOffset; rowIndex < Math.min(total, safeOffset + safeLimit); rowIndex += 1) {
-      const instrument = matched[Math.floor(rowIndex / 2)];
-      const timeframe = rowIndex % 2 === 0 ? "1d" : "1w";
+      const instrument = matched[Math.floor(rowIndex / 3)];
+      const timeframe = ["1d", "1w", "1mo"][rowIndex % 3];
       coverage.push({
         id: instrument.id,
         symbol: instrument.symbol,
@@ -1023,7 +1029,11 @@ export class TdxLocalStore {
         pricePrecision: instrument.pricePrecision,
         assetType: instrument.assetType,
         timeframe,
-        barCount: timeframe === "1d" ? instrument.barCount : Math.ceil(instrument.barCount / 5),
+        barCount: timeframe === "1d"
+          ? instrument.barCount
+          : timeframe === "1w"
+            ? Math.ceil(instrument.barCount / 5)
+            : Math.max(1, Math.ceil(instrument.barCount / 21)),
         firstTimestamp: instrument.firstTimestamp,
         lastTimestamp: instrument.lastTimestamp,
         adjustmentType: "none",
@@ -1032,7 +1042,7 @@ export class TdxLocalStore {
       });
     }
     const barCount = manifest.instruments.reduce(
-      (sum, instrument) => sum + instrument.barCount + Math.ceil(instrument.barCount / 5),
+      (sum, instrument) => sum + instrument.barCount + Math.ceil(instrument.barCount / 5) + Math.max(1, Math.ceil(instrument.barCount / 21)),
       0,
     );
     return {
@@ -1041,13 +1051,13 @@ export class TdxLocalStore {
       summary: {
         instrumentCount: manifest.instruments.length,
         barCount,
-        timeframes: ["1d", "1w"],
+        timeframes: ["1d", "1w", "1mo"],
       },
     };
   }
 
   async getCandles(instrumentId, timeframe = "1d") {
-    if (!["1d", "1w"].includes(timeframe)) return null;
+    if (!["1d", "1w", "1mo"].includes(timeframe)) return null;
     const manifest = await this.getManifest();
     const instrument = manifest?.instruments.find((item) => item.id === instrumentId);
     if (!instrument) return null;
@@ -1087,7 +1097,11 @@ export class TdxLocalStore {
       adjustmentType: "none",
       source: overlays.length ? "tdx-official+tushare" : "tdx-official",
       datasetVersion: manifest.datasetVersion,
-      candles: timeframe === "1w" ? aggregateWeekly(effectiveDaily) : effectiveDaily,
+      candles: timeframe === "1w"
+        ? aggregateWeekly(effectiveDaily)
+        : timeframe === "1mo"
+          ? aggregateMonthly(effectiveDaily)
+          : effectiveDaily,
     };
   }
 

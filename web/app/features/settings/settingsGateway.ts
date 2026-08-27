@@ -261,18 +261,24 @@ export function createSettingsStorageGateway(storage: SettingsStorage) {
 }
 
 export function createPreferencesGateway(fetcher: SettingsFetch) {
+  let mutationGeneration = 0;
+  let saveTail: Promise<void> = Promise.resolve();
+
   const load = async (signal?: AbortSignal) => {
+    const generationAtStart = mutationGeneration;
     const response = await fetcher("/api/preferences", {
       cache: "no-store",
       ...(signal ? { signal } : {}),
     });
+    if (generationAtStart !== mutationGeneration) return undefined;
     if (!response.ok) throw new Error("读取同步设置失败");
     const payload = await response.json();
+    if (generationAtStart !== mutationGeneration) return undefined;
     if (!payload || typeof payload !== "object" || Array.isArray(payload)) return undefined;
     return (payload as { preferences?: unknown }).preferences;
   };
 
-  const save = async (preferences: unknown, signal?: AbortSignal) => {
+  const write = async (preferences: unknown, signal?: AbortSignal) => {
     const response = await fetcher("/api/preferences", {
       method: "PUT",
       headers: { "Content-Type": "application/json" },
@@ -280,6 +286,15 @@ export function createPreferencesGateway(fetcher: SettingsFetch) {
       ...(signal ? { signal } : {}),
     });
     if (!response.ok) throw new Error("保存同步设置失败");
+  };
+
+  const save = (preferences: unknown, signal?: AbortSignal) => {
+    mutationGeneration += 1;
+    const pendingSave = saveTail
+      .catch(() => undefined)
+      .then(() => write(preferences, signal));
+    saveTail = pendingSave;
+    return pendingSave;
   };
 
   return { load, save };

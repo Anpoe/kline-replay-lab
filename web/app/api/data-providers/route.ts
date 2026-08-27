@@ -1,17 +1,20 @@
 import { ensureSchema } from "../../../db/runtime";
+import { DIRECT_PROVIDER_TIMEFRAMES } from "../../lib/marketDataProviders";
 import { loadProviderSecrets } from "../../lib/providerCredentials";
+import { TIMEFRAME_IDS } from "../../lib/timeframeCatalog";
 
 export async function GET() {
   await ensureSchema();
   const { secrets, tdxQuantEndpoint } = await loadProviderSecrets();
   return Response.json({
+    timeframeCatalog: [...TIMEFRAME_IDS],
     providers: [
       {
         id: "tushare",
         name: "Tushare Pro",
         market: "A股",
         configured: Boolean(secrets.tushareToken),
-        supportedTimeframes: ["5m", "1h", "1d", "1w"],
+        supportedTimeframes: [...DIRECT_PROVIDER_TIMEFRAMES.tushare],
         credentialNames: ["TUSHARE_TOKEN"],
       },
       {
@@ -19,7 +22,7 @@ export async function GET() {
         name: "Alpaca Market Data",
         market: "美股",
         configured: Boolean(secrets.alpacaKeyId && secrets.alpacaSecretKey),
-        supportedTimeframes: ["5m", "1h", "1d", "1w"],
+        supportedTimeframes: [...DIRECT_PROVIDER_TIMEFRAMES.alpaca],
         credentialNames: ["APCA_API_KEY_ID", "APCA_API_SECRET_KEY"],
       },
       {

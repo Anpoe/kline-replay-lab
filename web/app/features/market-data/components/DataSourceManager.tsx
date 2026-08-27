@@ -33,6 +33,12 @@ import {
   createMarketDataGateway,
   createMarketDataStorageGateway,
 } from "../marketDataGateway";
+import {
+  isMarketSyncTerminalStatus,
+  shouldRefreshMarketSyncJobs,
+} from "../../../lib/marketSyncWorkerCoordinator.ts";
+import { chooseUsSyncMode } from "../marketDataMode.ts";
+import { TIMEFRAME_IDS, timeframeLabel as catalogTimeframeLabel, type TimeframeId } from "../../../lib/timeframeCatalog";
 
 // The worker route remains the polling transport behind marketDataGateway: /api/data-jobs/market/sync/worker.
 
@@ -169,7 +175,7 @@ type AdvancedSetup = {
   funds: boolean;
   convertibleBonds: boolean;
   includeDelisted: boolean;
-  minimumTimeframe: "1d" | "1h" | "5m";
+  minimumTimeframe: TimeframeId;
   historyRange: "all" | "20y" | "10y";
   cnInitialSource: "tdx-zip" | "local-zip" | "tushare";
   cnIncrementalSource: "none" | "tushare" | "tdxquant";
@@ -222,10 +228,13 @@ function statusLabel(status: DownloadJob["status"]) {
 }
 
 function timeframeLabel(value: AdvancedSetup["minimumTimeframe"]) {
-  if (value === "5m") return "5 分钟（自动生成 1 小时、日线、周线）";
-  if (value === "1h") return "1 小时（自动生成日线、周线）";
-  return "日线（自动生成周线）";
+  if (value === "5m") return `${catalogTimeframeLabel(value)}（自动生成 M15、M30、H1、H4、D1、W1、MN）`;
+  if (value === "1h") return `${catalogTimeframeLabel(value)}（自动生成 H4、D1、W1、MN）`;
+  if (value === "1d") return `${catalogTimeframeLabel(value)}（自动生成 W1、MN）`;
+  return catalogTimeframeLabel(value);
 }
+
+const DIRECT_SETUP_TIMEFRAMES = new Set<TimeframeId>(["5m", "1h", "1d"]);
 
 function SetupProgress({ step }: { step: number }) {
   return (
@@ -501,20 +510,6 @@ export function DataSourceManager({
     return () => window.removeEventListener("provider-settings-updated", reload);
   }, [loadProviders]);
 
-  useEffect(() => {
-    const reload = () => {
-      void Promise.all([
-        loadJobs(),
-        loadMarketSync(),
-        loadLocalTask(),
-        loadCnMaintenanceTask(),
-        loadFxTask(),
-      ]);
-    };
-    window.addEventListener("data-auto-update-updated", reload);
-    return () => window.removeEventListener("data-auto-update-updated", reload);
-  }, [loadCnMaintenanceTask, loadFxTask, loadJobs, loadLocalTask, loadMarketSync]);
-
   const configured = useMemo(
     () => Object.fromEntries(providers.map((provider) => [provider.id, provider.configured])) as Partial<Record<ProviderId, boolean>>,
     [providers],
@@ -688,6 +683,7 @@ export function DataSourceManager({
     marketSyncLoopRef.current = runId;
     setMarketSyncBusy(true);
     let networkFailures = 0;
+    let lastJobsRefreshAt = Date.now();
     try {
       while (aliveRef.current) {
         let data: {
@@ -730,11 +726,6 @@ export function DataSourceManager({
           failedBatches: Number(data.failedBatches ?? 0),
         };
         setMarketSync(next);
-        try {
-          await loadJobs();
-        } catch {
-          // A status update must continue even if the auxiliary job list is offline.
-        }
         const title = next.run.mode === "initialize" ? "美股历史初始化" : "美股最新日线更新";
         const failed = next.run.failedSymbols
           ? "，失败 " + next.run.failedSymbols.toLocaleString() + " 个"
@@ -745,7 +736,16 @@ export function DataSourceManager({
           next.run.completedBatches.toLocaleString() + " / " +
           next.run.totalBatches.toLocaleString() + " 批，写入 " +
           next.run.insertedCount.toLocaleString() + " 根 K 线" + failed);
-        if (["completed", "completed_with_errors", "cancelled", "paused"].includes(next.run.status)) {
+        const terminal = isMarketSyncTerminalStatus(next.run.status);
+        if (!terminal && shouldRefreshMarketSyncJobs(next.run.status, lastJobsRefreshAt, Date.now())) {
+          lastJobsRefreshAt = Date.now();
+          try {
+            await loadJobs();
+          } catch {
+            // A status update must continue even if the auxiliary job list is offline.
+          }
+        }
+        if (terminal) {
           notifyDataChanged();
           break;
         }
@@ -1081,19 +1081,30 @@ export function DataSourceManager({
               <div className="advanced-group">
                 <div className="advanced-group-head"><strong>最小时间周期</strong><small>更大的周期由最小周期在本地聚合生成。</small></div>
                 <div className="choice-card-grid three">
-                  {([
-                    ["1d", "日线", "生成周线 · 无需客户端"],
-                    ["1h", "1小时", "生成日线、周线 · 需要 TdxQuant"],
-                    ["5m", "5分钟", "生成1小时、日线、周线 · 需要 TdxQuant"],
-                  ] as const).map(([value, label, hint]) => (
-                    <button key={value} className={advanced.minimumTimeframe === value ? "selected" : ""} onClick={() => setAdvanced((current) => ({
-                      ...current,
-                      minimumTimeframe: value,
-                      intradaySource: value === "1d" ? "none" : "tdxquant",
-                    }))}>
-                      <span>{advanced.minimumTimeframe === value && <Check size={14} />}</span><strong>{label}</strong><small>{hint}</small>
-                    </button>
-                  ))}
+                  {TIMEFRAME_IDS.map((value) => {
+                    const available = DIRECT_SETUP_TIMEFRAMES.has(value);
+                    const hint = value === "1d"
+                      ? "生成 W1、MN · 无需客户端"
+                      : value === "1h"
+                        ? "生成 H4、D1、W1、MN · 需要 TdxQuant"
+                        : value === "5m"
+                          ? "生成 M15、M30、H1、H4、D1、W1、MN · 需要 TdxQuant"
+                          : "";
+                    return (
+                      <button
+                        key={value}
+                        className={advanced.minimumTimeframe === value ? "selected" : ""}
+                        disabled={!available}
+                        onClick={() => setAdvanced((current) => ({
+                          ...current,
+                          minimumTimeframe: value,
+                          intradaySource: value === "1d" ? "none" : "tdxquant",
+                        }))}
+                      >
+                        <span>{advanced.minimumTimeframe === value && <Check size={14} />}</span><strong>{catalogTimeframeLabel(value)}</strong><small>{hint}</small>
+                      </button>
+                    );
+                  })}
                 </div>
               </div>
               <div className="advanced-group">
@@ -1391,7 +1402,7 @@ export function DataSourceManager({
           <div className="market-maintenance-actions">
             {!configured.alpaca && <button onClick={onOpenSettings}><Settings2 size={14} />配置 Alpaca</button>}
             {configured.alpaca && !marketSyncBusy && !["queued", "running", "paused"].includes(marketSync?.run.status ?? "") && (
-              <button className="primary" onClick={() => void syncUsMarket(usStarted ? "update" : "initialize")}>
+              <button className="primary" onClick={() => void syncUsMarket(chooseUsSyncMode({ started: usStarted, remaining: usRemaining }))}>
                 <CloudDownload size={14} />{usInitialized
                   ? "拉取最新美股数据"
                   : usStarted ? "继续初始化美股" : "初始化美股市场库"}
@@ -1455,7 +1466,7 @@ export function DataSourceManager({
             }
             return (
               <div className="download-job-row" key={job.id}>
-                <span><strong>{job.instrumentId} · {job.timeframe}</strong><small>{job.provider} / {job.vendorSymbol}</small></span>
+                <span><strong>{job.instrumentId} · {catalogTimeframeLabel(job.timeframe)}</strong><small>{job.provider} / {job.vendorSymbol}</small></span>
                 <span><strong>{job.startDate} — {job.endDate}</strong><small>{job.instrumentName}</small></span>
                 <span>
                   <strong>{job.status === "completed" && Number(job.insertedCount) === 0

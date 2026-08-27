@@ -1,7 +1,11 @@
 import { ensureSchema, getRawDb } from "../../../db/runtime";
 import {
+  claimDataAutoUpdate,
+  completeDataAutoUpdate,
   readDataAutoUpdateSettings,
+  renewDataAutoUpdate,
   writeDataAutoUpdateSettings,
+  isValidDataAutoUpdateScheduleTime,
   type DataAutoUpdateStatus,
 } from "../../lib/dataAutoUpdateSettings";
 import { inspectExistingMarkets } from "../../lib/dataAutoUpdateService";
@@ -39,67 +43,85 @@ export async function GET(request: Request) {
 
 export async function PUT(request: Request) {
   await ensureSchema();
-  const body = await request.json().catch(() => ({})) as { enabled?: unknown };
-  if (typeof body.enabled !== "boolean") {
-    return Response.json({ error: "自动更新开关参数不正确" }, { status: 400 });
+  const body = await request.json().catch(() => ({})) as {
+    enabled?: unknown;
+    scheduledEnabled?: unknown;
+    scheduledTime?: unknown;
+  };
+  const patch: {
+    enabled?: boolean;
+    scheduledEnabled?: boolean;
+    scheduledTime?: string;
+  } = {};
+  if (body.enabled !== undefined) {
+    if (typeof body.enabled !== "boolean") {
+      return Response.json({ error: "自动更新开关参数不正确" }, { status: 400 });
+    }
+    patch.enabled = body.enabled;
   }
-  const settings = await writeDataAutoUpdateSettings(getRawDb(), { enabled: body.enabled });
+  if (body.scheduledEnabled !== undefined) {
+    if (typeof body.scheduledEnabled !== "boolean") {
+      return Response.json({ error: "定时自动更新开关参数不正确" }, { status: 400 });
+    }
+    patch.scheduledEnabled = body.scheduledEnabled;
+  }
+  if (body.scheduledTime !== undefined) {
+    if (!isValidDataAutoUpdateScheduleTime(body.scheduledTime)) {
+      return Response.json({ error: "定时检查时间格式不正确" }, { status: 400 });
+    }
+    patch.scheduledTime = body.scheduledTime;
+  }
+  if (!Object.keys(patch).length) {
+    return Response.json({ error: "缺少自动更新设置" }, { status: 400 });
+  }
+  const settings = await writeDataAutoUpdateSettings(getRawDb(), patch);
   return Response.json({ settings: publicSettings(settings) });
 }
 
 export async function POST(request: Request) {
   await ensureSchema();
   const body = await request.json().catch(() => ({})) as {
-    action?: "claim" | "complete";
+    action?: "claim" | "complete" | "renew";
     date?: unknown;
     runToken?: unknown;
+    trigger?: unknown;
     status?: unknown;
     message?: unknown;
   };
   const db = getRawDb();
-  const current = await readDataAutoUpdateSettings(db);
   if (body.action === "claim") {
     if (!validDate(body.date)) return Response.json({ error: "缺少有效的本地日期" }, { status: 400 });
-    if (!current.enabled) {
-      return Response.json({ shouldRun: false, settings: publicSettings(current) });
-    }
     const runToken = typeof body.runToken === "string" && body.runToken.trim()
       ? body.runToken.trim()
       : crypto.randomUUID();
-    const sameDate = current.lastCheckDate === body.date;
-    const startedAt = current.lastStartedAt ? Date.parse(current.lastStartedAt) : Number.NaN;
-    const staleRunning = current.lastStatus === "running"
-      && Number.isFinite(startedAt)
-      && Date.now() - startedAt > 10 * 60 * 1000;
-    if (sameDate && current.lastStatus === "completed") {
-      return Response.json({ shouldRun: false, settings: publicSettings(current) });
+    if (body.trigger !== undefined && body.trigger !== "startup" && body.trigger !== "scheduled") {
+      return Response.json({ error: "自动更新触发来源不正确" }, { status: 400 });
     }
-    if (sameDate && current.lastStatus === "running" && !staleRunning) {
-      return Response.json({ shouldRun: false, settings: publicSettings(current) });
-    }
-    if (sameDate && current.lastStatus !== "running") {
-      return Response.json({ shouldRun: false, settings: publicSettings(current) });
-    }
-    const settings = await writeDataAutoUpdateSettings(db, {
-      lastCheckDate: body.date,
-      lastStartedAt: new Date().toISOString(),
-      lastFinishedAt: null,
-      lastStatus: "running",
-      lastMessage: "正在检查已有市场的最新数据…",
-      lastRunToken: runToken,
+    const result = await claimDataAutoUpdate(db, {
+      date: body.date,
+      runToken,
+      trigger: body.trigger === "scheduled" ? "scheduled" : "startup",
     });
-    return Response.json({ shouldRun: true, settings: publicSettings(settings) });
+    return Response.json({
+      shouldRun: result.claimed,
+      settings: publicSettings(result.settings),
+    });
   }
   if (body.action === "complete") {
     if (!validStatus(body.status)) return Response.json({ error: "自动更新完成状态不正确" }, { status: 400 });
     const message = typeof body.message === "string" ? body.message.trim().slice(0, 800) : "";
-    const settings = await writeDataAutoUpdateSettings(db, {
-      lastStatus: body.status,
-      lastMessage: message,
-      lastFinishedAt: new Date().toISOString(),
-      lastRunToken: null,
+    const runToken = typeof body.runToken === "string" ? body.runToken.trim() : "";
+    const result = await completeDataAutoUpdate(db, {
+      runToken,
+      status: body.status,
+      message,
     });
-    return Response.json({ settings: publicSettings(settings) });
+    return Response.json({ completed: result.completed, settings: publicSettings(result.settings) });
+  }
+  if (body.action === "renew") {
+    const runToken = typeof body.runToken === "string" ? body.runToken.trim() : "";
+    const result = await renewDataAutoUpdate(db, { runToken });
+    return Response.json({ renewed: result.renewed, settings: publicSettings(result.settings) });
   }
   return Response.json({ error: "不支持的自动更新操作" }, { status: 400 });
 }

@@ -119,4 +119,31 @@ export function aggregateWeekly(bars) {
   return weekly;
 }
 
+function monthKey(timestamp) {
+  const date = new Date(timestamp);
+  return `${date.getUTCFullYear()}-${String(date.getUTCMonth() + 1).padStart(2, "0")}`;
+}
+
+export function aggregateMonthly(bars) {
+  const monthly = [];
+  let activeKey = "";
+  let current = null;
+  for (const bar of bars) {
+    const key = monthKey(bar.timestamp);
+    if (key !== activeKey) {
+      if (current) monthly.push(current);
+      activeKey = key;
+      current = { ...bar };
+      continue;
+    }
+    current.high = Math.max(current.high, bar.high);
+    current.low = Math.min(current.low, bar.low);
+    current.close = bar.close;
+    current.volume = Number(current.volume ?? 0) + Number(bar.volume ?? 0);
+    current.turnover = Number(current.turnover ?? 0) + Number(bar.turnover ?? 0);
+  }
+  if (current) monthly.push(current);
+  return monthly;
+}
+
 export const TDX_DAY_RECORD_SIZE = RECORD_SIZE;

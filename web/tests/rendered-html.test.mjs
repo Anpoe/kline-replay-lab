@@ -205,6 +205,9 @@ test("ships the K-line training workbench instead of the starter", async () => {
   assert.match(snapshotsRoute, /PATTERN_SCAN_BLOCK_BARS = 2_048/);
   assert.match(snapshotsRoute, /PATTERN_SCAN_MAX_BLOCKS = 8/);
   assert.match(snapshotsRoute, /patternAttempts/);
+  assert.match(snapshotsRoute, /timeframeView/);
+  assert.match(snapshotsRoute, /aggregateCandlesToTimeframe/);
+  assert.match(snapshotsRoute, /getCachedTimeframeView/);
   assert.match(workbench, /createRandomWindowSnapshot/);
   assert.match(workbench, /replayWindow: newTaskRequest/);
   assert.match(workbench, /data\.selection\.startCursor \+ 1/);
@@ -212,6 +215,9 @@ test("ships the K-line training workbench instead of the starter", async () => {
   assert.match(workbench, /windowSnapshot\?\.patternMatch/);
   assert.match(workbench, /"snapshotId" in request/);
   assert.match(workbench, /selectedPatternIds\.length && taskSetupKind === "random"[\s\S]*?requestSnapshotId = request\.snapshotId/);
+  assert.match(workbench, /chartTimeframe/);
+  assert.match(workbench, /loadTimeframeView/);
+  assert.match(workbench, /renderedChartBars/);
   assert.doesNotMatch(workbench, /\bformatNumber\(/);
   assert.match(workbench, /setOrderType\("market"\)[\s\S]*?setOrderTriggerPrice\(""\)[\s\S]*?setOrderStopLoss\(""\)[\s\S]*?setOrderTakeProfit\(""\)/);
   assert.match(snapshotsRoute, /baseSnapshotId/);
@@ -223,6 +229,66 @@ test("ships the K-line training workbench instead of the starter", async () => {
   assert.match(dataJobsRoute, /WITH ranked_jobs AS/);
   assert.match(dataJobsRoute, /instrument_status AS/);
   assert.doesNotMatch(packageJson, /react-loading-skeleton/);
+});
+
+test("previews duplicate training in replay before offering review", async () => {
+  const workbench = await readFile(new URL("app/components/TrainingWorkbench.tsx", root), "utf8");
+  const warningStart = workbench.indexOf('className="duplicate-market-warning"');
+  const warningEnd = workbench.indexOf('<div className="chart-area">', warningStart);
+  const warningBlock = warningStart >= 0 && warningEnd >= 0
+    ? workbench.slice(warningStart, warningEnd)
+    : "";
+
+  assert.match(workbench, /className="duplicate-training-preview"/);
+  assert.match(workbench, /重复训练预览/);
+  assert.match(workbench, /resumeSession\(duplicateMarketWarning\.session, true, undefined, "duplicate"\)/);
+  assert.match(workbench, /查看复盘/);
+  assert.match(workbench, /返回当前训练/);
+  assert.doesNotMatch(warningBlock, /setView\("review"\)/);
+});
+
+test("renders the review heading only inside the review feature", async () => {
+  const [workbench, reviewPanel] = await Promise.all([
+    readFile(new URL("app/components/TrainingWorkbench.tsx", root), "utf8"),
+    readFile(new URL("app/features/review/components/ReviewPanel.tsx", root), "utf8"),
+  ]);
+  const reviewStart = workbench.indexOf('<section className="content-page review-page">');
+  const reviewSection = reviewStart >= 0 ? workbench.slice(reviewStart) : "";
+
+  assert.doesNotMatch(reviewSection, /<div className="page-heading">/);
+  assert.match(reviewPanel, /<div className="page-heading">/);
+});
+
+test("keeps large review history responsive while preserving full-list access", async () => {
+  const [workbench, reviewController, reviewHistory] = await Promise.all([
+    readFile(new URL("app/components/TrainingWorkbench.tsx", root), "utf8"),
+    readFile(new URL("app/features/review/reviewController.ts", root), "utf8"),
+    readFile(new URL("app/features/review/components/SessionHistoryPanel.tsx", root), "utf8"),
+  ]);
+
+  assert.match(workbench, /buildReviewSessionSummariesInBatches/);
+  assert.match(workbench, /sessionSummariesReadyRef/);
+  assert.match(workbench, /sessionSummaryLoadRef/);
+  assert.match(workbench, /view !== "sop"/);
+  assert.match(reviewController, /REVIEW_SESSION_SUMMARY_BATCH_SIZE/);
+  assert.match(reviewHistory, /REVIEW_SESSION_PAGE_SIZE/);
+  assert.match(reviewHistory, /加载更多历史/);
+});
+
+test("renders personal SOP recommendations only on the dedicated SOP page", async () => {
+  const workbench = await readFile(new URL("app/components/TrainingWorkbench.tsx", root), "utf8");
+  const sopStart = workbench.indexOf('{view === "sop"');
+  const performanceStart = workbench.indexOf('{view === "performance"', sopStart);
+  const databaseStart = workbench.indexOf('{view === "database"', performanceStart);
+  const sopPage = sopStart >= 0 && performanceStart >= 0
+    ? workbench.slice(sopStart, performanceStart)
+    : "";
+  const performancePage = performanceStart >= 0 && databaseStart >= 0
+    ? workbench.slice(performanceStart, databaseStart)
+    : "";
+
+  assert.match(sopPage, /<PersonalSopRecommendations/);
+  assert.doesNotMatch(performancePage, /<PersonalSopRecommendations/);
 });
 
 test("generated sample candles satisfy OHLC invariants", async () => {

@@ -3,7 +3,9 @@ import test from "node:test";
 import {
   calculateFxHistoryBoundary,
   calculateFxIncrementStart,
+  getFxCandleEndTimestamp,
   getFx5mBucket,
+  isFxTimeframeAligned,
   isFx5mAligned,
   isFxCandleComplete,
   normalizeFxInstrument,
@@ -35,6 +37,28 @@ test("只把结束时刻已到达的 5m K 线交给增量写入", () => {
   const start = Date.parse("2026-08-06T12:30:00.000Z");
   assert.equal(isFxCandleComplete(start, "5m", start + 5 * 60 * 1000 - 1), false);
   assert.equal(isFxCandleComplete({ timestamp: start }, "5m", start + 5 * 60 * 1000), true);
+});
+
+test("D1、W1 和 MN 使用 FX session 日历计算结束边界", () => {
+  const dailyStart = Date.parse("2026-10-31T21:00:00.000Z");
+  assert.equal(isFxTimeframeAligned(dailyStart, "1d"), true);
+  assert.equal(
+    getFxCandleEndTimestamp(dailyStart, "1d"),
+    Date.parse("2026-11-01T22:00:00.000Z"),
+  );
+
+  const weeklyStart = Date.parse("2026-11-01T22:00:00.000Z");
+  assert.equal(isFxTimeframeAligned(weeklyStart, "1w"), true);
+  assert.equal(
+    getFxCandleEndTimestamp(weeklyStart, "1w"),
+    Date.parse("2026-11-08T22:00:00.000Z"),
+  );
+
+  const monthlyStart = Date.parse("2026-10-01T21:00:00.000Z");
+  assert.equal(
+    getFxCandleEndTimestamp(monthlyStart, "1mo"),
+    Date.parse("2026-11-01T22:00:00.000Z"),
+  );
 });
 
 test("历史边界包含 Dukascopy 最后一根，增量起点排他且不回退", () => {

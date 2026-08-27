@@ -17,17 +17,27 @@
  * 或任务/覆盖元数据中，而不是改变现有 Candle 表示。
  */
 
+import {
+  bucketStartTimestamp,
+  DEFAULT_FX_SESSION,
+  nextBucketStartTimestamp,
+} from "./fx/dukascopyAggregation.ts";
+import type { TimeframeId } from "./timeframeCatalog.ts";
+
 export const FX_BASE_TIMEFRAME = "5m" as const;
 export const FX_BASE_TIMEFRAME_MS = 5 * 60 * 1000;
 
 export type FxBaseTimeframe = typeof FX_BASE_TIMEFRAME;
-export type FxTimeframe = "1m" | "5m" | "1h" | "1d" | "1w";
+export type FxTimeframe = TimeframeId;
 export type FxHigherTimeframe = Exclude<FxTimeframe, "1m" | "5m">;
 
-export const FX_TIMEFRAME_MS: Readonly<Record<FxTimeframe, number>> = Object.freeze({
+export const FX_TIMEFRAME_MS: Readonly<Record<Exclude<FxTimeframe, "1mo">, number>> = Object.freeze({
   "1m": 60 * 1000,
   "5m": FX_BASE_TIMEFRAME_MS,
+  "15m": 15 * 60 * 1000,
+  "30m": 30 * 60 * 1000,
   "1h": 60 * 60 * 1000,
+  "4h": 4 * 60 * 60 * 1000,
   "1d": 24 * 60 * 60 * 1000,
   "1w": 7 * 24 * 60 * 60 * 1000,
 });
@@ -50,8 +60,12 @@ export type FxInstrumentId =
   | "USDCAD.FX"
   | "USDCHF.FX";
 
+export type GoldInstrumentId = "XAUUSD.GOLD";
+export type MarketInstrumentId = FxInstrumentId | GoldInstrumentId;
+
 export type FxInstrumentDefinition = Readonly<{
   id: FxInstrumentId;
+  market: "FX";
   displayName: string;
   baseCurrency: string;
   quoteCurrency: string;
@@ -65,9 +79,27 @@ export type FxInstrumentDefinition = Readonly<{
   pipSize: number;
 }>;
 
+export type GoldInstrumentDefinition = Readonly<{
+  id: GoldInstrumentId;
+  market: "GOLD";
+  displayName: string;
+  baseCurrency: "XAU";
+  quoteCurrency: "USD";
+  /** Dukascopy 的无分隔符品种代码。 */
+  dukascopySymbol: "XAUUSD";
+  /** Twelve Data 的斜杠品种代码。 */
+  twelveDataSymbol: "XAU/USD";
+  /** 黄金现货报价精度；成交规则不在本阶段由该字段推导。 */
+  pricePrecision: number;
+  pipSize: number;
+}>;
+
+export type MarketInstrumentDefinition = FxInstrumentDefinition | GoldInstrumentDefinition;
+
 export const FX_INSTRUMENT_CATALOG: readonly FxInstrumentDefinition[] = Object.freeze([
   {
     id: "EURUSD.FX",
+    market: "FX",
     displayName: "EUR/USD",
     baseCurrency: "EUR",
     quoteCurrency: "USD",
@@ -78,6 +110,7 @@ export const FX_INSTRUMENT_CATALOG: readonly FxInstrumentDefinition[] = Object.f
   },
   {
     id: "GBPUSD.FX",
+    market: "FX",
     displayName: "GBP/USD",
     baseCurrency: "GBP",
     quoteCurrency: "USD",
@@ -88,6 +121,7 @@ export const FX_INSTRUMENT_CATALOG: readonly FxInstrumentDefinition[] = Object.f
   },
   {
     id: "USDJPY.FX",
+    market: "FX",
     displayName: "USD/JPY",
     baseCurrency: "USD",
     quoteCurrency: "JPY",
@@ -98,6 +132,7 @@ export const FX_INSTRUMENT_CATALOG: readonly FxInstrumentDefinition[] = Object.f
   },
   {
     id: "AUDUSD.FX",
+    market: "FX",
     displayName: "AUD/USD",
     baseCurrency: "AUD",
     quoteCurrency: "USD",
@@ -108,6 +143,7 @@ export const FX_INSTRUMENT_CATALOG: readonly FxInstrumentDefinition[] = Object.f
   },
   {
     id: "USDCAD.FX",
+    market: "FX",
     displayName: "USD/CAD",
     baseCurrency: "USD",
     quoteCurrency: "CAD",
@@ -118,6 +154,7 @@ export const FX_INSTRUMENT_CATALOG: readonly FxInstrumentDefinition[] = Object.f
   },
   {
     id: "USDCHF.FX",
+    market: "FX",
     displayName: "USD/CHF",
     baseCurrency: "USD",
     quoteCurrency: "CHF",
@@ -127,6 +164,25 @@ export const FX_INSTRUMENT_CATALOG: readonly FxInstrumentDefinition[] = Object.f
     pipSize: 0.0001,
   },
 ] satisfies readonly FxInstrumentDefinition[]);
+
+export const GOLD_INSTRUMENT_CATALOG: readonly GoldInstrumentDefinition[] = Object.freeze([
+  {
+    id: "XAUUSD.GOLD",
+    market: "GOLD",
+    displayName: "XAU/USD",
+    baseCurrency: "XAU",
+    quoteCurrency: "USD",
+    dukascopySymbol: "XAUUSD",
+    twelveDataSymbol: "XAU/USD",
+    pricePrecision: 2,
+    pipSize: 0.01,
+  },
+]);
+
+export const MARKET_INSTRUMENT_CATALOG: readonly MarketInstrumentDefinition[] = Object.freeze([
+  ...FX_INSTRUMENT_CATALOG,
+  ...GOLD_INSTRUMENT_CATALOG,
+]);
 
 /** 兼容不同页面/供应商的品种选择器，返回项目内部 ID。 */
 export function normalizeFxInstrument(value: unknown): FxInstrumentId | null {
@@ -152,6 +208,22 @@ export function getFxInstrumentDefinition(value: unknown): FxInstrumentDefinitio
 
 /** 便于 provider 适配器按用户输入解析目录项。 */
 export const resolveFxInstrument = getFxInstrumentDefinition;
+
+/** 兼容数据维护入口的跨市场品种解析；FX resolver 仍保持 FX-only。 */
+export function normalizeMarketInstrument(value: unknown): MarketInstrumentId | null {
+  if (typeof value !== "string") return null;
+  const compact = value.trim().toUpperCase().replace(/[^A-Z]/g, "");
+  const withoutGoldSuffix = compact.endsWith("GOLD") ? compact.slice(0, -4) : compact;
+  if (compact === "GOLD" || withoutGoldSuffix === "XAUUSD") return "XAUUSD.GOLD";
+  return normalizeFxInstrument(value);
+}
+
+export function getMarketInstrumentDefinition(value: unknown): MarketInstrumentDefinition | null {
+  const id = normalizeMarketInstrument(value);
+  return id ? MARKET_INSTRUMENT_CATALOG.find((instrument) => instrument.id === id) ?? null : null;
+}
+
+export const resolveMarketInstrument = getMarketInstrumentDefinition;
 
 export type FxRawCandle = Readonly<{
   timestamp: FxTimestampInput;
@@ -291,19 +363,31 @@ export function isFx5mAligned(timestamp: number): boolean {
 }
 
 export function isFxTimeframeAligned(timestamp: number, timeframe: FxTimeframe): boolean {
-  return Number.isFinite(timestamp) && timestamp % FX_TIMEFRAME_MS[timeframe] === 0;
+  if (!Number.isFinite(timestamp)) return false;
+  const duration = timeframe === "1mo" ? undefined : FX_TIMEFRAME_MS[timeframe];
+  const sessionCalendarTimeframe = timeframe === "1d" || timeframe === "1w" || timeframe === "1mo";
+  return duration != null && !sessionCalendarTimeframe
+    ? timestamp % duration === 0
+    : timestamp === bucketStartTimestamp(timestamp, timeframe, DEFAULT_FX_SESSION);
 }
 
 export function getFxCandleEndTimestamp(timestamp: number, timeframe: FxTimeframe): number {
   if (!Number.isFinite(timestamp)) throw new RangeError("FX timestamp is invalid");
-  return timestamp + FX_TIMEFRAME_MS[timeframe];
+  const duration = timeframe === "1mo" ? undefined : FX_TIMEFRAME_MS[timeframe];
+  const sessionCalendarTimeframe = timeframe === "1d" || timeframe === "1w" || timeframe === "1mo";
+  return duration != null && !sessionCalendarTimeframe
+    ? timestamp + duration
+    : nextBucketStartTimestamp(timestamp, timeframe, DEFAULT_FX_SESSION);
 }
 
 /** 将任意时间向后对齐到不早于它的 FX 周期起点。 */
 export function alignFxTimestampUp(timestamp: number, timeframe: FxTimeframe = FX_BASE_TIMEFRAME): number {
   if (!Number.isFinite(timestamp)) throw new RangeError("FX timestamp is invalid");
-  const duration = FX_TIMEFRAME_MS[timeframe];
-  return Math.ceil(timestamp / duration) * duration;
+  const duration = timeframe === "1mo" ? undefined : FX_TIMEFRAME_MS[timeframe];
+  const sessionCalendarTimeframe = timeframe === "1d" || timeframe === "1w" || timeframe === "1mo";
+  if (duration != null && !sessionCalendarTimeframe) return Math.ceil(timestamp / duration) * duration;
+  const bucket = bucketStartTimestamp(timestamp, timeframe, DEFAULT_FX_SESSION);
+  return bucket >= timestamp ? bucket : nextBucketStartTimestamp(bucket, timeframe, DEFAULT_FX_SESSION);
 }
 
 export function isFxCandleComplete(

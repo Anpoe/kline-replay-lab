@@ -1,0 +1,26 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" role="img" aria-labelledby="title desc">
+  <title id="title">K线训练营</title>
+  <desc id="desc">深蓝色圆角方块上的上涨 K 线图形</desc>
+  <defs>
+    <linearGradient id="background" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#091b2d"/>
+      <stop offset="1" stop-color="#123f58"/>
+    </linearGradient>
+    <radialGradient id="glow" cx="75%" cy="25%" r="58%">
+      <stop offset="0" stop-color="#56dcc1" stop-opacity=".28"/>
+      <stop offset="1" stop-color="#56dcc1" stop-opacity="0"/>
+    </radialGradient>
+  </defs>
+  <rect x="9" y="9" width="238" height="238" rx="54" fill="url(#background)"/>
+  <circle cx="187" cy="64" r="75" fill="url(#glow)"/>
+  <g stroke="#c9fbf1" stroke-width="7" stroke-linecap="round" fill="#eafdf8">
+    <path d="M69 123v72"/>
+    <rect x="57" y="146" width="24" height="31" rx="6" stroke="none"/>
+    <path d="M123 92v77"/>
+    <rect x="111" y="113" width="24" height="34" rx="6" stroke="none"/>
+    <path d="M177 56v74"/>
+    <rect x="165" y="74" width="24" height="36" rx="6" stroke="none"/>
+  </g>
+  <path d="M46 184l51-46 43 15 64-79" fill="none" stroke="#48e0c1" stroke-width="14" stroke-linecap="round" stroke-linejoin="round"/>
+  <circle cx="204" cy="74" r="13" fill="#ffb347"/>
+</svg>

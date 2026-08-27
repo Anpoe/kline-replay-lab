@@ -1,16 +1,52 @@
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
+import {
+  availableTimeframesForInstrument,
+  resolveAvailableTimeframe,
+} from "../app/lib/timeframeAvailability.ts";
+import { TIMEFRAME_IDS } from "../app/lib/timeframeCatalog.ts";
 
 const root = new URL("../", import.meta.url);
 
-test("falls back when randomUUID is unavailable on an insecure LAN origin", async () => {
-  const workbench = await readFile(new URL("app/components/TrainingWorkbench.tsx", root), "utf8");
+test("moves startup auto-update out of the browser and keeps status polling read-only", async () => {
+  const [workbench, worker, providerSettings] = await Promise.all([
+    readFile(new URL("app/components/TrainingWorkbench.tsx", root), "utf8"),
+    readFile(new URL("local-data/background-worker.mjs", root), "utf8"),
+    readFile(new URL("app/features/market-data/components/ProviderSettingsPanel.tsx", root), "utf8"),
+  ]);
 
-  assert.match(workbench, /typeof webCrypto\?\.randomUUID === "function"/);
-  assert.match(workbench, /typeof webCrypto\?\.getRandomValues === "function"/);
-  assert.match(workbench, /bytes\[6\].*0x40/);
-  assert.doesNotMatch(workbench, /\bcrypto\.randomUUID\(/);
+  assert.doesNotMatch(workbench, /DataAutoUpdateController/);
+  assert.match(worker, /createBackgroundWorkerServer/);
+  assert.match(providerSettings, /setInterval/);
+  assert.match(providerSettings, /10000/);
+});
+
+test("shows a daily scheduled auto-update control and persists its time", async () => {
+  const [providerSettings, providerRoute, worker] = await Promise.all([
+    readFile(new URL("app/features/market-data/components/ProviderSettingsPanel.tsx", root), "utf8"),
+    readFile(new URL("app/api/provider-settings/route.ts", root), "utf8"),
+    readFile(new URL("local-data/background-auto-update.mjs", root), "utf8"),
+  ]);
+
+  assert.match(providerSettings, /每日定时检查更新/);
+  assert.match(providerSettings, /type="time"/);
+  assert.match(providerSettings, /autoUpdateScheduledEnabled/);
+  assert.match(providerSettings, /autoUpdateScheduleTime/);
+  assert.match(providerRoute, /autoUpdateScheduledEnabled/);
+  assert.match(providerRoute, /autoUpdateScheduleTime/);
+  assert.match(worker, /scheduled-not-due/);
+  assert.doesNotMatch(worker, /DEFAULT_TIME_ZONE|Asia\/Shanghai/);
+  assert.match(worker, /getHours\(\)/);
+});
+
+test("falls back when randomUUID is unavailable on an insecure LAN origin", async () => {
+  const uuid = await readFile(new URL("app/lib/uuid.ts", root), "utf8");
+
+  assert.match(uuid, /typeof webCrypto\?\.randomUUID === "function"/);
+  assert.match(uuid, /typeof webCrypto\?\.getRandomValues === "function"/);
+  assert.match(uuid, /bytes\[6\].*0x40/);
+  assert.match(uuid, /bytes\[8\].*0x80/);
 });
 
 test("exposes the web UI on IPv4 and IPv6 while keeping remote access explicit", async () => {
@@ -45,6 +81,16 @@ test("supports touch long-press decision backfill without disabling chart draggi
   assert.match(chart, /右键或长按已揭示的 K 线/);
 });
 
+test("selects protection prices from a mobile touch release", async () => {
+  const chart = await readFile(new URL("app/components/KLineReplayChart.tsx", root), "utf8");
+
+  assert.match(chart, /const handlePointerUp = \(event: ReactPointerEvent<HTMLDivElement>\)/);
+  assert.match(chart, /event\.pointerType === "touch"/);
+  assert.match(chart, /resolvePriceAt\(event\.clientX, event\.clientY\)/);
+  assert.match(chart, /onProtectionPriceSelectRef\.current\(priceSelectionMode, price\)/);
+  assert.match(chart, /onPointerUp=\{handlePointerUp\}/);
+});
+
 test("locks mobile gestures while drawing and preserves refresh-scoped chart zoom", async () => {
   const [chart, styles] = await Promise.all([
     readFile(new URL("app/components/KLineReplayChart.tsx", root), "utf8"),
@@ -76,6 +122,11 @@ test("supports TradingView-style drawing groups, object management and drawing h
     readFile(new URL("app/components/TrainingWorkbench.tsx", root), "utf8"),
     readFile(new URL("app/components/KLineReplayChart.tsx", root), "utf8"),
   ]);
+  const drawingGroupsStart = workbench.indexOf("const drawingToolGroups");
+  const drawingGroupsEnd = workbench.indexOf("const trainingPositionTool", drawingGroupsStart);
+  const drawingGroups = drawingGroupsStart >= 0 && drawingGroupsEnd >= 0
+    ? workbench.slice(drawingGroupsStart, drawingGroupsEnd)
+    : "";
 
   assert.match(workbench, /CUSTOM_REASON_TAGS_KEY/);
   assert.match(workbench, /aria-label="自定义交易理由标签"/);
@@ -87,6 +138,9 @@ test("supports TradingView-style drawing groups, object management and drawing h
   assert.match(workbench, /name: "priceChannelLine", label: "三线价格通道"/);
   assert.match(workbench, /group\.tools\.length === 1/);
   assert.doesNotMatch(workbench, /group\.id === "position"/);
+  assert.match(drawingGroups, /id: "notes"[\s\S]*?label: "画笔"[\s\S]*?tools: \[\{ name: "brush", label: "画笔"/);
+  assert.match(drawingGroups, /id: "text"[\s\S]*?tools: \[\{ name: "trainingTextBox", label: "文字标记"/);
+  assert.doesNotMatch(drawingGroups, /画笔与注释/);
   assert.match(workbench, /name: "trainingTextBox", label: "文字标记"/);
   assert.match(workbench, /aria-label="图表文字"/);
   assert.match(workbench, /aria-label="文字内容"/);
@@ -144,7 +198,8 @@ test("starts a fresh random round and only samples available instrument-timefram
   assert.match(workbench, /item\.timeframes[\s\S]*candidateTimeframe/);
   assert.match(workbench, /chartLoadError[\s\S]*这组行情无法开始训练/);
   assert.match(candlesRoute, /GROUP_CONCAT\(DISTINCT c\.timeframe\)/);
-  assert.match(candlesRoute, /timeframes: \["1d", "1w"\]/);
+  assert.match(candlesRoute, /const localTimeframes = normalizeTimeframeCoverage\(item\.timeframes/);
+  assert.match(candlesRoute, /normalizeTimeframeCoverage\(\[[\s\S]*localTimeframes/);
 });
 
 test("wires chart protection picking, trailing stops and risk sizing into the workbench", async () => {
@@ -169,8 +224,8 @@ test("wires chart protection picking, trailing stops and risk sizing into the wo
   assert.match(workbench, /ensureProtectiveDecisionCard/);
   assert.match(workbench, /protective_level_selected_on_chart/);
   assert.match(workbench, /item\.autoGenerated && item\.barTimestamp === targetBar\.timestamp/);
-  assert.match(workbench, /onProtectionPriceSelect=\{applyDraftProtectionPrice\}/);
-  assert.match(workbench, /onProtectionLineMove=\{moveProtectionLine\}/);
+  assert.match(workbench, /onProtectionPriceSelect=\{showingCanonicalChart \? applyDraftProtectionPrice : ignoreProtectionPriceSelect\}/);
+  assert.match(workbench, /onProtectionLineMove=\{showingCanonicalChart \? moveProtectionLine : rejectProtectionLineMove\}/);
   assert.match(workbench, /retryDelays = \[0, 500, 1000, 2000, 4000\]/);
   assert.match(workbench, /fetch\("\/api\/candles\?instruments=1", \{ cache: "no-store" \}\)/);
   assert.match(workbench, /marketRuleCode\(item\.market\) === marketRuleCode\(config\.market\)/);
@@ -178,6 +233,73 @@ test("wires chart protection picking, trailing stops and risk sizing into the wo
   assert.match(chart, /name: "trainingProtectionLine"/);
   assert.match(chart, /onClickCapture=\{handleClick\}/);
   assert.match(chart, /onPressedMoveEnd/);
+});
+
+test("keeps mobile protection picking and risk sizing controls reachable", async () => {
+  const [workbench, styles] = await Promise.all([
+    readFile(new URL("app/components/TrainingWorkbench.tsx", root), "utf8"),
+    readFile(new URL("app/globals.css", root), "utf8"),
+  ]);
+
+  assert.match(workbench, /aria-pressed=\{protectionPriceSelection === "stop-loss"\}/);
+  assert.match(workbench, /请在上方 K 线图点击选择止损价格/);
+  assert.match(workbench, /if \(!showingCanonicalChart\)/);
+  assert.match(workbench, /风险手数/);
+  assert.match(styles, /@media \(max-width: 600px\)[\s\S]*?\.execution-order-controls \{[^}]*display: grid;[^}]*grid-template-columns: repeat\(2/);
+  assert.match(styles, /@media \(max-width: 600px\)[\s\S]*?\.execution-order-controls \{[^}]*overflow-x: visible/);
+  assert.match(styles, /\.mobile-protection-selection-hint/);
+});
+
+test("keeps the mobile trade setup in flow while the existing action dock stays fixed", async () => {
+  const [workbench, styles] = await Promise.all([
+    readFile(new URL("app/components/TrainingWorkbench.tsx", root), "utf8"),
+    readFile(new URL("app/globals.css", root), "utf8"),
+  ]);
+  const setupStart = workbench.indexOf('className="trade-setup-panel"');
+  const setupEnd = workbench.indexOf('className="trade-fixed-dock"', setupStart);
+  const stats = workbench.indexOf('className="trade-stats"', setupStart);
+  const controls = workbench.indexOf('className="execution-order-controls"', setupStart);
+  const orderEntry = workbench.indexOf('className="order-entry"', setupStart);
+
+  assert.ok(setupStart >= 0, "mobile trade setup wrapper should exist");
+  assert.ok(stats > setupStart && stats < setupEnd, "account stats should stay in the in-flow setup panel");
+  assert.ok(controls > setupStart && controls < setupEnd, "order controls should stay in the in-flow setup panel");
+  assert.ok(orderEntry > setupEnd, "the unchanged action row should remain in the fixed dock");
+  assert.match(styles, /@media \(max-width: 600px\)[\s\S]*?\.trade-dock \{[^}]*position: static;/);
+  assert.match(styles, /@media \(max-width: 600px\)[\s\S]*?\.trade-fixed-dock \{[^}]*position: fixed;[^}]*bottom: 64px;/);
+  assert.match(styles, /@media \(max-width: 600px\)[\s\S]*?\.replay-layout \{[^}]*padding-bottom: 132px/);
+});
+
+test("reserves mobile decision space and keeps provider cards inside the viewport", async () => {
+  const styles = await readFile(new URL("app/globals.css", root), "utf8");
+
+  assert.match(styles, /@media \(max-width: 600px\)[\s\S]*?\.replay-layout \{[^}]*padding-bottom: 132px/);
+  assert.match(styles, /\.provider-setting-card \{[^}]*min-width: 0/);
+  assert.match(styles, /\.provider-setting-title \{[^}]*min-width: 0/);
+  assert.match(styles, /\.source-routing > label \{[^}]*min-width: 0/);
+  assert.match(styles, /\.market-maintenance-actions \{[^}]*min-width: 0/);
+});
+
+test("filters training cycles and disables empty mistake replay", async () => {
+  const workbench = await readFile(new URL("app/components/TrainingWorkbench.tsx", root), "utf8");
+
+  assert.match(workbench, /taskDraft\.mode as string\) !== "mistake"/);
+  assert.match(workbench, /disabled=\{startingTraining \|\| \(taskDraft\.mode === "mistake" && !mistakeSources\.length\)\}/);
+  assert.match(workbench, /TIMEFRAME_IDS\.map\(\(item\)/);
+  assert.match(workbench, /const available = currentAvailableTimeframes\.includes\(item\)/);
+  assert.match(workbench, /availableTimeframesForInstrument\(/);
+});
+
+test("resolves only catalog-supported instrument timeframes", () => {
+  const catalog = [
+    { id: "A.US", timeframes: ["1d"] },
+    { id: "EURUSD.FX", timeframes: ["1m", "5m", "1h", "1d", "1w"] },
+  ];
+  const supported = [...TIMEFRAME_IDS];
+
+  assert.deepEqual(availableTimeframesForInstrument(catalog, "A.US", supported), ["1d", "1w", "1mo"]);
+  assert.equal(resolveAvailableTimeframe(["1d"], "5m"), "1d");
+  assert.equal(resolveAvailableTimeframe(["1m", "5m"], "5m"), "5m");
 });
 
 test("uses mobile cards for wide training and data tables", async () => {
@@ -195,6 +317,8 @@ test("uses mobile cards for wide training and data tables", async () => {
   assert.match(styles, /\.topbar \{[\s\S]*height: 46px;[\s\S]*flex-wrap: nowrap;/);
   assert.match(styles, /\.chart-area \{[\s\S]*height: clamp\(380px, 52svh, 500px\)/);
   assert.match(styles, /\.orders-board\.mobile-expanded \.orders-table-wrap \{ display: block; \}/);
+  assert.match(styles, /\.performance-row-actions button \{[^}]*min-height: 32px;/);
+  assert.match(styles, /\.task-pattern-options button \{[^}]*min-height: 32px;/);
   assert.match(workbench, /className="mobile-order-label"/);
   assert.match(workbench, /aria-label=\{startingTraining \? "正在筛选随机训练" : "立即开始随机训练"\}/);
   assert.match(workbench, /onClick=\{\(\) => void startQuickRandomTraining\(\)\}/);

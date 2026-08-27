@@ -1,8 +1,15 @@
 import { BookOpenCheck, RotateCcw, Trash2 } from "lucide-react";
+import { useState } from "react";
 import {
   defaultReviewSessionFilters,
   type ReviewSessionFilters,
 } from "../reviewContracts";
+import {
+  nextReviewSessionVisibleCount,
+  REVIEW_SESSION_PAGE_SIZE,
+  visibleReviewSessionItems,
+} from "../reviewController";
+import { timeframeLabel } from "../../../lib/timeframeCatalog";
 
 export type SessionHistoryItem = {
   id: string;
@@ -63,9 +70,16 @@ export function SessionHistoryPanel({
   onResume,
   onDelete,
 }: SessionHistoryPanelProps) {
+  const [visibleState, setVisibleState] = useState<{
+    items: readonly SessionHistoryItem[];
+    count: number;
+  }>({ items, count: REVIEW_SESSION_PAGE_SIZE });
   const filtersAreDefault = Object.entries(filters).every(([key, value]) => (
     value === defaultReviewSessionFilters[key as keyof ReviewSessionFilters]
   ));
+  const visibleItemCount = visibleState.items === items ? visibleState.count : REVIEW_SESSION_PAGE_SIZE;
+  const visibleItems = visibleReviewSessionItems(items, visibleItemCount);
+  const canLoadMore = visibleItems.length < items.length;
 
   return (
     <>
@@ -90,7 +104,7 @@ export function SessionHistoryPanel({
             <span>周期</span>
             <select value={filters.timeframe} onChange={(event) => onFilterChange({ timeframe: event.target.value })}>
               <option value="all">全部周期</option>
-              {timeframes.map((value) => <option key={value} value={value}>{value}</option>)}
+              {timeframes.map((value) => <option key={value} value={value}>{timeframeLabel(value)}</option>)}
             </select>
           </label>
           <label>
@@ -118,11 +132,11 @@ export function SessionHistoryPanel({
           </label>
         </div>
         <div className="review-session-scroll" tabIndex={0} aria-label="全部可恢复训练，可滚动浏览">
-          {items.length ? items.map((item) => (
+          {visibleItems.length ? visibleItems.map((item) => (
             <div className={`session-row ${item.selected ? "active" : ""}`} key={item.id}>
               <div className="session-main">
                 <div className="session-title">
-                  <strong>{item.instrumentId} · {item.timeframe}</strong>
+                  <strong>{item.instrumentId} · {timeframeLabel(item.timeframe)}</strong>
                   <span className={item.completed ? "session-status completed" : "session-status"}>
                     {item.completed ? "已完成" : "已保存，可继续"}
                   </span>
@@ -149,6 +163,18 @@ export function SessionHistoryPanel({
               </div>
             </div>
           )) : <div className="empty-state">{emptyText}</div>}
+          {canLoadMore && (
+            <button
+              type="button"
+              className="review-session-load-more"
+              onClick={() => setVisibleState({
+                items,
+                count: nextReviewSessionVisibleCount(visibleItemCount, items.length),
+              })}
+            >
+              加载更多历史（已显示 {visibleItems.length} / {items.length}）
+            </button>
+          )}
         </div>
       </article>
       <details className="audit-timeline">

@@ -7,6 +7,8 @@ import {
   type SeedCandle,
 } from "../../../db/sample-data";
 import { fetchLocalData, readLocalDataJson } from "../../lib/localDataService";
+import { normalizeTimeframeCoverage } from "../../lib/timeframeAvailability";
+import { isSupportedTimeframe } from "../../lib/timeframeCatalog";
 
 type ImportedBar = Partial<SeedCandle> & { timestamp?: number | string };
 
@@ -123,12 +125,22 @@ export async function GET(request: Request) {
     for (const item of rows.results as Array<Record<string, unknown>>) {
       merged.set(String(item.id), {
         ...item,
-        timeframes: String(item.timeframeList ?? "").split(",").filter(Boolean),
+        timeframes: normalizeTimeframeCoverage(item.timeframeList),
       });
     }
     for (const item of local?.instruments ?? []) {
       if (Number(item.barCount ?? 0) <= 0) continue;
-      merged.set(String(item.id), { ...item, timeframes: ["1d", "1w"] });
+      const instrumentId = String(item.id);
+      const localTimeframes = normalizeTimeframeCoverage(item.timeframes ?? item.timeframeList);
+      const existing = merged.get(instrumentId);
+      merged.set(String(item.id), {
+        ...existing,
+        ...item,
+        timeframes: normalizeTimeframeCoverage([
+          ...normalizeTimeframeCoverage(existing?.timeframes),
+          ...localTimeframes,
+        ]),
+      });
     }
     return Response.json({ instruments: [...merged.values()] });
   }
@@ -178,8 +190,12 @@ export async function GET(request: Request) {
     const databaseHasNonSampleData = marketDatabaseRows.some((item) => (
       Number(item.barCount ?? 0) > 0 && String(item.source ?? "") !== "sample"
     ));
-    const databaseTimeframes = new Set(marketDatabaseRows.map((item) => String(item.timeframe)));
-    for (const timeframe of local?.summary.timeframes ?? []) databaseTimeframes.add(timeframe);
+    const databaseTimeframes = new Set<string>(
+      marketDatabaseRows
+        .map((item) => String(item.timeframe))
+        .filter((timeframe) => isSupportedTimeframe(timeframe)),
+    );
+    for (const timeframe of normalizeTimeframeCoverage(local?.summary.timeframes)) databaseTimeframes.add(timeframe);
     return Response.json({
       coverage: [...databasePage, ...(local?.coverage ?? [])],
       total: databaseRows.length + Number(local?.total ?? 0),
@@ -193,6 +209,9 @@ export async function GET(request: Request) {
 
   const instrumentId = url.searchParams.get("instrument") ?? "600519.SH";
   const timeframe = url.searchParams.get("timeframe") ?? "1d";
+  if (!isSupportedTimeframe(timeframe)) {
+    return Response.json({ error: `不支持的周期：${timeframe}` }, { status: 400 });
+  }
   const instrument = await db
     .prepare(`SELECT id, symbol, name, market, timezone, price_precision AS pricePrecision
       FROM instruments WHERE id = ?`)
@@ -239,6 +258,9 @@ export async function POST(request: Request) {
   const bars = payload.bars ?? [];
   if (!instrument?.id || !instrument.symbol || !payload.timeframe || bars.length === 0) {
     return Response.json({ error: "缺少品种、周期或 K 线数据" }, { status: 400 });
+  }
+  if (!isSupportedTimeframe(payload.timeframe)) {
+    return Response.json({ error: `不支持的周期：${payload.timeframe}` }, { status: 400 });
   }
   if (bars.length > 5000 || bars.some((bar) => !isValidBar(bar))) {
     return Response.json({ error: "单次最多 5000 根，且 OHLC 必须有效" }, { status: 400 });
@@ -318,7 +340,7 @@ export async function DELETE(request: Request) {
     }>;
   };
   const selections = (payload.selections ?? []).filter((item) =>
-    item.id && item.timeframe && item.adjustmentType && item.source);
+    item.id && item.timeframe && isSupportedTimeframe(item.timeframe) && item.adjustmentType && item.source);
   if (!selections.length || selections.length > 200) {
     return Response.json({ error: "请选择 1～200 条数据记录" }, { status: 400 });
   }

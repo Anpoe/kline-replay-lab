@@ -94,6 +94,28 @@ test("preserves data task actions and provider setting payloads", async () => {
   assert.equal(requests[10].init.method, "DELETE");
 });
 
+test("deduplicates the same market sync worker across gateway instances", async () => {
+  const requests = [];
+  let release;
+  const fetcher = async (input, init) => {
+    requests.push({ input, init });
+    return await new Promise((resolve) => {
+      release = () => resolve(response({ payload: { run: { id: "run-shared", status: "running" } } }));
+    });
+  };
+  const firstGateway = createMarketDataGateway(fetcher);
+  const secondGateway = createMarketDataGateway(fetcher);
+
+  const first = firstGateway.marketSyncWorker("run-shared");
+  const second = secondGateway.marketSyncWorker("run-shared");
+  await Promise.resolve();
+  assert.equal(requests.length, 1);
+
+  release();
+  assert.deepEqual(await first, { run: { id: "run-shared", status: "running" } });
+  assert.deepEqual(await second, { run: { id: "run-shared", status: "running" } });
+});
+
 test("preserves the market onboarding storage key and cleans malformed data", () => {
   const storage = createMemoryStorage();
   const gateway = createMarketDataStorageGateway(storage);

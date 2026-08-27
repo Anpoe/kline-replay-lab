@@ -11,8 +11,9 @@ import {
   XCircle,
 } from "lucide-react";
 import { useId, useMemo, useState } from "react";
+import { TIMEFRAME_IDS, timeframeLabel, type TimeframeId } from "../../../lib/timeframeCatalog.ts";
 
-export type FxTimeframe = "1m" | "5m" | "1h" | "1d" | "1w";
+export type FxTimeframe = TimeframeId;
 
 export type FxCurrencyPair = {
   id: string;
@@ -129,7 +130,7 @@ export type FxDataControlPanelProps = {
   onRefreshStatus?: () => void | Promise<void>;
 };
 
-const TARGET_TIMEFRAMES: readonly FxTimeframe[] = ["1m", "5m", "1h", "1d", "1w"];
+const TARGET_TIMEFRAMES: readonly FxTimeframe[] = TIMEFRAME_IDS;
 const STAGE_ORDER: readonly FxTaskStage[] = ["download", "parse", "aggregate", "validate", "persist", "completed"];
 const STAGE_LABELS: Record<FxTaskStage, string> = {
   queued: "等待",
@@ -337,7 +338,7 @@ export function FxDataControlPanel({
         <div className="provider-setting-title">
           <div>
             <Database size={17} />
-            <span><strong>初始化与增量更新</strong><small>统一保存 UTC 的 1m / 5m / 1h / 1d / 1w 外汇训练数据</small></span>
+            <span><strong>初始化与增量更新</strong><small>统一保存 UTC 的 {TIMEFRAME_IDS.map((value) => timeframeLabel(value)).join(" / ")} 外汇训练数据</small></span>
           </div>
           <span>{selectedPair?.label ?? "未选择货币对"}</span>
         </div>

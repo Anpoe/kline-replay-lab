@@ -1,8 +1,9 @@
 "use client";
 
-import { KeyRound, Link2, RefreshCw, Save, Trash2 } from "lucide-react";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { Clock, KeyRound, Link2, RefreshCw, Save, Trash2 } from "lucide-react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { createMarketDataGateway } from "../marketDataGateway";
+import { DEFAULT_DATA_AUTO_UPDATE_SCHEDULE_TIME } from "../../../lib/dataAutoUpdateSettings";
 
 type ProviderState = {
   configured: boolean;
@@ -22,6 +23,8 @@ type ProviderSettingsResponse = {
   };
   autoUpdate?: {
     enabled: boolean;
+    scheduledEnabled: boolean;
+    scheduledTime: string;
     lastCheckDate: string | null;
     lastFinishedAt: string | null;
     lastStatus: "idle" | "running" | "completed" | "partial" | "failed";
@@ -55,9 +58,12 @@ export function ProviderSettingsPanel() {
   const [notice, setNotice] = useState("");
   const [saving, setSaving] = useState<"" | "tushare" | "alpaca" | "tdxquant" | "twelvedata" | "dukascopy">("");
   const [autoUpdateEnabled, setAutoUpdateEnabled] = useState(false);
+  const [autoUpdateScheduledEnabled, setAutoUpdateScheduledEnabled] = useState(false);
+  const [autoUpdateScheduleTime, setAutoUpdateScheduleTime] = useState(DEFAULT_DATA_AUTO_UPDATE_SCHEDULE_TIME);
   const [autoUpdateStatus, setAutoUpdateStatus] = useState<ProviderSettingsResponse["autoUpdate"]>();
   const [autoUpdateSaving, setAutoUpdateSaving] = useState(false);
   const [statusLoaded, setStatusLoaded] = useState(false);
+  const autoUpdateScheduleTimeDirtyRef = useRef(false);
   const marketDataGateway = useMemo(
     () => createMarketDataGateway((input, init) => fetch(input, init)),
     [],
@@ -68,6 +74,10 @@ export function ProviderSettingsPanel() {
       const data = await marketDataGateway.loadProviderSettings<ProviderSettingsResponse>();
       setStatus(data.providers);
       setAutoUpdateEnabled(Boolean(data.autoUpdate?.enabled));
+      setAutoUpdateScheduledEnabled(Boolean(data.autoUpdate?.scheduledEnabled));
+      if (!autoUpdateScheduleTimeDirtyRef.current) {
+        setAutoUpdateScheduleTime(data.autoUpdate?.scheduledTime ?? DEFAULT_DATA_AUTO_UPDATE_SCHEDULE_TIME);
+      }
       setAutoUpdateStatus(data.autoUpdate);
       setStatusLoaded(true);
       if (data.providers.tdxquant.endpoint) setTdxQuantEndpoint(data.providers.tdxquant.endpoint);
@@ -96,11 +106,10 @@ export function ProviderSettingsPanel() {
   }, [loadStatus]);
 
   useEffect(() => {
-    const refreshAutoUpdateStatus = () => {
+    const timer = window.setInterval(() => {
       void loadStatus();
-    };
-    window.addEventListener("data-auto-update-updated", refreshAutoUpdateStatus);
-    return () => window.removeEventListener("data-auto-update-updated", refreshAutoUpdateStatus);
+    }, 10000);
+    return () => window.clearInterval(timer);
   }, [loadStatus]);
 
   const saveAutoUpdate = async (enabled: boolean) => {
@@ -116,6 +125,33 @@ export function ProviderSettingsPanel() {
       setNotice(enabled ? "已开启：下次启动后会检查已有市场，只有发现缺口才会拉取。" : "每日启动自动更新已关闭。已有数据不会被删除。");
     } catch (error) {
       setNotice(error instanceof Error ? error.message : "保存自动更新设置失败");
+    } finally {
+      setAutoUpdateSaving(false);
+    }
+  };
+
+  const saveAutoUpdateSchedule = async (patch: { enabled?: boolean; time?: string }) => {
+    const scheduledEnabled = patch.enabled ?? autoUpdateScheduledEnabled;
+    const scheduledTime = patch.time ?? autoUpdateScheduleTime;
+    setAutoUpdateSaving(true);
+    setNotice("");
+    try {
+      const result = await marketDataGateway.saveProviderSettings<{ autoUpdate?: ProviderSettingsResponse["autoUpdate"]; error?: string }>({
+        autoUpdateScheduledEnabled: scheduledEnabled,
+        autoUpdateScheduleTime: scheduledTime,
+      });
+      if (!result.autoUpdate) throw new Error(result.error ?? "保存定时自动更新设置失败");
+      setAutoUpdateScheduledEnabled(Boolean(result.autoUpdate.scheduledEnabled));
+      setAutoUpdateScheduleTime(result.autoUpdate.scheduledTime ?? scheduledTime);
+      autoUpdateScheduleTimeDirtyRef.current = false;
+      setAutoUpdateStatus(result.autoUpdate);
+      window.dispatchEvent(new Event("provider-settings-updated"));
+      window.dispatchEvent(new Event("data-auto-update-settings-updated"));
+      setNotice(scheduledEnabled
+        ? `已开启：每天 ${scheduledTime}（系统时间）自动检查已有市场。`
+        : "每日定时自动更新已关闭。已有数据不会被删除。");
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : "保存定时自动更新设置失败");
     } finally {
       setAutoUpdateSaving(false);
     }
@@ -200,6 +236,46 @@ export function ProviderSettingsPanel() {
         </small>
       </article>
 
+      <article className="provider-setting-card auto-update-setting-card">
+        <div className="provider-setting-title">
+          <div><Clock size={17} /><span><strong>每日定时检查更新</strong><small>错过时间启动时会立即检查</small></span></div>
+          <button
+            type="button"
+            className="indicator-switch"
+            role="switch"
+            aria-checked={autoUpdateScheduledEnabled}
+            aria-label="每日定时检查更新"
+            disabled={autoUpdateSaving || !statusLoaded}
+            onClick={() => void saveAutoUpdateSchedule({ enabled: !autoUpdateScheduledEnabled })}
+          ><span /></button>
+        </div>
+        <div className="auto-update-schedule-controls">
+          <label>每日检查时间（系统时间）
+            <input
+              type="time"
+              value={autoUpdateScheduleTime}
+              disabled={autoUpdateSaving || !statusLoaded}
+              onChange={(event) => {
+                autoUpdateScheduleTimeDirtyRef.current = true;
+                setAutoUpdateScheduleTime(event.target.value);
+              }}
+            />
+          </label>
+          <button
+            type="button"
+            className="ghost-button"
+            disabled={autoUpdateSaving || !statusLoaded}
+            onClick={() => void saveAutoUpdateSchedule({ time: autoUpdateScheduleTime })}
+          >保存时间</button>
+        </div>
+        <p className="provider-setting-help">后台 worker 会在每天到达此时间后检查 A 股、美股和外汇；软件在此时间之后启动则立即执行，全天只执行一次。</p>
+        <small className="auto-update-setting-status">
+          {autoUpdateScheduledEnabled
+            ? `当前计划：每天 ${autoUpdateScheduleTime}（系统时间）`
+            : "定时检查未开启"}
+        </small>
+      </article>
+
       <article className="provider-setting-card">
         <div className="provider-setting-title">
           <div><KeyRound size={17} /><span><strong>Alpaca</strong><small>美股历史 K 线</small></span></div>
@@ -274,7 +350,7 @@ export function ProviderSettingsPanel() {
             <input type="password" autoComplete="new-password" value={twelveDataApiKey} onChange={(event) => setTwelveDataApiKey(event.target.value)} placeholder={status.twelvedata.configured ? "输入新值可替换现有凭证" : "填写 Twelve Data API Key"} />
           </label>
         </div>
-        <p className="provider-setting-help">密钥只在服务端请求 Twelve Data，前端不会把完整密钥回显。增量更新写入已经收盘的 M1，并在本机聚合 5m / 1h / 1d / 1w。</p>
+        <p className="provider-setting-help">密钥只在服务端请求 Twelve Data，前端不会把完整密钥回显。增量更新写入已经收盘的 M1，并在本机聚合 M5 / M15 / M30 / H1 / H4 / D1 / W1 / MN。</p>
         <div className="provider-setting-actions">
           {status.twelvedata.source === "settings" && <button className="delete-session" onClick={() => clearProvider("twelvedata")}><Trash2 size={13} />清除本机凭证</button>}
           <button className="primary-button" disabled={saving === "twelvedata"} onClick={() => saveProvider("twelvedata")}><Save size={14} />保存 Twelve Data</button>

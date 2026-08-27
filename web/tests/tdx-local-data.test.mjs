@@ -7,6 +7,7 @@ import test from "node:test";
 import { zipSync } from "fflate";
 import { TdxLocalStore } from "../local-data/store.mjs";
 import {
+  aggregateMonthly,
   aggregateWeekly,
   classifyTdxInstrument,
   instrumentIdFromEntry,
@@ -47,6 +48,12 @@ test("TDX .day records decode and aggregate into calendar weeks", () => {
     { open: weekly[0].open, high: weekly[0].high, low: weekly[0].low, close: weekly[0].close, volume: weekly[0].volume },
     { open: 10, high: 12, low: 9.8, close: 11.8, volume: 300 },
   );
+  const monthly = aggregateMonthly(bars);
+  assert.equal(monthly.length, 1);
+  assert.deepEqual(
+    { open: monthly[0].open, high: monthly[0].high, low: monthly[0].low, close: monthly[0].close, volume: monthly[0].volume },
+    { open: 10, high: 12.2, low: 9.8, close: 11.2, volume: 600 },
+  );
 });
 
 test("TDX paths map to stable ids and common asset classes", () => {
@@ -58,7 +65,7 @@ test("TDX paths map to stable ids and common asset classes", () => {
   assert.equal(classifyTdxInstrument("123001.SZ"), "convertible-bond");
 });
 
-test("local store downloads, indexes and serves daily/weekly candles", async (context) => {
+test("local store downloads, indexes and serves daily/weekly/monthly candles", async (context) => {
   const archive = Buffer.from(zipSync({
     "sh/lday/sh600519.day": new Uint8Array(dayBuffer(sampleRows)),
     "sz/lday/sz399001.day": new Uint8Array(dayBuffer(sampleRows)),
@@ -122,12 +129,14 @@ test("local store downloads, indexes and serves daily/weekly candles", async (co
   assert.equal((await store.getInstruments()).length, 2);
   const daily = await store.getCandles("600519.SH", "1d");
   const weekly = await store.getCandles("600519.SH", "1w");
+  const monthly = await store.getCandles("600519.SH", "1mo");
   assert.equal(daily.candles.length, 3);
   assert.equal(weekly.candles.length, 2);
+  assert.equal(monthly.candles.length, 1);
   const coverage = await store.getCoverage({ offset: 1, limit: 2 });
-  assert.equal(coverage.total, 4);
+  assert.equal(coverage.total, 6);
   assert.equal(coverage.coverage.length, 2);
-  assert.deepEqual(coverage.coverage.map((item) => item.timeframe), ["1w", "1d"]);
+  assert.deepEqual(coverage.coverage.map((item) => item.timeframe), ["1w", "1mo"]);
   assert.match((await store.getManifest()).datasetVersion, /^tdx-[a-f0-9]{16}$/);
 
   await store.startCnMaintenance({ mode: "repair", token: "test-token", repairDays: 8 });

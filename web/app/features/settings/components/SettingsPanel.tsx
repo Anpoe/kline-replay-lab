@@ -7,14 +7,43 @@ import {
   MAX_REPLAY_HISTORY_BARS,
   MIN_REPLAY_HISTORY_BARS,
   normalizeReplayHistoryBars,
-  timeframes,
+  pretradePlanFieldOptions,
   type AppSettings,
   type PositionSizeMode,
   type SettingsTab,
 } from "../settingsContracts";
+import { canAggregateTimeframe, TIMEFRAME_IDS, timeframeLabel } from "../../../lib/timeframeCatalog";
+
+function SettingsSwitch({
+  checked,
+  disabled = false,
+  label,
+  onChange,
+}: {
+  checked: boolean;
+  disabled?: boolean;
+  label: string;
+  onChange: () => void;
+}) {
+  return (
+    <button
+      type="button"
+      role="switch"
+      aria-label={label}
+      aria-checked={checked}
+      disabled={disabled}
+      className={`settings-switch${checked ? " on" : ""}`}
+      onClick={onChange}
+    >
+      <span />
+    </button>
+  );
+}
 
 export type SettingsPanelInstrument = {
+  id?: string;
   market: string;
+  timeframes?: readonly string[];
 };
 
 export type SettingsPanelProps = {
@@ -46,6 +75,14 @@ export function SettingsPanel({
   onOpenTrash,
   onSave,
 }: SettingsPanelProps) {
+  const availableTimeframes = new Set(
+    TIMEFRAME_IDS.filter((targetTimeframe) => availableInstruments.some((item) => (
+      item.timeframes?.some((sourceTimeframe) => (
+        sourceTimeframe === targetTimeframe
+        || canAggregateTimeframe(sourceTimeframe, targetTimeframe)
+      ))
+    ))),
+  );
   return (
     <div className="task-modal-backdrop" role="presentation" onMouseDown={(event) => {
       if (event.target === event.currentTarget) onClose();
@@ -63,6 +100,7 @@ export function SettingsPanel({
         <div className="settings-tabs" role="tablist" aria-label="设置分类">
           <button className={tab === "basic" ? "active" : ""} onClick={() => onTabChange("basic")}>基本设置</button>
           <button className={tab === "training" ? "active" : ""} onClick={() => onTabChange("training")}>训练设置</button>
+          <button className={tab === "discipline" ? "active" : ""} onClick={() => onTabChange("discipline")}>交易纪律</button>
           <button className={tab === "data" ? "active" : ""} onClick={() => onTabChange("data")}>数据源设置</button>
         </div>
 
@@ -340,7 +378,11 @@ export function SettingsPanel({
               {draft.randomTimeframeMode === "fixed" && (
                 <label>指定周期
                   <select value={draft.randomTimeframe} onChange={(event) => onDraftChange((next) => ({ ...next, randomTimeframe: event.target.value }))}>
-                    {timeframes.map((item) => <option key={item}>{item}</option>)}
+                    {TIMEFRAME_IDS.map((item) => (
+                      <option key={item} value={item} disabled={!availableTimeframes.has(item)}>
+                        {timeframeLabel(item)}
+                      </option>
+                    ))}
                   </select>
                 </label>
               )}
@@ -376,6 +418,121 @@ export function SettingsPanel({
                 </label>
               </div>
               <small>冷却用于去掉同一段走势里的重复命中；扫描强度越大，稀有形态越容易找到，但仍会受服务端有界窗口保护。5m 等短周期若长期无命中，请优先降低趋势升幅阈值。具体形态阈值在左侧“形态”中管理。</small>
+            </div>
+          </div>
+        ) : tab === "discipline" ? (
+          <div className="settings-section discipline-settings">
+            <div className="settings-section-head">
+              <strong>严格模式</strong>
+              <span>把交易纪律放到训练开仓入口；每个开关单独生效，保存后用于当前训练。</span>
+            </div>
+
+            <div className={`settings-rule discipline-master-card${draft.strictModeEnabled ? " active" : ""}`}>
+              <div className="settings-row-action">
+                <div>
+                  <span>EXECUTION DISCIPLINE</span>
+                  <strong>{draft.strictModeEnabled ? "严格模式已开启" : "严格模式未开启"}</strong>
+                  <small>{draft.strictModeEnabled ? "未完成已启用的规划或 SOP 检查项时，开仓会被拦截。" : "普通模式仍可训练；开启后才会把已启用的纪律变成开仓门禁。"}</small>
+                </div>
+                <SettingsSwitch
+                  checked={draft.strictModeEnabled}
+                  label="严格模式"
+                  onChange={() => onDraftChange((next) => ({ ...next, strictModeEnabled: !next.strictModeEnabled }))}
+                />
+              </div>
+            </div>
+
+            <div className="settings-rule discipline-toggle-card">
+              <div className="settings-row-action">
+                <div>
+                  <span>事前规划卡</span>
+                  <strong>{draft.requirePretradePlan ? "需要事前规划卡" : "不强制事前规划卡"}</strong>
+                  <small>开启后只检查下面勾选的字段；关闭某一项后，严格模式不再因该项为空而拦截。</small>
+                </div>
+                <SettingsSwitch
+                  checked={draft.requirePretradePlan}
+                  label="需要事前规划卡"
+                  onChange={() => onDraftChange((next) => ({ ...next, requirePretradePlan: !next.requirePretradePlan }))}
+                />
+              </div>
+              <div className={`pretrade-field-list${draft.requirePretradePlan ? "" : " disabled"}`}>
+                {pretradePlanFieldOptions.map((option) => {
+                  const selected = draft.requiredPretradeFields.includes(option.key);
+                  return (
+                    <div className="pretrade-field-row" key={option.key}>
+                      <div><strong>{option.label}</strong><small>{option.description}</small></div>
+                      <SettingsSwitch
+                        checked={selected}
+                        disabled={!draft.requirePretradePlan}
+                        label={`要求填写${option.label}`}
+                        onChange={() => onDraftChange((next) => ({
+                          ...next,
+                          requiredPretradeFields: selected
+                            ? next.requiredPretradeFields.filter((field) => field !== option.key)
+                            : [...next.requiredPretradeFields, option.key],
+                        }))}
+                      />
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+
+            <div className="settings-rule discipline-toggle-card">
+              <div className="settings-row-action">
+                <div>
+                  <span>内置 SOP</span>
+                  <strong>{draft.sopCheckEnabled ? "启用 SOP 检查" : "关闭 SOP 检查"}</strong>
+                  <small>按市场和周期的基础 SOP 检查；它与事前规划卡、个人表现 SOP 是三个独立开关。</small>
+                </div>
+                <SettingsSwitch
+                  checked={draft.sopCheckEnabled}
+                  label="启用 SOP 检查"
+                  onChange={() => onDraftChange((next) => ({ ...next, sopCheckEnabled: !next.sopCheckEnabled }))}
+                />
+              </div>
+            </div>
+
+            <div className="settings-rule discipline-toggle-card">
+              <div className="settings-row-action">
+                <div>
+                  <span>PERSONAL PERFORMANCE SOP</span>
+                  <strong>个人表现 SOP</strong>
+                  <small>{draft.personalSopCheckEnabled
+                    ? "已开启；只使用表现页中至少 15 笔样本的已采用规则，管理入场条件、品种资料和持仓范围。事前规划卡由严格模式单独控制。"
+                    : "未开启；开启后只使用表现页中至少 15 笔样本的已采用规则，管理入场条件、品种资料和持仓范围。事前规划卡由严格模式单独控制。"}</small>
+                </div>
+                <SettingsSwitch
+                  checked={draft.personalSopCheckEnabled}
+                  label="个人表现 SOP"
+                  onChange={() => onDraftChange((next) => ({ ...next, personalSopCheckEnabled: !next.personalSopCheckEnabled }))}
+                />
+              </div>
+              <div className="active-personal-sop-summary">
+                <span>当前规则</span>
+                {draft.activePersonalSopRule ? (
+                  <strong>{draft.activePersonalSopRule.title} · {draft.activePersonalSopRule.stats.samples} 笔样本 · {timeframeLabel(draft.activePersonalSopRule.scope.timeframe)}</strong>
+                ) : <strong>尚未采用表现推荐</strong>}
+                <small>{draft.activePersonalSopRule ? "表现页出现新候选时不会自动替换当前规则。" : "请在表现页的个人 SOP 推荐中采用一条满足 15 笔门槛的规则。"}</small>
+              </div>
+              <div className="settings-row-action auto-close-row">
+                <div>
+                  <span>持仓管理</span>
+                  <strong>{draft.personalSopAutoCloseEnabled ? "超限自动平仓已开启" : "超限只提示"}</strong>
+                  <small>仅作用于本地回放；会沿用下一根 K 线成交和 A 股 T+1 预约规则，不绕过市场约束。</small>
+                </div>
+                <SettingsSwitch
+                  checked={draft.personalSopAutoCloseEnabled}
+                  disabled={!draft.activePersonalSopRule}
+                  label="超出持仓纪律自动平仓"
+                  onChange={() => onDraftChange((next) => ({ ...next, personalSopAutoCloseEnabled: !next.personalSopAutoCloseEnabled }))}
+                />
+              </div>
+            </div>
+
+            <div className="settings-note-card">
+              <strong>使用说明</strong>
+              <span>候选组合必须至少有 15 笔已平仓样本。样本不足时只显示积累进度，不会阻断下单，也不会自动平仓。</span>
             </div>
           </div>
         ) : (

@@ -7,6 +7,7 @@ import {
   migrateDecisionLinksByBarRelation,
   type DecisionLinkBarRelation,
 } from "../../lib/decisionLinkMigration";
+import { isSupportedTimeframe } from "../../lib/timeframeCatalog";
 
 type SessionEventPayload = {
   id?: string;
@@ -37,13 +38,18 @@ function decisionLinkLookaheadMs(timeframe: string) {
     case "1m":
       return 8 * 86_400_000;
     case "5m":
+    case "15m":
+    case "30m":
       return 8 * 86_400_000;
     case "1h":
+    case "4h":
       return 21 * 86_400_000;
     case "1d":
       return 90 * 86_400_000;
     case "1w":
       return 365 * 86_400_000;
+    case "1mo":
+      return 3 * 365 * 86_400_000;
     default:
       return 90 * 86_400_000;
   }
@@ -260,6 +266,9 @@ export async function POST(request: Request) {
   }
   if (!payload.id || !payload.instrumentId || !payload.timeframe || payload.state == null) {
     return Response.json({ error: "训练记录不完整" }, { status: 400 });
+  }
+  if (!isSupportedTimeframe(payload.timeframe)) {
+    return Response.json({ error: `不支持的周期：${payload.timeframe}` }, { status: 400 });
   }
   const now = new Date().toISOString();
   const db = getRawDb();

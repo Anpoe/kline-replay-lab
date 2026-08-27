@@ -7,6 +7,7 @@ import {
   MAX_SNAPSHOT_CHUNK_BYTES,
   materializeSnapshotCandleWindow,
   materializeSnapshotCandles,
+  snapshotBucketKey,
 } from "../app/lib/snapshotStorage.ts";
 
 const candle = (timestamp, close) => ({
@@ -55,6 +56,20 @@ test("oversized time buckets are split below the configured UTF-8 limit", async 
   assert.ok(chunks.length > 1);
   assert.ok(chunks.every((chunk) => chunk.byteSize <= 240));
   assert.ok(chunks.every((chunk) => chunk.bucketKey === "day:2026-01-01"));
+});
+
+test("snapshot bucket policy covers every catalog timeframe", () => {
+  const timestamp = Date.UTC(2026, 1, 11, 12, 34);
+
+  assert.equal(snapshotBucketKey(timestamp, "1m"), "day:2026-02-11");
+  assert.equal(snapshotBucketKey(timestamp, "5m"), "week:2026-02-09");
+  assert.equal(snapshotBucketKey(timestamp, "15m"), "week:2026-02-09");
+  assert.equal(snapshotBucketKey(timestamp, "30m"), "week:2026-02-09");
+  assert.equal(snapshotBucketKey(timestamp, "1h"), "month:2026-02");
+  assert.equal(snapshotBucketKey(timestamp, "4h"), "month:2026-02");
+  assert.equal(snapshotBucketKey(timestamp, "1d"), "year:2026");
+  assert.equal(snapshotBucketKey(timestamp, "1w"), "year:2026");
+  assert.equal(snapshotBucketKey(timestamp, "1mo"), "year:2026");
 });
 
 test("compact snapshot chunks round-trip candles exactly", async () => {

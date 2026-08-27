@@ -16,20 +16,38 @@ import {
   type MarketRuleProfile,
 } from "../../lib/marketRules.ts";
 import {
+  normalizePersonalSopRule,
+  type PersonalSopRule,
+} from "../../lib/performanceSop.ts";
+import {
   DEFAULT_REPLAY_HISTORY_BARS,
   MAX_REPLAY_HISTORY_BARS,
   MIN_REPLAY_HISTORY_BARS,
   normalizeReplayHistoryBars,
 } from "../../lib/trainingTasks.ts";
 import type { TradingMode } from "../../lib/tradingAccount.ts";
+import { TIMEFRAME_IDS } from "../../lib/timeframeCatalog.ts";
 
 export type { DataMarket } from "../../lib/dataMarkets.ts";
 
 export type PositionSizeMode = "fixed" | "risk-percent";
 export type MarketOrderQtySettings = Record<DataMarket, number>;
-export type SettingsTab = "basic" | "training" | "data";
+export type SettingsTab = "basic" | "training" | "discipline" | "data";
 
-export const timeframes: string[] = ["1m", "5m", "1h", "1d", "1w"];
+export type PretradePlanField = "marketState" | "location" | "reasons" | "stop" | "target" | "note";
+
+export const pretradePlanFieldOptions: Array<{ key: PretradePlanField; label: string; description: string }> = [
+  { key: "marketState", label: "市场状态", description: "趋势、震荡或反转背景" },
+  { key: "location", label: "当前位置", description: "突破、回调、区间等位置" },
+  { key: "reasons", label: "交易理由", description: "至少填写一个理由标签" },
+  { key: "stop", label: "止损", description: "失效点或保护性止损" },
+  { key: "target", label: "第一目标", description: "计划中的第一止盈目标" },
+  { key: "note", label: "计划说明", description: "入场触发与失效条件说明" },
+];
+
+export const defaultRequiredPretradeFields: PretradePlanField[] = ["marketState", "location", "reasons", "stop", "target"];
+
+export const timeframes: string[] = [...TIMEFRAME_IDS];
 
 export const DEFAULT_MARKET_ORDER_QTYS: MarketOrderQtySettings = {
   CN: 100,
@@ -77,6 +95,13 @@ export type AppSettings = {
   randomUsMinAverageDailyDollarVolume: number;
   patternCooldownBars: number;
   patternScanAttempts: number;
+  strictModeEnabled: boolean;
+  requirePretradePlan: boolean;
+  requiredPretradeFields: PretradePlanField[];
+  sopCheckEnabled: boolean;
+  personalSopCheckEnabled: boolean;
+  personalSopAutoCloseEnabled: boolean;
+  activePersonalSopRule: PersonalSopRule | null;
 };
 
 export const defaultAppSettings: AppSettings = {
@@ -106,6 +131,13 @@ export const defaultAppSettings: AppSettings = {
   randomUsMinAverageDailyDollarVolume: 1000000,
   patternCooldownBars: 10,
   patternScanAttempts: 12,
+  strictModeEnabled: false,
+  requirePretradePlan: true,
+  requiredPretradeFields: [...defaultRequiredPretradeFields],
+  sopCheckEnabled: true,
+  personalSopCheckEnabled: false,
+  personalSopAutoCloseEnabled: false,
+  activePersonalSopRule: null,
 };
 
 export function marketOrderQtyKey(market: string | undefined, instrumentId = ""): DataMarket | null {
@@ -120,6 +152,12 @@ export function marketOrderQtyKey(market: string | undefined, instrumentId = "")
 export function positiveOrderQty(value: unknown, fallback: number) {
   const quantity = Number(value);
   return Number.isFinite(quantity) && quantity > 0 ? quantity : fallback;
+}
+
+function normalizeRequiredPretradeFields(value: unknown): PretradePlanField[] {
+  const allowed = new Set<PretradePlanField>(pretradePlanFieldOptions.map((option) => option.key));
+  const source = Array.isArray(value) ? value : defaultRequiredPretradeFields;
+  return source.filter((field): field is PretradePlanField => typeof field === "string" && allowed.has(field as PretradePlanField));
 }
 
 export function normalizeMarketOrderQtySettings(value: unknown, legacyValue?: unknown): MarketOrderQtySettings {
@@ -198,6 +236,13 @@ export function normalizeSettings(value: Partial<AppSettings>): AppSettings {
     ),
     patternCooldownBars: Math.max(0, Math.min(100, Math.round(Number(merged.patternCooldownBars) || 0))),
     patternScanAttempts: Math.max(1, Math.min(50, Math.round(Number(merged.patternScanAttempts) || defaultAppSettings.patternScanAttempts))),
+    strictModeEnabled: merged.strictModeEnabled === true,
+    requirePretradePlan: merged.requirePretradePlan !== false,
+    requiredPretradeFields: normalizeRequiredPretradeFields(merged.requiredPretradeFields),
+    sopCheckEnabled: merged.sopCheckEnabled !== false,
+    personalSopCheckEnabled: merged.personalSopCheckEnabled === true,
+    personalSopAutoCloseEnabled: merged.personalSopAutoCloseEnabled === true,
+    activePersonalSopRule: normalizePersonalSopRule(merged.activePersonalSopRule),
   };
 }
 

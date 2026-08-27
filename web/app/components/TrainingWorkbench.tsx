@@ -56,6 +56,11 @@ import {
 } from "./KLineReplayChart";
 import { dataMarkets, marketRuleCode, marketSelectionLabel, type DataMarket } from "../lib/dataMarkets";
 import {
+  deriveProtectionLines,
+  resetConsumedStopDraftAfterFlatten,
+  resetConsumedStopDraftAfterOpenFills,
+} from "../lib/tradeProtection";
+import {
   configuredDefaultOrderQuantity,
   configuredDefaultOrderQuantityForRequest,
   defaultAppSettings,
@@ -65,7 +70,7 @@ import {
   type PositionSizeMode,
   type SettingsTab,
 } from "../features/settings/settingsContracts";
-import { prepareSettingsSave } from "../features/settings/settingsController";
+import { persistSettingsSave } from "../features/settings/settingsController";
 import {
   createPreferencesGateway,
   createSettingsStorageGateway,
@@ -73,9 +78,15 @@ import {
   normalizeReasonTags,
 } from "../features/settings/settingsGateway";
 import { SettingsPanel } from "../features/settings/components/SettingsPanel";
+import { PersonalSopRecommendations } from "../features/sop/components/PersonalSopRecommendations";
+import { evaluateDisciplineGate } from "../features/sop/sopController";
 import { DataSourceManager } from "../features/market-data/components/DataSourceManager";
 import { createMarketDataGateway } from "../features/market-data/marketDataGateway";
-import { filterReviewSessions } from "../features/review/reviewController";
+import {
+  buildReviewSessionSummariesInBatches,
+  filterReviewSessions,
+  REVIEW_SESSION_SUMMARY_BATCH_SIZE,
+} from "../features/review/reviewController";
 import {
   defaultReviewSessionFilters,
   type ReviewSessionFilters,
@@ -92,10 +103,26 @@ import {
 import { createLiveGateway } from "../features/live/liveGateway";
 import type { LiveScanMarket, LiveScanResponse, LiveScanResult, LiveScanSort } from "../features/live/liveScanContracts";
 import { LiveScanPanel } from "../features/live/components/LiveScanPanel";
-import { DataAutoUpdateController } from "./DataAutoUpdateController";
 import { ProviderSettingsPanel } from "../features/market-data/components/ProviderSettingsPanel";
-import { aggregateM1To5m } from "../lib/fx/dukascopyAggregation";
+import {
+  aggregateCandles as aggregateFxCandles,
+  aggregateM1To5m,
+  bucketStartTimestamp,
+  type FxTimeframe,
+} from "../lib/fx/dukascopyAggregation";
 import { parseDukascopyCsv } from "../lib/fx/dukascopyCsv";
+import {
+  aggregateCandlesToTimeframe,
+  canAggregateTimeframe,
+  timeframeBucketKey,
+  type SupportedTimeframe,
+} from "../lib/timeframeAggregation";
+import {
+  availableTimeframesForInstrument,
+  resolveAvailableTimeframe,
+} from "../lib/timeframeAvailability";
+import { TIMEFRAME_IDS, timeframeLabel, timeframeLookbackMs, timeframeMinutes } from "../lib/timeframeCatalog";
+import { visibleTimeframeViewBars } from "../lib/timeframeView";
 import {
   CN_A_MAINBOARD_RULES_V1,
   buyQuantityStep,
@@ -129,12 +156,28 @@ import {
   type TrainingTaskDraft,
 } from "../lib/trainingTasks";
 import {
+  markTrainingAutosaveSaved,
+  observeTrainingAutosave,
+  resetTrainingAutosaveGate,
+  type TrainingAutosaveGate,
+} from "../lib/trainingAutosave";
+import {
   analyzePerformanceHabits,
   summarizePerformance,
   type HabitTrade,
   type PerformanceBreakdown,
   type PerformanceRecord,
 } from "../lib/performance";
+import {
+  deriveSopInstrumentContext,
+  generatePersonalSopRecommendations,
+  evaluatePersonalSopManagement,
+  holdingBarsAtCursor,
+  personalSopTemplateScopes,
+  recommendationToPersonalSopRule,
+  summarizePersonalSopScopes,
+  type PersonalSopRecommendation,
+} from "../lib/performanceSop";
 import {
   defaultPatternPresets,
   findPatternMatches,
@@ -160,6 +203,7 @@ import {
   trailingAverageDailyDollarVolume,
 } from "../lib/randomLiquidity";
 import { findStrongestTrainingWindowOverlap } from "../lib/randomTrainingOverlap";
+import { createUuid } from "../lib/uuid";
 import {
   accountEquity,
   accountMarketValue,
@@ -206,7 +250,7 @@ import { calculateRiskSizedQuantity, inferRiskSizingSide } from "../lib/riskSizi
  * fetch("/api/live-state") and fetch("/api/candles?instruments=1", { cache: "no-store" }) contracts.
  */
 
-type View = "replay" | "performance" | "database" | "review";
+type View = "replay" | "performance" | "sop" | "database" | "review";
 
 type Instrument = {
   id: string;
@@ -216,6 +260,7 @@ type Instrument = {
   timezone: string;
   pricePrecision: number;
   assetType?: InstrumentAssetType;
+  marketCap?: number;
 };
 type InstrumentAssetType = "stock" | "index" | "fund" | "convertible-bond" | "other";
 type AvailableInstrument = {
@@ -384,6 +429,12 @@ function coverageKey(item: Coverage) {
 }
 type PositionSide = "long" | "short";
 type OrderAction = "open" | "close";
+type SopDisciplineMetadata = {
+  kind: "personal-sop";
+  ruleId: string;
+  ruleVersion: string;
+  violation: "entry-mismatch" | "holding-limit";
+};
 type PendingOrder = {
   id: string;
   action: OrderAction;
@@ -410,6 +461,7 @@ type PendingOrder = {
   riskBudget?: number;
   reservedMargin?: number;
   instrumentEconomics?: InstrumentEconomics;
+  discipline?: SopDisciplineMetadata;
 };
 type PositionLot = {
   id: string;
@@ -441,6 +493,7 @@ type PositionLot = {
   riskBudget?: number;
   marginUsed?: number;
   instrumentEconomics?: InstrumentEconomics;
+  discipline?: SopDisciplineMetadata;
 };
 type Execution = {
   id: string;
@@ -471,6 +524,7 @@ type Execution = {
   engineVersion?: string;
   ruleId?: string;
   ruleVersion?: string;
+  discipline?: SopDisciplineMetadata;
 };
 type OrderRejection = {
   id: string;
@@ -709,6 +763,12 @@ type DuplicateMarketWarning = {
   currentBarCount: number;
   overlapRatio: number;
 };
+type RestorePreviewKind = "trash" | "duplicate";
+type DuplicateTrainingPreview = {
+  session: TrainingSession;
+  state: TrainingState;
+  returnSession: TrainingSession;
+};
 type RestoreRequest = {
   id: string;
   instrumentId: string;
@@ -716,6 +776,7 @@ type RestoreRequest = {
   state: TrainingState;
   updatedAt?: string;
   preview?: boolean;
+  previewKind?: RestorePreviewKind;
   evidenceTimestamp?: number;
 };
 type NewTaskRequest = {
@@ -1091,7 +1152,7 @@ const defaultInstruments = [
 ];
 
 function normalizeAvailableInstrument(item: Instrument & { timeframes?: string[] }): AvailableInstrument | null {
-  const availableTimeframes = (item.timeframes ?? []).filter((value) => timeframes.includes(value));
+  const availableTimeframes = (item.timeframes ?? []).filter((value) => TIMEFRAME_IDS.includes(value as typeof TIMEFRAME_IDS[number]));
   if (!availableTimeframes.length) return null;
   return {
     id: item.id,
@@ -1150,12 +1211,15 @@ const drawingToolGroups: Array<{
   },
   {
     id: "notes",
-    label: "画笔与注释",
+    label: "画笔",
     icon: Brush,
-    tools: [
-      { name: "brush", label: "画笔", icon: Brush },
-      { name: "trainingTextBox", label: "文字标记", icon: Tag, kind: "text" },
-    ],
+    tools: [{ name: "brush", label: "画笔", icon: Brush }],
+  },
+  {
+    id: "text",
+    label: "文字标记",
+    icon: Tag,
+    tools: [{ name: "trainingTextBox", label: "文字标记", icon: Tag, kind: "text" }],
   },
 ];
 
@@ -1304,6 +1368,7 @@ type TrainingSessionHabitTrade = {
   returnPct: number;
   holdingBars: number;
   entryTimestamp: number;
+  exitTimestamp?: number;
   entryPrice: number;
   market: string;
   patterns: string[];
@@ -1370,13 +1435,8 @@ function trainingPnlStats(state: TrainingState): TrainingPnlStats {
 
 function estimatedHoldingBars(timeframe: string, entryTimestamp: number, exitTimestamp?: number) {
   if (!exitTimestamp || exitTimestamp <= entryTimestamp) return 1;
-  const intervalMs: Record<string, number> = {
-    "5m": 5 * 60 * 1000,
-    "1h": 60 * 60 * 1000,
-    "1d": 24 * 60 * 60 * 1000,
-    "1w": 7 * 24 * 60 * 60 * 1000,
-  };
-  return Math.max(1, Math.round((exitTimestamp - entryTimestamp) / (intervalMs[timeframe] ?? intervalMs["1d"])));
+  const intervalMs = timeframeLookbackMs(timeframe) ?? timeframeLookbackMs("1d")!;
+  return Math.max(1, Math.round((exitTimestamp - entryTimestamp) / intervalMs));
 }
 
 function PerformanceInsightCard({
@@ -1425,24 +1485,6 @@ function randomUint32() {
   return Math.floor(Math.random() * 0x1_0000_0000);
 }
 
-function createUuid() {
-  const webCrypto = globalThis.crypto;
-  if (typeof webCrypto?.randomUUID === "function") return webCrypto.randomUUID();
-
-  const bytes = new Uint8Array(16);
-  if (typeof webCrypto?.getRandomValues === "function") {
-    webCrypto.getRandomValues(bytes);
-  } else {
-    for (let index = 0; index < bytes.length; index += 1) {
-      bytes[index] = Math.floor(Math.random() * 256);
-    }
-  }
-  bytes[6] = (bytes[6] & 0x0f) | 0x40;
-  bytes[8] = (bytes[8] & 0x3f) | 0x80;
-  const hex = Array.from(bytes, (value) => value.toString(16).padStart(2, "0"));
-  return `${hex.slice(0, 4).join("")}-${hex.slice(4, 6).join("")}-${hex.slice(6, 8).join("")}-${hex.slice(8, 10).join("")}-${hex.slice(10).join("")}`;
-}
-
 function randomItem<T>(items: T[]) {
   if (!items.length) return undefined;
   return items[randomUint32() % items.length];
@@ -1450,7 +1492,7 @@ function randomItem<T>(items: T[]) {
 
 function formatDate(timestamp: number, timeframe: string) {
   const date = new Date(timestamp);
-  return timeframe === "1m" || timeframe === "5m" || timeframe === "1h"
+  return (timeframeMinutes(timeframe) ?? 24 * 60) < 24 * 60
     ? date.toLocaleString("zh-CN", { month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit" })
     : date.toLocaleDateString("zh-CN", { year: "numeric", month: "2-digit", day: "2-digit" });
 }
@@ -1499,6 +1541,9 @@ function eventLabel(type: string) {
     order_quantity_changed: "调整下单数量",
     order_rejected: "市场规则拒单",
     orders_rejected: "成交阶段拒单",
+    sop_entry_blocked: "个人 SOP 拦截开仓",
+    sop_holding_limit_warning: "个人 SOP 持仓超限提示",
+    sop_auto_close_queued: "个人 SOP 自动预约平仓",
     positions_settled_at_training_end: "训练结束自动平仓",
     training_completed: "训练自动结束",
     training_revealed: "解除盲测并继续观察",
@@ -1541,7 +1586,7 @@ function replayPriceBand(
   // A weekly bar spans several sessions, so a daily price-limit band cannot be
   // inferred from its previous weekly close. Daily data is ordered from listing
   // onward in the complete local A-share library, which lets us honor IPO days.
-  if (timeframe === "1w") return null;
+  if (timeframe === "1w" || timeframe === "1mo") return null;
   const listedTradingDay = timeframe === "1d" ? cursor + 2 : undefined;
   return createPriceBand(
     rules,
@@ -1566,6 +1611,12 @@ function createOrderRejection(
     ruleVersion: rules.version,
   };
 }
+
+const ignoreProtectionPriceSelect = () => undefined;
+const rejectProtectionLineMove = () => false;
+const ignoreCandleContextMenu = () => undefined;
+const ignoreDrawingsChange = () => undefined;
+const ignoreDrawingSelect = () => undefined;
 
 export function TrainingWorkbench() {
   const settingsGateway = useMemo(
@@ -1609,6 +1660,11 @@ export function TrainingWorkbench() {
     pricePrecision: 2,
   });
   const [bars, setBars] = useState<KLineData[]>([]);
+  const [chartTimeframe, setChartTimeframe] = useState("1d");
+  const [chartBars, setChartBars] = useState<KLineData[]>([]);
+  const [chartViewLoading, setChartViewLoading] = useState(false);
+  const [chartViewError, setChartViewError] = useState("");
+  const [chartViewSnapshotId, setChartViewSnapshotId] = useState("");
   const [snapshotDataIndexOffset, setSnapshotDataIndexOffset] = useState(0);
   const [cursor, setCursor] = useState(0);
   const [loading, setLoading] = useState(true);
@@ -1628,6 +1684,7 @@ export function TrainingWorkbench() {
   const [orderTakeProfit, setOrderTakeProfit] = useState("");
   const [protectionPriceSelection, setProtectionPriceSelection] = useState<ProtectionPriceKind | null>(null);
   const [orderPanelTab, setOrderPanelTab] = useState<"positions" | "pending" | "history">("positions");
+  const [hoveredClosedPositionId, setHoveredClosedPositionId] = useState<string | null>(null);
   const [mobileOrdersExpanded, setMobileOrdersExpanded] = useState(false);
   const [mobileToolbarOpen, setMobileToolbarOpen] = useState(false);
   const [indicatorMenuOpen, setIndicatorMenuOpen] = useState(false);
@@ -1728,6 +1785,7 @@ export function TrainingWorkbench() {
   const [editingDecisionId, setEditingDecisionId] = useState("");
   const [reviewedSession, setReviewedSession] = useState<{ session: TrainingSession; state: TrainingState } | null>(null);
   const [duplicateMarketWarning, setDuplicateMarketWarning] = useState<DuplicateMarketWarning | null>(null);
+  const [duplicateTrainingPreview, setDuplicateTrainingPreview] = useState<DuplicateTrainingPreview | null>(null);
   const [coverage, setCoverage] = useState<Coverage[]>([]);
   const [coveragePage, setCoveragePage] = useState(1);
   const [coverageTotal, setCoverageTotal] = useState(0);
@@ -1768,6 +1826,9 @@ export function TrainingWorkbench() {
   const decisionPanelRef = useRef<HTMLElement | null>(null);
   const decisionDraftBeforeBackfillRef = useRef<Decision | null>(null);
   const marketLoadRef = useRef<{ id: number; controller: AbortController | null }>({ id: 0, controller: null });
+  const timeframeViewLoadRef = useRef<{ id: number; controller: AbortController | null }>({ id: 0, controller: null });
+  const sessionSummaryLoadRef = useRef<{ id: number; controller: AbortController | null }>({ id: 0, controller: null });
+  const sessionSummariesReadyRef = useRef(false);
   const liveRequestRef = useRef<LiveScanResult | null>(null);
   const livePortfoliosRef = useRef<LivePortfolioRecord[]>([]);
   const liveWatchlistRef = useRef<LiveWatchRecord[]>([]);
@@ -1784,8 +1845,7 @@ export function TrainingWorkbench() {
     portfolios: [] as LivePortfolioRecord[],
     watchlist: [] as LiveWatchRecord[],
   });
-  const trainingAutosaveInitializedRef = useRef(false);
-  const trainingAutosaveSignatureRef = useRef("");
+  const trainingAutosaveGateRef = useRef<TrainingAutosaveGate>(resetTrainingAutosaveGate());
   const trainingAutosaveTimerRef = useRef<number | null>(null);
 
   const rememberOrderEntryPreference = (update: Partial<Pick<AppSettings, "orderType" | "positionSizeMode" | "riskPercent">>) => {
@@ -1811,6 +1871,14 @@ export function TrainingWorkbench() {
     [bars, cursor, visibleBarStartIndex],
   );
   const selectedCatalogInstrument = availableInstruments.find((item) => item.id === instrumentId);
+  const currentAvailableTimeframes = useMemo(
+    () => availableTimeframesForInstrument(availableInstruments, instrumentId, timeframes),
+    [availableInstruments, instrumentId],
+  );
+  const setupAvailableTimeframes = useMemo(
+    () => availableTimeframesForInstrument(availableInstruments, setupInstrumentId, timeframes),
+    [availableInstruments, setupInstrumentId],
+  );
   const currentAssetType = inferInstrumentAssetType(
     instrument.id,
     instrument.market,
@@ -1835,6 +1903,86 @@ export function TrainingWorkbench() {
   }).length, [availableInstruments, dataMarket]);
   const dataMarketLabel = dataMarkets.find((market) => market.id === dataMarket)?.label ?? dataMarket;
   const currentBar = bars[cursor];
+  const showingCanonicalChart = chartTimeframe === timeframe;
+  const renderedChartBars = useMemo(() => {
+    if (showingCanonicalChart) return visibleBars;
+    if (!currentBar) return [];
+    const canBuildPartialBar = canAggregateTimeframe(timeframe, chartTimeframe);
+    const viewStartTimestamp = bars[visibleBarStartIndex]?.timestamp ?? Number.NEGATIVE_INFINITY;
+    const visible = visibleTimeframeViewBars(
+      chartBars,
+      currentBar.timestamp,
+      canBuildPartialBar,
+    ).filter((bar) => bar.timestamp >= viewStartTimestamp);
+    if (!canBuildPartialBar) return visible;
+
+    const isFxInstrument = instrument.market.toUpperCase() === "FX" || /\.FX$/i.test(instrument.id);
+    const currentTargetBucket = isFxInstrument
+      ? String(bucketStartTimestamp(currentBar.timestamp, chartTimeframe as FxTimeframe, {
+          timeZone: instrument.timezone,
+          sessionStartHour: 17,
+          sessionStartMinute: 0,
+          weekStartsOn: 0,
+        }))
+      : timeframeBucketKey(currentBar.timestamp, chartTimeframe as SupportedTimeframe, instrument.timezone);
+    const sourceCandles = bars.slice(visibleBarStartIndex, cursor + 1)
+      .filter((bar) => {
+        const bucket = isFxInstrument
+          ? String(bucketStartTimestamp(bar.timestamp, chartTimeframe as FxTimeframe, {
+              timeZone: instrument.timezone,
+              sessionStartHour: 17,
+              sessionStartMinute: 0,
+              weekStartsOn: 0,
+            }))
+          : timeframeBucketKey(bar.timestamp, chartTimeframe as SupportedTimeframe, instrument.timezone);
+        return bucket === currentTargetBucket;
+      })
+      .map((bar) => ({
+      timestamp: bar.timestamp,
+      open: bar.open,
+      high: bar.high,
+      low: bar.low,
+      close: bar.close,
+      volume: bar.volume ?? null,
+      turnover: null,
+    }));
+    const partialCandles = isFxInstrument
+      ? aggregateFxCandles(sourceCandles, chartTimeframe as FxTimeframe, {
+          timeZone: instrument.timezone,
+          sessionStartHour: 17,
+          sessionStartMinute: 0,
+          weekStartsOn: 0,
+        })
+      : aggregateCandlesToTimeframe(sourceCandles, chartTimeframe as SupportedTimeframe, instrument.timezone);
+    if (!partialCandles.length) return visible;
+    return [
+      ...visible.filter((bar) => {
+        const bucket = isFxInstrument
+          ? String(bucketStartTimestamp(bar.timestamp, chartTimeframe as FxTimeframe, {
+              timeZone: instrument.timezone,
+              sessionStartHour: 17,
+              sessionStartMinute: 0,
+              weekStartsOn: 0,
+            }))
+          : timeframeBucketKey(bar.timestamp, chartTimeframe as SupportedTimeframe, instrument.timezone);
+        return bucket !== currentTargetBucket;
+      }),
+      ...partialCandles,
+    ] as KLineData[];
+  }, [
+    bars,
+    chartBars,
+    chartTimeframe,
+    cursor,
+    currentBar,
+    instrument.id,
+    instrument.market,
+    instrument.timezone,
+    showingCanonicalChart,
+    timeframe,
+    visibleBarStartIndex,
+    visibleBars,
+  ]);
   const selectedPatternPresetDraft = patternPresetDrafts.find((preset) => preset.id === selectedPatternPresetId)
     ?? patternPresetDrafts[0];
   const trainingDateLabel = (timestamp: number) => {
@@ -1968,51 +2116,15 @@ export function TrainingWorkbench() {
     }), [currentBar, positions]);
   const protectionLines = useMemo<ProtectionLine[]>(() => {
     if (!currentBar || liveMode) return [];
-    const lines: ProtectionLine[] = [];
-    if (effectiveOrderStop) lines.push({
-      id: "draft-stop-loss",
-      kind: "stop-loss",
-      price: effectiveOrderStop,
-      timestamp: currentBar.timestamp,
-      label: "计划 SL",
+    return deriveProtectionLines({
+      currentTimestamp: currentBar.timestamp,
+      draftStopLoss: effectiveOrderStop,
+      draftTakeProfit: effectiveOrderTarget,
+      positions,
+      hoveredClosedPositionId,
       movable: trainingTask?.status !== "completed",
-      source: "draft",
     });
-    if (effectiveOrderTarget) lines.push({
-      id: "draft-take-profit",
-      kind: "take-profit",
-      price: effectiveOrderTarget,
-      timestamp: currentBar.timestamp,
-      label: "计划 TP",
-      movable: trainingTask?.status !== "completed",
-      source: "draft",
-    });
-    openPositions.forEach((position, index) => {
-      if (position.stopLoss) lines.push({
-        id: `${position.id}:stop-loss`,
-        kind: "stop-loss",
-        price: position.stopLoss,
-        timestamp: position.entryTimestamp,
-        label: `SL #${index + 1}`,
-        movable: trainingTask?.status !== "completed",
-        source: "position",
-        positionId: position.id,
-        side: position.side,
-      });
-      if (position.takeProfit) lines.push({
-        id: `${position.id}:take-profit`,
-        kind: "take-profit",
-        price: position.takeProfit,
-        timestamp: position.entryTimestamp,
-        label: `TP #${index + 1}`,
-        movable: trainingTask?.status !== "completed",
-        source: "position",
-        positionId: position.id,
-        side: position.side,
-      });
-    });
-    return lines;
-  }, [currentBar, effectiveOrderStop, effectiveOrderTarget, liveMode, openPositions, trainingTask?.status]);
+  }, [currentBar, effectiveOrderStop, effectiveOrderTarget, hoveredClosedPositionId, liveMode, positions, trainingTask?.status]);
   const currentTaskProgress = trainingTask
     ? taskProgress(trainingTask, cursor)
     : { revealed: 0, total: 0, percent: 0 };
@@ -2263,8 +2375,8 @@ export function TrainingWorkbench() {
     return reviewPatternFilter.presetNames[selectedIndex] ?? id;
   }) ?? [];
   const reviewTitle = reviewedSession
-    ? `${reviewedSession.session.instrumentId} · ${reviewedSession.session.timeframe}`
-    : `${instrumentId} · ${timeframe} · 当前训练`;
+    ? `${reviewedSession.session.instrumentId} · ${timeframeLabel(reviewedSession.session.timeframe)}`
+    : `${instrumentId} · ${timeframeLabel(timeframe)} · 当前训练`;
   const reviewDecisionById = useMemo(
     () => new Map(reviewState.decisionSubmissions.map((submission) => [submission.id, submission])),
     [reviewState.decisionSubmissions],
@@ -2346,6 +2458,58 @@ export function TrainingWorkbench() {
         },
     };
   }, []);
+
+  const buildSyncedPreferences = useCallback((nextSettings: AppSettings): SyncedPreferences => ({
+    version: 1,
+    appSettings: nextSettings,
+    patternPresets,
+    movingAverageSettings,
+    quickRandomMode,
+    quickRandomPatternPresetId,
+    randomTrainingPatternPresetIds,
+    reasonTags,
+    customReasonTags,
+    drawingPreferences: {
+      magnetMode: drawingMagnetMode,
+      color: drawingColor,
+      lineWidth: drawingLineWidth,
+      groupTools: groupDrawingTools,
+    },
+    liveScanSettings: {
+      market: liveScanMarket,
+      presetIds: liveScanPresetIds,
+      minPrice: liveScanMinPrice,
+      maxPrice: liveScanMaxPrice,
+      minVolume: liveScanMinVolume,
+      sort: liveScanSort,
+      limit: liveScanLimit,
+    },
+    liveScanData,
+    liveNavigatorResume,
+    liveScanResume,
+  }), [
+    customReasonTags,
+    drawingColor,
+    drawingLineWidth,
+    drawingMagnetMode,
+    groupDrawingTools,
+    liveNavigatorResume,
+    liveScanData,
+    liveScanLimit,
+    liveScanMarket,
+    liveScanMaxPrice,
+    liveScanMinPrice,
+    liveScanMinVolume,
+    liveScanPresetIds,
+    liveScanResume,
+    liveScanSort,
+    movingAverageSettings,
+    patternPresets,
+    quickRandomMode,
+    quickRandomPatternPresetId,
+    randomTrainingPatternPresetIds,
+    reasonTags,
+  ]);
 
   const applySyncedPreferences = useCallback((value: unknown) => {
     if (!value || typeof value !== "object" || Array.isArray(value)) return;
@@ -2579,62 +2743,14 @@ export function TrainingWorkbench() {
   useEffect(() => {
     if (!syncedPreferencesReady || !syncedPreferencesHydratedRef.current) return;
     const timer = window.setTimeout(() => {
-      const preferences: SyncedPreferences = {
-        version: 1,
-        appSettings,
-        patternPresets,
-        movingAverageSettings,
-        quickRandomMode,
-        quickRandomPatternPresetId,
-        randomTrainingPatternPresetIds,
-        reasonTags,
-        customReasonTags,
-        drawingPreferences: {
-          magnetMode: drawingMagnetMode,
-          color: drawingColor,
-          lineWidth: drawingLineWidth,
-          groupTools: groupDrawingTools,
-        },
-        liveScanSettings: {
-          market: liveScanMarket,
-          presetIds: liveScanPresetIds,
-          minPrice: liveScanMinPrice,
-          maxPrice: liveScanMaxPrice,
-          minVolume: liveScanMinVolume,
-          sort: liveScanSort,
-          limit: liveScanLimit,
-        },
-        liveScanData,
-        liveNavigatorResume,
-        liveScanResume,
-      };
+      const preferences = buildSyncedPreferences(appSettingsRef.current);
       void preferencesGateway.save(preferences).catch(() => undefined);
     }, 350);
     return () => window.clearTimeout(timer);
   }, [
     appSettings,
-    customReasonTags,
-    drawingColor,
-    drawingLineWidth,
-    drawingMagnetMode,
-    groupDrawingTools,
-    liveScanData,
-    liveNavigatorResume,
-    liveScanResume,
-    liveScanLimit,
-    liveScanMarket,
-    liveScanMaxPrice,
-    liveScanMinPrice,
-    liveScanMinVolume,
-    liveScanPresetIds,
-    liveScanSort,
-    movingAverageSettings,
-    patternPresets,
+    buildSyncedPreferences,
     preferencesGateway,
-    quickRandomMode,
-    quickRandomPatternPresetId,
-    randomTrainingPatternPresetIds,
-    reasonTags,
     syncedPreferencesReady,
   ]);
 
@@ -2817,7 +2933,18 @@ export function TrainingWorkbench() {
 
   const loadBars = useCallback(async () => {
     if (!startupReady) return;
+    if (trainingAutosaveTimerRef.current !== null) {
+      window.clearTimeout(trainingAutosaveTimerRef.current);
+      trainingAutosaveTimerRef.current = null;
+    }
+    trainingAutosaveGateRef.current = resetTrainingAutosaveGate();
     marketLoadRef.current.controller?.abort();
+    timeframeViewLoadRef.current.controller?.abort();
+    timeframeViewLoadRef.current = {
+      id: timeframeViewLoadRef.current.id + 1,
+      controller: null,
+    };
+    setChartViewLoading(false);
     const requestId = marketLoadRef.current.id + 1;
     const controller = new AbortController();
     marketLoadRef.current = { id: requestId, controller };
@@ -2890,6 +3017,10 @@ export function TrainingWorkbench() {
       const loadedDataIndexOffset = data.window?.startIndex ?? 0;
       setInstrument(data.instrument);
       setBars(data.candles);
+      setChartTimeframe(requestTimeframe);
+      setChartBars(data.candles);
+      setChartViewError("");
+      setChartViewSnapshotId("");
       setSnapshotDataIndexOffset(loadedDataIndexOffset);
       setDataSnapshotId(data.snapshot.id);
       setSnapshotHash(data.snapshot.contentHash);
@@ -2950,6 +3081,9 @@ export function TrainingWorkbench() {
         setSaveState("Live observation · not saved as training");
       } else if (restoreRequest) {
         const isTrashPreview = Boolean(restoreRequest.preview);
+        const previewSaveLabel = restoreRequest.previewKind === "duplicate"
+          ? "重复训练预览 · 未恢复"
+          : "回收站查看 · 未恢复";
         setTrashPreview(isTrashPreview);
         setLiveMode(false);
         setLiveContext(null);
@@ -3025,7 +3159,7 @@ export function TrainingWorkbench() {
             }),
           ]);
         setSaveState(isTrashPreview
-          ? "回收站查看 · 未恢复"
+          ? previewSaveLabel
           : evidenceMissing
             ? "证据 K 线不在原始快照中，已保留训练当前位置"
             : restoreRequest.evidenceTimestamp != null ? "已跳到证据 K 线" : "已恢复保存点");
@@ -3165,6 +3299,77 @@ export function TrainingWorkbench() {
     return () => window.clearTimeout(timer);
   }, [loadBars, loadNonce]);
 
+  useEffect(() => () => {
+    timeframeViewLoadRef.current.controller?.abort();
+  }, []);
+
+  const loadTimeframeView = useCallback(async (nextTimeframe: string) => {
+    if (nextTimeframe === chartTimeframe) return;
+    timeframeViewLoadRef.current.controller?.abort();
+    if (nextTimeframe === timeframe) {
+      timeframeViewLoadRef.current = {
+        id: timeframeViewLoadRef.current.id + 1,
+        controller: null,
+      };
+      setChartTimeframe(timeframe);
+      setChartBars(bars);
+      setChartViewSnapshotId("");
+      setChartViewError("");
+      setChartViewLoading(false);
+      return;
+    }
+    if (!dataSnapshotId) {
+      setChartViewError("当前状态没有可复用的来源快照，暂时不能切换观察周期。");
+      return;
+    }
+
+    setProtectionPriceSelection(null);
+    setDrawingRequest(null);
+    setDrawingGroupOpen("");
+    setDrawingTextOpen(false);
+    setDrawingObjectsOpen(false);
+    setSelectedDrawingId("");
+    const requestId = timeframeViewLoadRef.current.id + 1;
+    const controller = new AbortController();
+    timeframeViewLoadRef.current = { id: requestId, controller };
+    setChartViewLoading(true);
+    setChartViewError("");
+    try {
+      const data = await marketDataGateway.createSnapshot<{
+        candles: KLineData[];
+        snapshot: SnapshotMeta;
+      }>({
+        instrumentId,
+        timeframe: nextTimeframe,
+        adjustmentType: "none",
+        timeframeView: {
+          sourceSnapshotId: dataSnapshotId,
+          sourceTimeframe: timeframe,
+        },
+      }, controller.signal);
+      if (timeframeViewLoadRef.current.id !== requestId) return;
+      setChartBars(data.candles);
+      setChartTimeframe(nextTimeframe);
+      setChartViewSnapshotId(data.snapshot.id);
+      setChartViewError("");
+    } catch (error) {
+      if (controller.signal.aborted || timeframeViewLoadRef.current.id !== requestId) return;
+      setChartViewError(error instanceof Error ? error.message : "观察周期加载失败");
+    } finally {
+      if (timeframeViewLoadRef.current.id === requestId) {
+        timeframeViewLoadRef.current.controller = null;
+        setChartViewLoading(false);
+      }
+    }
+  }, [
+    bars,
+    chartTimeframe,
+    dataSnapshotId,
+    instrumentId,
+    marketDataGateway,
+    timeframe,
+  ]);
+
   const persistTrainingState = useCallback(async (
     state: TrainingState,
     successMessage: string,
@@ -3185,6 +3390,14 @@ export function TrainingWorkbench() {
       state,
       updatedAt: savedAt,
     });
+    // The local list only patches transport fields above; its derived PnL and
+    // habit-trade summary must be rebuilt before the next history view.
+    sessionSummaryLoadRef.current.controller?.abort();
+    sessionSummaryLoadRef.current = {
+      id: sessionSummaryLoadRef.current.id + 1,
+      controller: null,
+    };
+    sessionSummariesReadyRef.current = false;
     // The floating training navigator keeps its own session list. Keep that
     // list in sync immediately, otherwise switching away and back can restore
     // the stale state captured when the navigator was opened.
@@ -3219,7 +3432,10 @@ export function TrainingWorkbench() {
   useEffect(() => {
     if (trashPreview || !trainingReady || !trainingComplete || !saveCompletedTrainingRef.current) return;
     saveCompletedTrainingRef.current = false;
-    trainingAutosaveSignatureRef.current = trainingMutationSignature;
+    trainingAutosaveGateRef.current = markTrainingAutosaveSaved(
+      trainingAutosaveGateRef.current,
+      trainingMutationSignature,
+    );
     setSaveState("训练完成 · 正在保存…");
     void persistTrainingState(trainingState, "训练完成 · 已保存");
   }, [persistTrainingState, trainingComplete, trainingMutationSignature, trainingReady, trainingState, trashPreview]);
@@ -3230,16 +3446,15 @@ export function TrainingWorkbench() {
         window.clearTimeout(trainingAutosaveTimerRef.current);
         trainingAutosaveTimerRef.current = null;
       }
-      trainingAutosaveInitializedRef.current = false;
-      trainingAutosaveSignatureRef.current = "";
+      trainingAutosaveGateRef.current = resetTrainingAutosaveGate();
       return;
     }
-    if (!trainingAutosaveInitializedRef.current) {
-      trainingAutosaveInitializedRef.current = true;
-      trainingAutosaveSignatureRef.current = trainingMutationSignature;
-      return;
-    }
-    if (trainingMutationSignature === trainingAutosaveSignatureRef.current) return;
+    const observation = observeTrainingAutosave(
+      trainingAutosaveGateRef.current,
+      trainingMutationSignature,
+    );
+    trainingAutosaveGateRef.current = observation.gate;
+    if (!observation.shouldSave) return;
     if (trainingAutosaveTimerRef.current !== null) window.clearTimeout(trainingAutosaveTimerRef.current);
     const signatureToSave = trainingMutationSignature;
     const stateToSave = trainingState;
@@ -3247,7 +3462,12 @@ export function TrainingWorkbench() {
       trainingAutosaveTimerRef.current = null;
       setSaveState("自动保存中…");
       void persistTrainingState(stateToSave, "已自动保存").then((saved) => {
-        if (saved) trainingAutosaveSignatureRef.current = signatureToSave;
+        if (saved) {
+          trainingAutosaveGateRef.current = markTrainingAutosaveSaved(
+            trainingAutosaveGateRef.current,
+            signatureToSave,
+          );
+        }
       });
     }, 650);
     trainingAutosaveTimerRef.current = timer;
@@ -3308,11 +3528,35 @@ export function TrainingWorkbench() {
     const basePositionById = new Map(basePositions.map((position) => [position.id, position]));
     const nextPositions: PositionLot[] = result.positions.map((position) => {
       const entryOrder = orderById.get(position.entryOrderId);
+      const exitOrder = position.exitOrderId ? orderById.get(position.exitOrderId) : undefined;
       return {
         ...position,
         decisionSubmissionId: position.decisionSubmissionId ?? entryOrder?.decisionSubmissionId,
+        discipline: position.discipline ?? exitOrder?.discipline,
       };
     });
+    const stopDraftAfterOpenFills = resetConsumedStopDraftAfterOpenFills({
+      orders,
+      fills: result.fills,
+      orderStopLoss,
+      decisionStop: decision.stop,
+    });
+    const stopDraftAfterExecution = resetConsumedStopDraftAfterFlatten({
+      previousPositions: basePositions,
+      nextPositions,
+      orderStopLoss: stopDraftAfterOpenFills.orderStopLoss,
+      decisionStop: stopDraftAfterOpenFills.decisionStop,
+    });
+    if (stopDraftAfterExecution.orderStopLoss !== orderStopLoss) {
+      setOrderStopLoss((current) => current === orderStopLoss
+        ? stopDraftAfterExecution.orderStopLoss
+        : current);
+    }
+    if (stopDraftAfterExecution.decisionStop !== decision.stop) {
+      setDecision((current) => current.stop === decision.stop
+        ? { ...current, stop: stopDraftAfterExecution.decisionStop }
+        : current);
+    }
     const nextPositionById = new Map(nextPositions.map((position) => [position.id, position]));
     const fills: Execution[] = result.fills.map((fill) => {
       const order = orderById.get(fill.orderId);
@@ -3322,6 +3566,7 @@ export function TrainingWorkbench() {
         decisionSubmissionId: order?.decisionSubmissionId ?? relatedPosition?.decisionSubmissionId,
         ruleId: order?.ruleId ?? marketRules.id,
         ruleVersion: order?.ruleVersion ?? marketRules.version,
+        discipline: order?.discipline ?? relatedPosition?.discipline,
       };
     });
     const rejections: OrderRejection[] = result.rejections.map((rejection) => ({
@@ -3368,7 +3613,7 @@ export function TrainingWorkbench() {
       }, bar.timestamp);
     }
     return { ...result, positions: nextPositions, fills, rejections };
-  }, [appendEvent, bars, cashBalance, executionProfile, instrument.timezone, liveMode, marketRules, positions, timeframe, tradingMode]);
+  }, [appendEvent, bars, cashBalance, decision.stop, executionProfile, instrument.timezone, liveMode, marketRules, orderStopLoss, positions, timeframe, tradingMode]);
 
   const settleTrainingAtBar = useCallback((
     basePositions: PositionLot[],
@@ -3467,6 +3712,107 @@ export function TrainingWorkbench() {
       simulatedCashBalance = executionResult.cashBalance;
       remainingOrders = [...futureOrders, ...executionResult.remainingOrders];
       consumedOrderIds.push(...executionResult.consumedOrderIds);
+
+      const activePersonalSopRule = appSettingsRef.current.personalSopCheckEnabled
+        ? appSettingsRef.current.activePersonalSopRule
+        : null;
+      if (
+        activePersonalSopRule
+        && barIndex < endCursor
+      ) {
+        simulatedPositions
+          .filter((position) => position.status === "open")
+          .forEach((position) => {
+            const holdingBars = holdingBarsAtCursor(bars, barIndex, position.entryTimestamp);
+            const management = evaluatePersonalSopManagement(activePersonalSopRule, holdingBars);
+            if (!management.overMax) return;
+            if (remainingOrders.some((order) => order.action === "close" && order.positionId === position.id)) return;
+
+            const discipline = {
+              kind: "personal-sop" as const,
+              ruleId: activePersonalSopRule.id,
+              ruleVersion: activePersonalSopRule.version,
+              violation: "holding-limit" as const,
+            };
+            const shouldAutoClose = appSettingsRef.current.strictModeEnabled
+              && appSettingsRef.current.personalSopAutoCloseEnabled;
+            if (!shouldAutoClose) {
+              setRuleNotice(`持仓 ${holdingBars} 根 K 线，已超过个人 SOP 上限 ${activePersonalSopRule.management.holdingBarsMax} 根`);
+              appendEvent("sop_holding_limit_warning", {
+                positionId: position.id,
+                holdingBars,
+                maxHoldingBars: activePersonalSopRule.management.holdingBarsMax,
+                ruleId: activePersonalSopRule.id,
+                ruleVersion: activePersonalSopRule.version,
+                autoCloseEnabled: false,
+              }, executionBar.timestamp);
+              return;
+            }
+
+            const closeValidation = validateCloseOrder(marketRules, position, executionBar.timestamp, instrument.timezone);
+            let executeAtTimestamp: number | undefined;
+            if (!closeValidation.ok) {
+              if (closeValidation.code !== "t_plus_one_locked") {
+                setRuleNotice(closeValidation.message ?? "个人 SOP 自动平仓未通过当前市场规则");
+                appendEvent("sop_holding_limit_warning", {
+                  positionId: position.id,
+                  holdingBars,
+                  maxHoldingBars: activePersonalSopRule.management.holdingBarsMax,
+                  ruleId: activePersonalSopRule.id,
+                  ruleVersion: activePersonalSopRule.version,
+                  autoCloseEnabled: true,
+                  blockedBy: closeValidation.code ?? "market_rule_rejected",
+                }, executionBar.timestamp);
+                return;
+              }
+              const targetIndex = findNextTradingSessionIndex(bars, barIndex, instrument.timezone);
+              const taskEndCursor = trainingTask?.endCursor ?? bars.length - 1;
+              if (targetIndex < 0 || targetIndex > taskEndCursor) {
+                setRuleNotice("个人 SOP 已超出持仓上限，但训练结束前没有可用的下一交易日平仓 K 线");
+                appendEvent("sop_holding_limit_warning", {
+                  positionId: position.id,
+                  holdingBars,
+                  maxHoldingBars: activePersonalSopRule.management.holdingBarsMax,
+                  ruleId: activePersonalSopRule.id,
+                  ruleVersion: activePersonalSopRule.version,
+                  autoCloseEnabled: true,
+                  blockedBy: "no_next_trading_session",
+                }, executionBar.timestamp);
+                return;
+              }
+              executeAtTimestamp = bars[targetIndex].timestamp;
+            }
+            const order: PendingOrder = {
+              id: createUuid(),
+              action: "close",
+              side: position.side === "long" ? "sell" : "buy",
+              qty: position.qty,
+              createdAt: executionBar.timestamp,
+              positionId: position.id,
+              decisionSubmissionId: position.decisionSubmissionId,
+              ruleId: marketRules.id,
+              ruleVersion: marketRules.version,
+              priceBand: replayPriceBand(marketRules, bars, barIndex, instrument.timezone, timeframe),
+              ...(executeAtTimestamp == null ? {} : { executeAtTimestamp }),
+              orderType: "market",
+              engineVersion: EXECUTION_ENGINE_VERSION,
+              discipline,
+            };
+            remainingOrders = [...remainingOrders, order];
+            setRuleNotice(executeAtTimestamp == null
+              ? `个人 SOP 已超出持仓上限，已预约下一根 K 线平仓`
+              : `个人 SOP 已超出持仓上限，已预约下一交易日平仓`);
+            appendEvent("sop_auto_close_queued", {
+              order,
+              positionId: position.id,
+              holdingBars,
+              maxHoldingBars: activePersonalSopRule.management.holdingBarsMax,
+              ruleId: activePersonalSopRule.id,
+              ruleVersion: activePersonalSopRule.version,
+              ...(executeAtTimestamp == null ? {} : { executeAtTimestamp }),
+            }, executionBar.timestamp);
+          });
+      }
     }
     setPendingOrders(remainingOrders);
     setCursor(nextCursor);
@@ -3496,7 +3842,7 @@ export function TrainingWorkbench() {
         endCursor: completedTask.endCursor,
       }, bars[nextCursor]?.timestamp);
     }
-  }, [appendEvent, bars, cashBalance, cursor, executeOrders, pendingOrders, positions, settleTrainingAtBar, trainingTask]);
+  }, [appendEvent, bars, cashBalance, cursor, executeOrders, instrument.timezone, marketRules, pendingOrders, positions, settleTrainingAtBar, timeframe, trainingTask]);
 
   const revealNext = useCallback(() => revealMany(1), [revealMany]);
   const revealPrevious = () => {
@@ -3734,6 +4080,61 @@ export function TrainingWorkbench() {
       }
       qty = riskSizing.quantity;
     }
+    const patternFilter = trainingTask?.patternFilter;
+    const currentPatternNames = patternFilter?.matchedPresetIds.length
+      ? patternFilter.matchedPresetIds.map((id) => {
+          const index = patternFilter.presetIds.indexOf(id);
+          return patternFilter.presetNames[index] ?? id;
+        })
+      : patternFilter?.presetNames ?? [];
+    const plannedRisk = stopLoss == null ? 0 : Math.abs(expectedEntry - stopLoss);
+    const plannedReward = takeProfit == null ? 0 : Math.abs(takeProfit - expectedEntry);
+    const sopInstrument = deriveSopInstrumentContext(
+      bars,
+      cursor,
+      instrument.timezone,
+      timeframe,
+      { market: instrument.market, entryPrice: expectedEntry, marketCap: instrument.marketCap },
+    );
+    const disciplineGate = evaluateDisciplineGate({
+      strictModeEnabled: appSettingsRef.current.strictModeEnabled,
+      requirePretradePlan: appSettingsRef.current.requirePretradePlan,
+      requiredPretradeFields: appSettingsRef.current.requiredPretradeFields,
+      sopCheckEnabled: appSettingsRef.current.sopCheckEnabled,
+      personalSopCheckEnabled: appSettingsRef.current.personalSopCheckEnabled,
+      activePersonalSopRule: appSettingsRef.current.activePersonalSopRule,
+      scope: {
+        market: performanceMarketCode(instrument.market, instrument.id),
+        timeframe,
+        instrumentId: instrument.id,
+      },
+      decision: {
+        ...decision,
+        score: decisionScore(decision),
+      },
+      patterns: currentPatternNames,
+      instrument: sopInstrument,
+      riskReward: plannedRisk > 0 && plannedReward > 0 ? plannedReward / plannedRisk : undefined,
+    });
+    if (!disciplineGate.allowed) {
+      const blockedMessage = disciplineGate.checks
+        .filter((check) => check.status === "blocked")
+        .map((check) => check.message)
+        .join("；");
+      setRuleNotice(blockedMessage || "当前开仓未通过交易纪律检查");
+      setSaveState("交易纪律已拦截开仓");
+      appendEvent("sop_entry_blocked", {
+        checks: disciplineGate.checks,
+        scope: { market: instrument.market, instrumentId: instrument.id, timeframe },
+        side,
+        expectedEntry,
+      }, currentBar.timestamp);
+      return;
+    }
+    const disciplineWarning = disciplineGate.checks
+      .filter((check) => check.status === "warning")
+      .map((check) => check.message)
+      .join("；");
     const validation = validateOpenOrder(marketRules, side, qty);
     if (!validation.ok) {
       rejectOrderAttempt(validation, { action: "open", side, qty });
@@ -3802,7 +4203,7 @@ export function TrainingWorkbench() {
       engineVersion: EXECUTION_ENGINE_VERSION,
     };
     if (liveMode) {
-      setRuleNotice("");
+      setRuleNotice(disciplineWarning);
       setPendingOrders((items) => [...items, order]);
       appendEvent("order_queued", {
         order,
@@ -3819,7 +4220,7 @@ export function TrainingWorkbench() {
       return;
     }
     setPendingOrders((items) => [...items, order]);
-    setRuleNotice("");
+    setRuleNotice(disciplineWarning);
     appendEvent("order_queued", {
       order,
       marketRuleId: marketRules.id,
@@ -3979,6 +4380,7 @@ export function TrainingWorkbench() {
   const startFreshTraining = (nextInstrumentId: string, nextTimeframe: string) => {
     const targetMarket = availableInstruments.find((item) => item.id === nextInstrumentId)?.market
       ?? (/\.FX$/i.test(nextInstrumentId) ? "FX" : undefined);
+    setDuplicateTrainingPreview(null);
     liveRequestRef.current = null;
     setTrainingNavigatorActive(false);
     setLiveMode(false);
@@ -3995,7 +4397,7 @@ export function TrainingWorkbench() {
     setDrawings([]);
     setDrawingUndoStack([]);
     setDrawingRedoStack([]);
-    setClearNonce(Date.now());
+    setClearNonce((nonce) => nonce + 1);
     setTradingMode(appSettingsRef.current.tradingMode);
     setInitialCapital(appSettingsRef.current.initialCapital);
     setCashBalance(appSettingsRef.current.initialCapital);
@@ -4016,6 +4418,15 @@ export function TrainingWorkbench() {
     setInstrumentId(nextInstrumentId);
     setTimeframe(nextTimeframe);
     setLoadNonce((value) => value + 1);
+  };
+
+  const handleTimeframeChange = (nextTimeframe: string) => {
+    if (!currentAvailableTimeframes.includes(nextTimeframe)) return;
+    if (dataSnapshotId) {
+      void loadTimeframeView(nextTimeframe);
+      return;
+    }
+    startFreshTraining(instrumentId, nextTimeframe);
   };
 
   const waitForCnLiveUpdate = async () => {
@@ -4522,7 +4933,7 @@ export function TrainingWorkbench() {
 
   const saveSession = async () => {
     if (trashPreview) {
-      setSaveState("回收站查看模式不会保存训练");
+      setSaveState(duplicateTrainingPreview ? "重复训练预览不会保存训练" : "回收站查看模式不会保存训练");
       return;
     }
     if (liveMode) {
@@ -4565,17 +4976,27 @@ export function TrainingWorkbench() {
     }
     setSaveState("保存中…");
     const savedEvent = appendEvent("session_manually_saved");
-    trainingAutosaveSignatureRef.current = trainingMutationSignature;
+    trainingAutosaveGateRef.current = markTrainingAutosaveSaved(
+      trainingAutosaveGateRef.current,
+      trainingMutationSignature,
+    );
     await persistTrainingState({
       ...trainingState,
       events: [...trainingState.events, savedEvent],
     }, "已手动保存");
   };
 
-  const resumeSession = (session: TrainingSession, preview = false, navigatorSessions?: TrainingSession[]) => {
+  const resumeSession = (
+    session: TrainingSession,
+    preview = false,
+    navigatorSessions?: TrainingSession[],
+    previewKind?: RestorePreviewKind,
+  ) => {
     try {
       const state = parseTrainingState(JSON.parse(session.stateJson));
       if (!state) throw new Error("invalid session");
+      const resolvedPreviewKind = preview ? previewKind ?? "trash" : undefined;
+      if (resolvedPreviewKind !== "duplicate") setDuplicateTrainingPreview(null);
       if (preview || !navigatorSessions?.length) {
         setTrainingNavigatorActive(false);
       } else {
@@ -4587,10 +5008,18 @@ export function TrainingWorkbench() {
         setTrainingNavigatorActive(sessions.length > 1);
       }
       setReviewedSession(null);
-      queueRestore({ ...session, state, preview });
+      queueRestore({ ...session, state, preview, previewKind: resolvedPreviewKind });
     } catch {
       setImportStatus(preview ? "这条训练记录不完整，无法查看训练。" : "这条训练记录不完整，暂时无法恢复。");
     }
+  };
+
+  const returnFromDuplicateTrainingPreview = () => {
+    const returnSession = duplicateTrainingPreview?.returnSession;
+    setDuplicateTrainingPreview(null);
+    setReviewedSession(null);
+    if (!returnSession) return;
+    resumeSession(returnSession, false);
   };
 
   const moveTrainingSession = (direction: -1 | 1) => {
@@ -4616,7 +5045,7 @@ export function TrainingWorkbench() {
   };
 
   const deleteSession = async (session: TrainingSession) => {
-    if (!window.confirm(`确定将 ${session.instrumentId} · ${session.timeframe} 的这次训练移入回收站吗？`)) return;
+    if (!window.confirm(`确定将 ${session.instrumentId} · ${timeframeLabel(session.timeframe)} 的这次训练移入回收站吗？`)) return;
     const removedIndex = sessionSummaries.findIndex((item) => item.session.id === session.id);
     const removedSummary = removedIndex >= 0 ? sessionSummaries[removedIndex] : undefined;
     setSessionSummaries((items) => items.filter((item) => item.session.id !== session.id));
@@ -4907,6 +5336,26 @@ export function TrainingWorkbench() {
     }
   };
 
+  const openDuplicateTrainingPreview = (duplicateMarketWarning: DuplicateMarketWarning) => {
+    const now = new Date().toISOString();
+    const returnSession: TrainingSession = {
+      id: sessionId,
+      instrumentId,
+      timeframe,
+      dataSnapshotId: dataSnapshotId || undefined,
+      stateJson: JSON.stringify(trainingState),
+      createdAt: now,
+      updatedAt: now,
+    };
+    setDuplicateTrainingPreview({
+      session: duplicateMarketWarning.session,
+      state: duplicateMarketWarning.state,
+      returnSession,
+    });
+    setReviewSessionFilters(defaultReviewSessionFilters);
+    resumeSession(duplicateMarketWarning.session, true, undefined, "duplicate");
+  };
+
   const openReviewEvidence = (timestamp: number, label: string) => {
     if (!Number.isFinite(timestamp)) return;
     if (reviewedSession) {
@@ -4916,6 +5365,7 @@ export function TrainingWorkbench() {
         ...session,
         state: { ...reviewedSession.state, cursorTimestamp: timestamp },
         preview: true,
+        previewKind: duplicateTrainingPreview ? "duplicate" : "trash",
         evidenceTimestamp: timestamp,
       });
       return;
@@ -5225,13 +5675,13 @@ export function TrainingWorkbench() {
 
   const restoreTrashedSession = async (session: TrainingSession) => {
     if (trashActionId) return;
-    if (!window.confirm(`恢复 ${session.instrumentId} · ${session.timeframe} 这次训练吗？`)) return;
+    if (!window.confirm(`恢复 ${session.instrumentId} · ${timeframeLabel(session.timeframe)} 这次训练吗？`)) return;
     setTrashActionId(session.id);
     setTrashError("");
     try {
       await reviewGateway.restoreSession(session.id);
       setTrashSessions((items) => items.filter((item) => item.id !== session.id));
-      void loadSessions(true);
+      void loadSessions(true, true);
       setShowTrash(false);
       setShowSettings(false);
       resumeSession(session);
@@ -5244,7 +5694,7 @@ export function TrainingWorkbench() {
 
   const permanentlyDeleteTrashedSession = async (session: TrainingSession) => {
     if (trashActionId) return;
-    if (!window.confirm(`确定彻底删除 ${session.instrumentId} · ${session.timeframe} 吗？删除后无法恢复。`)) return;
+    if (!window.confirm(`确定彻底删除 ${session.instrumentId} · ${timeframeLabel(session.timeframe)} 吗？删除后无法恢复。`)) return;
     setTrashActionId(session.id);
     setTrashError("");
     try {
@@ -5313,12 +5763,13 @@ export function TrainingWorkbench() {
           && Number.isFinite(plannedRisk) && Number.isFinite(plannedReward) && plannedRisk > 0
           ? plannedReward / plannedRisk
           : undefined;
-        return {
-          pnl: position.realizedPnl ?? 0,
-          returnPct: positionReturnPct(position, position.exitPrice ?? position.entryPrice),
-          holdingBars: estimatedHoldingBars(session.timeframe, position.entryTimestamp, position.exitTimestamp),
-          entryTimestamp: position.entryTimestamp,
-          entryPrice: position.entryPrice,
+          return {
+            pnl: position.realizedPnl ?? 0,
+            returnPct: positionReturnPct(position, position.exitPrice ?? position.entryPrice),
+            holdingBars: estimatedHoldingBars(session.timeframe, position.entryTimestamp, position.exitTimestamp),
+            entryTimestamp: position.entryTimestamp,
+            exitTimestamp: position.exitTimestamp,
+            entryPrice: position.entryPrice,
           market: performanceMarketLabel(
             /\.FX$/i.test(session.instrumentId)
               ? "FX"
@@ -5369,22 +5820,38 @@ export function TrainingWorkbench() {
     }
   }, [parseTrainingState]);
 
-  const loadSessions = useCallback(async (includeAll = false) => {
+  const loadSessions = useCallback(async (includeAll = false, force = false) => {
+    if (!force && sessionSummariesReadyRef.current) return;
+    sessionSummaryLoadRef.current.controller?.abort();
+    const requestId = sessionSummaryLoadRef.current.id + 1;
+    const controller = new AbortController();
+    sessionSummaryLoadRef.current = { id: requestId, controller };
     try {
-      const sessions = await reviewGateway.loadSessions<TrainingSession>(includeAll);
-      setSessionSummaries(sessions
-        .sort(compareTrainingSessionsByCreatedAt)
-        .flatMap((session) => {
-          const summary = buildSessionSummary(session);
-          return summary ? [summary] : [];
-        }));
+      const sessions = await reviewGateway.loadSessions<TrainingSession>(includeAll, controller.signal);
+      const result = await buildReviewSessionSummariesInBatches(
+        [...sessions].sort(compareTrainingSessionsByCreatedAt),
+        buildSessionSummary,
+        {
+          batchSize: REVIEW_SESSION_SUMMARY_BATCH_SIZE,
+          shouldCancel: () => controller.signal.aborted,
+        },
+      );
+      if (controller.signal.aborted || result.status !== "completed" || sessionSummaryLoadRef.current.id !== requestId) return;
+      setSessionSummaries(result.summaries);
+      sessionSummariesReadyRef.current = true;
     } catch {
-      // Review data is optional for the replay shell; retain the current list on a transient failure.
+      if (!controller.signal.aborted) {
+        // Review data is optional for the replay shell; retain the current list on a transient failure.
+      }
+    } finally {
+      if (sessionSummaryLoadRef.current.id === requestId) {
+        sessionSummaryLoadRef.current.controller = null;
+      }
     }
   }, [buildSessionSummary, reviewGateway]);
 
   useEffect(() => {
-    if (view !== "performance" || !sessionSummaries.length) return;
+    if ((view !== "performance" && view !== "sop") || !sessionSummaries.length) return;
     const groupedEntries = new Map<string, number[]>();
     sessionSummaries.forEach((summary) => {
       const snapshotId = summary.state.dataSnapshotId ?? summary.session.dataSnapshotId;
@@ -5688,6 +6155,12 @@ export function TrainingWorkbench() {
       return {
         result: performanceUsesCapital ? trade.pnl : trade.returnPct,
         holdingBars: trade.holdingBars,
+        closedTimestamp: trade.exitTimestamp ?? trade.entryTimestamp,
+        scope: {
+          market: performanceMarketCode(trade.market, summary.session.instrumentId),
+          timeframe: summary.session.timeframe,
+          instrumentId: summary.session.instrumentId,
+        },
         decision: trade.decision
           ? {
               ...trade.decision,
@@ -5707,6 +6180,56 @@ export function TrainingWorkbench() {
     () => analyzePerformanceHabits(performanceHabitTrades),
     [performanceHabitTrades],
   );
+  const personalSopTrades = useMemo<HabitTrade[]>(() => {
+    if (view !== "sop") return [];
+    return sessionSummaries.flatMap((summary) => (
+      summary.habitTrades.map((trade) => {
+        const snapshotId = summary.state.dataSnapshotId ?? summary.session.dataSnapshotId ?? "";
+        const context = snapshotTradeContexts[snapshotId]?.[String(trade.entryTimestamp)];
+        return {
+          result: trade.returnPct,
+          holdingBars: trade.holdingBars,
+          closedTimestamp: trade.exitTimestamp ?? trade.entryTimestamp,
+          scope: {
+            market: performanceMarketCode(trade.market, summary.session.instrumentId),
+            timeframe: summary.session.timeframe,
+            instrumentId: summary.session.instrumentId,
+          },
+          decision: trade.decision
+            ? {
+                ...trade.decision,
+                source: trade.decision.source === "backfilled" ? "backfilled" : "pretrade",
+              }
+            : undefined,
+          patterns: trade.patterns,
+          instrument: {
+            market: trade.market,
+            entryPrice: trade.entryPrice,
+            ...context,
+          },
+        };
+      })
+    ));
+  }, [sessionSummaries, snapshotTradeContexts, view]);
+  const personalSopRecommendations = useMemo<PersonalSopRecommendation[]>(() => (
+    personalSopTemplateScopes.flatMap((scope) => generatePersonalSopRecommendations(personalSopTrades, { scope, limit: 3 }))
+  ), [personalSopTrades]);
+  const personalSopScopeSummaries = useMemo(
+    () => summarizePersonalSopScopes(personalSopTrades, personalSopTemplateScopes),
+    [personalSopTrades],
+  );
+
+  const applyPersonalSopRule = (recommendation: PersonalSopRecommendation) => {
+    const nextSettings = normalizeSettings({
+      ...appSettingsRef.current,
+      activePersonalSopRule: recommendationToPersonalSopRule(recommendation),
+    });
+    appSettingsRef.current = nextSettings;
+    setAppSettings(nextSettings);
+    setSettingsDraft(nextSettings);
+    settingsGateway.saveAppSettings(nextSettings);
+    setRuleNotice(`已采用个人 SOP：${recommendation.title} · ${recommendation.stats.samples} 笔样本`);
+  };
   const selectedPerformanceSession = filteredSessionSummaries.find(
     (summary) => summary.session.id === selectedPerformanceSessionId,
   );
@@ -5760,7 +6283,7 @@ export function TrainingWorkbench() {
   };
 
   const mistakeSources = useMemo<MistakeSource[]>(() => {
-    if (!showTaskSetup || (taskDraft.mode as string) !== "mistakes") return [];
+    if (!showTaskSetup || (taskDraft.mode as string) !== "mistake") return [];
     return sessionSummaries.flatMap(({ session, state }) => {
     try {
       const weakPlans = state.decisionSubmissions.filter((submission) => decisionScore(submission.decision) < 80);
@@ -5772,7 +6295,7 @@ export function TrainingWorkbench() {
         state,
         count,
         targetCursor,
-        label: `${session.instrumentId} · ${session.timeframe} · ${count} 个错题点 · ${new Date(session.updatedAt).toLocaleDateString("zh-CN")}`,
+        label: `${session.instrumentId} · ${timeframeLabel(session.timeframe)} · ${count} 个错题点 · ${new Date(session.updatedAt).toLocaleDateString("zh-CN")}`,
       }];
     } catch {
       return [];
@@ -5793,9 +6316,17 @@ export function TrainingWorkbench() {
     void loadTrashSessions();
   };
 
-  const saveSettings = () => {
-    const result = prepareSettingsSave(settingsDraft);
+  const saveSettings = async () => {
+    const previousSettings = appSettingsRef.current;
+    setSettingsError("");
+    const result = await persistSettingsSave(settingsDraft, {
+      write: (nextSettings) => {
+        appSettingsRef.current = nextSettings;
+        return preferencesGateway.save(buildSyncedPreferences(nextSettings));
+      },
+    });
     if (!result.ok) {
+      appSettingsRef.current = previousSettings;
       setSettingsError(result.error);
       return;
     }
@@ -5856,8 +6387,16 @@ export function TrainingWorkbench() {
 
   const openTaskSetup = () => {
     setTaskSetupKind("configured");
-    setSetupInstrumentId(appSettings.defaultInstrumentId);
-    setSetupTimeframe(appSettings.defaultTimeframe);
+    const nextInstrumentId = availableInstruments.some((item) => item.id === appSettings.defaultInstrumentId)
+      ? appSettings.defaultInstrumentId
+      : availableInstruments[0]?.id ?? appSettings.defaultInstrumentId;
+    const nextAvailableTimeframes = availableTimeframesForInstrument(
+      availableInstruments,
+      nextInstrumentId,
+      TIMEFRAME_IDS,
+    );
+    setSetupInstrumentId(nextInstrumentId);
+    setSetupTimeframe(resolveAvailableTimeframe(nextAvailableTimeframes, appSettings.defaultTimeframe));
     setTaskDraft({
       ...defaultTrainingTaskDraft,
       randomRun: false,
@@ -5913,7 +6452,7 @@ export function TrainingWorkbench() {
       ? [config.anchorTimeframe]
       : config.timeframeMode === "fixed"
         ? [config.fixedTimeframe]
-        : timeframes;
+        : [...TIMEFRAME_IDS];
     const createPairs = (instruments: AvailableInstrument[], allowedTimeframes?: string[]) => instruments.flatMap((item) =>
       item.timeframes
         .filter((candidateTimeframe) => !allowedTimeframes || allowedTimeframes.includes(candidateTimeframe))
@@ -6132,7 +6671,7 @@ export function TrainingWorkbench() {
     const selectedPresets = patternPresets.filter((preset) => draft.patternPresetIds?.includes(preset.id));
     for (let index = 0; index < attemptLimit; index += 1) {
       const pair = pairs[index];
-      setPatternScanStatus(`正在检查候选 ${index + 1}/${attemptLimit}：${pair.instrument.short} · ${pair.timeframe}`);
+      setPatternScanStatus(`正在检查候选 ${index + 1}/${attemptLimit}：${pair.instrument.short} · ${timeframeLabel(pair.timeframe)}`);
       try {
         const requiresClientLiquidityScan = isUsMarket(pair.instrument.market)
           && randomConfig.usLiquidityFilter !== false;
@@ -6378,9 +6917,12 @@ export function TrainingWorkbench() {
   useEffect(() => {
     const timer = window.setTimeout(() => {
       if (view === "database") loadCoverage();
-      if (view === "review" || view === "performance") loadSessions(true);
+      if (view === "review" || view === "performance" || view === "sop") loadSessions(true);
     }, 0);
-    return () => window.clearTimeout(timer);
+    return () => {
+      window.clearTimeout(timer);
+      sessionSummaryLoadRef.current.controller?.abort();
+    };
   }, [loadCoverage, loadSessions, view]);
 
   useEffect(() => {
@@ -6389,15 +6931,6 @@ export function TrainingWorkbench() {
     }, 0);
     return () => window.clearTimeout(timer);
   }, [loadInstrumentCatalog]);
-
-  useEffect(() => {
-    const refreshAfterAutoUpdate = () => {
-      void loadInstrumentCatalog();
-      if (view === "database") void loadCoverage();
-    };
-    window.addEventListener("data-auto-update-updated", refreshAfterAutoUpdate);
-    return () => window.removeEventListener("data-auto-update-updated", refreshAfterAutoUpdate);
-  }, [loadCoverage, loadInstrumentCatalog, view]);
 
   useEffect(() => {
     if (!settingsReady || !instrumentCatalogReady || startupRandomStartedRef.current) return;
@@ -6518,7 +7051,6 @@ export function TrainingWorkbench() {
 
   return (
     <div className="app-shell">
-      <DataAutoUpdateController />
       <aside className="main-rail">
         <button className="brand-mark" aria-label="K线训练营">K</button>
         <nav aria-label="主导航">
@@ -6527,6 +7059,9 @@ export function TrainingWorkbench() {
           </button>
           <button className={view === "performance" ? "active" : ""} onClick={() => setView("performance")}>
             <Activity size={20} /><span>表现</span>
+          </button>
+          <button className={view === "sop" ? "active" : ""} onClick={() => setView("sop")}>
+            <ListChecks size={20} /><span>SOP</span>
           </button>
           <button className={view === "database" ? "active" : ""} onClick={() => setView("database")}>
             <Database size={20} /><span>数据</span>
@@ -6559,14 +7094,24 @@ export function TrainingWorkbench() {
                   value={instrumentId}
                   instruments={availableInstruments}
                   ariaLabel="选择品种"
-                  onChange={(nextInstrumentId) => startFreshTraining(nextInstrumentId, timeframe)}
+                  onChange={(nextInstrumentId) => {
+                    const nextAvailableTimeframes = availableTimeframesForInstrument(
+                      availableInstruments,
+                      nextInstrumentId,
+                      timeframes,
+                    );
+                    startFreshTraining(
+                      nextInstrumentId,
+                      resolveAvailableTimeframe(nextAvailableTimeframes, timeframe),
+                    );
+                  }}
                 />
                 <span className="market-pill">{currentAssetLabel}</span>
               </>
             )}
             <span className="rule-pill">{trainingTask ? trainingModeLabels[trainingTask.mode] : "自由训练"}</span>
             <span className="rule-pill">{tradingMode === "capital" ? "资金账户" : "收益率"}</span>
-            {trashPreview && <span className="rule-pill read-only">回收站查看 · 未恢复</span>}
+            {trashPreview && <span className="rule-pill read-only">{duplicateTrainingPreview ? "重复训练预览 · 未恢复" : "回收站查看 · 未恢复"}</span>}
             {!marketRules.tradingEnabled && <span className="rule-pill read-only">只看盘</span>}
             {trainingTask?.patternFilter && (
               <span className="rule-pill" title={`命中：${trainingTask.patternFilter.matchedPresetIds.join("、")}`}>
@@ -6574,10 +7119,22 @@ export function TrainingWorkbench() {
               </span>
             )}
             <div className="timeframes" aria-label="周期">
-              {timeframes.map((item) => (
-                <button key={item} className={timeframe === item ? "active" : ""} onClick={() => startFreshTraining(instrumentId, item)}>{item}</button>
-              ))}
+              {TIMEFRAME_IDS.map((item) => {
+                const available = currentAvailableTimeframes.includes(item);
+                return (
+                  <button
+                    key={item}
+                    className={`${chartTimeframe === item ? "active" : ""}${available ? "" : " unavailable"}`}
+                    disabled={chartViewLoading || !available}
+                    onClick={() => handleTimeframeChange(item)}
+                  >{timeframeLabel(item)}</button>
+                );
+              })}
             </div>
+            {chartViewLoading && <span className="chart-view-status">正在切换观察周期…</span>}
+            {chartViewError && <span className="chart-view-status error" role="alert">{chartViewError}</span>}
+            {chartViewSnapshotId && !chartViewLoading && !chartViewError && <span className="chart-view-status">观察数据已缓存</span>}
+            {!showingCanonicalChart && <span className="chart-view-status">训练基准 {timeframeLabel(timeframe)} · 仅观察</span>}
             <div className="indicator-toolbar">
               <button
                 type="button"
@@ -6638,7 +7195,7 @@ export function TrainingWorkbench() {
             aria-controls="mobile-training-toolbar"
             onClick={() => setMobileToolbarOpen((value) => !value)}
           >
-            <span>{timeframe}</span><ChevronDown size={15} />
+            <span>{timeframeLabel(chartTimeframe)}</span><ChevronDown size={15} />
           </button>
           {mobileToolbarOpen && (
             <div className="mobile-toolbar-popover" id="mobile-training-toolbar">
@@ -6647,13 +7204,24 @@ export function TrainingWorkbench() {
                 <span>{tradingMode === "capital" ? "资金账户" : "收益率"}</span>
               </div>
               <div className="mobile-timeframes" aria-label="手机端周期">
-                {timeframes.map((item) => (
-                  <button key={item} className={timeframe === item ? "active" : ""} onClick={() => {
-                    setMobileToolbarOpen(false);
-                    startFreshTraining(instrumentId, item);
-                  }}>{item}</button>
-                ))}
+                {TIMEFRAME_IDS.map((item) => {
+                  const available = currentAvailableTimeframes.includes(item);
+                  return (
+                    <button
+                      key={item}
+                      className={`${chartTimeframe === item ? "active" : ""}${available ? "" : " unavailable"}`}
+                      disabled={chartViewLoading || !available}
+                      onClick={() => {
+                        setMobileToolbarOpen(false);
+                        handleTimeframeChange(item);
+                      }}
+                    >{timeframeLabel(item)}</button>
+                  );
+                })}
               </div>
+              {!showingCanonicalChart && <span className="mobile-chart-view-note">训练基准 {timeframeLabel(timeframe)} · 仅观察</span>}
+              {chartViewLoading && <div className="mobile-random-status"><Activity size={12} />正在切换观察周期…</div>}
+              {chartViewError && <div className="mobile-random-error" role="alert">{chartViewError}</div>}
               <div className="mobile-indicator-settings">
                 <strong><LineChart size={13} />主图指标</strong>
                 <MovingAverageEditor compact settings={movingAverageSettings} onChange={setMovingAverageSettings} />
@@ -6736,7 +7304,7 @@ export function TrainingWorkbench() {
                       <div className="trash-session-row" key={session.id}>
                         <div className="trash-session-main">
                           <div className="session-title">
-                            <strong>{session.instrumentId} · {session.timeframe}</strong>
+                            <strong>{session.instrumentId} · {timeframeLabel(session.timeframe)}</strong>
                             <span className={task?.status === "completed" ? "session-status completed" : "session-status"}>
                               {task?.status === "completed" ? "已完成" : "可继续"}
                             </span>
@@ -6981,12 +7549,24 @@ export function TrainingWorkbench() {
                       value={setupInstrumentId}
                       instruments={availableInstruments}
                       ariaLabel="训练品种"
-                      onChange={setSetupInstrumentId}
+                      onChange={(nextInstrumentId) => {
+                        const nextAvailableTimeframes = availableTimeframesForInstrument(
+                          availableInstruments,
+                          nextInstrumentId,
+                          timeframes,
+                        );
+                        setSetupInstrumentId(nextInstrumentId);
+                        setSetupTimeframe((current) => resolveAvailableTimeframe(nextAvailableTimeframes, current));
+                      }}
                     />
                   </label>
                   <label>周期
                     <select value={setupTimeframe} onChange={(event) => setSetupTimeframe(event.target.value)}>
-                      {timeframes.map((item) => <option key={item}>{item}</option>)}
+                      {TIMEFRAME_IDS.map((item) => (
+                        <option key={item} value={item} disabled={!setupAvailableTimeframes.includes(item)}>
+                          {timeframeLabel(item)}
+                        </option>
+                      ))}
                     </select>
                   </label>
                 </div>
@@ -7116,7 +7696,7 @@ export function TrainingWorkbench() {
               {patternScanStatus && <div className="pattern-scan-status"><Activity size={14} />{patternScanStatus}</div>}
               <div className="task-modal-actions">
                 <button className="ghost-button" onClick={() => setShowTaskSetup(false)}>取消</button>
-                <button className="primary-button" disabled={startingTraining} onClick={() => void startConfiguredTraining()}><Play size={16} />{startingTraining ? "正在筛选…" : taskSetupKind === "random" ? "开始随机训练" : "开始训练"}</button>
+                <button className="primary-button" disabled={startingTraining || (taskDraft.mode === "mistake" && !mistakeSources.length)} onClick={() => void startConfiguredTraining()}><Play size={16} />{startingTraining ? "正在筛选…" : taskSetupKind === "random" ? "开始随机训练" : "开始训练"}</button>
               </div>
             </section>
           </div>
@@ -7148,7 +7728,9 @@ export function TrainingWorkbench() {
               <div className="chart-heading">
                 <div>
                   <strong>{trainingTask?.hideInstrument ? "BLIND" : instrument.symbol}</strong>
-                  <span>{trainingTask?.hideInstrument ? `品种已隐藏 · ${timeframe}` : `${instrument.name} · ${timeframe} · 历史训练`}</span>
+                  <span>{trainingTask?.hideInstrument
+                    ? `品种已隐藏 · ${timeframeLabel(chartTimeframe)}${showingCanonicalChart ? "" : ` · 训练基准 ${timeframeLabel(timeframe)}`}`
+                    : `${instrument.name} · ${timeframeLabel(chartTimeframe)}${showingCanonicalChart ? "" : ` · 训练基准 ${timeframeLabel(timeframe)}`} · 历史训练`}</span>
                 </div>
                 {currentBar && (
                   <div className="ohlc-line">
@@ -7164,6 +7746,26 @@ export function TrainingWorkbench() {
                 )}
               </div>
 
+              {duplicateTrainingPreview && (
+                <div className="duplicate-training-preview" role="status" aria-live="polite">
+                  <BookOpenCheck size={17} />
+                  <div>
+                    <strong>重复训练预览</strong>
+                    <span>{duplicateTrainingPreview.session.instrumentId} · {timeframeLabel(duplicateTrainingPreview.session.timeframe)} · 当前仅查看历史训练内容，不会覆盖或保存当前训练。</span>
+                  </div>
+                  <div className="duplicate-training-preview-actions">
+                    <button type="button" className="duplicate-market-link" onClick={() => {
+                      const preview = duplicateTrainingPreview;
+                      if (!preview) return;
+                      setReviewedSession({ session: preview.session, state: preview.state });
+                      setReviewSessionFilters(defaultReviewSessionFilters);
+                      setView("review");
+                    }}>查看复盘</button>
+                    <button type="button" className="duplicate-training-return" onClick={returnFromDuplicateTrainingPreview}>返回当前训练</button>
+                  </div>
+                </div>
+              )}
+
               {duplicateMarketWarning && trainingTask?.randomRun && (
                 <div className="duplicate-market-warning" role="status" aria-live="polite">
                   <BookOpenCheck size={17} />
@@ -7171,19 +7773,15 @@ export function TrainingWorkbench() {
                     <strong>可能是重复行情 · {Math.round(duplicateMarketWarning.overlapRatio * 100)}%</strong>
                     <span>{trainingTask.hideInstrument || trainingTask.hideDate
                       ? `与训练库中的一场历史训练高度重叠 · ${duplicateMarketWarning.overlapBars}/${duplicateMarketWarning.currentBarCount} 根`
-                      : `与 ${duplicateMarketWarning.session.instrumentId} · ${duplicateMarketWarning.session.timeframe} · ${formatDate(duplicateMarketWarning.state.trainingTask!.startTimestamp, duplicateMarketWarning.session.timeframe)} 的训练高度重叠`}</span>
+                      : `与 ${duplicateMarketWarning.session.instrumentId} · ${timeframeLabel(duplicateMarketWarning.session.timeframe)} · ${formatDate(duplicateMarketWarning.state.trainingTask!.startTimestamp, duplicateMarketWarning.session.timeframe)} 的训练高度重叠`}</span>
                   </div>
-                  <button type="button" className="duplicate-market-link" onClick={() => {
-                    setReviewedSession({ session: duplicateMarketWarning.session, state: duplicateMarketWarning.state });
-                    setReviewSessionFilters(defaultReviewSessionFilters);
-                    setView("review");
-                  }}>查看对应训练</button>
+                  <button type="button" className="duplicate-market-link" onClick={() => openDuplicateTrainingPreview(duplicateMarketWarning)}>查看对应训练</button>
                   <button type="button" className="duplicate-market-dismiss" aria-label="关闭重复行情提示" onClick={() => setDuplicateMarketWarning(null)}><X size={13} /></button>
                 </div>
               )}
 
               <div className="chart-area">
-                <div className="drawing-rail" aria-label="画图工具">
+                <div className={`drawing-rail${showingCanonicalChart ? "" : " observation-only"}`} aria-label="画图工具">
                   <button
                     className={!selectedDrawingId && !drawingGroupOpen && !drawingRequest && !drawingTextOpen ? "active" : ""}
                     title="光标"
@@ -7370,30 +7968,30 @@ export function TrainingWorkbench() {
                     </div>
                   ) : (
                     <KLineReplayChart
-                      bars={visibleBars}
-                      dataIndexOffset={chartDataIndexOffset}
+                      bars={renderedChartBars}
+                      dataIndexOffset={showingCanonicalChart ? chartDataIndexOffset : 0}
                       symbol={trainingTask?.hideInstrument ? "BLIND" : instrument.symbol}
                       timezone={instrument.timezone}
-                      timeframe={timeframe}
+                      timeframe={chartTimeframe}
                       pricePrecision={instrument.pricePrecision}
                       movingAverageSettings={movingAverageSettings}
-                      drawingRequest={drawingRequest}
+                      drawingRequest={showingCanonicalChart ? drawingRequest : null}
                       clearNonce={clearNonce}
                       tradeMarkers={tradeMarkers}
                       decisionMarkers={decisionMarkers}
                       protectionLines={protectionLines}
-                      priceSelectionMode={protectionPriceSelection}
-                      drawings={drawings}
-                      selectedDrawingId={selectedDrawingId}
-                      drawingsRestoreNonce={drawingsRestoreNonce}
+                      priceSelectionMode={showingCanonicalChart ? protectionPriceSelection : null}
+                      drawings={showingCanonicalChart ? drawings : []}
+                      selectedDrawingId={showingCanonicalChart ? selectedDrawingId : ""}
+                      drawingsRestoreNonce={showingCanonicalChart ? drawingsRestoreNonce : 0}
                       hideDate={Boolean(trainingTask?.hideDate)}
                       hidePrice={Boolean(trainingTask?.hidePrice)}
                       onDecisionSelect={setSelectedDecisionId}
-                      onProtectionPriceSelect={applyDraftProtectionPrice}
-                      onProtectionLineMove={moveProtectionLine}
-                      onCandleContextMenu={openDecisionForCandle}
-                      onDrawingsChange={handleDrawingsChange}
-                      onDrawingSelect={(id) => setSelectedDrawingId(id ?? "")}
+                      onProtectionPriceSelect={showingCanonicalChart ? applyDraftProtectionPrice : ignoreProtectionPriceSelect}
+                      onProtectionLineMove={showingCanonicalChart ? moveProtectionLine : rejectProtectionLineMove}
+                      onCandleContextMenu={showingCanonicalChart ? openDecisionForCandle : ignoreCandleContextMenu}
+                      onDrawingsChange={showingCanonicalChart ? handleDrawingsChange : ignoreDrawingsChange}
+                      onDrawingSelect={showingCanonicalChart ? (id) => setSelectedDrawingId(id ?? "") : ignoreDrawingSelect}
                     />
                   )}
                   {protectionPriceSelection && (
@@ -7482,7 +8080,8 @@ export function TrainingWorkbench() {
               )}
 
               <div className="trade-dock">
-                <div className="trade-stats">
+                <div className="trade-setup-panel">
+                  <div className="trade-stats">
                   {tradingMode === "capital" && marginInstrument ? (
                     <>
                       <span>账户余额 <strong>{money(cashBalance)}</strong></span>
@@ -7507,8 +8106,8 @@ export function TrainingWorkbench() {
                       <span>已实现收益率 <strong className={realizedReturnPct >= 0 ? "up" : "down"}>{percent(realizedReturnPct)}</strong></span>
                     </>
                   )}
-                </div>
-                <div className="execution-order-controls">
+                  </div>
+                  <div className="execution-order-controls">
                   {!liveMode && <label>下单方式
                     <select aria-label="下单方式" value={positionSizeMode} onChange={(event) => {
                       const value = event.target.value as PositionSizeMode;
@@ -7546,9 +8145,18 @@ export function TrainingWorkbench() {
                     <span className="protection-picker-control">
                       <button
                         aria-label="在图表选择保护止损价"
+                        aria-pressed={protectionPriceSelection === "stop-loss"}
                         className={protectionPriceSelection === "stop-loss" ? "active" : ""}
                         type="button"
-                        onClick={() => setProtectionPriceSelection((current) => current === "stop-loss" ? null : "stop-loss")}
+                        title={showingCanonicalChart ? "点击 K 线图选择止损价格" : `请先切换回训练基准周期 ${timeframeLabel(timeframe)}`}
+                        onClick={() => {
+                          if (!showingCanonicalChart) {
+                            setRuleNotice(`请先切换回训练基准周期 ${timeframeLabel(timeframe)}，再在图表选择止损价格`);
+                            return;
+                          }
+                          setProtectionPriceSelection((current) => current === "stop-loss" ? null : "stop-loss");
+                          setRuleNotice("请在上方 K 线图点击选择止损价格");
+                        }}
                       >{effectiveOrderStop ? trainingPriceLabel(effectiveOrderStop) : "点击图表选价"}</button>
                       {effectiveOrderStop && <button aria-label="清除保护止损价" className="clear" type="button" onClick={() => clearDraftProtectionPrice("stop-loss")}><X size={11} /></button>}
                     </span>
@@ -7557,9 +8165,18 @@ export function TrainingWorkbench() {
                     <span className="protection-picker-control">
                       <button
                         aria-label="在图表选择保护止盈价"
+                        aria-pressed={protectionPriceSelection === "take-profit"}
                         className={protectionPriceSelection === "take-profit" ? "active" : ""}
                         type="button"
-                        onClick={() => setProtectionPriceSelection((current) => current === "take-profit" ? null : "take-profit")}
+                        title={showingCanonicalChart ? "点击 K 线图选择止盈价格" : `请先切换回训练基准周期 ${timeframeLabel(timeframe)}`}
+                        onClick={() => {
+                          if (!showingCanonicalChart) {
+                            setRuleNotice(`请先切换回训练基准周期 ${timeframeLabel(timeframe)}，再在图表选择止盈价格`);
+                            return;
+                          }
+                          setProtectionPriceSelection((current) => current === "take-profit" ? null : "take-profit");
+                          setRuleNotice("请在上方 K 线图点击选择止盈价格");
+                        }}
                       >{effectiveOrderTarget ? trainingPriceLabel(effectiveOrderTarget) : "点击图表选价"}</button>
                       {effectiveOrderTarget && <button aria-label="清除保护止盈价" className="clear" type="button" onClick={() => clearDraftProtectionPrice("take-profit")}><X size={11} /></button>}
                     </span>
@@ -7574,8 +8191,13 @@ export function TrainingWorkbench() {
                       ? `按账户余额 ${money(riskBalance)} × ${riskPercent}% 风险计算；拖动止损线后风险${marginInstrument ? "手数" : "数量"}会自动更新。`
                       : "请先在图表点击或拖动止损线；系统会按账户余额和单笔风险自动计算数量/手数。"}
                   </small>}
+                  {!liveMode && protectionPriceSelection && <div className="mobile-protection-selection-hint" role="status">
+                    请在上方 K 线图点击选择{protectionPriceSelection === "stop-loss" ? "止损" : "止盈"}价格{positionSizeMode === "risk-percent" && protectionPriceSelection === "stop-loss" ? "，风险手数/数量会自动更新" : ""}。
+                  </div>}
+                  </div>
                 </div>
-                <div className="order-entry">
+                <div className="trade-fixed-dock">
+                  <div className="order-entry">
                   <label><span className="quantity-label">{marginInstrument ? (positionSizeMode === "risk-percent" && !liveMode ? "风险手数" : "手数") : positionSizeMode === "risk-percent" && !liveMode ? "风险数量" : "数量"}</span><input
                     aria-label="下单数量"
                     type="number"
@@ -7629,9 +8251,9 @@ export function TrainingWorkbench() {
                       <button className="orders-mobile-toggle" aria-expanded={mobileOrdersExpanded} onClick={() => setMobileOrdersExpanded((value) => !value)}>{mobileOrdersExpanded ? "收起" : "明细"}</button>
                     </div>
                     <div className="orders-tabs">
-                      <button className={orderPanelTab === "positions" ? "active" : ""} onClick={() => { setOrderPanelTab("positions"); setMobileOrdersExpanded(true); }}>当前持仓 <span>{openPositions.length}</span></button>
-                      <button className={orderPanelTab === "pending" ? "active" : ""} onClick={() => { setOrderPanelTab("pending"); setMobileOrdersExpanded(true); }}>待成交 <span>{pendingOrders.length}</span></button>
-                      <button className={orderPanelTab === "history" ? "active" : ""} onClick={() => { setOrderPanelTab("history"); setMobileOrdersExpanded(true); }}>已平仓 <span>{closedPositions.length}</span></button>
+                      <button className={orderPanelTab === "positions" ? "active" : ""} onClick={() => { setHoveredClosedPositionId(null); setOrderPanelTab("positions"); setMobileOrdersExpanded(true); }}>当前持仓 <span>{openPositions.length}</span></button>
+                      <button className={orderPanelTab === "pending" ? "active" : ""} onClick={() => { setHoveredClosedPositionId(null); setOrderPanelTab("pending"); setMobileOrdersExpanded(true); }}>待成交 <span>{pendingOrders.length}</span></button>
+                      <button className={orderPanelTab === "history" ? "active" : ""} onClick={() => { setHoveredClosedPositionId(null); setOrderPanelTab("history"); setMobileOrdersExpanded(true); }}>已平仓 <span>{closedPositions.length}</span></button>
                     </div>
                   </div>
 
@@ -7654,12 +8276,19 @@ export function TrainingWorkbench() {
                           const closeValidation = currentBar
                             ? validateCloseOrder(marketRules, position, currentBar.timestamp, instrument.timezone)
                             : { ok: false, message: "行情未就绪" };
+                          const activeRule = appSettings.personalSopCheckEnabled ? appSettings.activePersonalSopRule : null;
+                          const holdingAge = activeRule && currentBar
+                            ? holdingBarsAtCursor(bars, cursor, position.entryTimestamp)
+                            : 0;
+                          const holdingStatus = activeRule && holdingAge
+                            ? evaluatePersonalSopManagement(activeRule, holdingAge)
+                            : null;
                           return (
                             <tr key={position.id}>
                               <td data-label="仓位"><span className="position-id">#{position.id.slice(0, 6)}</span></td>
                               <td data-label="方向"><span className={position.side === "long" ? "side-long" : "side-short"}>{position.side === "long" ? "多 / 买" : "空 / 卖"}</span></td>
                               <td data-label="数量">{marginInstrument ? `${position.qty.toFixed(2)} 手` : position.qty}</td>
-                              <td data-label="开仓时间">{trainingDateLabel(position.entryTimestamp)}</td>
+                              <td data-label="开仓时间"><span>{trainingDateLabel(position.entryTimestamp)}</span>{holdingStatus?.overMax && <small className="position-sop-warning">超出 SOP {holdingAge} / {activeRule?.management.holdingBarsMax} 根</small>}</td>
                               <td data-label="开仓价">{trainingPriceLabel(position.entryPrice)}</td>
                               <td data-label="保护价">损 {trainingPriceLabel(position.stopLoss)} / 盈 {trainingPriceLabel(position.takeProfit)}</td>
                               <td data-label="现价">{trainingPriceLabel(currentBar?.close)}</td>
@@ -7699,10 +8328,14 @@ export function TrainingWorkbench() {
                     )}
 
                     {orderPanelTab === "history" && (
-                      <table className="orders-table">
+                      <table className="orders-table" onMouseLeave={() => setHoveredClosedPositionId(null)}>
                         <thead><tr><th>仓位</th><th>方向</th><th>数量</th><th>开仓时间</th><th>开仓价</th><th>平仓时间</th><th>平仓价</th><th>费用 / 原因</th><th>净盈亏</th></tr></thead>
                         <tbody>{closedPositions.length ? [...closedPositions].reverse().map((position) => (
-                          <tr key={position.id}>
+                          <tr
+                            key={position.id}
+                            onMouseEnter={() => setHoveredClosedPositionId(position.id)}
+                            onMouseLeave={() => setHoveredClosedPositionId((current) => current === position.id ? null : current)}
+                          >
                             <td data-label="仓位"><span className="position-id">#{position.id.slice(0, 6)}</span></td>
                             <td data-label="方向"><span className={position.side === "long" ? "side-long" : "side-short"}>{position.side === "long" ? "多 / 买" : "空 / 卖"}</span></td>
                             <td data-label="数量">{marginInstrument ? `${position.qty.toFixed(2)} 手` : position.qty}</td>
@@ -7726,6 +8359,7 @@ export function TrainingWorkbench() {
                     ))}
                   </div>
                 )}
+                </div>
               </div>
             </section>
 
@@ -7978,7 +8612,7 @@ export function TrainingWorkbench() {
             <button type="button" aria-label="上一场训练" title="上一场训练" onPointerDown={(event) => event.stopPropagation()} onClick={() => moveTrainingSession(-1)}><ChevronLeft size={16} /></button>
             <div className="live-scan-navigator-label">
               <span>训练切换</span>
-              <strong>{trainingNavigatorSessions[trainingNavigatorIndex]?.instrumentId ?? "--"} · {trainingNavigatorSessions[trainingNavigatorIndex]?.timeframe ?? "--"}</strong>
+              <strong>{trainingNavigatorSessions[trainingNavigatorIndex]?.instrumentId ?? "--"} · {timeframeLabel(trainingNavigatorSessions[trainingNavigatorIndex]?.timeframe ?? "--")}</strong>
               <small>{trainingNavigatorIndex + 1} / {trainingNavigatorSessions.length}</small>
             </div>
             <button type="button" aria-label="下一场训练" title="下一场训练" onPointerDown={(event) => event.stopPropagation()} onClick={() => moveTrainingSession(1)}><ChevronRight size={16} /></button>
@@ -7995,6 +8629,34 @@ export function TrainingWorkbench() {
             ><X size={14} /></button>
           </div>
         ) : null}
+
+        {view === "sop" && (
+          <section className="content-page sop-page">
+            <div className="page-heading">
+              <div>
+                <span>PERSONAL SOP</span>
+                <h1>个人交易 SOP</h1>
+                <p>系统从已平仓训练中寻找稳定的组合；至少 15 笔相似样本后，才允许采用为严格模式规则。</p>
+              </div>
+              <button type="button" className="ghost-button" onClick={() => openSettingsPanel("discipline")}><Settings2 size={15} />交易纪律设置</button>
+            </div>
+            <PersonalSopRecommendations
+              recommendations={personalSopRecommendations}
+              scopeSummaries={personalSopScopeSummaries}
+              activeRule={appSettings.activePersonalSopRule}
+              formatResult={(value) => percent(value)}
+              onApply={applyPersonalSopRule}
+            />
+            <section className="sop-logic-card">
+              <div><span className="section-label">RULE LOGIC</span><h2>它会管理什么</h2></div>
+              <div className="sop-logic-grid">
+            <div><strong>入场</strong><span>市场/周期（品种不限）、形态、市场状态、位置和理由。</span></div>
+                <div><strong>资料</strong><span>价格、日均成交量、成交额和市值；当前资料缺失时提示但不伪造通过。</span></div>
+                <div><strong>持仓</strong><span>使用真实揭示 K 线索引管理持仓范围；超限后提示，开启严格自动平仓才会排队。</span></div>
+              </div>
+            </section>
+          </section>
+        )}
 
         {view === "performance" && (
           <section className="content-page performance-page">
@@ -8164,7 +8826,7 @@ export function TrainingWorkbench() {
                 <label>周期
                   <select value={performanceFilters.timeframe} onChange={(event) => setPerformanceFilters((filters) => ({ ...filters, timeframe: event.target.value }))}>
                     <option value="all">全部周期</option>
-                    {timeframes.map((value) => <option key={value} value={value}>{value}</option>)}
+                    {TIMEFRAME_IDS.map((value) => <option key={value} value={value}>{timeframeLabel(value)}</option>)}
                   </select>
                 </label>
                 <label>计价模式
@@ -8318,7 +8980,7 @@ export function TrainingWorkbench() {
                       key={summary.session.id}
                       role="button"
                       tabIndex={0}
-                      aria-label={`选择训练 ${summary.session.instrumentId} ${summary.session.timeframe}`}
+                      aria-label={`选择训练 ${summary.session.instrumentId} ${timeframeLabel(summary.session.timeframe)}`}
                       onClick={() => setSelectedPerformanceSessionId(summary.session.id)}
                       onKeyDown={(event) => {
                         if (event.key === "Enter" || event.key === " ") {
@@ -8327,7 +8989,7 @@ export function TrainingWorkbench() {
                         }
                       }}
                     >
-                      <span><strong>{summary.session.instrumentId}</strong><small>{summary.session.timeframe}</small></span>
+                      <span><strong>{summary.session.instrumentId}</strong><small>{timeframeLabel(summary.session.timeframe)}</small></span>
                       <span><strong>{summary.modeLabel}</strong><small>{summary.rangeLabel}{summary.task?.patternFilter ? ` · 形态：${summary.task.patternFilter.presetNames.join("、") || summary.task.patternFilter.presetIds.join("、")}` : ""}</small></span>
                       <span className={summary.task?.status === "completed" ? "session-status completed" : "session-status"}>{summary.task?.status === "completed" ? "已完成" : "可继续"}</span>
                       <span className="performance-session-result">
@@ -8473,7 +9135,7 @@ export function TrainingWorkbench() {
                     <td className="coverage-select-cell" data-label="选择">
                       <input
                         type="checkbox"
-                        aria-label={`选择 ${item.symbol} ${item.timeframe} ${item.source}`}
+                        aria-label={`选择 ${item.symbol} ${timeframeLabel(item.timeframe)} ${item.source}`}
                         checked={selected}
                         onChange={() => setSelectedCoverageKeys((current) => current.includes(key)
                           ? current.filter((value) => value !== key)
@@ -8481,7 +9143,7 @@ export function TrainingWorkbench() {
                       />
                     </td>
                     <td data-label="品种"><strong>{item.symbol}</strong><span>{item.name}</span></td>
-                    <td data-label="市场">{item.market}</td><td data-label="周期"><span className="tf-badge">{item.timeframe}</span></td>
+                    <td data-label="市场">{item.market}</td><td data-label="周期"><span className="tf-badge">{timeframeLabel(item.timeframe)}</span></td>
                     <td data-label="数量">{Number(item.barCount).toLocaleString()}</td>
                     <td data-label="覆盖范围">{new Date(item.firstTimestamp).toLocaleDateString("zh-CN")} — {new Date(item.lastTimestamp).toLocaleDateString("zh-CN")}</td>
                     <td data-label="复权">{item.adjustmentType}</td><td data-label="来源">{item.source}</td><td data-label="状态"><span className="healthy-dot" />完整</td>
@@ -8495,10 +9157,6 @@ export function TrainingWorkbench() {
 
         {view === "review" && (
           <section className="content-page review-page">
-            <div className="page-heading">
-              <div><span>REVIEW</span><h1>训练复盘</h1><p>{reviewTitle} · 先看事前计划，再判断执行质量。</p></div>
-              {reviewedSession && <button className="ghost-button" onClick={() => setReviewedSession(null)}>返回当前训练</button>}
-            </div>
             <ReviewPanel
               title={reviewTitle}
               summary={reviewPanelSummary}
@@ -8509,7 +9167,7 @@ export function TrainingWorkbench() {
                 const linked = id ? reviewDecisionById.get(id) : undefined;
                 return linked ? linked.decision.marketState || linked.decision.location || "已关联" : undefined;
               }}
-              onBack={() => setReviewedSession(null)}
+              onBack={() => duplicateTrainingPreview ? returnFromDuplicateTrainingPreview() : setReviewedSession(null)}
               onEvidence={openReviewEvidence}
               formatDate={formatDate}
               money={money}

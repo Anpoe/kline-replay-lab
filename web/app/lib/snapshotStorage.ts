@@ -159,11 +159,15 @@ export function snapshotBucketKey(timestamp: number, timeframe: string) {
     case "1m":
       return `day:${utcDateKey(timestamp)}`;
     case "5m":
+    case "15m":
+    case "30m":
       return `week:${utcWeekKey(timestamp)}`;
     case "1h":
+    case "4h":
       return `month:${date.toISOString().slice(0, 7)}`;
     case "1d":
     case "1w":
+    case "1mo":
       return `year:${date.getUTCFullYear()}`;
     default:
       return `day:${utcDateKey(timestamp)}`;
