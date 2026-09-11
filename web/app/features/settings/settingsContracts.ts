@@ -27,6 +27,11 @@ import {
 } from "../../lib/trainingTasks.ts";
 import type { TradingMode } from "../../lib/tradingAccount.ts";
 import { TIMEFRAME_IDS } from "../../lib/timeframeCatalog.ts";
+import {
+  DEFAULT_REPLAY_TRADING_SESSION,
+  normalizeReplayTradingSession,
+  type ReplayTradingSession,
+} from "../../lib/replayTradingSession.ts";
 
 export type { DataMarket } from "../../lib/dataMarkets.ts";
 
@@ -65,7 +70,7 @@ export const marketOrderQuantityFields: Array<{
   { key: "CN", label: "A股默认数量（股）", min: 1, step: 1 },
   { key: "US", label: "美股默认数量（股）", min: 1, step: 1 },
   { key: "FX", label: "外汇默认手数（手）", min: 0.01, step: 0.01 },
-  { key: "GOLD", label: "黄金默认数量", min: 1, step: 1 },
+  { key: "GOLD", label: "黄金默认手数（手）", min: 0.01, step: 0.01 },
 ];
 
 export type AppSettings = {
@@ -82,6 +87,7 @@ export type AppSettings = {
   executionProfile: ExecutionCostProfile;
   fxAccountConfig: FxAccountConfig;
   replayHistoryBars: number;
+  replayTradingSession: ReplayTradingSession;
   randomInstrumentMode: "current" | "all" | "market";
   randomMarket: string;
   randomTimeframeMode: "current" | "all" | "fixed";
@@ -118,6 +124,7 @@ export const defaultAppSettings: AppSettings = {
   executionProfile: { ...DEFAULT_EXECUTION_COST_PROFILE, maxVolumeParticipationPct: 10 },
   fxAccountConfig: { ...DEFAULT_FX_ACCOUNT_CONFIG },
   replayHistoryBars: DEFAULT_REPLAY_HISTORY_BARS,
+  replayTradingSession: { ...DEFAULT_REPLAY_TRADING_SESSION },
   randomInstrumentMode: "all",
   randomMarket: "A股",
   randomTimeframeMode: "all",
@@ -145,8 +152,17 @@ export function marketOrderQtyKey(market: string | undefined, instrumentId = "")
   if (normalized === "CN" || normalized === "A股") return "CN";
   if (normalized === "US" || normalized === "美股") return "US";
   if (normalized === "FX" || normalized === "FOREX" || normalized === "外汇" || /\.FX$/i.test(instrumentId)) return "FX";
-  if (normalized === "GOLD" || normalized === "METAL" || normalized === "黄金") return "GOLD";
+  if (normalized === "GOLD" || normalized === "METAL" || normalized === "黄金" || /\.GOLD$/i.test(instrumentId)) return "GOLD";
   return null;
+}
+
+export function tradingModeForInstrument(
+  requested: TradingMode,
+  market: string | undefined,
+  instrumentId: string,
+): TradingMode {
+  const key = marketOrderQtyKey(market, instrumentId);
+  return key === "FX" || key === "GOLD" ? "capital" : requested === "capital" ? "capital" : "return";
 }
 
 export function positiveOrderQty(value: unknown, fallback: number) {
@@ -213,6 +229,7 @@ export function normalizeSettings(value: Partial<AppSettings>): AppSettings {
     }),
     fxAccountConfig: normalizeFxAccountConfig(merged.fxAccountConfig),
     replayHistoryBars: normalizeReplayHistoryBars(merged.replayHistoryBars),
+    replayTradingSession: normalizeReplayTradingSession(merged.replayTradingSession),
     defaultSpeed: [0.5, 1, 2, 5].includes(Number(merged.defaultSpeed))
       ? Number(merged.defaultSpeed)
       : defaultAppSettings.defaultSpeed,

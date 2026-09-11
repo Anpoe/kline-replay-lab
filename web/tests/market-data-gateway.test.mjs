@@ -40,6 +40,7 @@ test("preserves provider, job, and task polling endpoints", async () => {
   });
 
   await gateway.loadProviders();
+  await gateway.loadAutoUpdateStatus();
   await gateway.loadJobs("US");
   await gateway.loadMarketSync("run-1");
   await gateway.loadLocalTask();
@@ -49,6 +50,7 @@ test("preserves provider, job, and task polling endpoints", async () => {
 
   assert.deepEqual(requests.map((request) => request.input), [
     "/api/data-providers",
+    "/api/data-auto-update",
     "/api/data-jobs?market=US",
     "/api/data-jobs/market/sync?runId=run-1",
     "/api/local-data",
@@ -56,8 +58,9 @@ test("preserves provider, job, and task polling endpoints", async () => {
     "/api/cn-maintenance",
     "/api/fx-data",
   ]);
-  assert.equal(requests[2].init.cache, "no-store");
-  assert.equal(requests[6].init.cache, "no-store");
+  assert.equal(requests[1].init.cache, "no-store");
+  assert.equal(requests[3].init.cache, "no-store");
+  assert.equal(requests[7].init.cache, "no-store");
 });
 
 test("filters FX task polling by pair without breaking the legacy signal argument", async () => {

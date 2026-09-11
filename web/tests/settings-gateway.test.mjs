@@ -143,6 +143,13 @@ test("preferences gateway exposes a stable error for non-OK responses", async ()
   await assert.rejects(() => gateway.save({ version: 1 }), { message: "保存同步设置失败" });
 });
 
+test("restores chosen trading hours after saving and recreating the settings gateway", () => {
+  const storage = createMemoryStorage();
+  const session = { enabled: true, startTime: "07:00", endTime: "18:00" };
+  createSettingsStorageGateway(storage).saveAppSettings({ ...defaultAppSettings, replayTradingSession: session });
+  assert.deepEqual(createSettingsStorageGateway(storage).loadAppSettings().settings.replayTradingSession, session);
+});
+
 test("serializes preference saves so a slower old write cannot overwrite the latest settings", async () => {
   const firstWriteStarted = createDeferred();
   const releaseFirstWrite = createDeferred();

@@ -81,6 +81,8 @@ test("ships the K-line training workbench instead of the starter", async () => {
   assert.match(workbench, /训练内容发生实际修改后会自动保存/);
   assert.match(workbench, /单纯浏览 K 线不会触发保存/);
   assert.match(settingsPanel, /随机训练规则/);
+  assert.match(settingsPanel, /交易时段/);
+  assert.match(settingsPanel, /跟随图表时区/);
   assert.match(workbench, /RANDOM_TRAINING_PATTERN_PRESETS_KEY/);
   assert.match(workbench, /patternPresetIds: randomTrainingPatternPresetIds/);
   assert.doesNotMatch(workbench, /className="restore-notice"/);
@@ -114,6 +116,9 @@ test("ships the K-line training workbench instead of the starter", async () => {
   assert.match(workbench, /观望当日开盘价/);
   assert.match(workbench, /liveWatchPerformanceRows/);
   assert.match(workbench, /liveWatchPerformanceSummary/);
+  assert.match(workbench, /loadAutoUpdateStatus/);
+  assert.match(workbench, /shouldRefreshLivePricesAfterAutoUpdate/);
+  assert.match(workbench, /ensureMarketData: false/);
   assert.match(workbench, /type LivePerformanceFilters/);
   assert.match(workbench, /buyDateFrom/);
   assert.match(workbench, /holdingStatus/);
@@ -163,7 +168,11 @@ test("ships the K-line training workbench instead of the starter", async () => {
   assert.match(workbench, /insufficient_cash_at_fill/);
   assert.match(workbench, /次日开盘平仓/);
   assert.match(workbench, /order_queued_for_next_session/);
-  assert.match(workbench, /earliestScheduledIndex - 1/);
+  assert.match(workbench, /positions_settled_at_replay_session_end/);
+  assert.match(workbench, /deferredOpenOrders/);
+  const replayAdvance = await readFile(new URL("app/lib/replayTradingSession.ts", root), "utf8");
+  assert.match(workbench, /const nextCursor = advanceReplayCursor\(/);
+  assert.match(replayAdvance, /earliestScheduledIndex - 1/);
   assert.match(workbench, /syncedPreferencesHydratedRef/);
   assert.match(workbench, /!syncedPreferencesReady \|\| !syncedPreferencesHydratedRef\.current/);
   assert.doesNotMatch(workbench, /\.finally\(\(\) => \{\s*if \(!cancelled\) setSyncedPreferencesReady\(true\)/);

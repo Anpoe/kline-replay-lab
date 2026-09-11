@@ -98,6 +98,13 @@ export function createMarketDataStorageGateway(storage: MarketDataStorage) {
 }
 
 export function createMarketDataGateway(fetcher: MarketDataGatewayFetch) {
+  const loadAutoUpdateStatus = <T = unknown>(signal?: AbortSignal) => requestJson<T>(
+    fetcher,
+    "/api/data-auto-update",
+    withSignal({ cache: "no-store" }, signal),
+    "读取后台自动更新状态失败",
+  );
+
   const loadProviders = <T = unknown>(signal?: AbortSignal) => requestJson<T>(
     fetcher,
     "/api/data-providers",
@@ -390,6 +397,7 @@ export function createMarketDataGateway(fetcher: MarketDataGatewayFetch) {
   );
 
   return {
+    loadAutoUpdateStatus,
     loadProviders,
     loadJobs,
     loadMarketSync,

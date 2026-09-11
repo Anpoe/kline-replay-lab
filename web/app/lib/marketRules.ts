@@ -1,4 +1,5 @@
 import {
+  createGoldInstrumentEconomics,
   createFxInstrumentEconomics,
   type FxAccountConfig,
   type InstrumentEconomics,
@@ -88,6 +89,26 @@ export const FX_SPOT_RULES_V2: MarketRuleProfile = Object.freeze({
   limitFillPolicy: "allow",
   quantityUnit: "lot",
   defaultOrderQuantity: 1,
+});
+
+export const GOLD_SPOT_RULES_V1: MarketRuleProfile = Object.freeze({
+  id: "gold-spot-margin",
+  version: "2026.08-v1",
+  name: "黄金现货保证金（Bid/Ask）",
+  market: "GOLD",
+  tradingEnabled: true,
+  allowShort: true,
+  boardLot: 0.01,
+  minimumBuyQuantity: 0.01,
+  buyQuantityStep: 0.01,
+  ipoNoLimitTradingDays: 0,
+  tPlusOne: false,
+  priceLimitRatio: null,
+  priceTick: 0.01,
+  limitFillPolicy: "allow",
+  quantityUnit: "lot",
+  defaultOrderQuantity: 1,
+  instrumentEconomics: createGoldInstrumentEconomics(),
 });
 
 export const CN_UNSUPPORTED_RULES_V1: MarketRuleProfile = Object.freeze({
@@ -183,6 +204,12 @@ export function resolveMarketRules(
       instrumentEconomics: createFxInstrumentEconomics(instrumentId, fxAccountConfig),
     };
   }
+  if (normalizedMarket === "GOLD" || /\.GOLD$/i.test(instrumentId)) {
+    return {
+      ...GOLD_SPOT_RULES_V1,
+      instrumentEconomics: createGoldInstrumentEconomics(fxAccountConfig),
+    };
+  }
   return { ...GENERIC_CASH_RULES_V1, market };
 }
 
@@ -247,13 +274,24 @@ export function validateOpenOrder(
   return { ok: true };
 }
 
+// Snapshot analysis can visit hundreds of thousands of candles. Intl formatters
+// own substantial native memory, so reuse them instead of allocating per bar.
+const tradingDateFormatters = new Map<string, Intl.DateTimeFormat>();
+
 export function tradingDate(timestamp: number, timezone: string) {
-  return new Intl.DateTimeFormat("en-CA", {
-    timeZone: timezone,
-    year: "numeric",
-    month: "2-digit",
-    day: "2-digit",
-  }).format(new Date(timestamp));
+  let formatter = tradingDateFormatters.get(timezone);
+  if (!formatter) {
+    formatter = new Intl.DateTimeFormat("en-CA", {
+      timeZone: timezone,
+      year: "numeric",
+      month: "2-digit",
+      day: "2-digit",
+    });
+    // Bound the cache even when legacy snapshot metadata supplies many zones.
+    if (tradingDateFormatters.size >= 32) tradingDateFormatters.clear();
+    tradingDateFormatters.set(timezone, formatter);
+  }
+  return formatter.format(new Date(timestamp));
 }
 
 export function findNextTradingSessionIndex(

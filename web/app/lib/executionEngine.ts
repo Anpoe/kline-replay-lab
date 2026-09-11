@@ -14,7 +14,7 @@ export const EXECUTION_ENGINE_VERSION = "2026.08-v4";
 
 export type OrderType = "market" | "limit" | "stop";
 export type IntrabarConflictPolicy = "conservative" | "optimistic" | "seeded";
-export type ExecutionReason = "order" | "stop_loss" | "take_profit" | "training_end" | "liquidation";
+export type ExecutionReason = "order" | "stop_loss" | "take_profit" | "training_end" | "session_end" | "liquidation";
 
 export type ExecutionCostProfile = {
   commissionRateBps: number;
@@ -152,6 +152,7 @@ export type ExecutionStepInput<
     rawPrice: number,
     reason: "stop_loss" | "take_profit",
   ) => FillValidation;
+  skipProtectiveExits?: boolean;
 };
 
 export type ExecutionStepResult<TOrder extends EngineOrder, TPosition extends EnginePosition> = {
@@ -555,7 +556,7 @@ export function executeBarStep<
 
   // Protection that existed before this bar is resolved before manual orders.
   // Newly opened lots are intentionally not eligible until the following bar.
-  const positionsEligibleForProtection = positions.length;
+  const positionsEligibleForProtection = input.skipProtectiveExits ? 0 : positions.length;
   for (let index = 0; index < positionsEligibleForProtection; index += 1) {
     if (availableQuantity <= 0) break;
     const position = positions[index];
@@ -641,7 +642,7 @@ export function executeBarStep<
           orderId: order.id,
           positionId: order.positionId,
           code: "currency_conversion_unavailable",
-          message: "账户币种与货币对无法自动换算，请设置报价币到账户币的换算率",
+          message: "账户币种与交易品种无法自动换算，请设置报价币到账户币的换算率",
         });
         continue;
       }

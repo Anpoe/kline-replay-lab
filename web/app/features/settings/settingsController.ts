@@ -2,6 +2,7 @@ import {
   normalizeSettings,
   type AppSettings,
 } from "./settingsContracts.ts";
+import { isTradingSessionTime } from "../../lib/replayTradingSession.ts";
 
 export type SettingsSaveResult =
   | { ok: true; settings: AppSettings }
@@ -13,6 +14,15 @@ export type SettingsPersistence = {
 
 /** Validate the settings boundary before the shell applies side effects. */
 export function prepareSettingsSave(draft: Partial<AppSettings>): SettingsSaveResult {
+  const session = draft.replayTradingSession;
+  if (session?.enabled) {
+    if (!isTradingSessionTime(session.startTime) || !isTradingSessionTime(session.endTime)) {
+      return { ok: false, error: "交易时段需要填写有效的开始和结束时间。" };
+    }
+    if (session.startTime === session.endTime) {
+      return { ok: false, error: "交易时段的开始与结束时间不能相同；全天训练请关闭交易时段限制。" };
+    }
+  }
   if (
     draft.randomDateMode === "range"
     && (!draft.randomStartDate || !draft.randomEndDate)

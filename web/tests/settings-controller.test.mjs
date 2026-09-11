@@ -76,6 +76,19 @@ test("does not call the persistence adapter after validation fails", async () =>
   assert.equal(writes, 0);
 });
 
+test("validates trading hours before saving while allowing overnight sessions", () => {
+  for (const [startTime, endTime] of [["", "18:00"], ["25:00", "18:00"], ["07:00", "07:00"]]) {
+    assert.equal(prepareSettingsSave({
+      replayTradingSession: { enabled: true, startTime, endTime },
+    }).ok, false);
+  }
+  const session = { enabled: true, startTime: "22:00", endTime: "07:00" };
+  const result = prepareSettingsSave({ replayTradingSession: session });
+  assert.equal(result.ok, true);
+  assert.deepEqual(result.settings.replayTradingSession, session);
+  assert.equal(normalizeSettings({}).replayTradingSession.enabled, false);
+});
+
 test("waits for durable persistence before reporting settings saved", async () => {
   let releaseWrite = () => undefined;
   const pendingWrite = new Promise((resolve) => {

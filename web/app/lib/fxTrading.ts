@@ -107,6 +107,26 @@ export function createFxInstrumentEconomics(
   };
 }
 
+export function createGoldInstrumentEconomics(
+  accountConfig?: Partial<FxAccountConfig> | null,
+): InstrumentEconomics {
+  const config = normalizeFxAccountConfig(accountConfig);
+  return {
+    settlementMode: "margin",
+    quoteBasis: "bid",
+    quantityUnit: "lot",
+    contractSize: 100,
+    pipSize: 0.01,
+    pointSize: 0.01,
+    baseCurrency: "XAU",
+    quoteCurrency: "USD",
+    accountCurrency: config.accountCurrency,
+    leverage: config.leverage,
+    stopOutLevelPct: config.stopOutLevelPct,
+    manualQuoteToAccountRate: config.manualQuoteToAccountRate,
+  };
+}
+
 export function isMarginEconomics(value?: InstrumentEconomics | null) {
   return value?.settlementMode === "margin";
 }

@@ -89,6 +89,10 @@ export async function POST(request: Request) {
   }>> = {};
 
   for (const item of items) {
+    // Let navigation, health probes and other API requests run between snapshots.
+    // Database promises alone may keep this entire batch in the microtask queue.
+    await new Promise<void>((resolve) => setTimeout(resolve, 0));
+    if (request.signal.aborted) break;
     const snapshotId = item.snapshotId!;
     const row = await getSnapshotRow(db, snapshotId);
     if (!row) continue;

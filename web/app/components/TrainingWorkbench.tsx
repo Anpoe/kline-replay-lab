@@ -66,6 +66,7 @@ import {
   defaultAppSettings,
   normalizeSettings,
   timeframes,
+  tradingModeForInstrument,
   type AppSettings,
   type PositionSizeMode,
   type SettingsTab,
@@ -100,6 +101,7 @@ import {
   normalizeLiveScanLimit,
   selectLiveNavigatorIndex,
 } from "../features/live/liveScanController";
+import { shouldRefreshLivePricesAfterAutoUpdate } from "../features/live/liveAutoRefresh";
 import { createLiveGateway } from "../features/live/liveGateway";
 import type { LiveScanMarket, LiveScanResponse, LiveScanResult, LiveScanSort } from "../features/live/liveScanContracts";
 import { LiveScanPanel } from "../features/live/components/LiveScanPanel";
@@ -140,7 +142,6 @@ import {
   type RuleValidation,
 } from "../lib/marketRules";
 import {
-  advanceWithinTask,
   createLegacyTrainingTask,
   defaultTrainingTaskDraft,
   finishTask,
@@ -155,6 +156,11 @@ import {
   type TrainingTask,
   type TrainingTaskDraft,
 } from "../lib/trainingTasks";
+import {
+  advanceReplayCursor,
+  createReplayTradingSessionPredicate,
+  firstReplaySkippedBarIndex,
+} from "../lib/replayTradingSession";
 import {
   markTrainingAutosaveSaved,
   observeTrainingAutosave,
@@ -1281,6 +1287,7 @@ function exitReasonLabel(value: ExecutionReason | undefined) {
   if (value === "stop_loss") return "止损";
   if (value === "take_profit") return "止盈";
   if (value === "training_end") return "训练结束";
+  if (value === "session_end") return "交易时段结束";
   if (value === "liquidation") return "保证金强平";
   return "手动平仓";
 }
@@ -1545,6 +1552,7 @@ function eventLabel(type: string) {
     sop_holding_limit_warning: "个人 SOP 持仓超限提示",
     sop_auto_close_queued: "个人 SOP 自动预约平仓",
     positions_settled_at_training_end: "训练结束自动平仓",
+    positions_settled_at_replay_session_end: "交易时段结束自动平仓",
     training_completed: "训练自动结束",
     training_revealed: "解除盲测并继续观察",
   };
@@ -1832,6 +1840,9 @@ export function TrainingWorkbench() {
   const liveRequestRef = useRef<LiveScanResult | null>(null);
   const livePortfoliosRef = useRef<LivePortfolioRecord[]>([]);
   const liveWatchlistRef = useRef<LiveWatchRecord[]>([]);
+  const livePriceRefreshRunningRef = useRef(false);
+  const livePriceRefreshRef = useRef<((options?: { ensureMarketData?: boolean }) => Promise<void>) | null>(null);
+  const liveAutoUpdateFinishedAtRef = useRef<string | null | undefined>(undefined);
   const livePersistSignatureRef = useRef("");
   const liveBarDragRef = useRef<{ pointerId: number; startX: number; startY: number; offsetX: number; offsetY: number } | null>(null);
   const trainingBarDragRef = useRef<{ pointerId: number; startX: number; startY: number; offsetX: number; offsetY: number } | null>(null);
@@ -2005,6 +2016,9 @@ export function TrainingWorkbench() {
     : [], [currentBar, instrument.timezone, marketRules, openPositions]);
   const instrumentEconomics = marketRules.instrumentEconomics;
   const marginInstrument = isMarginEconomics(instrumentEconomics);
+  const goldInstrument = marketRuleCode(instrument.market) === "GOLD" || /\.GOLD$/i.test(instrument.id);
+  const marginContractUnit = goldInstrument ? "盎司" : instrumentEconomics?.baseCurrency ?? "基础币";
+  const marginPipLabel = goldInstrument ? "每点" : "每 Pip";
   const reservedMarginTotal = pendingOrders.reduce(
     (sum, order) => sum + Math.max(0, Number(order.reservedMargin ?? 0)),
     0,
@@ -2913,7 +2927,7 @@ export function TrainingWorkbench() {
     setDrawingUndoStack([]);
     setDrawingRedoStack([]);
     setClearNonce(Date.now());
-    setTradingMode(appSettingsRef.current.tradingMode);
+    setTradingMode(tradingModeForInstrument(appSettingsRef.current.tradingMode, undefined, request.instrumentId));
     setInitialCapital(appSettingsRef.current.initialCapital);
     setCashBalance(appSettingsRef.current.initialCapital);
     setExecutionProfile(appSettingsRef.current.executionProfile);
@@ -3026,7 +3040,12 @@ export function TrainingWorkbench() {
       setSnapshotHash(data.snapshot.contentHash);
       const restoredMarketRules = restoreRequest?.state.marketRules;
       const loadedMarketRules = restoredMarketRules?.id === "generic-cash"
-        && (data.instrument.market === "FX" || data.instrument.id.endsWith(".FX"))
+        && (
+          data.instrument.market === "FX"
+          || data.instrument.market === "GOLD"
+          || data.instrument.id.endsWith(".FX")
+          || data.instrument.id.endsWith(".GOLD")
+        )
         ? resolveMarketRules(data.instrument.market, data.instrument.id, appSettingsRef.current.fxAccountConfig)
         : restoredMarketRules ?? resolveMarketRules(
           data.instrument.market,
@@ -3063,7 +3082,11 @@ export function TrainingWorkbench() {
           data.instrument.id,
           loadedMarketRules,
         ));
-        setTradingMode(savedPortfolio?.tradingMode ?? appSettingsRef.current.tradingMode);
+        setTradingMode(tradingModeForInstrument(
+          savedPortfolio?.tradingMode ?? appSettingsRef.current.tradingMode,
+          data.instrument.market,
+          data.instrument.id,
+        ));
         setInitialCapital(savedPortfolio?.initialCapital ?? appSettingsRef.current.initialCapital);
         setCashBalance(savedPortfolio?.cashBalance ?? savedPortfolio?.initialCapital ?? appSettingsRef.current.initialCapital);
         setExecutionProfile(DEFAULT_EXECUTION_COST_PROFILE);
@@ -3130,7 +3153,11 @@ export function TrainingWorkbench() {
         setOrderTakeProfit(restoreRequest.state.orderTakeProfit ?? "");
         setPositionSizeMode(restoreRequest.state.positionSizeMode);
         setRiskPercent(restoreRequest.state.riskPercent);
-        setTradingMode(restoreRequest.state.tradingMode);
+        setTradingMode(tradingModeForInstrument(
+          restoreRequest.state.tradingMode,
+          data.instrument.market,
+          data.instrument.id,
+        ));
         setInitialCapital(restoreRequest.state.initialCapital);
         setCashBalance(restoreRequest.state.cashBalance);
         setExecutionProfile(restoreRequest.state.executionProfile);
@@ -3240,9 +3267,12 @@ export function TrainingWorkbench() {
         ));
         setPositionSizeMode(appSettingsRef.current.positionSizeMode);
         setRiskPercent(appSettingsRef.current.riskPercent);
-        setTradingMode(isMarginEconomics(loadedMarketRules.instrumentEconomics)
-          ? "capital"
-          : appSettingsRef.current.tradingMode);
+        const nextTradingMode = tradingModeForInstrument(
+          appSettingsRef.current.tradingMode,
+          data.instrument.market,
+          data.instrument.id,
+        );
+        setTradingMode(nextTradingMode);
         setInitialCapital(appSettingsRef.current.initialCapital);
         setCashBalance(appSettingsRef.current.initialCapital);
         setExecutionProfile(appSettingsRef.current.executionProfile);
@@ -3273,7 +3303,7 @@ export function TrainingWorkbench() {
           sourceSessionId: nextTask.sourceSessionId,
           marketRuleId: loadedMarketRules.id,
           marketRuleVersion: loadedMarketRules.version,
-          tradingMode: appSettingsRef.current.tradingMode,
+          tradingMode: nextTradingMode,
           initialCapital: appSettingsRef.current.initialCapital,
         })]);
         setSaveState("新训练 · 尚未保存");
@@ -3493,8 +3523,9 @@ export function TrainingWorkbench() {
         instrument.timezone,
         timeframe,
       );
-    const validateEnginePrice = (side: "buy" | "sell", rawPrice: number) => {
+    const validateEnginePrice = (side: "buy" | "sell", rawPrice: number, allowSessionCloseGap = false) => {
       if (liveMode) return { ok: true as const };
+      if (allowSessionCloseGap) return { ok: true as const };
       const validation = validateMarketFill(marketRules, side, rawPrice, priceBand);
       return validation.ok
         ? { ok: true as const }
@@ -3512,7 +3543,8 @@ export function TrainingWorkbench() {
       cashBalance: baseCashBalance,
       capitalMode: tradingMode === "capital",
       instrumentEconomics: liveMode ? undefined : marketRules.instrumentEconomics,
-      validateFill: (order, rawPrice) => validateEnginePrice(order.side, rawPrice),
+      skipProtectiveExits: orders.length > 0 && orders.every((order) => order.reason === "session_end"),
+      validateFill: (order, rawPrice) => validateEnginePrice(order.side, rawPrice, order.reason === "session_end"),
       validateProtectiveFill: (position, side, rawPrice) => {
         if (liveMode) return { ok: true };
         const closeValidation = validateCloseOrder(marketRules, position, bar.timestamp, instrument.timezone);
@@ -3676,33 +3708,114 @@ export function TrainingWorkbench() {
       setPlaying(false);
       return;
     }
-    const requestedNextCursor = trainingTask
-      ? advanceWithinTask(trainingTask, cursor, count)
-      : Math.min(cursor + Math.max(1, count), bars.length - 1);
-    const earliestScheduledIndex = pendingOrders
-      .filter((order) => order.executeAtTimestamp != null)
-      .map((order) => bars.findIndex((bar, index) => index > cursor && bar.timestamp >= Number(order.executeAtTimestamp)))
-      .filter((index) => index >= 0)
-      .reduce((earliest, index) => Math.min(earliest, index), Number.POSITIVE_INFINITY);
-    const nextCursor = Number.isFinite(earliestScheduledIndex)
-      && earliestScheduledIndex > cursor + 1
-      && requestedNextCursor >= earliestScheduledIndex
-      ? earliestScheduledIndex - 1
-      : requestedNextCursor;
+    const nextCursor = advanceReplayCursor({
+      bars,
+      cursor,
+      requestedCount: count,
+      endCursor,
+      session: appSettingsRef.current.replayTradingSession,
+      timeframe,
+      timezone: instrument.timezone,
+      randomRun: trainingTask?.randomRun,
+      liveMode,
+      scheduledOrderTimestamps: pendingOrders
+        .filter((order) => order.executeAtTimestamp != null)
+        .map((order) => Number(order.executeAtTimestamp)),
+    });
+    const sessionOptions = {
+      session: appSettingsRef.current.replayTradingSession,
+      timeframe,
+      timezone: instrument.timezone,
+      randomRun: trainingTask?.randomRun,
+      liveMode,
+    };
+    const isWithinReplaySession = createReplayTradingSessionPredicate(sessionOptions);
+    const firstSkippedBarIndex = firstReplaySkippedBarIndex({
+      bars,
+      cursor,
+      destination: nextCursor,
+      ...sessionOptions,
+    });
     let simulatedPositions = positions;
     let simulatedCashBalance = cashBalance;
     let remainingOrders = pendingOrders;
     const consumedOrderIds: string[] = [];
     for (let barIndex = cursor + 1; barIndex <= nextCursor; barIndex += 1) {
       const executionBar = bars[barIndex];
+      const isSkippedBar = isWithinReplaySession != null && !isWithinReplaySession(executionBar.timestamp);
+      if (barIndex === firstSkippedBarIndex) {
+        const positionsToClose = simulatedPositions.filter((position) => position.status === "open");
+        if (positionsToClose.length) {
+          const sessionCloseOrders: PendingOrder[] = positionsToClose.map((position) => ({
+            id: `session-close:${position.id}:${executionBar.timestamp}`,
+            action: "close",
+            side: position.side === "long" ? "sell" : "buy",
+            qty: position.qty,
+            createdAt: executionBar.timestamp,
+            positionId: position.id,
+            decisionSubmissionId: position.decisionSubmissionId,
+            orderType: "market",
+            reason: "session_end",
+            engineVersion: EXECUTION_ENGINE_VERSION,
+            ruleId: marketRules.id,
+            ruleVersion: marketRules.version,
+            instrumentEconomics: position.instrumentEconomics,
+          }));
+          const sessionCloseResult = executeOrders(
+            sessionCloseOrders,
+            {
+              timestamp: executionBar.timestamp,
+              open: executionBar.open,
+              high: executionBar.open,
+              low: executionBar.open,
+              close: executionBar.open,
+            },
+            barIndex,
+            simulatedPositions,
+            simulatedCashBalance,
+          );
+          simulatedPositions = sessionCloseResult.positions;
+          simulatedCashBalance = sessionCloseResult.cashBalance;
+          consumedOrderIds.push(...sessionCloseResult.consumedOrderIds);
+          const closedPositionIds = new Set(
+            sessionCloseResult.fills
+              .filter((fill) => fill.action === "close" && fill.reason === "session_end")
+              .map((fill) => fill.positionId),
+          );
+          if (closedPositionIds.size) {
+            const cancelledCloseOrderIds = remainingOrders
+              .filter((order) => order.action === "close" && closedPositionIds.has(order.positionId))
+              .map((order) => order.id);
+            consumedOrderIds.push(...cancelledCloseOrderIds);
+            remainingOrders = remainingOrders.filter((order) => !cancelledCloseOrderIds.includes(order.id));
+            setRuleNotice(`交易时段结束，已按 ${executionBar.open} 自动平仓 ${closedPositionIds.size} 笔持仓`);
+            appendEvent("positions_settled_at_replay_session_end", {
+              timestamp: executionBar.timestamp,
+              closedPositionIds: [...closedPositionIds],
+              executionIds: sessionCloseResult.fills.map((fill) => fill.id),
+              cancelledOrderIds: cancelledCloseOrderIds,
+              engineVersion: EXECUTION_ENGINE_VERSION,
+              executionProfile,
+              tradingMode,
+              cashBalance: simulatedCashBalance,
+            }, executionBar.timestamp);
+          }
+        }
+      }
       const futureOrders = remainingOrders.filter((order) => (
         order.executeAtTimestamp != null && order.executeAtTimestamp > executionBar.timestamp
       ));
       const dueOrders = remainingOrders.filter((order) => (
         order.executeAtTimestamp == null || order.executeAtTimestamp <= executionBar.timestamp
       ));
+      const executableOrders = isSkippedBar
+        ? dueOrders.filter((order) => order.action === "close")
+        : dueOrders;
+      const deferredOpenOrders = isSkippedBar
+        ? dueOrders.filter((order) => order.action === "open")
+        : [];
       const executionResult = executeOrders(
-        dueOrders,
+        executableOrders,
         executionBar,
         barIndex,
         simulatedPositions,
@@ -3710,7 +3823,7 @@ export function TrainingWorkbench() {
       );
       simulatedPositions = executionResult.positions;
       simulatedCashBalance = executionResult.cashBalance;
-      remainingOrders = [...futureOrders, ...executionResult.remainingOrders];
+      remainingOrders = [...futureOrders, ...deferredOpenOrders, ...executionResult.remainingOrders];
       consumedOrderIds.push(...executionResult.consumedOrderIds);
 
       const activePersonalSopRule = appSettingsRef.current.personalSopCheckEnabled
@@ -3842,7 +3955,7 @@ export function TrainingWorkbench() {
         endCursor: completedTask.endCursor,
       }, bars[nextCursor]?.timestamp);
     }
-  }, [appendEvent, bars, cashBalance, cursor, executeOrders, instrument.timezone, marketRules, pendingOrders, positions, settleTrainingAtBar, timeframe, trainingTask]);
+  }, [appendEvent, bars, cashBalance, cursor, executeOrders, executionProfile, instrument.timezone, liveMode, marketRules, pendingOrders, positions, settleTrainingAtBar, timeframe, tradingMode, trainingTask]);
 
   const revealNext = useCallback(() => revealMany(1), [revealMany]);
   const revealPrevious = () => {
@@ -4152,7 +4265,7 @@ export function TrainingWorkbench() {
       rejectOrderAttempt({
         ok: false,
         code: "currency_conversion_unavailable",
-        message: "账户币种与货币对无法自动换算，请在设置中填写报价币到账户币的换算率",
+        message: "账户币种与交易品种无法自动换算，请在设置中填写报价币到账户币的换算率",
       }, { action: "open", side, qty, accountCurrency: orderEconomics?.accountCurrency });
       return;
     }
@@ -4398,7 +4511,7 @@ export function TrainingWorkbench() {
     setDrawingUndoStack([]);
     setDrawingRedoStack([]);
     setClearNonce((nonce) => nonce + 1);
-    setTradingMode(appSettingsRef.current.tradingMode);
+    setTradingMode(tradingModeForInstrument(appSettingsRef.current.tradingMode, targetMarket, nextInstrumentId));
     setInitialCapital(appSettingsRef.current.initialCapital);
     setCashBalance(appSettingsRef.current.initialCapital);
     setExecutionProfile(appSettingsRef.current.executionProfile);
@@ -4503,7 +4616,8 @@ export function TrainingWorkbench() {
     throw new Error("美股最新日线同步等待超时，请到数据页查看任务状态");
   };
 
-  const refreshLivePortfolioPrices = async () => {
+  const refreshLivePortfolioPrices = async (options: { ensureMarketData?: boolean } = {}) => {
+    if (livePriceRefreshRunningRef.current) return;
     const portfolios = livePortfoliosRef.current;
     const watchlist = liveWatchlistRef.current;
     const tracked = [...portfolios, ...watchlist];
@@ -4511,6 +4625,7 @@ export function TrainingWorkbench() {
       setLivePriceRefreshStatus("暂无可同步的实盘标的");
       return;
     }
+    livePriceRefreshRunningRef.current = true;
     setLivePriceRefreshRunning(true);
     setLivePriceRefreshStatus("正在读取最新价…");
     try {
@@ -4519,7 +4634,7 @@ export function TrainingWorkbench() {
       const usInstrumentIds = [...new Set(
         tracked.filter((item) => item.market === "US").map((item) => item.instrumentId),
       )];
-      if (usInstrumentIds.length) {
+      if (options.ensureMarketData !== false && usInstrumentIds.length) {
         setLivePriceRefreshStatus("姝ｅ湪鏇存柊缇庤偂鏈€鏂颁氦鏄撴棩鈥︹€?");
         try {
           await runUsLiveUpdate(usInstrumentIds);
@@ -4629,6 +4744,14 @@ export function TrainingWorkbench() {
           nextExecutions.push(...fills);
           nextRejections.push(...rejections);
         }
+        const priceChanged = price.timestamp !== portfolio.latestTimestamp || price.close !== portfolio.latestClose;
+        const tradeStateChanged = nextPositions !== portfolio.positions
+          && (
+            nextPendingOrders.length !== portfolio.pendingOrders.length
+            || nextExecutions.length !== portfolio.executions.length
+            || nextRejections.length !== portfolio.orderRejections.length
+          );
+        if (!priceChanged && !tradeStateChanged) return portfolio;
         return {
           ...portfolio,
           latestTimestamp: price.timestamp,
@@ -4641,8 +4764,10 @@ export function TrainingWorkbench() {
           updatedAt: new Date().toISOString(),
         };
       });
-      livePortfoliosRef.current = nextPortfolios;
-      setLivePortfolios(nextPortfolios);
+      if (nextPortfolios.some((portfolio, index) => portfolio !== portfolios[index])) {
+        livePortfoliosRef.current = nextPortfolios;
+        setLivePortfolios(nextPortfolios);
+      }
       const nextWatchlist = watchlist.map((watch) => {
         // Keep the observation baseline fixed at the original observation day.
         // Watchlist performance is not a simulated next-session trade.
@@ -4654,12 +4779,23 @@ export function TrainingWorkbench() {
           observationTimestamp,
           observationClose,
         };
-        return price
-          ? (syncedInstrumentIds.add(watch.instrumentId), { ...migratedWatch, latestTimestamp: price.timestamp, latestClose: price.close, updatedAt: new Date().toISOString() })
-          : migratedWatch;
+        const observationChanged = observationTimestamp !== watch.observationTimestamp
+          || observationClose !== watch.observationClose;
+        if (!price) return observationChanged ? { ...migratedWatch, updatedAt: new Date().toISOString() } : watch;
+        syncedInstrumentIds.add(watch.instrumentId);
+        const priceChanged = price.timestamp !== watch.latestTimestamp || price.close !== watch.latestClose;
+        if (!observationChanged && !priceChanged) return watch;
+        return {
+          ...migratedWatch,
+          latestTimestamp: price.timestamp,
+          latestClose: price.close,
+          updatedAt: new Date().toISOString(),
+        };
       });
-      liveWatchlistRef.current = nextWatchlist;
-      setLiveWatchlist(nextWatchlist);
+      if (nextWatchlist.some((watch, index) => watch !== watchlist[index])) {
+        liveWatchlistRef.current = nextWatchlist;
+        setLiveWatchlist(nextWatchlist);
+      }
       if (liveMode && liveContext) {
         const price = pricesById.get(liveContext.instrumentId);
         if (price && (price.timestamp !== liveContext.timestamp || price.close !== liveContext.close)) {
@@ -4673,9 +4809,71 @@ export function TrainingWorkbench() {
     } catch (error) {
       setLivePriceRefreshStatus(error instanceof Error ? `同步失败：${error.message}` : "同步失败");
     } finally {
+      livePriceRefreshRunningRef.current = false;
       setLivePriceRefreshRunning(false);
     }
   };
+
+  useEffect(() => {
+    livePriceRefreshRef.current = refreshLivePortfolioPrices;
+  });
+
+  useEffect(() => {
+    const livePerformanceVisible = view === "performance"
+      && (performanceSection === "live" || performanceSection === "watch");
+    if (!livePerformanceVisible || !liveStateReady || !liveStateHydratedRef.current) return;
+
+    let cancelled = false;
+    let checking = false;
+    const refreshFromStoredMarketData = () => {
+      if (cancelled || document.visibilityState === "hidden") return;
+      void livePriceRefreshRef.current?.({ ensureMarketData: false });
+    };
+    const checkAutoUpdate = async () => {
+      if (cancelled || checking || document.visibilityState === "hidden") return;
+      checking = true;
+      try {
+        const payload = await marketDataGateway.loadAutoUpdateStatus<{
+          settings?: { lastFinishedAt?: unknown; lastStatus?: unknown };
+        }>();
+        if (cancelled) return;
+        const settings = payload.settings;
+        const previousFinishedAt = liveAutoUpdateFinishedAtRef.current;
+        const nextFinishedAt = typeof settings?.lastFinishedAt === "string" && settings.lastFinishedAt
+          ? settings.lastFinishedAt
+          : null;
+        if (shouldRefreshLivePricesAfterAutoUpdate(previousFinishedAt, settings)) {
+          refreshFromStoredMarketData();
+        }
+        liveAutoUpdateFinishedAtRef.current = nextFinishedAt;
+      } catch {
+        // The next focus or interval check can recover when the web service is ready.
+      } finally {
+        checking = false;
+      }
+    };
+
+    // Hydration only restores the persisted ledger. Read the latest already
+    // synchronized candles immediately when the live performance page opens.
+    refreshFromStoredMarketData();
+    void checkAutoUpdate();
+    const timer = window.setInterval(() => void checkAutoUpdate(), 30_000);
+    const onFocus = () => {
+      refreshFromStoredMarketData();
+      void checkAutoUpdate();
+    };
+    const onVisibilityChange = () => {
+      if (document.visibilityState === "visible") onFocus();
+    };
+    window.addEventListener("focus", onFocus);
+    document.addEventListener("visibilitychange", onVisibilityChange);
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+      window.removeEventListener("focus", onFocus);
+      document.removeEventListener("visibilitychange", onVisibilityChange);
+    };
+  }, [liveStateReady, marketDataGateway, performanceSection, view]);
 
   const startLiveScan = async (skipUpdate = false) => {
     setLiveScanRunning(true);
@@ -4751,7 +4949,7 @@ export function TrainingWorkbench() {
       setDrawingUndoStack([]);
       setDrawingRedoStack([]);
       setClearNonce((nonce) => nonce + 1);
-      setTradingMode(appSettingsRef.current.tradingMode);
+      setTradingMode(tradingModeForInstrument(appSettingsRef.current.tradingMode, result.market, result.instrumentId));
       setInitialCapital(appSettingsRef.current.initialCapital);
       setCashBalance(appSettingsRef.current.initialCapital);
       setExecutionProfile(DEFAULT_EXECUTION_COST_PROFILE);
@@ -5850,8 +6048,10 @@ export function TrainingWorkbench() {
     }
   }, [buildSessionSummary, reviewGateway]);
 
+  const needsSnapshotTradeContexts = view === "sop"
+    || (view === "performance" && performanceSection === "training");
   useEffect(() => {
-    if ((view !== "performance" && view !== "sop") || !sessionSummaries.length) return;
+    if (!needsSnapshotTradeContexts || !sessionSummaries.length) return;
     const groupedEntries = new Map<string, number[]>();
     sessionSummaries.forEach((summary) => {
       const snapshotId = summary.state.dataSnapshotId ?? summary.session.dataSnapshotId;
@@ -5873,7 +6073,7 @@ export function TrainingWorkbench() {
       })
       .catch(() => undefined);
     return () => controller.abort();
-  }, [reviewGateway, sessionSummaries, view]);
+  }, [needsSnapshotTradeContexts, reviewGateway, sessionSummaries]);
 
   const performanceSessionSummaries = useMemo(
     () => view === "performance" ? sessionSummaries : [],
@@ -8184,7 +8384,7 @@ export function TrainingWorkbench() {
                   <small>{liveMode
                     ? "实盘观察按下一交易日开盘成交，不计模拟费用。"
                     : marginInstrument
-                      ? `成交模型 ${EXECUTION_ENGINE_VERSION} · BID K线 · 买入/回补用 Ask，卖出/平多用 Bid · 1 手 ${Number(instrumentEconomics?.contractSize ?? 100000).toLocaleString()} ${instrumentEconomics?.baseCurrency ?? "基础币"} · 每 Pip ${oneLotPipValue == null ? "待换算" : `${oneLotPipValue.toFixed(2)} ${instrumentEconomics?.accountCurrency ?? "USD"}`} · 杠杆 1:${instrumentEconomics?.leverage ?? 100} · 强平线 ${instrumentEconomics?.stopOutLevelPct ?? 50}%`
+                      ? `成交模型 ${EXECUTION_ENGINE_VERSION} · BID K线 · 买入/回补用 Ask，卖出/平多用 Bid · 1 手 ${Number(instrumentEconomics?.contractSize ?? 100000).toLocaleString()} ${marginContractUnit} · ${marginPipLabel} ${oneLotPipValue == null ? "待换算" : `${oneLotPipValue.toFixed(2)} ${instrumentEconomics?.accountCurrency ?? "USD"}`} · 杠杆 1:${instrumentEconomics?.leverage ?? 100} · 强平线 ${instrumentEconomics?.stopOutLevelPct ?? 50}%`
                       : `成交模型 ${EXECUTION_ENGINE_VERSION} · 佣金 ${executionProfile.commissionRateBps}bp · 滑点 ${executionProfile.slippageBps}bp · 价差 ${executionProfile.spreadBps}bp · 当根量参与 ${executionProfile.maxVolumeParticipationPct || "不限"}${executionProfile.maxVolumeParticipationPct ? "%" : ""}`}</small>
                   {!liveMode && positionSizeMode === "risk-percent" && <small>
                     {effectiveOrderStop
@@ -9193,7 +9393,7 @@ export function TrainingWorkbench() {
                 <div className="evidence-row"><span>任务状态</span><strong>{reviewState.trainingTask?.status === "completed" ? "已完成" : "进行中"}</strong></div>
                 <div className="evidence-row"><span>市场规则</span><strong>{reviewState.marketRules ? `${reviewState.marketRules.name} · ${reviewState.marketRules.version}` : "旧训练未锁定规则版本"}</strong></div>
                 <div className="evidence-row"><span>交易账户</span><strong>{isMarginEconomics(reviewState.marketRules?.instrumentEconomics)
-                  ? `外汇保证金账户 · ${reviewState.marketRules?.instrumentEconomics?.accountCurrency ?? "USD"} · 杠杆 1:${reviewState.marketRules?.instrumentEconomics?.leverage ?? 100} · 强平线 ${reviewState.marketRules?.instrumentEconomics?.stopOutLevelPct ?? 50}% · 余额 ${reviewState.cashBalance.toFixed(2)}`
+                  ? `保证金账户 · ${reviewState.marketRules?.instrumentEconomics?.accountCurrency ?? "USD"} · 杠杆 1:${reviewState.marketRules?.instrumentEconomics?.leverage ?? 100} · 强平线 ${reviewState.marketRules?.instrumentEconomics?.stopOutLevelPct ?? 50}% · 余额 ${reviewState.cashBalance.toFixed(2)}`
                   : reviewState.tradingMode === "capital" ? `资金账户 · 初始 ${reviewState.initialCapital.toFixed(2)} · 现金 ${reviewState.cashBalance.toFixed(2)}` : "收益率模式 · 不限制本金"}</strong></div>
                 <div className="evidence-row"><span>成交引擎</span><strong>{`${reviewState.executionEngineVersion} · ${reviewState.marketRules?.instrumentEconomics?.quoteBasis === "bid" ? "BID 图表 / Ask 买入回补" : "中间价"} · 佣金 ${reviewState.executionProfile.commissionRateBps}bp · 滑点 ${reviewState.executionProfile.slippageBps}bp · 价差 ${reviewState.executionProfile.spreadBps}bp`}</strong></div>
                 <div className="evidence-row"><span>规则拒单</span><strong>{reviewState.orderRejections.length}</strong></div>

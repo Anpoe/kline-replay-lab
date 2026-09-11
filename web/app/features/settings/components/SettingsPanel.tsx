@@ -107,8 +107,43 @@ export function SettingsPanel({
         {tab === "basic" ? (
           <div className="settings-section">
             <div className="settings-section-head">
-              <strong>新训练默认值</strong>
-              <span>打开“新建 Replay 训练”时优先使用这些选项。</span>
+              <strong>训练偏好与默认值</strong>
+              <span>管理回放偏好，以及新建 Replay 训练时使用的默认选项。</span>
+            </div>
+            <div className="settings-rule">
+              <div className="settings-row-action">
+                <div>
+                  <span>交易时段</span>
+                  <strong>只在指定时段训练</strong>
+                </div>
+                <SettingsSwitch
+                  checked={draft.replayTradingSession.enabled}
+                  label="只在指定时段训练"
+                  onChange={() => onDraftChange((next) => ({
+                    ...next,
+                    replayTradingSession: { ...next.replayTradingSession, enabled: !next.replayTradingSession.enabled },
+                  }))}
+                />
+              </div>
+              {draft.replayTradingSession.enabled && (
+                <div className="execution-settings-grid">
+                  <label>开始时间
+                    <input type="time" step="60" value={draft.replayTradingSession.startTime} onChange={(event) => onDraftChange((next) => ({
+                      ...next,
+                      replayTradingSession: { ...next.replayTradingSession, startTime: event.target.value },
+                    }))} />
+                  </label>
+                  <label>结束时间
+                    <input type="time" step="60" value={draft.replayTradingSession.endTime} onChange={(event) => onDraftChange((next) => ({
+                      ...next,
+                      replayTradingSession: { ...next.replayTradingSession, endTime: event.target.value },
+                    }))} />
+                  </label>
+                </div>
+              )}
+              <small>跟随图表时区，按 K 线时间判断，包含开始、不含结束；结束早于开始时表示跨午夜，例如 22:00–07:00。</small>
+              <small>保存后从下一次推进生效。单步、快进和自动播放会跳过非交易时段，跳过的历史 K 线仍完整显示；已有平仓挂单及止损止盈照常执行，开仓挂单顺延到下一个交易时段。</small>
+              <small>仅适用于非随机训练的分钟线、小时线；随机训练、日线及更大周期、实盘观察不受影响。</small>
             </div>
             <div className="settings-rule">
               <span>模拟交易账户</span>
@@ -158,7 +193,7 @@ export function SettingsPanel({
                   </label>
                 ))}
               </div>
-              <small>新建训练、切换到新市场或打开实盘观察时会按当前市场使用对应值；已保存训练继续沿用训练内记录的下单数量。外汇可按 0.01 手递增。</small>
+              <small>新建训练、切换到新市场或打开实盘观察时会按当前市场使用对应值；已保存训练继续沿用训练内记录的下单数量。外汇和黄金可按 0.01 手递增。</small>
             </div>
             <div className="settings-rule">
               <span>下单方式</span>
@@ -184,7 +219,7 @@ export function SettingsPanel({
               <small>切换只影响之后新建的训练；已开始和已保存训练会继续使用创建时锁定的账户模式。</small>
             </div>
             <div className="settings-rule">
-              <span>外汇保证金账户</span>
+              <span>外汇 / 黄金保证金账户</span>
               <div className="execution-settings-grid">
                 <label>账户币种
                   <select value={draft.fxAccountConfig.accountCurrency} onChange={(event) => onDraftChange((next) => ({
@@ -215,7 +250,7 @@ export function SettingsPanel({
                   }))} />
                 </label>
               </div>
-              <small>外汇训练固定使用保证金资金账户。账户币种等于报价币时按 1:1 换算；等于基础币时按当前汇价反算；只有第三币种账户才使用上面的手动换算率。参数会随新训练冻结。</small>
+              <small>外汇和黄金训练固定使用保证金资金账户，不使用收益率模式。账户币种等于报价币时按 1:1 换算；外汇账户币种等于基础币时按汇价反算；其他情况使用上面的手动换算率。参数会随新训练冻结。</small>
             </div>
             <div className="settings-rule">
               <span>确定性成交引擎</span>
