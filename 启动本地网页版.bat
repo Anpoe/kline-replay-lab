@@ -7,8 +7,10 @@ set "KLINE_LOCAL_URL=http://localhost:%KLINE_WEB_PORT%"
 set "KLINE_DATA_URL=http://127.0.0.1:3100/health"
 set "KLINE_LAN_IP="
 set "KLINE_MOBILE_URL="
-set "KLINE_REMOTE_HOST=kline42.dynv6.net"
-set "KLINE_REMOTE_URL=http://%KLINE_REMOTE_HOST%:%KLINE_WEB_PORT%"
+rem Remote access is optional; set KLINE_REMOTE_HOST before launching if needed.
+if not defined KLINE_REMOTE_HOST set "KLINE_REMOTE_HOST="
+set "KLINE_REMOTE_URL="
+if defined KLINE_REMOTE_HOST set "KLINE_REMOTE_URL=http://%KLINE_REMOTE_HOST%:%KLINE_WEB_PORT%"
 
 rem Phone (LAN) uses the panel detected KLINE_MOBILE_URL and the same trusted Wi-Fi.
 rem Remote (IPv6): %KLINE_REMOTE_URL%

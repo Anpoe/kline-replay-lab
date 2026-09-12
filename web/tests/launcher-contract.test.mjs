@@ -34,8 +34,9 @@ test("启动器保留局域网与远程地址提示且不自动开放防火墙",
   const source = await readFile(new URL("../../启动本地网页版.bat", import.meta.url), "utf8");
   assert.match(source, /KLINE_WEB_PORT=3101/);
   assert.match(source, /KLINE_MOBILE_URL/);
-  assert.match(source, /KLINE_REMOTE_HOST=kline42\.dynv6\.net/);
-  assert.match(source, /kline42\.dynv6\.net/);
+  assert.match(source, /KLINE_REMOTE_HOST/);
+  assert.match(source, /if\s+not\s+defined\s+KLINE_REMOTE_HOST/i);
+  assert.doesNotMatch(source, /kline42\.dynv6\.net/i);
   assert.match(source, /Remote \(IPv6\)/);
   assert.match(source, /same trusted Wi-Fi/);
   assert.match(source, /does not open a public firewall port automatically/);

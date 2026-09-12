@@ -4,6 +4,10 @@
 
 当前版本只在本机运行，不包含 Sites 托管、账号或云同步配置。
 
+## 普通用户发布包
+
+从 GitHub Releases 下载 `KLineTrainingCamp-Portable.zip` 并完整解压。发布包已经包含 Node.js 运行时、锁定的 JavaScript 依赖和 WebUI 文件，普通用户不需要安装 Node.js，也不需要执行 `npm install`。请保持 `runtime`、`web` 和 `KLineTrainingCamp.ControlPanel.exe` 的相对位置不变，然后双击根目录中的 EXE。
+
 ## 推荐启动方式
 
 双击项目根目录中的原生控制面板：
@@ -24,13 +28,13 @@ KLineTrainingCamp.ControlPanel.exe
 http://localhost:3101
 ```
 
-关闭面板窗口只会隐藏到托盘；从托盘选择“退出”会先清理由面板启动的本地服务。勾选“开机后台启动”后，Windows 启动项会直接使用 `KLineTrainingCamp.ControlPanel.exe --hidden`，因此登录时不会闪现面板窗口。旧的 `启动控制面板.bat` 与 `启动本地网页版.bat` 仅保留为兼容转发器；如果 EXE 缺失，先运行 `launcher/build-native-control-panel.ps1` 构建。
+关闭面板窗口只会隐藏到托盘；从托盘选择“退出”会先清理由面板启动的本地服务。勾选“开机后台启动”后，Windows 启动项会直接使用 `KLineTrainingCamp.ControlPanel.exe --hidden`，因此登录时不会闪现面板窗口。旧的 `启动控制面板.bat` 与 `启动本地网页版.bat` 仅保留为兼容转发器。开发者从源码运行时，如果 EXE 缺失，可执行 `launcher/build-native-control-panel.ps1` 构建。
 
 在设置 → 数据源设置中可分别开启“每日启动自动检查更新”和“每日定时检查更新”。定时检查使用运行软件这台机器的系统时间；软件在设定时间之后启动会立即执行，两个开关共享同一天一次的 claim，不会因重新打开 WebUI 或重启面板而重复自动执行。面板的“当前后台工作”和 3102 状态卡会显示 worker 状态；WebUI 只读取和显示任务状态，数据库工作由本机服务端/API 和后台 worker 完成。
 
-网页服务使用 IPv4/IPv6 双栈监听，并额外允许 `kline42.dynv6.net` 作为远程主机名。DDNS-GO 写入 AAAA 记录且防火墙明确允许 TCP 3101 后，可通过 `http://kline42.dynv6.net:3101` 访问；脚本不会自动开放公网端口。长期公网使用前应增加 HTTPS 和访问认证。
+网页服务使用 IPv4/IPv6 双栈监听。需要远程访问时，可在启动前自行设置 `KLINE_REMOTE_HOST`；发布包默认不配置固定公网域名，脚本也不会自动开放公网端口。长期公网使用前应增加 HTTPS 和访问认证。
 
-## 命令行启动
+## 开发者命令行启动
 
 环境要求：Node.js `>=22.13.0`。
 
@@ -83,4 +87,4 @@ npm run db:generate # 数据结构变化后生成迁移
 - `tests/`：自动测试。
 - `worker/`：本地全栈运行入口。
 
-产品范围、实现状态和后续规划见上一级目录的 `K线训练营2.0-方案草案.md`。
+内部产品方案、开发计划和验证记录不随正式发布包分发。

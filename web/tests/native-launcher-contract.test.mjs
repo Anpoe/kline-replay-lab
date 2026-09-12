@@ -194,6 +194,35 @@ test("WebUI 子进程解析可执行 npm.cmd 并使用可执行的 cmd 参数", 
   assert.match(source, /run dev -- --strictPort/);
 });
 
+test("正式发布包使用内置 Node 与打包 WebUI，并对缺少依赖给出可恢复提示", async () => {
+  const source = await readFile(new URL("../../launcher/NativeProcessSupervisor.cs", import.meta.url), "utf8");
+
+  assert.match(source, /release-manifest\.json/);
+  assert.match(source, /ResolveNodeCommand[\s\S]{0,300}Path\.Combine\(root,\s*"runtime",\s*"node\.exe"\)/);
+  assert.match(source, /Path\.Combine\(webDirectory,\s*"node_modules",\s*"vinext",\s*"dist",\s*"cli\.js"\)/);
+  assert.match(source, /dev --hostname/);
+  assert.match(source, /unzipper/);
+  assert.match(source, /npm install/);
+});
+
+test("公开发布脚本构建生产包并排除个人开发文档", async () => {
+  const script = await readFile(new URL("../../launcher/build-public-release.ps1", import.meta.url), "utf8");
+
+  assert.match(script, /npm\.cmd/);
+  assert.match(script, /['"]ci['"]/);
+  assert.match(script, /['"]run['"][\s\S]{0,80}['"]build['"]/);
+  assert.match(script, /\$stageRuntime\s*=\s*Join-Path\s+\$stageRoot\s+'runtime'/);
+  assert.match(script, /\$stageRuntime[\s\S]{0,120}['"]node\.exe['"]/);
+  assert.match(script, /-OutputPath/);
+  assert.match(script, /\$releaseExcludedDirectories\s*=\s*@\(/);
+  assert.match(script, /Join-Path\s+\$stageWeb\s+'\.wrangler'/);
+  assert.match(script, /Join-Path\s+\$stageWeb\s+'\.local-data'/);
+  assert.match(script, /release-manifest\.json/);
+  assert.match(script, /AGENTS\.md/);
+  assert.match(script, /docs/);
+  assert.match(script, /\.zip/);
+});
+
 test("WebUI Vite 配置拒绝端口回退", async () => {
   const source = await readFile(new URL("../vite.config.ts", import.meta.url), "utf8");
 
@@ -224,33 +253,35 @@ test("原生控制面板由构建脚本输出为项目根目录 EXE", async () =
   assert.equal([...source].every((character) => character.codePointAt(0) <= 0x7f), true);
 });
 
-test("原生构建产物携带自定义图标而不是 Windows 默认应用图标", { skip: process.platform !== "win32" }, () => {
+test("原生构建产物携带自定义图标而不是 Windows 默认应用图标", { skip: process.platform !== "win32" }, async () => {
   const buildScript = fileURLToPath(new URL("../../launcher/build-native-control-panel.ps1", import.meta.url));
-  const executable = fileURLToPath(new URL("../../KLineTrainingCamp.ControlPanel.exe", import.meta.url));
-  const build = spawnSync("powershell.exe", [
-    "-NoProfile",
-    "-ExecutionPolicy",
-    "Bypass",
-    "-File",
-    buildScript,
-  ], { encoding: "utf8" });
+  const temporaryDirectory = await mkdtemp(join(tmpdir(), "kline-icon-test-"));
+  try {
+    const executable = join(temporaryDirectory, "KLineTrainingCamp.ControlPanel.exe");
+    const build = spawnSync("powershell.exe", [
+      "-NoProfile",
+      "-ExecutionPolicy",
+      "Bypass",
+      "-File",
+      buildScript,
+      "-OutputPath",
+      executable,
+    ], { encoding: "utf8" });
 
-  assert.equal(build.status, 0, `${build.stdout}\n${build.stderr}`);
-  return mkdtemp(join(tmpdir(), "kline-icon-test-")).then(async (temporaryDirectory) => {
-    try {
-      const baselineSource = join(temporaryDirectory, "NoIcon.cs");
-      const baselineExecutable = join(temporaryDirectory, "NoIcon.exe");
-      await writeFile(baselineSource, "using System; internal static class NoIcon { [STAThread] private static void Main() {} }", "utf8");
-      const compilerCandidates = [
-        join(process.env.WINDIR, "Microsoft.NET", "Framework64", "v4.0.30319", "csc.exe"),
-        join(process.env.WINDIR, "Microsoft.NET", "Framework", "v4.0.30319", "csc.exe"),
-      ];
-      const compiler = compilerCandidates.find(existsSync);
-      assert.ok(compiler, "找不到 .NET Framework csc.exe");
-      const baselineBuild = spawnSync(compiler, ["/nologo", "/target:winexe", `/out:${baselineExecutable}`, baselineSource], { encoding: "utf8" });
-      assert.equal(baselineBuild.status, 0, `${baselineBuild.stdout}\n${baselineBuild.stderr}`);
+    assert.equal(build.status, 0, `${build.stdout}\n${build.stderr}`);
+    const baselineSource = join(temporaryDirectory, "NoIcon.cs");
+    const baselineExecutable = join(temporaryDirectory, "NoIcon.exe");
+    await writeFile(baselineSource, "using System; internal static class NoIcon { [STAThread] private static void Main() {} }", "utf8");
+    const compilerCandidates = [
+      join(process.env.WINDIR, "Microsoft.NET", "Framework64", "v4.0.30319", "csc.exe"),
+      join(process.env.WINDIR, "Microsoft.NET", "Framework", "v4.0.30319", "csc.exe"),
+    ];
+    const compiler = compilerCandidates.find(existsSync);
+    assert.ok(compiler, "找不到 .NET Framework csc.exe");
+    const baselineBuild = spawnSync(compiler, ["/nologo", "/target:winexe", `/out:${baselineExecutable}`, baselineSource], { encoding: "utf8" });
+    assert.equal(baselineBuild.status, 0, `${baselineBuild.stdout}\n${baselineBuild.stderr}`);
 
-      const compareIcons = String.raw`
+    const compareIcons = String.raw`
 Add-Type -AssemblyName System.Drawing
 function Get-IconHash([System.Drawing.Icon] $Icon) {
   $bitmap = $Icon.ToBitmap()
@@ -286,11 +317,10 @@ finally {
         },
       });
 
-      assert.equal(comparison.status, 0, `${comparison.stdout}\n${comparison.stderr}`);
-    } finally {
-      await rm(temporaryDirectory, { recursive: true, force: true });
-    }
-  });
+    assert.equal(comparison.status, 0, `${comparison.stdout}\n${comparison.stderr}`);
+  } finally {
+    await rm(temporaryDirectory, { recursive: true, force: true });
+  }
 });
 
 test("窗口和托盘复用 EXE 内嵌图标", async () => {

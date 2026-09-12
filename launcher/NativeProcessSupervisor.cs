@@ -46,6 +46,7 @@ namespace KLineTrainingCamp.Launcher
         public const int DataPort = 3100;
         public const int WebUiPort = 3101;
         public const int BackgroundWorkerPort = 3102;
+        private const string ReleaseManifestFileName = "release-manifest.json";
         private const int HealthWaitAttempts = 60;
         private const int HealthWaitDelayMilliseconds = 500;
         private const int LogQueueLimit = 1000;
@@ -60,6 +61,7 @@ namespace KLineTrainingCamp.Launcher
         private readonly string projectRoot;
         private readonly string webDirectory;
         private readonly string nodeCommand;
+        private readonly bool packagedRelease;
         private CancellationTokenSource startCancellation = new CancellationTokenSource();
         private int queuedLogCount;
         private bool disposed;
@@ -68,9 +70,11 @@ namespace KLineTrainingCamp.Launcher
         {
             projectRoot = FindProjectRoot(startingDirectory ?? AppDomain.CurrentDomain.BaseDirectory);
             webDirectory = Path.Combine(projectRoot, "web");
-            nodeCommand = string.IsNullOrWhiteSpace(nodeExecutable)
-                ? Environment.GetEnvironmentVariable("KLINE_NODE_EXE") ?? "node.exe"
+            string configuredNode = string.IsNullOrWhiteSpace(nodeExecutable)
+                ? Environment.GetEnvironmentVariable("KLINE_NODE_EXE")
                 : nodeExecutable;
+            packagedRelease = File.Exists(Path.Combine(projectRoot, ReleaseManifestFileName));
+            nodeCommand = ResolveNodeCommand(projectRoot, configuredNode, packagedRelease);
         }
 
         public string ProjectRoot { get { return projectRoot; } }
@@ -175,6 +179,7 @@ namespace KLineTrainingCamp.Launcher
                         return;
                     }
 
+                    ValidateServicePrerequisites(service);
                     Process process = CreateServiceProcess(service);
                     var managed = new ManagedProcess { Service = service, Process = process };
                     bool started = false;
@@ -525,10 +530,18 @@ namespace KLineTrainingCamp.Launcher
 
             if (service == ManagedService.WebUi)
             {
-                string commandShell = Environment.GetEnvironmentVariable("ComSpec");
-                startInfo.FileName = string.IsNullOrWhiteSpace(commandShell) ? "cmd.exe" : commandShell;
-                string npmCommand = ResolveNpmCommand();
-                startInfo.Arguments = "/d /s /c \"\"" + npmCommand + "\" run dev -- --strictPort\"";
+                if (packagedRelease)
+                {
+                    startInfo.FileName = nodeCommand;
+                    startInfo.Arguments = "node_modules\\vinext\\dist\\cli.js dev --hostname :: --port " + WebUiPort + " --strictPort";
+                }
+                else
+                {
+                    string commandShell = Environment.GetEnvironmentVariable("ComSpec");
+                    startInfo.FileName = string.IsNullOrWhiteSpace(commandShell) ? "cmd.exe" : commandShell;
+                    string npmCommand = ResolveNpmCommand();
+                    startInfo.Arguments = "/d /s /c \"\"" + npmCommand + "\" run dev -- --strictPort\"";
+                }
             }
             else
             {
@@ -545,6 +558,31 @@ namespace KLineTrainingCamp.Launcher
                 startInfo.EnvironmentVariables["KLINE_WEB_ORIGIN"] = "http://127.0.0.1:" + WebUiPort;
             }
             return new Process { StartInfo = startInfo, EnableRaisingEvents = true };
+        }
+
+        private void ValidateServicePrerequisites(ManagedService service)
+        {
+            if (Path.IsPathRooted(nodeCommand) && !File.Exists(nodeCommand))
+                throw new FileNotFoundException("找不到随发布包附带的 Node.js 运行时：" + nodeCommand + "。", nodeCommand);
+
+            if (service == ManagedService.Data && !File.Exists(Path.Combine(webDirectory, "node_modules", "unzipper", "package.json")))
+                throw new FileNotFoundException("缺少本地运行依赖 unzipper。开发目录请在 web 目录执行 npm install；正式发布包请重新解压完整安装包。", Path.Combine(webDirectory, "node_modules", "unzipper"));
+
+            if (service == ManagedService.WebUi && packagedRelease)
+            {
+                string cliPath = Path.Combine(webDirectory, "node_modules", "vinext", "dist", "cli.js");
+                string buildPath = Path.Combine(webDirectory, "dist", "server", "index.js");
+                if (!File.Exists(cliPath) || !File.Exists(buildPath))
+                    throw new FileNotFoundException("正式发布包缺少 WebUI 生产构建产物，请重新生成发布包。", buildPath);
+            }
+        }
+
+        private static string ResolveNodeCommand(string root, string configuredNode, bool preferBundled)
+        {
+            string bundledNode = Path.Combine(root, "runtime", "node.exe");
+            if (preferBundled) return bundledNode;
+            if (!string.IsNullOrWhiteSpace(configuredNode)) return configuredNode;
+            return File.Exists(bundledNode) ? bundledNode : "node.exe";
         }
 
         private string ResolveNpmCommand()

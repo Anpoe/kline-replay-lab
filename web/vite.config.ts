@@ -6,6 +6,7 @@ const LOCAL_DATABASE_ID =
 
 // macOS Seatbelt blocks FSEvents, so Codex previews need polling for HMR.
 const isCodexSeatbeltSandbox = process.env.CODEX_SANDBOX === "seatbelt";
+const configuredRemoteHost = process.env.KLINE_REMOTE_HOST?.trim();
 
 const localBindingConfig = {
   main: "./worker/index.ts",
@@ -38,9 +39,9 @@ export default defineConfig(async () => {
       host: "::",
       // The worker owns 3102, so never let Vite move WebUI off its fixed port.
       strictPort: true,
-      // Keep Vite's DNS-rebinding protection and add only the user's dynv6
-      // hostname. localhost and literal IP addresses remain allowed by Vite.
-      allowedHosts: ["kline42.dynv6.net"],
+      // Keep Vite's DNS-rebinding protection. A remote hostname is opt-in via
+      // KLINE_REMOTE_HOST; localhost and literal IP addresses remain allowed.
+      allowedHosts: configuredRemoteHost ? [configuredRemoteHost] : [],
       // Vinext/Miniflare can briefly reconnect its worker during cold start.
       // The application already surfaces actionable request failures in-page,
       // so do not leave Vite's developer overlay stuck over a healthy local app.

@@ -1,11 +1,17 @@
 [CmdletBinding()]
-param()
+param(
+    [string]$OutputPath
+)
 
 $ErrorActionPreference = 'Stop'
 
 $launcherDirectory = Split-Path -Parent $PSCommandPath
 $projectRoot = Split-Path -Parent $launcherDirectory
-$outputPath = Join-Path $projectRoot 'KLineTrainingCamp.ControlPanel.exe'
+if ([string]::IsNullOrWhiteSpace($OutputPath)) {
+    $outputPath = Join-Path $projectRoot 'KLineTrainingCamp.ControlPanel.exe'
+} else {
+    $outputPath = [IO.Path]::GetFullPath($OutputPath)
+}
 $assetDirectory = Join-Path $launcherDirectory 'assets'
 $iconPath = Join-Path $assetDirectory 'KLineTrainingCamp.ico'
 $iconPreviewPath = Join-Path $assetDirectory 'KLineTrainingCamp.png'
@@ -34,6 +40,7 @@ if ($missingSource) {
 $temporaryDirectory = Join-Path ([IO.Path]::GetTempPath()) ('KLineTrainingCamp.Icon.' + [Guid]::NewGuid().ToString('N'))
 try {
     New-Item -ItemType Directory -Path $assetDirectory -Force | Out-Null
+    New-Item -ItemType Directory -Path (Split-Path -Parent $outputPath) -Force | Out-Null
     New-Item -ItemType Directory -Path $temporaryDirectory -Force | Out-Null
     $iconGeneratorExe = Join-Path $temporaryDirectory 'KLineTrainingCamp.IconGenerator.exe'
     $iconCompilerArguments = @(

@@ -1,2 +1,8 @@
 # Local CodeGraph index; regenerate with `codegraph sync`.
 .codegraph/
+
+# Private development notes and agent-only instructions.
+/AGENTS.md
+/*-方案草案.md
+/docs/
+/artifacts/

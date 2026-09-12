@@ -57,10 +57,13 @@ test("exposes the web UI on IPv4 and IPv6 while keeping remote access explicit",
   ]);
 
   assert.match(viteConfig, /host:\s*"::"/);
-  assert.match(viteConfig, /allowedHosts:\s*\["kline42\.dynv6\.net"\]/);
+  assert.match(viteConfig, /configuredRemoteHost/);
+  assert.match(viteConfig, /allowedHosts:\s*configuredRemoteHost\s*\?/);
+  assert.doesNotMatch(viteConfig, /kline42\.dynv6\.net/i);
   assert.match(packageJson, /vinext dev --hostname ::/);
   assert.match(launcher, /KLINE_MOBILE_URL/);
-  assert.match(launcher, /KLINE_REMOTE_HOST=kline42\.dynv6\.net/);
+  assert.match(launcher, /KLINE_REMOTE_HOST/);
+  assert.doesNotMatch(launcher, /kline42\.dynv6\.net/i);
   assert.match(launcher, /Remote \(IPv6\):/);
   assert.match(launcher, /same trusted Wi-Fi/);
   assert.match(launcher, /does not open a public firewall port automatically/);
