@@ -29,6 +29,10 @@ test("ships the K-line training workbench instead of the starter", async () => {
   assert.match(layout, /ResizeObserver loop completed with undelivered notifications/);
   assert.match(layout, /stopImmediatePropagation/);
   assert.match(workbench, /未来已隐藏/);
+  assert.match(workbench, /const hideTaskInstrument = trainingTask\?\.status === "active" && trainingTask\.hideInstrument/);
+  assert.match(workbench, /const hideTaskDate = trainingTask\?\.status === "active" && trainingTask\.hideDate/);
+  assert.match(workbench, /const hideTaskPrice = trainingTask\?\.status === "active" && trainingTask\.hidePrice/);
+  assert.match(workbench, /REPLAY · \{trainingComplete \? "未来已揭示" : "未来已隐藏"\}/);
   assert.match(workbench, /下一根开盘/);
   assert.match(workbench, /K 线数据库/);
   assert.match(workbench, /queueClosePosition/);

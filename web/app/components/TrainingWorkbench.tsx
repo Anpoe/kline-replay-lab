@@ -1996,13 +1996,16 @@ export function TrainingWorkbench() {
   ]);
   const selectedPatternPresetDraft = patternPresetDrafts.find((preset) => preset.id === selectedPatternPresetId)
     ?? patternPresetDrafts[0];
+  const hideTaskInstrument = trainingTask?.status === "active" && trainingTask.hideInstrument;
+  const hideTaskDate = trainingTask?.status === "active" && trainingTask.hideDate;
+  const hideTaskPrice = trainingTask?.status === "active" && trainingTask.hidePrice;
   const trainingDateLabel = (timestamp: number) => {
-    if (!trainingTask?.hideDate) return formatDate(timestamp, timeframe);
+    if (!hideTaskDate) return formatDate(timestamp, timeframe);
     const index = bars.findIndex((bar) => bar.timestamp === timestamp);
     return index >= 0 ? `K线 #${index + 1}` : "日期已隐藏";
   };
   const trainingPriceLabel = (price: number | undefined) => (
-    trainingTask?.hidePrice ? "•••" : price?.toFixed(instrument.pricePrecision) ?? "--"
+    hideTaskPrice ? "•••" : price?.toFixed(instrument.pricePrecision) ?? "--"
   );
   const openPositions = useMemo(() => positions.filter((position) => position.status === "open"), [positions]);
   const closedPositions = useMemo(() => positions.filter((position) => position.status === "closed"), [positions]);
@@ -2148,8 +2151,7 @@ export function TrainingWorkbench() {
   const trainingComplete = trainingTask?.status === "completed";
   const rewindLocked = Boolean(trainingTask?.randomRun);
   const reviewLocked = Boolean(
-    trainingTask?.status === "active"
-    && (trainingTask.hideInstrument || trainingTask.hideDate || trainingTask.hidePrice),
+    hideTaskInstrument || hideTaskDate || hideTaskPrice,
   );
   const planScore = decisionScore(decision);
   const decisionMarkers = useMemo<DecisionMarker[]>(() => decisionSubmissions
@@ -5446,6 +5448,15 @@ export function TrainingWorkbench() {
     const targetCursor = backfillTarget?.dataIndex ?? cursor;
     const targetBar = bars[targetCursor] ?? currentBar;
     if (!targetBar) return;
+    if (!hasDecisionContent(decision)) {
+      if (editingSubmission || backfillTarget) {
+        setSaveState("决策内容为空 · 未保存");
+        return;
+      }
+      setSaveState("未填写决策 · 仅揭示下一根");
+      revealNext();
+      return;
+    }
     if (editingSubmission) {
       const nextDecision: Decision = {
         ...decision,
@@ -7286,7 +7297,7 @@ export function TrainingWorkbench() {
       <main className="workspace">
         <header className="topbar">
           <div className="instrument-selectors">
-            {trainingTask?.hideInstrument ? (
+            {hideTaskInstrument ? (
               <span className="blind-pill">品种已隐藏</span>
             ) : (
               <>
@@ -7927,14 +7938,14 @@ export function TrainingWorkbench() {
             <section className="chart-stage">
               <div className="chart-heading">
                 <div>
-                  <strong>{trainingTask?.hideInstrument ? "BLIND" : instrument.symbol}</strong>
-                  <span>{trainingTask?.hideInstrument
+                  <strong>{hideTaskInstrument ? "BLIND" : instrument.symbol}</strong>
+                  <span>{hideTaskInstrument
                     ? `品种已隐藏 · ${timeframeLabel(chartTimeframe)}${showingCanonicalChart ? "" : ` · 训练基准 ${timeframeLabel(timeframe)}`}`
                     : `${instrument.name} · ${timeframeLabel(chartTimeframe)}${showingCanonicalChart ? "" : ` · 训练基准 ${timeframeLabel(timeframe)}`} · 历史训练`}</span>
                 </div>
                 {currentBar && (
                   <div className="ohlc-line">
-                    {trainingTask?.hidePrice ? <span><EyeOff size={13} />绝对价格已隐藏</span> : (
+                    {hideTaskPrice ? <span><EyeOff size={13} />绝对价格已隐藏</span> : (
                       <>
                         <span>O {currentBar.open.toFixed(instrument.pricePrecision)}</span>
                         <span>H {currentBar.high.toFixed(instrument.pricePrecision)}</span>
@@ -7971,7 +7982,7 @@ export function TrainingWorkbench() {
                   <BookOpenCheck size={17} />
                   <div>
                     <strong>可能是重复行情 · {Math.round(duplicateMarketWarning.overlapRatio * 100)}%</strong>
-                    <span>{trainingTask.hideInstrument || trainingTask.hideDate
+                    <span>{hideTaskInstrument || hideTaskDate
                       ? `与训练库中的一场历史训练高度重叠 · ${duplicateMarketWarning.overlapBars}/${duplicateMarketWarning.currentBarCount} 根`
                       : `与 ${duplicateMarketWarning.session.instrumentId} · ${timeframeLabel(duplicateMarketWarning.session.timeframe)} · ${formatDate(duplicateMarketWarning.state.trainingTask!.startTimestamp, duplicateMarketWarning.session.timeframe)} 的训练高度重叠`}</span>
                   </div>
@@ -8170,7 +8181,7 @@ export function TrainingWorkbench() {
                     <KLineReplayChart
                       bars={renderedChartBars}
                       dataIndexOffset={showingCanonicalChart ? chartDataIndexOffset : 0}
-                      symbol={trainingTask?.hideInstrument ? "BLIND" : instrument.symbol}
+                      symbol={hideTaskInstrument ? "BLIND" : instrument.symbol}
                       timezone={instrument.timezone}
                       timeframe={chartTimeframe}
                       pricePrecision={instrument.pricePrecision}
@@ -8184,8 +8195,8 @@ export function TrainingWorkbench() {
                       drawings={showingCanonicalChart ? drawings : []}
                       selectedDrawingId={showingCanonicalChart ? selectedDrawingId : ""}
                       drawingsRestoreNonce={showingCanonicalChart ? drawingsRestoreNonce : 0}
-                      hideDate={Boolean(trainingTask?.hideDate)}
-                      hidePrice={Boolean(trainingTask?.hidePrice)}
+                      hideDate={hideTaskDate}
+                      hidePrice={hideTaskPrice}
                       onDecisionSelect={setSelectedDecisionId}
                       onProtectionPriceSelect={showingCanonicalChart ? applyDraftProtectionPrice : ignoreProtectionPriceSelect}
                       onProtectionLineMove={showingCanonicalChart ? moveProtectionLine : rejectProtectionLineMove}
@@ -8205,7 +8216,7 @@ export function TrainingWorkbench() {
                       <div className="decision-chart-card-head">
                         <div>
                           <span>{selectedDecision.autoGenerated ? "订单自动计划" : selectedDecision.backfilled ? "补写决策" : "已提交决策"}</span>
-                          <strong>{trainingTask?.hideDate ? `K线 #${selectedDecision.cursor + 1}` : formatDate(selectedDecision.barTimestamp, timeframe)}</strong>
+                          <strong>{hideTaskDate ? `K线 #${selectedDecision.cursor + 1}` : formatDate(selectedDecision.barTimestamp, timeframe)}</strong>
                         </div>
                         <button aria-label="关闭决策卡" onClick={() => setSelectedDecisionId("")}>×</button>
                       </div>
@@ -8215,9 +8226,9 @@ export function TrainingWorkbench() {
                         {selectedDecision.decision.reasons.map((reason) => <span key={reason}>{reason}</span>)}
                       </div>
                       <div className="decision-chart-levels">
-                        <span>参考价 <strong>{trainingTask?.hidePrice ? "已隐藏" : selectedDecision.referencePrice.toFixed(instrument.pricePrecision)}</strong></span>
-                        <span>失效 <strong>{trainingTask?.hidePrice ? "训练结束后揭示" : selectedDecision.decision.stop || "未填写"}</strong></span>
-                        <span>目标 <strong>{trainingTask?.hidePrice ? "训练结束后揭示" : selectedDecision.decision.target || "未填写"}</strong></span>
+                        <span>参考价 <strong>{hideTaskPrice ? "已隐藏" : selectedDecision.referencePrice.toFixed(instrument.pricePrecision)}</strong></span>
+                        <span>失效 <strong>{hideTaskPrice ? "训练结束后揭示" : selectedDecision.decision.stop || "未填写"}</strong></span>
+                        <span>目标 <strong>{hideTaskPrice ? "训练结束后揭示" : selectedDecision.decision.target || "未填写"}</strong></span>
                       </div>
                       <DecisionLinkedTradeSummary
                         positions={linkedDecisionPositions}
@@ -8235,14 +8246,14 @@ export function TrainingWorkbench() {
                       </div>
                     </div>
                   )}
-                  <div className="replay-watermark">REPLAY · 未来已隐藏</div>
+                  <div className="replay-watermark">REPLAY · {trainingComplete ? "未来已揭示" : "未来已隐藏"}</div>
                   <div className="chart-touch-hint">长按 K 线补写决策</div>
                 </div>
               </div>
 
               <div className="replay-controls">
                 <div className="progress-meta">
-                  <span>{currentBar ? (trainingTask?.hideDate ? `训练第 ${currentTaskProgress.revealed} 根` : formatDate(currentBar.timestamp, timeframe)) : "--"}</span>
+                  <span>{currentBar ? (hideTaskDate ? `训练第 ${currentTaskProgress.revealed} 根` : formatDate(currentBar.timestamp, timeframe)) : "--"}</span>
                   <span>{trainingTask ? `${currentTaskProgress.revealed} / ${currentTaskProgress.total} 根` : `${cursor + 1} / ${bars.length} 根`}</span>
                 </div>
                 <div className="progress-track"><span style={{ width: `${progress}%` }} /></div>
@@ -8572,8 +8583,8 @@ export function TrainingWorkbench() {
                 <div className="decision-backfill-target">
                   <div>
                     <span>{editingDecisionId ? "正在编辑" : "正在补写"}</span>
-                    <strong>{trainingTask?.hideDate ? `K线 #${decisionTarget.dataIndex + 1}` : formatDate(decisionTarget.timestamp, timeframe)}</strong>
-                    <small>{trainingTask?.hidePrice ? "参考价已隐藏" : `参考价 ${decisionTarget.referencePrice.toFixed(instrument.pricePrecision)}`}</small>
+                    <strong>{hideTaskDate ? `K线 #${decisionTarget.dataIndex + 1}` : formatDate(decisionTarget.timestamp, timeframe)}</strong>
+                    <small>{hideTaskPrice ? "参考价已隐藏" : `参考价 ${decisionTarget.referencePrice.toFixed(instrument.pricePrecision)}`}</small>
                   </div>
                   <button type="button" onClick={cancelDecisionBackfill}>取消</button>
                 </div>
@@ -8720,10 +8731,10 @@ export function TrainingWorkbench() {
               </fieldset>
               <div className="price-plan">
                 <button type="button" className={`decision-price-level${protectionPriceSelection === "stop-loss" ? " active" : ""}`} onClick={() => setProtectionPriceSelection((current) => current === "stop-loss" ? null : "stop-loss")}>
-                  <span>失效 / 止损</span><strong>{trainingTask?.hidePrice ? "已隐藏" : decision.stop || "点击图表取点"}</strong>
+                  <span>失效 / 止损</span><strong>{hideTaskPrice ? "已隐藏" : decision.stop || "点击图表取点"}</strong>
                 </button>
                 <button type="button" className={`decision-price-level${protectionPriceSelection === "take-profit" ? " active" : ""}`} onClick={() => setProtectionPriceSelection((current) => current === "take-profit" ? null : "take-profit")}>
-                  <span>第一目标</span><strong>{trainingTask?.hidePrice ? "已隐藏" : decision.target || "点击图表取点"}</strong>
+                  <span>第一目标</span><strong>{hideTaskPrice ? "已隐藏" : decision.target || "点击图表取点"}</strong>
                 </button>
                 <button
                   type="button"
