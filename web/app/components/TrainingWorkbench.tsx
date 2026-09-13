@@ -855,6 +855,7 @@ type SyncedPreferences = {
     minPrice: string;
     maxPrice: string;
     minVolume: string;
+    excludeLimitUp?: boolean;
     sort: LiveScanSort;
     limit: number;
   };
@@ -1759,6 +1760,7 @@ export function TrainingWorkbench() {
   const [liveScanMinPrice, setLiveScanMinPrice] = useState("");
   const [liveScanMaxPrice, setLiveScanMaxPrice] = useState("");
   const [liveScanMinVolume, setLiveScanMinVolume] = useState("");
+  const [liveScanExcludeLimitUp, setLiveScanExcludeLimitUp] = useState(false);
   const [liveScanSort, setLiveScanSort] = useState<LiveScanSort>("turnover");
   const [liveScanLimit, setLiveScanLimit] = useState(100);
   const [liveScanStatus, setLiveScanStatus] = useState("");
@@ -2576,6 +2578,7 @@ export function TrainingWorkbench() {
       minPrice: liveScanMinPrice,
       maxPrice: liveScanMaxPrice,
       minVolume: liveScanMinVolume,
+      excludeLimitUp: liveScanExcludeLimitUp,
       sort: liveScanSort,
       limit: liveScanLimit,
     },
@@ -2595,6 +2598,7 @@ export function TrainingWorkbench() {
     liveScanMaxPrice,
     liveScanMinPrice,
     liveScanMinVolume,
+    liveScanExcludeLimitUp,
     liveScanPresetIds,
     liveScanResume,
     liveScanSort,
@@ -2682,6 +2686,7 @@ export function TrainingWorkbench() {
       if (typeof settings.minPrice === "string") setLiveScanMinPrice(settings.minPrice);
       if (typeof settings.maxPrice === "string") setLiveScanMaxPrice(settings.maxPrice);
       if (typeof settings.minVolume === "string") setLiveScanMinVolume(settings.minVolume);
+      if (typeof settings.excludeLimitUp === "boolean") setLiveScanExcludeLimitUp(settings.excludeLimitUp);
       if (settings.sort === "turnover" || settings.sort === "volume" || settings.sort === "change") setLiveScanSort(settings.sort);
       if (Number.isFinite(settings.limit)) setLiveScanLimit(normalizeLiveScanLimit(settings.limit));
     }
@@ -5032,6 +5037,7 @@ export function TrainingWorkbench() {
         minPrice: liveScanMinPrice,
         maxPrice: liveScanMaxPrice,
         minVolume: liveScanMinVolume,
+        excludeLimitUp: liveScanExcludeLimitUp,
         sort: liveScanSort,
         limit: liveScanLimit,
       });
@@ -7817,6 +7823,7 @@ export function TrainingWorkbench() {
             minPrice={liveScanMinPrice}
             maxPrice={liveScanMaxPrice}
             minVolume={liveScanMinVolume}
+            excludeLimitUp={liveScanExcludeLimitUp}
             sort={liveScanSort}
             limit={liveScanLimit}
             status={liveScanStatus}
@@ -7836,6 +7843,7 @@ export function TrainingWorkbench() {
             onMinPriceChange={setLiveScanMinPrice}
             onMaxPriceChange={setLiveScanMaxPrice}
             onMinVolumeChange={setLiveScanMinVolume}
+            onExcludeLimitUpChange={setLiveScanExcludeLimitUp}
             onSortChange={setLiveScanSort}
             onLimitChange={(limit) => setLiveScanLimit(normalizeLiveScanLimit(limit))}
             onStart={(skipUpdate) => void startLiveScan(skipUpdate)}

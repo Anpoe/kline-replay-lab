@@ -314,6 +314,14 @@ button { color: inherit; }
 .live-scan-market button small { color: var(--faint); font-size: 8px; font-weight: 500; }
 .live-scan-market button.active { color: var(--accent-strong); background: var(--accent-soft); border-color: rgba(32, 201, 151, .35); }
 .live-scan-filter-grid { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 8px; margin-top: 13px; }
+.live-scan-filter-options { display: flex; align-items: center; gap: 8px; margin-top: 9px; }
+.live-scan-filter-options label { display: inline-flex; align-items: center; gap: 6px; min-height: 30px; padding: 6px 9px; color: var(--muted); background: var(--surface-raised); border: 1px solid var(--line); border-radius: 999px; cursor: pointer; font-size: 9px; white-space: nowrap; }
+.live-scan-filter-options label:has(input:checked) { color: var(--accent-strong); background: var(--accent-soft); border-color: rgba(32, 201, 151, .3); }
+.live-scan-filter-options input { appearance: none; display: grid; place-items: center; width: 14px; height: 14px; flex: 0 0 auto; margin: 0; background: transparent; border: 1px solid var(--line-strong); border-radius: 4px; }
+.live-scan-filter-options input::after { content: ""; width: 7px; height: 4px; border-left: 2px solid #07120f; border-bottom: 2px solid #07120f; transform: rotate(-45deg) translate(1px, -1px); opacity: 0; }
+.live-scan-filter-options input:checked { background: var(--accent); border-color: var(--accent); }
+.live-scan-filter-options input:checked::after { opacity: 1; }
+.live-scan-filter-options small { color: var(--faint); font-size: 8px; }
 .task-error strong { display: block; margin-bottom: 7px; }
 .task-error button { padding: 0; color: #f0c16e; background: transparent; border: 0; cursor: pointer; font-size: 9px; }
 .live-scan-results { margin-top: 14px; overflow: hidden; border: 1px solid var(--line); border-radius: 10px; }

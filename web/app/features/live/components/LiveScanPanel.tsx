@@ -13,6 +13,7 @@ type LiveScanPanelProps = {
   minPrice: string;
   maxPrice: string;
   minVolume: string;
+  excludeLimitUp: boolean;
   sort: LiveScanSort;
   limit: number;
   status: string;
@@ -26,6 +27,7 @@ type LiveScanPanelProps = {
   onMinPriceChange: (value: string) => void;
   onMaxPriceChange: (value: string) => void;
   onMinVolumeChange: (value: string) => void;
+  onExcludeLimitUpChange: (value: boolean) => void;
   onSortChange: (sort: LiveScanSort) => void;
   onLimitChange: (limit: number) => void;
   onStart: (skipUpdate: boolean) => void;
@@ -40,6 +42,7 @@ export function LiveScanPanel({
   minPrice,
   maxPrice,
   minVolume,
+  excludeLimitUp,
   sort,
   limit,
   status,
@@ -53,6 +56,7 @@ export function LiveScanPanel({
   onMinPriceChange,
   onMaxPriceChange,
   onMinVolumeChange,
+  onExcludeLimitUpChange,
   onSortChange,
   onLimitChange,
   onStart,
@@ -102,6 +106,16 @@ export function LiveScanPanel({
           <label>排序<select value={sort} onChange={(event) => onSortChange(event.target.value as LiveScanSort)}><option value="turnover">平均成交额从高到低</option><option value="volume">平均成交量从高到低</option><option value="change">当日涨幅从高到低</option></select></label>
           <label>最多显示<select value={limit} onChange={(event) => onLimitChange(Number(event.target.value))}><option value={50}>50 个</option><option value={100}>100 个</option><option value={200}>200 个</option><option value={500}>500 个</option></select></label>
         </div>
+
+        {market === "CN" && (
+          <div className="live-scan-filter-options">
+            <label title="按各板块涨停价排除当日收盘涨停的股票">
+              <input type="checkbox" checked={excludeLimitUp} onChange={(event) => onExcludeLimitUpChange(event.target.checked)} />
+              <span>排除涨停</span>
+              <small>按板块涨停价判断</small>
+            </label>
+          </div>
+        )}
 
         {status && <div className="pattern-scan-status"><Activity size={14} />{status}</div>}
         {error && <div className="task-error"><strong>{error}</strong><button type="button" onClick={() => onStart(true)}>使用本地现有最新数据筛选</button></div>}

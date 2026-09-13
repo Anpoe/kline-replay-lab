@@ -10,6 +10,7 @@ import {
   aggregateMonthly,
   aggregateWeekly,
   classifyTdxInstrument,
+  cnPriceLimitRatio,
   instrumentIdFromEntry,
   parseTdxDayBuffer,
 } from "../local-data/tdx-day.mjs";
@@ -63,6 +64,13 @@ test("TDX paths map to stable ids and common asset classes", () => {
   assert.equal(classifyTdxInstrument("000001.SH"), "index");
   assert.equal(classifyTdxInstrument("510300.SH"), "fund");
   assert.equal(classifyTdxInstrument("123001.SZ"), "convertible-bond");
+});
+
+test("CN stock codes resolve to their board price-limit ratios", () => {
+  assert.equal(cnPriceLimitRatio("600519.SH"), 0.1);
+  assert.equal(cnPriceLimitRatio("688001.SH"), 0.2);
+  assert.equal(cnPriceLimitRatio("300001.SZ"), 0.2);
+  assert.equal(cnPriceLimitRatio("430001.BJ"), 0.3);
 });
 
 test("local store downloads, indexes and serves daily/weekly/monthly candles", async (context) => {

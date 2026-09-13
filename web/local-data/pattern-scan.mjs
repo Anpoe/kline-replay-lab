@@ -179,6 +179,29 @@ function volumeConfirmed(candles, index, lookback, multiplier) {
   return mean <= 0 || finite(candles[index].volume) >= mean * multiplier;
 }
 
+function roundToTick(value, tick) {
+  const precision = String(tick).includes(".") ? String(tick).length - String(tick).indexOf(".") - 1 : 0;
+  return Number((Math.round((value + Number.EPSILON) / tick) * tick).toFixed(precision));
+}
+
+function isLimitUpCandle(latest, previous, ratio = 0.1, tick = 0.01) {
+  const referenceClose = finite(previous?.close, Number.NaN);
+  const close = finite(latest?.close, Number.NaN);
+  const parsedRatio = Number(ratio);
+  const parsedTick = Number(tick);
+  if (
+    !Number.isFinite(referenceClose)
+    || referenceClose <= 0
+    || !Number.isFinite(close)
+    || !Number.isFinite(parsedRatio)
+    || parsedRatio <= 0
+    || !Number.isFinite(parsedTick)
+    || parsedTick <= 0
+  ) return false;
+  const upper = roundToTick(referenceClose * (1 + parsedRatio), parsedTick);
+  return close >= upper - parsedTick / 10;
+}
+
 export function matchesLatestPattern(candles, preset) {
   const index = candles.length - 1;
   const current = candles[index];
@@ -268,6 +291,7 @@ export function screenLatestCandles(candles, presets, filters = {}) {
   if (filters.maxPrice != null && latest.close > filters.maxPrice) return null;
   if (filters.minAverageVolume != null && averageVolume < filters.minAverageVolume) return null;
   if (filters.minAverageTurnover != null && averageTurnover < filters.minAverageTurnover) return null;
+  if (filters.excludeLimitUp && isLimitUpCandle(latest, previous, filters.limitUpRatio, filters.priceTick)) return null;
   const hits = presets.filter((preset) => matchesLatestPattern(candles, preset));
   if (presets.length && !hits.length) return null;
   return {

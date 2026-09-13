@@ -19,6 +19,7 @@ import {
   aggregateMonthly,
   aggregateWeekly,
   classifyTdxInstrument,
+  cnPriceLimitRatio,
   fallbackInstrumentName,
   instrumentIdFromEntry,
   parseTdxDayBuffer,
@@ -1219,7 +1220,10 @@ export class TdxLocalStore {
       const merged = new Map(parseTdxDayBuffer(buffer).map((bar) => [bar.timestamp, bar]));
       for (const overlay of overlays.get(instrument.id) ?? []) merged.set(overlay.timestamp, overlay);
       const candles = [...merged.values()].sort((left, right) => left.timestamp - right.timestamp);
-      const match = screenLatestCandles(candles, presets, filters);
+      const scanFilters = filters.excludeLimitUp
+        ? { ...filters, limitUpRatio: cnPriceLimitRatio(instrument.id), priceTick: 0.01 }
+        : filters;
+      const match = screenLatestCandles(candles, presets, scanFilters);
       if (!match || match.timestamp !== latestTimestamp) continue;
       results.push({
         instrumentId: instrument.id,

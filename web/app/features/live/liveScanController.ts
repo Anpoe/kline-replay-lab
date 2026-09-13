@@ -27,6 +27,7 @@ export function buildLiveScanRequest(input: {
   minPrice: string;
   maxPrice: string;
   minVolume: string;
+  excludeLimitUp?: boolean;
   sort: LiveScanSort;
   limit: number;
 }) {
@@ -38,6 +39,7 @@ export function buildLiveScanRequest(input: {
       ...(input.minPrice ? { minPrice: Number(input.minPrice) } : {}),
       ...(input.maxPrice ? { maxPrice: Number(input.maxPrice) } : {}),
       ...(input.minVolume ? { minAverageVolume: Number(input.minVolume) } : {}),
+      ...(input.market === "CN" && input.excludeLimitUp ? { excludeLimitUp: true } : {}),
     },
     sort: input.sort,
     limit: normalizeLiveScanLimit(input.limit),

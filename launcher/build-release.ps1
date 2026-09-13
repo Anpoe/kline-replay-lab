@@ -2,7 +2,8 @@
 param(
     [string]$OutputDirectory,
     [string]$NodeExecutable,
-    [string]$NativeExecutable
+    [string]$NativeExecutable,
+    [string]$ReleaseVersion
 )
 
 $ErrorActionPreference = 'Stop'
@@ -11,6 +12,23 @@ $launcherDirectory = Split-Path -Parent $PSCommandPath
 $projectRoot = Split-Path -Parent $launcherDirectory
 $webSource = Join-Path $projectRoot 'web'
 $nativeBuildScript = Join-Path $launcherDirectory 'build-native-control-panel.ps1'
+
+function Resolve-ReleaseVersion {
+    param([string]$Configured)
+
+    $candidate = $Configured
+    if ([string]::IsNullOrWhiteSpace($candidate)) { $candidate = $env:KLINE_RELEASE_VERSION }
+    if ([string]::IsNullOrWhiteSpace($candidate)) {
+        try { $candidate = (& git -C $projectRoot describe --tags --exact-match --match 'v[0-9]*' 2>$null).Trim() } catch { }
+    }
+    if ([string]::IsNullOrWhiteSpace($candidate)) { return '0.0.0-dev' }
+    $candidate = $candidate.Trim()
+    if ($candidate.StartsWith('v')) { $candidate = $candidate.Substring(1) }
+    if ($candidate -notmatch '^\d+\.\d+\.\d+(?:\.\d+)?$') {
+        throw "ReleaseVersion must be a semantic version such as 0.1.2; found $candidate."
+    }
+    return $candidate
+}
 
 if ([string]::IsNullOrWhiteSpace($OutputDirectory)) {
     $OutputDirectory = Join-Path $projectRoot 'artifacts\KLineTrainingCamp-Portable'
@@ -93,7 +111,7 @@ if ($nodeMajor -lt 22 -or ($nodeMajor -eq 22 -and $nodeMinor -lt 13)) {
 }
 
 $nativeExecutableForRelease = $NativeExecutable
-$temporaryDirectory = Join-Path ([IO.Path]::GetTempPath()) ('KLineTrainingCamp.PublicRelease.' + [Guid]::NewGuid().ToString('N'))
+$temporaryDirectory = Join-Path ([IO.Path]::GetTempPath()) ('KLineTrainingCamp.Release.' + [Guid]::NewGuid().ToString('N'))
 $stageRoot = Join-Path $temporaryDirectory 'KLineTrainingCamp-Portable'
 $stageWeb = Join-Path $stageRoot 'web'
 $stageRuntime = Join-Path $stageRoot 'runtime'
@@ -128,14 +146,16 @@ try {
         if (Test-Path -LiteralPath $licensePath) { Copy-Item -LiteralPath $licensePath -Destination (Join-Path $stageRuntime $licenseName) -Force }
     }
 
-    $gitRevision = 'local-build'
+$gitRevision = 'local-build'
     try {
         $gitRevision = (& git -C $projectRoot rev-parse --short HEAD).Trim()
         if ([string]::IsNullOrWhiteSpace($gitRevision)) { $gitRevision = 'local-build' }
     } catch { }
+    $resolvedReleaseVersion = Resolve-ReleaseVersion $ReleaseVersion
     $manifest = [ordered]@{
         product = 'K线训练营 2.0'
-        version = $gitRevision
+        version = $resolvedReleaseVersion
+        commit = $gitRevision
         webServer = 'vinext-bundled'
         runtime = 'bundled-node'
         ports = [ordered]@{ data = 3100; web = 3101; worker = 3102 }

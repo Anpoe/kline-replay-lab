@@ -18,6 +18,7 @@ $iconPreviewPath = Join-Path $assetDirectory 'KLineTrainingCamp.png'
 $iconGeneratorSource = Join-Path $launcherDirectory 'BrandIconGenerator.cs'
 $sources = @(
     (Join-Path $launcherDirectory 'NativeProcessSupervisor.cs'),
+    (Join-Path $launcherDirectory 'NativeUpdateService.cs'),
     (Join-Path $launcherDirectory 'NativeControlPanel.cs')
 )
 $compilerCandidates = @(
@@ -68,6 +69,7 @@ try {
         '/optimize+',
         '/reference:System.Drawing.dll',
         '/reference:System.Management.dll',
+        '/reference:System.IO.Compression.FileSystem.dll',
         '/reference:System.Windows.Forms.dll',
         '/reference:System.Web.Extensions.dll',
         '/reference:Microsoft.CSharp.dll',

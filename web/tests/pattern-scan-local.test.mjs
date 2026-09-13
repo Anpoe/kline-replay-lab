@@ -28,6 +28,41 @@ test("latest scanner applies price and liquidity gates", () => {
   assert.equal(screenLatestCandles(candles, [], { minAverageVolume: 2_000_000 }), null);
 });
 
+test("latest scanner excludes a close at the configured limit-up price", () => {
+  const candles = makeCandles();
+  candles[candles.length - 2] = {
+    ...candles.at(-2),
+    open: 10,
+    high: 10.5,
+    low: 9.8,
+    close: 10,
+  };
+  candles[candles.length - 1] = {
+    ...candles.at(-1),
+    open: 10.5,
+    high: 11,
+    low: 10.4,
+    close: 11,
+  };
+
+  assert.equal(screenLatestCandles(candles, [], {
+    excludeLimitUp: true,
+    limitUpRatio: 0.1,
+  }), null);
+  assert.ok(screenLatestCandles(candles.map((candle, index) => index === candles.length - 1
+    ? { ...candle, close: 10.99 }
+    : candle), [], {
+    excludeLimitUp: true,
+    limitUpRatio: 0.1,
+  }));
+  assert.equal(screenLatestCandles(candles.map((candle, index) => index === candles.length - 1
+    ? { ...candle, close: 12, high: 12 }
+    : candle), [], {
+    excludeLimitUp: true,
+    limitUpRatio: 0.2,
+  }), null);
+});
+
 test("selected pattern presets use OR matching and report the hit", () => {
   const candles = makeCandles();
   candles[candles.length - 1] = {

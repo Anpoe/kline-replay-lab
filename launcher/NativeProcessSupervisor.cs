@@ -81,6 +81,8 @@ namespace KLineTrainingCamp.Launcher
 
         public string WebDirectory { get { return webDirectory; } }
 
+        public bool IsPackagedRelease { get { return packagedRelease; } }
+
         public bool HasOwnedProcesses
         {
             get

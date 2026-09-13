@@ -27,6 +27,14 @@ export function classifyTdxInstrument(instrumentId) {
   return "other";
 }
 
+export function cnPriceLimitRatio(instrumentId) {
+  const normalized = String(instrumentId).toUpperCase();
+  if (/^(?:688|689)\d{3}\.SH$/.test(normalized)) return 0.2;
+  if (/^(?:300|301)\d{3}\.SZ$/.test(normalized)) return 0.2;
+  if (/^[489]\d{5}\.BJ$/.test(normalized)) return 0.3;
+  return 0.1;
+}
+
 export function fallbackInstrumentName(instrumentId, assetType = classifyTdxInstrument(instrumentId)) {
   const [code, exchange] = instrumentId.split(".");
   const exchangeName = { SH: "沪", SZ: "深", BJ: "北" }[exchange] ?? exchange;

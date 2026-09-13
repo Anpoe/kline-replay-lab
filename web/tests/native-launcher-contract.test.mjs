@@ -223,6 +223,34 @@ test("发布脚本构建生产包并排除个人开发文档", async () => {
   assert.match(script, /\.zip/);
 });
 
+test("原生控制面板通过 main Release 安全更新并保留本地数据", async () => {
+  const [updateService, panel, nativeBuild, releaseBuild] = await Promise.all([
+    readFile(new URL("../../launcher/NativeUpdateService.cs", import.meta.url), "utf8"),
+    readFile(new URL("../../launcher/NativeControlPanel.cs", import.meta.url), "utf8"),
+    readFile(new URL("../../launcher/build-native-control-panel.ps1", import.meta.url), "utf8"),
+    readFile(new URL("../../launcher/build-release.ps1", import.meta.url), "utf8"),
+  ]);
+
+  assert.match(updateService, /api\.github\.com\/repos\/Anpoe\/kline-replay-lab\/releases\/latest/);
+  assert.match(updateService, /browser_download_url/);
+  assert.match(updateService, /SHA256|SHA256Managed/);
+  assert.match(updateService, /ZipFile\.ExtractToDirectory/);
+  assert.match(updateService, /--apply-update/);
+  assert.match(updateService, /\.wrangler/);
+  assert.match(updateService, /\.local-data/);
+  assert.match(updateService, /KLineTrainingCamp-Portable-/);
+  assert.match(updateService, /WaitForExit/);
+  assert.match(panel, /BeginUpdateCheck/);
+  assert.match(panel, /RunUpdateCheckAsync/);
+  assert.match(panel, /ApplyUpdateAsync/);
+  assert.match(panel, /NativeUpdateService/);
+  assert.match(panel, /21600000/);
+  assert.match(nativeBuild, /NativeUpdateService\.cs/);
+  assert.match(nativeBuild, /System\.IO\.Compression\.FileSystem\.dll/);
+  assert.match(releaseBuild, /ReleaseVersion/);
+  assert.match(releaseBuild, /version\s*=\s*\$resolvedReleaseVersion/);
+});
+
 test("WebUI Vite 配置拒绝端口回退", async () => {
   const source = await readFile(new URL("../vite.config.ts", import.meta.url), "utf8");
 

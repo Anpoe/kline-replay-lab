@@ -46,6 +46,34 @@ test("扫描请求由 feature 统一生成筛选 DTO", () => {
   });
 });
 
+test("A 股扫描请求可携带排除涨停条件，美股不发送该条件", () => {
+  const cnRequest = buildLiveScanRequest({
+    market: "CN",
+    presetIds: [],
+    presets: [],
+    minPrice: "",
+    maxPrice: "",
+    minVolume: "",
+    excludeLimitUp: true,
+    sort: "turnover",
+    limit: 100,
+  });
+  assert.equal(cnRequest.filters.excludeLimitUp, true);
+
+  const usRequest = buildLiveScanRequest({
+    market: "US",
+    presetIds: [],
+    presets: [],
+    minPrice: "",
+    maxPrice: "",
+    minVolume: "",
+    excludeLimitUp: true,
+    sort: "turnover",
+    limit: 100,
+  });
+  assert.equal("excludeLimitUp" in usRequest.filters, false);
+});
+
 test("实时扫描错误统一为用户可见文本", () => {
   assert.equal(normalizeLiveScanError(new Error("离线")), "离线");
   assert.equal(normalizeLiveScanError(undefined), "实盘筛选失败");

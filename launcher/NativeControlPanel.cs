@@ -28,6 +28,10 @@ namespace KLineTrainingCamp.Launcher
         private readonly NotifyIcon trayIcon;
         private readonly FormsTimer logTimer;
         private readonly FormsTimer statusTimer;
+        private readonly FormsTimer updateTimer;
+        private readonly Button updateButton;
+        private readonly NativeUpdateService updateService;
+        private CancellationTokenSource updateCancellation = new CancellationTokenSource();
         private readonly bool startHidden;
         private Thread activationThread;
         private long actionVersion;
@@ -40,6 +44,9 @@ namespace KLineTrainingCamp.Launcher
         private bool applyingStartupState;
         private bool runtimeStartQueued;
         private bool runtimeStarted;
+        private bool updateChecking;
+        private bool updateApplying;
+        private ReleaseUpdateInfo availableUpdate;
 
         private enum PanelAction { Start, Stop, Restart }
 
@@ -48,6 +55,7 @@ namespace KLineTrainingCamp.Launcher
             startHidden = HasHiddenArgument(args);
             activationSignal = sharedActivationSignal;
             supervisor = new NativeProcessSupervisor();
+            updateService = new NativeUpdateService(supervisor.ProjectRoot, supervisor.IsPackagedRelease);
             Icon extractedIcon = Icon.ExtractAssociatedIcon(Application.ExecutablePath);
             applicationIcon = extractedIcon == null ? (Icon)SystemIcons.Application.Clone() : (Icon)extractedIcon.Clone();
             if (extractedIcon != null) extractedIcon.Dispose();
@@ -87,6 +95,9 @@ namespace KLineTrainingCamp.Launcher
             startupCheckBox = new CheckBox { AutoSize = true, Margin = new Padding(18, 7, 0, 0), Text = "开机后后台启动" };
             startupCheckBox.CheckedChanged += delegate { UpdateStartupShortcut(); };
             actions.Controls.Add(startupCheckBox);
+            updateButton = CreateActionButton("检查软件更新", BeginUpdateAction);
+            updateButton.Enabled = supervisor.IsPackagedRelease;
+            actions.Controls.Add(updateButton);
             root.Controls.Add(actions, 0, 3);
 
             logBox = new TextBox { Dock = DockStyle.Fill, Multiline = true, ReadOnly = true, ScrollBars = ScrollBars.Vertical, WordWrap = false, BackColor = Color.White, Font = new Font(FontFamily.GenericMonospace, 9.0f), AccessibleName = "已脱敏运行日志" };
@@ -97,6 +108,8 @@ namespace KLineTrainingCamp.Launcher
             logTimer.Tick += delegate { DrainLogs(); };
             statusTimer = new FormsTimer { Interval = 2000 };
             statusTimer.Tick += delegate { BeginStatusPoll(); };
+            updateTimer = new FormsTimer { Interval = 21600000 };
+            updateTimer.Tick += delegate { BeginUpdateCheck(); };
 
             Resize += delegate { if (WindowState == FormWindowState.Minimized) HideToTray(); };
             FormClosing += HandleFormClosing;
@@ -154,6 +167,8 @@ namespace KLineTrainingCamp.Launcher
                 StartActivationListener();
                 logTimer.Start();
                 statusTimer.Start();
+                updateTimer.Start();
+                BeginUpdateCheck();
                 BeginAction(PanelAction.Start);
             }
             catch (Exception error)
@@ -208,6 +223,7 @@ namespace KLineTrainingCamp.Launcher
             menu.Items.Add("显示控制面板", null, delegate { RestoreFromTray(); });
             menu.Items.Add("打开 WebUI", null, delegate { OpenWebUi(); });
             menu.Items.Add("重启服务", null, delegate { BeginAction(PanelAction.Restart); });
+            menu.Items.Add("检查软件更新", null, delegate { BeginUpdateAction(); });
             menu.Items.Add(new ToolStripSeparator());
             menu.Items.Add("退出", null, delegate { RequestExit(); });
             return menu;
@@ -268,6 +284,157 @@ namespace KLineTrainingCamp.Launcher
         private void BeginStatusPoll()
         {
             Task ignored = PollStatusAsync();
+        }
+
+        private void BeginUpdateAction()
+        {
+            if (availableUpdate != null)
+            {
+                Task ignored = ApplyUpdateAsync(availableUpdate);
+            }
+            else
+            {
+                BeginUpdateCheck();
+            }
+        }
+
+        private void BeginUpdateCheck()
+        {
+            if (!supervisor.IsPackagedRelease || updateChecking || updateApplying || shuttingDown || IsDisposed) return;
+            Task ignored = RunUpdateCheckAsync();
+        }
+
+        private async Task RunUpdateCheckAsync()
+        {
+            updateChecking = true;
+            updateButton.Enabled = false;
+            updateButton.Text = "正在检查软件更新…";
+            try
+            {
+                ReleaseUpdateInfo update = await updateService.CheckForUpdateAsync(updateCancellation.Token);
+                if (shuttingDown || IsDisposed) return;
+                availableUpdate = update;
+                if (update == null)
+                {
+                    updateButton.Text = "检查软件更新";
+                    updateButton.Enabled = true;
+                    RecordPanelLog("INFO", "当前已是最新软件版本：" + updateService.InstalledVersion + "。");
+                }
+                else
+                {
+                    updateButton.Text = "更新到 v" + update.LatestVersion;
+                    updateButton.Enabled = true;
+                    RecordPanelLog("INFO", "发现软件新版本 v" + update.LatestVersion + "，可点击更新。" );
+                    if (!startHidden) summaryLabel.Text = "发现软件新版本 v" + update.LatestVersion + "，点击“更新到 v" + update.LatestVersion + "”。";
+                }
+            }
+            catch (OperationCanceledException)
+            {
+                if (!shuttingDown)
+                {
+                    updateButton.Text = "检查软件更新";
+                    updateButton.Enabled = true;
+                }
+            }
+            catch (Exception error)
+            {
+                availableUpdate = null;
+                updateButton.Text = "检查软件更新";
+                updateButton.Enabled = true;
+                RecordPanelLog("WARN", "软件更新检查失败：" + error.Message);
+            }
+            finally
+            {
+                updateChecking = false;
+            }
+        }
+
+        private async Task ApplyUpdateAsync(ReleaseUpdateInfo update)
+        {
+            if (update == null || updateApplying || shuttingDown || IsDisposed) return;
+            string notes = string.IsNullOrWhiteSpace(update.ReleaseNotes) ? "该版本没有附加说明。" : update.ReleaseNotes.Trim();
+            if (notes.Length > 800) notes = notes.Substring(0, 800) + "…";
+            DialogResult confirmation = MessageBox.Show(
+                "发现软件新版本 v" + update.LatestVersion + "。\r\n\r\n" + notes +
+                "\r\n\r\n更新时会暂时停止本地服务，完成后自动重启。是否现在更新？",
+                "K线训练营 2.0 · 软件更新",
+                MessageBoxButtons.YesNo,
+                MessageBoxIcon.Information);
+            if (confirmation != DialogResult.Yes) return;
+
+            updateApplying = true;
+            updateButton.Enabled = false;
+            updateButton.Text = "正在下载软件更新…";
+            string packagePath = null;
+            try
+            {
+                packagePath = await updateService.DownloadPackageAsync(update, updateCancellation.Token);
+                summaryLabel.Text = "更新包已校验，正在停止本地服务…";
+                bool launched = await StopAndLaunchUpdaterAsync(packagePath);
+                if (launched) packagePath = null;
+            }
+            catch (OperationCanceledException)
+            {
+                if (!shuttingDown) summaryLabel.Text = "软件更新已取消。";
+            }
+            catch (Exception error)
+            {
+                RecordPanelLog("ERROR", "软件更新失败：" + error.Message);
+                if (!shuttingDown) summaryLabel.Text = "软件更新失败：" + error.Message;
+            }
+            finally
+            {
+                if (packagePath != null) NativeUpdateService.DeleteDownloadedPackage(packagePath);
+                updateApplying = false;
+                if (!shuttingDown && !shutdownComplete)
+                {
+                    updateButton.Text = availableUpdate == null ? "检查软件更新" : "更新到 v" + availableUpdate.LatestVersion;
+                    updateButton.Enabled = true;
+                }
+            }
+        }
+
+        private async Task<bool> StopAndLaunchUpdaterAsync(string packagePath)
+        {
+            if (shutdownInProgress || shutdownComplete) return false;
+            shutdownInProgress = true;
+            PrepareForClose();
+            bool closeAfterShutdown = false;
+            bool updaterLaunched = false;
+            await actionGate.WaitAsync();
+            try
+            {
+                bool stopped = await supervisor.StopAllOwnedAsync();
+                if (!stopped || supervisor.HasOwnedProcesses)
+                    throw new InvalidOperationException("仍有本程序创建的服务未能停止，已取消更新。");
+                NativeUpdateService.LaunchUpdater(
+                    Application.ExecutablePath,
+                    packagePath,
+                    supervisor.ProjectRoot,
+                    Process.GetCurrentProcess().Id,
+                    startHidden);
+                updaterLaunched = true;
+                shutdownComplete = true;
+                closeAfterShutdown = true;
+            }
+            catch (Exception error)
+            {
+                RecordPanelLog("ERROR", "准备软件更新失败：" + error.Message);
+                shuttingDown = false;
+                exitRequested = false;
+                updateCancellation = new CancellationTokenSource();
+                logTimer.Start();
+                statusTimer.Start();
+                updateTimer.Start();
+                summaryLabel.Text = "准备软件更新失败：" + error.Message;
+            }
+            finally
+            {
+                shutdownInProgress = false;
+                actionGate.Release();
+            }
+            if (closeAfterShutdown) Close();
+            return updaterLaunched;
         }
 
         private async Task PollStatusAsync()
@@ -356,7 +523,8 @@ namespace KLineTrainingCamp.Launcher
             shuttingDown = true;
             Interlocked.Increment(ref actionVersion);
             supervisor.CancelPendingStarts();
-            logTimer.Stop(); statusTimer.Stop(); trayIcon.Visible = false;
+            updateCancellation.Cancel();
+            logTimer.Stop(); statusTimer.Stop(); updateTimer.Stop(); trayIcon.Visible = false;
         }
 
         private void BeginShutdown()
@@ -399,6 +567,7 @@ namespace KLineTrainingCamp.Launcher
             if (activationSignal != null) activationSignal.Set();
             if (activationThread != null && activationThread.IsAlive) activationThread.Join(500);
             try { if (!supervisor.HasOwnedProcesses) supervisor.Dispose(); } catch { }
+            updateTimer.Dispose();
             trayIcon.Dispose();
             applicationIcon.Dispose();
         }
@@ -467,6 +636,11 @@ namespace KLineTrainingCamp.Launcher
         {
             try
             {
+                if (NativeUpdateService.IsApplyUpdateRequest(args))
+                {
+                    Environment.ExitCode = NativeUpdateService.RunUpdater(args);
+                    return;
+                }
                 bool createdNew;
                 using (var instanceMutex = new Mutex(true, MutexName, out createdNew))
                 using (var activationEvent = new EventWaitHandle(false, EventResetMode.AutoReset, ActivationEventName))

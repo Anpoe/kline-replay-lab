@@ -92,6 +92,8 @@
 
 浏览器中的界面设置需要单独在同一个浏览器配置中保留；清除浏览器网站数据不会影响上面两个文件夹，但会让界面设置恢复为默认值。
 
+正式发布包会自动检查 main 仓库的最新 Release。控制面板发现新版本后，点击“更新到 vX.Y.Z”即可下载并校验更新；更新过程中会自动停止并重启本地服务，同时保留 `web\.wrangler` 和 `web\.local-data`。开发环境和未包含 `release-manifest.json` 的源码启动不会执行软件更新检查。
+
 升级时建议将新版本解压到新的文件夹，确认新版本可以启动后，再按需要迁移备份数据。不要把个人数据文件夹上传到 GitHub，也不要把包含行情接口密钥的目录发给别人。
 
 ## 本地服务和端口
@@ -144,6 +146,12 @@
 cd web
 npm ci
 npm run verify
+```
+
+生成正式发布包时请传入语义化版本号，例如：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File launcher\build-release.ps1 -ReleaseVersion 0.1.2
 ```
 
 开发时通常需要分别启动本地数据服务和 WebUI：

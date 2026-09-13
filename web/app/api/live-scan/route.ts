@@ -7,6 +7,7 @@ type ScanFilters = {
   maxPrice?: number;
   minAverageVolume?: number;
   minAverageTurnover?: number;
+  excludeLimitUp?: boolean;
 };
 
 type ScanRequest = {
