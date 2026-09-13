@@ -31,6 +31,8 @@
 
 关闭控制面板窗口只会隐藏到系统托盘；需要停止服务时，请从托盘菜单选择“退出”。
 
+启用开机后台启动后，Windows 会以 `KLineTrainingCamp.ControlPanel.exe --hidden` 静默启动；启动检查和定时检查由后台 worker 执行，同一天不会重复执行。
+
 也可以在浏览器中打开：
 
 <http://localhost:3101>
