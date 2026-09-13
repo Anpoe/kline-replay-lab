@@ -100,6 +100,13 @@ test("ships the K-line training workbench instead of the starter", async () => {
   assert.match(workbench, /按交易胜率/);
   assert.match(workbench, /按训练胜率/);
   assert.match(workbench, /训练收益率合计/);
+  assert.match(workbench, /performanceHeroDisplayMode/);
+  assert.match(workbench, /performance-hero-toggle/);
+  assert.match(workbench, /点击切换收益率/);
+  assert.match(workbench, /点击切换金额/);
+  assert.match(workbench, /position\.instrumentEconomics \?\? state\.marketRules\?\.instrumentEconomics/);
+  assert.match(workbench, /训练结果统一按上方主卡显示/);
+  assert.match(workbench, /performanceHeroUsesAmount \? summary\.pnl\.total : summary\.returnPct/);
   assert.match(workbench, /默认展示全部已保存训练/);
   assert.match(workbench, /最优持仓时长/);
   assert.match(workbench, /最优交易形态/);

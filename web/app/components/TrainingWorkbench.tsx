@@ -1437,8 +1437,13 @@ function trainingPnlStats(state: TrainingState): TrainingPnlStats {
   };
   const returnPct = pnl.returnPct ?? portfolioReturnPct(closedSessionPositions, 0);
   const realizedReturnPct = portfolioReturnPct(closedSessionPositions, 0);
+  const entryNotional = (position: PositionLot) => accountNotional(
+    position.entryPrice,
+    position.qty,
+    position.instrumentEconomics ?? state.marketRules?.instrumentEconomics,
+  ) ?? position.entryPrice * position.qty;
   const openEntryNotional = openSessionPositions.reduce(
-    (sum, position) => sum + position.entryPrice * position.qty,
+    (sum, position) => sum + entryNotional(position),
     0,
   );
   const floatingReturnPct = openEntryNotional > 0 ? pnl.floating / openEntryNotional * 100 : 0;
@@ -1829,6 +1834,7 @@ export function TrainingWorkbench() {
   const [trashError, setTrashError] = useState("");
   const [snapshotTradeContexts, setSnapshotTradeContexts] = useState<SnapshotTradeContextMap>({});
   const [performanceFilters, setPerformanceFilters] = useState<PerformanceFilters>(defaultPerformanceFilters);
+  const [performanceHeroDisplayMode, setPerformanceHeroDisplayMode] = useState<"return" | "amount">("return");
   const [livePerformanceFilters, setLivePerformanceFilters] = useState<LivePerformanceFilters>(defaultLivePerformanceFilters);
   const [reviewSessionFilters, setReviewSessionFilters] = useState<ReviewSessionFilters>(defaultReviewSessionFilters);
   const [selectedPerformanceSessionId, setSelectedPerformanceSessionId] = useState("");
@@ -6324,6 +6330,21 @@ export function TrainingWorkbench() {
     () => summarizePerformance(filteredSessionSummaries.map(performanceRecord)),
     [filteredSessionSummaries, performanceRecord],
   );
+  const filteredPerformanceTotals = useMemo(() => filteredSessionSummaries.reduce((totals, summary) => ({
+    totalPnl: totals.totalPnl + summary.pnl.total,
+    realizedPnl: totals.realizedPnl + summary.pnl.realized,
+    floatingPnl: totals.floatingPnl + summary.pnl.floating,
+    totalReturnPct: totals.totalReturnPct + summary.returnPct,
+    realizedReturnPct: totals.realizedReturnPct + summary.realizedReturnPct,
+    floatingReturnPct: totals.floatingReturnPct + summary.floatingReturnPct,
+  }), {
+    totalPnl: 0,
+    realizedPnl: 0,
+    floatingPnl: 0,
+    totalReturnPct: 0,
+    realizedReturnPct: 0,
+    floatingReturnPct: 0,
+  }), [filteredSessionSummaries]);
 
   const livePerformanceRows = useMemo(() => livePortfolios
     .filter((portfolio) => {
@@ -6588,6 +6609,10 @@ export function TrainingWorkbench() {
     (summary) => summary.session.id === selectedPerformanceSessionId,
   );
   const formatPerformanceValue = (value: number) => performanceUsesCapital ? money(value) : percent(value);
+  const performanceHeroUsesAmount = performanceHeroDisplayMode === "amount";
+  const performanceHeroValue = performanceHeroUsesAmount
+    ? filteredPerformanceTotals.totalPnl
+    : filteredPerformanceTotals.totalReturnPct;
   const reviewHeroTone: "up" | "down" = reviewRealizedPnl >= 0 ? "up" : "down";
   const reviewResultTone: "up" | "down" = reviewTotalResult >= 0 ? "up" : "down";
   const reviewHistoryItems = useMemo<SessionHistoryItem[]>(() => filteredReviewSessionSummaries.map((summary) => ({
@@ -9240,16 +9265,23 @@ export function TrainingWorkbench() {
                 <span className="section-label">当前训练集</span>
                 <h2>{filteredPerformance.sessions} 场训练的表现</h2>
               </div>
-              <small>默认展示全部已保存训练；混合计价模式统一按收益率汇总，筛选“资金账户”后按金额统计。</small>
+              <small>默认展示全部已保存训练；点击上方主卡可在累计收益率与累计总盈亏之间切换。</small>
             </div>
             <div className="performance-overview">
-              <div className="performance-hero">
-                <span>{performanceUsesCapital ? "累计总盈亏" : "训练收益率合计"}</span>
-                <strong className={filteredPerformance.totalPnl >= 0 ? "up" : "down"}>{formatPerformanceValue(filteredPerformance.totalPnl)}</strong>
-                <small>{performanceUsesCapital
-                  ? `已实现 ${money(filteredPerformance.realizedPnl)} · 浮动 ${money(filteredPerformance.floatingPnl)}`
-                  : `已实现收益率合计 ${percent(filteredPerformance.realizedPnl)} · 浮动收益率合计 ${percent(filteredPerformance.floatingPnl)}`}</small>
-              </div>
+              <button
+                type="button"
+                className="performance-hero performance-hero-toggle"
+                aria-pressed={performanceHeroUsesAmount}
+                aria-label={`切换训练集主指标，当前显示${performanceHeroUsesAmount ? "累计总盈亏" : "训练收益率合计"}`}
+                title="点击切换累计总盈亏与训练收益率合计"
+                onClick={() => setPerformanceHeroDisplayMode((mode) => mode === "amount" ? "return" : "amount")}
+              >
+                <span>{performanceHeroUsesAmount ? "累计总盈亏" : "训练收益率合计"}</span>
+                <strong className={performanceHeroValue >= 0 ? "up" : "down"}>{performanceHeroUsesAmount ? money(performanceHeroValue) : percent(performanceHeroValue)}</strong>
+                <small>{performanceHeroUsesAmount
+                  ? `训练收益率合计 ${percent(filteredPerformanceTotals.totalReturnPct)} · 已实现 ${money(filteredPerformanceTotals.realizedPnl)} · 浮动 ${money(filteredPerformanceTotals.floatingPnl)} · 点击切换收益率`
+                  : `累计总盈亏 ${money(filteredPerformanceTotals.totalPnl)} · 已实现收益率合计 ${percent(filteredPerformanceTotals.realizedReturnPct)} · 浮动收益率合计 ${percent(filteredPerformanceTotals.floatingReturnPct)} · 点击切换金额`}</small>
+              </button>
               <div className="performance-metric">
                 <span>训练场次</span>
                 <strong>{filteredPerformance.sessions}</strong>
@@ -9323,12 +9355,12 @@ export function TrainingWorkbench() {
             <article className="performance-sessions">
               <div className="performance-section-head">
                 <div><span className="section-label">训练明细</span><h2>选择具体训练</h2></div>
-                <small>选中一场后，可以查看完整复盘或继续训练。</small>
+                <small>训练结果统一按上方主卡显示{performanceHeroUsesAmount ? "资金" : "收益率"}；选中一场后，可以查看完整复盘或继续训练。</small>
               </div>
               {filteredSessionSummaries.length ? (
                 <div className="performance-session-list">
                   <div className="performance-session-header">
-                    <span>训练</span><span>模式 / 区间</span><span>状态</span><span>结果</span><span>创建时间</span><span>操作</span>
+                    <span>训练</span><span>模式 / 区间</span><span>状态</span><span>结果（{performanceHeroUsesAmount ? "资金" : "收益率"}）</span><span>创建时间</span><span>操作</span>
                   </div>
                   {filteredSessionSummaries.map((summary) => (
                     <div
@@ -9349,7 +9381,7 @@ export function TrainingWorkbench() {
                       <span><strong>{summary.modeLabel}</strong><small>{summary.rangeLabel}{summary.task?.patternFilter ? ` · 形态：${summary.task.patternFilter.presetNames.join("、") || summary.task.patternFilter.presetIds.join("、")}` : ""}</small></span>
                       <span className={summary.task?.status === "completed" ? "session-status completed" : "session-status"}>{summary.task?.status === "completed" ? "已完成" : "可继续"}</span>
                       <span className="performance-session-result">
-                        <strong className={(summary.state.tradingMode === "capital" ? summary.pnl.total : summary.returnPct) >= 0 ? "up" : "down"}>{summary.state.tradingMode === "capital" ? money(summary.pnl.total) : percent(summary.returnPct)}</strong>
+                        <strong className={(performanceHeroUsesAmount ? summary.pnl.total : summary.returnPct) >= 0 ? "up" : "down"}>{performanceHeroUsesAmount ? money(summary.pnl.total) : percent(summary.returnPct)}</strong>
                         <small>{summary.closedTradePnls.length} 笔已平仓 · {summary.winningTrades}胜/{summary.losingTrades}负/{summary.flatTrades}平</small>
                       </span>
                       <time>{new Date(summary.session.createdAt).toLocaleString("zh-CN")}</time>
