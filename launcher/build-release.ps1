@@ -36,7 +36,7 @@ function Resolve-NodeExecutable {
 
     $command = Get-Command node.exe -ErrorAction SilentlyContinue
     if ($command -and $command.Source) { return [IO.Path]::GetFullPath($command.Source) }
-    throw 'Node.js 22.13 or newer is required to build the public release.'
+    throw 'Node.js 22.13 or newer is required to build the release package.'
 }
 
 function Resolve-NpmCommand {
@@ -148,7 +148,7 @@ try {
         'docs'
     )
     foreach ($privatePath in $privatePaths) {
-        if (Test-Path -LiteralPath (Join-Path $stageRoot $privatePath)) { throw "Private development content leaked into the public release: $privatePath" }
+        if (Test-Path -LiteralPath (Join-Path $stageRoot $privatePath)) { throw "Private development content leaked into the release package: $privatePath" }
     }
 
     # Build/runtime state must never be distributed. A clean package starts
@@ -163,11 +163,11 @@ try {
     New-Item -ItemType Directory -Path (Split-Path -Parent $OutputDirectory) -Force | Out-Null
     $releaseCopyArguments = @($stageRoot, $OutputDirectory, '/E', '/NFL', '/NDL', '/NJH', '/NJS', '/NP', '/XD') + $releaseExcludedDirectories
     & robocopy.exe @releaseCopyArguments
-    if ($LASTEXITCODE -gt 7) { throw "Copying the public release failed with robocopy exit code $LASTEXITCODE." }
+    if ($LASTEXITCODE -gt 7) { throw "Copying the release package failed with robocopy exit code $LASTEXITCODE." }
 
     foreach ($excludedDirectoryName in @('.wrangler', '.local-data')) {
         $excludedDirectoryPath = Join-Path (Join-Path $OutputDirectory 'web') $excludedDirectoryName
-        if (Test-Path -LiteralPath $excludedDirectoryPath) { throw "Build/runtime state leaked into the public release: $excludedDirectoryName" }
+        if (Test-Path -LiteralPath $excludedDirectoryPath) { throw "Build/runtime state leaked into the release package: $excludedDirectoryName" }
     }
 
     $sevenZip = Get-Command 7z.exe -ErrorAction SilentlyContinue
@@ -183,8 +183,8 @@ try {
         Compress-Archive -Path (Join-Path $OutputDirectory '*') -DestinationPath $zipPath -Force
     }
 
-    Write-Host "Public release directory: $OutputDirectory"
-    Write-Host "Public release archive: $zipPath"
+    Write-Host "Release directory: $OutputDirectory"
+    Write-Host "Release archive: $zipPath"
 }
 finally {
     if (Test-Path -LiteralPath $temporaryDirectory) {

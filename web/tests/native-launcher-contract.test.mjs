@@ -205,8 +205,8 @@ test("正式发布包使用内置 Node 与打包 WebUI，并对缺少依赖给�
   assert.match(source, /npm install/);
 });
 
-test("公开发布脚本构建生产包并排除个人开发文档", async () => {
-  const script = await readFile(new URL("../../launcher/build-public-release.ps1", import.meta.url), "utf8");
+test("发布脚本构建生产包并排除个人开发文档", async () => {
+  const script = await readFile(new URL("../../launcher/build-release.ps1", import.meta.url), "utf8");
 
   assert.match(script, /npm\.cmd/);
   assert.match(script, /['"]ci['"]/);
