@@ -94,6 +94,7 @@ import {
 } from "../features/review/reviewContracts";
 import { createReviewGateway } from "../features/review/reviewGateway";
 import { ReviewPanel } from "../features/review/components/ReviewPanel";
+import { ReviewChartPreview } from "../features/review/components/ReviewChartPreview";
 import { SessionHistoryPanel, type AuditEventItem, type SessionHistoryItem } from "../features/review/components/SessionHistoryPanel";
 import {
   buildLiveScanRequest,
@@ -746,6 +747,20 @@ type TrainingSession = {
   createdAt: string;
   updatedAt: string;
   deletedAt?: string;
+};
+
+type ReviewChartSnapshot = {
+  sessionId: string;
+  snapshotId: string;
+  instrument: Instrument;
+  candles: KLineData[];
+  dataIndexOffset: number;
+};
+
+type ReviewChartLoadState = {
+  requestKey: string;
+  snapshot: ReviewChartSnapshot | null;
+  error: string;
 };
 
 function compareTrainingSessionsByCreatedAt(left: TrainingSession, right: TrainingSession) {
@@ -1792,6 +1807,7 @@ export function TrainingWorkbench() {
   const [backfillAssociation, setBackfillAssociation] = useState<"associate" | "none">("associate");
   const [editingDecisionId, setEditingDecisionId] = useState("");
   const [reviewedSession, setReviewedSession] = useState<{ session: TrainingSession; state: TrainingState } | null>(null);
+  const [reviewChartLoadState, setReviewChartLoadState] = useState<ReviewChartLoadState | null>(null);
   const [duplicateMarketWarning, setDuplicateMarketWarning] = useState<DuplicateMarketWarning | null>(null);
   const [duplicateTrainingPreview, setDuplicateTrainingPreview] = useState<DuplicateTrainingPreview | null>(null);
   const [coverage, setCoverage] = useState<Coverage[]>([]);
@@ -2382,14 +2398,7 @@ export function TrainingWorkbench() {
   const reviewTotalResult = reviewState.tradingMode === "capital"
     ? reviewState.pnlSnapshot?.total ?? reviewRealizedPnl
     : reviewState.pnlSnapshot?.returnPct ?? reviewRealizedReturnPct;
-  const reviewLatestSubmission = reviewState.decisionSubmissions.at(-1);
-  const reviewDecision = reviewLatestSubmission?.decision ?? reviewState.decision;
-  const reviewPlanScore = decisionScore(reviewDecision);
-  const reviewPatternFilter = reviewState.trainingTask?.patternFilter;
-  const reviewMatchedPatternNames = reviewPatternFilter?.matchedPresetIds.map((id) => {
-    const selectedIndex = reviewPatternFilter.presetIds.indexOf(id);
-    return reviewPatternFilter.presetNames[selectedIndex] ?? id;
-  }) ?? [];
+  const reviewPlanScore = decisionScore(reviewState.decisionSubmissions.at(-1)?.decision ?? reviewState.decision);
   const reviewTitle = reviewedSession
     ? `${reviewedSession.session.instrumentId} · ${timeframeLabel(reviewedSession.session.timeframe)}`
     : `${instrumentId} · ${timeframeLabel(timeframe)} · 当前训练`;
@@ -2397,6 +2406,76 @@ export function TrainingWorkbench() {
     () => new Map(reviewState.decisionSubmissions.map((submission) => [submission.id, submission])),
     [reviewState.decisionSubmissions],
   );
+  const reviewChartSnapshotId = reviewedSession?.state.dataSnapshotId ?? reviewedSession?.session.dataSnapshotId ?? "";
+  const reviewChartRequestKey = reviewedSession ? `${reviewedSession.session.id}:${reviewChartSnapshotId}` : "";
+  const reviewChartStateForSession = reviewChartLoadState?.requestKey === reviewChartRequestKey
+    ? reviewChartLoadState
+    : null;
+  const reviewPreviewSnapshot = reviewedSession
+    && reviewChartStateForSession?.snapshot?.sessionId === reviewedSession.session.id
+    ? reviewChartStateForSession.snapshot
+    : null;
+  const reviewChartLoading = Boolean(reviewedSession && reviewChartSnapshotId && !reviewChartStateForSession);
+  const reviewChartError = reviewedSession && !reviewChartSnapshotId
+    ? "这条旧训练没有绑定行情快照，暂时无法预览 K 线。"
+    : reviewChartStateForSession?.error ?? "";
+  const reviewPreviewBars = useMemo(() => {
+    const sourceBars = reviewedSession ? reviewPreviewSnapshot?.candles ?? [] : visibleBars;
+    if (!reviewedSession || !sourceBars.length) return sourceBars;
+
+    let cursorIndex = reviewedSession.state.cursorTimestamp == null
+      ? -1
+      : sourceBars.findIndex((bar) => bar.timestamp === reviewedSession.state.cursorTimestamp);
+    if (cursorIndex < 0 && reviewPreviewSnapshot) {
+      const absoluteCursor = reviewedSession.state.cursor + (reviewedSession.state.dataIndexOffset ?? 0);
+      cursorIndex = absoluteCursor - reviewPreviewSnapshot.dataIndexOffset;
+    }
+    return cursorIndex >= 0 ? sourceBars.slice(0, Math.min(sourceBars.length, cursorIndex + 1)) : sourceBars;
+  }, [reviewPreviewSnapshot, reviewedSession, visibleBars]);
+  const reviewPreviewInstrument = reviewedSession
+    ? reviewPreviewSnapshot?.instrument ?? {
+        ...instrument,
+        id: reviewedSession.session.instrumentId,
+        symbol: reviewedSession.session.instrumentId,
+        name: reviewedSession.session.instrumentId,
+      }
+    : instrument;
+  const reviewPreviewTimeframe = reviewedSession?.session.timeframe ?? timeframe;
+  const reviewPreviewDataIndexOffset = reviewedSession
+    ? reviewPreviewSnapshot?.dataIndexOffset ?? 0
+    : chartDataIndexOffset;
+  const reviewPreviewTradeMarkers = useMemo<TradeMarker[]>(() => {
+    const previewLastBar = reviewPreviewBars.at(-1);
+    return reviewState.positions
+      .filter((position) => !previewLastBar || position.entryTimestamp <= previewLastBar.timestamp)
+      .map((position) => {
+        const exitIsVisible = position.exitTimestamp != null
+          && (!previewLastBar || position.exitTimestamp <= previewLastBar.timestamp);
+        return {
+          id: position.id,
+          side: position.side,
+          qty: position.qty,
+          entryPrice: position.entryPrice,
+          entryTimestamp: position.entryTimestamp,
+          exitPrice: exitIsVisible ? position.exitPrice : undefined,
+          exitTimestamp: exitIsVisible ? position.exitTimestamp : undefined,
+          realizedPnl: exitIsVisible ? position.realizedPnl : undefined,
+        };
+      });
+  }, [reviewPreviewBars, reviewState.positions]);
+  const reviewPreviewDecisionMarkers = useMemo<DecisionMarker[]>(() => {
+    const previewLastBar = reviewPreviewBars.at(-1);
+    if (!previewLastBar) return [];
+    return reviewState.decisionSubmissions
+      .filter((submission) => submission.barTimestamp <= previewLastBar.timestamp)
+      .map((submission, index) => ({
+        id: submission.id,
+        timestamp: submission.barTimestamp,
+        price: reviewPreviewBars.find((bar) => bar.timestamp === submission.barTimestamp)?.high
+          ?? submission.referencePrice,
+        label: `计划 ${index + 1}`,
+      }));
+  }, [reviewPreviewBars, reviewState.decisionSubmissions]);
 
   const parseTrainingState = useCallback((value: unknown): TrainingState | null => {
     if (!value || typeof value !== "object") return null;
@@ -2898,6 +2977,64 @@ export function TrainingWorkbench() {
   }, [liveGateway, livePortfolios, liveStateReady, liveStateSaveRetryNonce, liveWatchlist]);
 
   useEffect(() => () => marketLoadRef.current.controller?.abort(), []);
+
+  useEffect(() => {
+    if (!reviewedSession) return;
+
+    const snapshotId = reviewedSession.state.dataSnapshotId ?? reviewedSession.session.dataSnapshotId;
+    if (!snapshotId) return;
+
+    const controller = new AbortController();
+    const requestKey = `${reviewedSession.session.id}:${snapshotId}`;
+    const task = reviewedSession.state.trainingTask;
+    const hasTaskRange = Boolean(
+      task
+      && Number.isFinite(task.startTimestamp)
+      && Number.isFinite(task.endTimestamp),
+    );
+    const options = hasTaskRange
+      ? {
+          startTimestamp: task!.startTimestamp,
+          endTimestamp: task!.endTimestamp,
+          lookbackBars: normalizeReplayHistoryBars(task!.historyBars),
+        }
+      : reviewedSession.state.cursorTimestamp != null
+        ? {
+            startTimestamp: reviewedSession.state.cursorTimestamp,
+            endTimestamp: reviewedSession.state.cursorTimestamp,
+            lookbackBars: 240,
+          }
+        : {};
+    void reviewGateway.loadSnapshot<{
+      instrument: Instrument;
+      candles: KLineData[];
+      window?: { startIndex: number };
+    }>(snapshotId, options, controller.signal)
+      .then((data) => {
+        if (controller.signal.aborted) return;
+        setReviewChartLoadState({
+          requestKey,
+          snapshot: {
+            sessionId: reviewedSession.session.id,
+            snapshotId,
+            instrument: data.instrument,
+            candles: data.candles,
+            dataIndexOffset: data.window?.startIndex ?? 0,
+          },
+          error: "",
+        });
+      })
+      .catch((error) => {
+        if (controller.signal.aborted) return;
+        setReviewChartLoadState({
+          requestKey,
+          snapshot: null,
+          error: error instanceof Error ? error.message : "训练行情预览加载失败",
+        });
+      });
+
+    return () => controller.abort();
+  }, [reviewGateway, reviewedSession]);
 
   const appendEvent = useCallback((
     type: string,
@@ -9388,28 +9525,19 @@ export function TrainingWorkbench() {
             />
             <div className="review-columns">
               <div className="review-module-stack">
-              <article className="insight-card">
-                <div className="section-label">最近一份事前计划</div>
-                <h2>{reviewPlanScore >= 80 ? "计划完整，可以进入样本积累" : "先补齐失效点和目标"}</h2>
-                <p>{reviewLatestSubmission ? <>提交于 <button type="button" className="evidence-link" onClick={() => openReviewEvidence(reviewLatestSubmission.barTimestamp, "计划")}>{formatDate(reviewLatestSubmission.barTimestamp, reviewedSession?.session.timeframe ?? timeframe)}</button></> : "当前内容还是草稿，尚未形成正式提交记录。"}</p>
-                <div className="evidence-row"><span>市场状态</span><strong>{reviewDecision.marketState || "未填写"}</strong></div>
-                <div className="evidence-row"><span>位置</span><strong>{reviewDecision.location || "未填写"}</strong></div>
-                <div className="evidence-row"><span>交易理由</span><strong>{reviewDecision.reasons.join("、") || "未填写"}</strong></div>
-                <div className="evidence-row"><span>失效 / 止损</span><strong>{reviewDecision.stop || "未填写"}</strong></div>
-                <div className="evidence-row"><span>第一目标</span><strong>{reviewDecision.target || "未填写"}</strong></div>
-                <div className="evidence-row"><span>训练模式</span><strong>{reviewState.trainingTask ? reviewState.trainingTask.randomRun ? reviewState.trainingTask.mode === "blind" ? "随机盲测" : "随机训练" : trainingModeLabels[reviewState.trainingTask.mode] : "旧版自由训练"}</strong></div>
-                <div className="evidence-row"><span>形态筛选</span><strong>{reviewPatternFilter
-                  ? `选择：${reviewPatternFilter.presetNames.join("、") || reviewPatternFilter.presetIds.join("、")}；本局命中：${reviewMatchedPatternNames.join("、") || "未记录"}`
-                  : "未使用形态筛选"}</strong></div>
-                <div className="evidence-row"><span>任务状态</span><strong>{reviewState.trainingTask?.status === "completed" ? "已完成" : "进行中"}</strong></div>
-                <div className="evidence-row"><span>市场规则</span><strong>{reviewState.marketRules ? `${reviewState.marketRules.name} · ${reviewState.marketRules.version}` : "旧训练未锁定规则版本"}</strong></div>
-                <div className="evidence-row"><span>交易账户</span><strong>{isMarginEconomics(reviewState.marketRules?.instrumentEconomics)
-                  ? `保证金账户 · ${reviewState.marketRules?.instrumentEconomics?.accountCurrency ?? "USD"} · 杠杆 1:${reviewState.marketRules?.instrumentEconomics?.leverage ?? 100} · 强平线 ${reviewState.marketRules?.instrumentEconomics?.stopOutLevelPct ?? 50}% · 余额 ${reviewState.cashBalance.toFixed(2)}`
-                  : reviewState.tradingMode === "capital" ? `资金账户 · 初始 ${reviewState.initialCapital.toFixed(2)} · 现金 ${reviewState.cashBalance.toFixed(2)}` : "收益率模式 · 不限制本金"}</strong></div>
-                <div className="evidence-row"><span>成交引擎</span><strong>{`${reviewState.executionEngineVersion} · ${reviewState.marketRules?.instrumentEconomics?.quoteBasis === "bid" ? "BID 图表 / Ask 买入回补" : "中间价"} · 佣金 ${reviewState.executionProfile.commissionRateBps}bp · 滑点 ${reviewState.executionProfile.slippageBps}bp · 价差 ${reviewState.executionProfile.spreadBps}bp`}</strong></div>
-                <div className="evidence-row"><span>规则拒单</span><strong>{reviewState.orderRejections.length}</strong></div>
-                <div className="review-note"><span>计划说明</span><p>{reviewDecision.note || "未填写"}</p></div>
-              </article>
+              <ReviewChartPreview
+                key={reviewedSession ? `${reviewedSession.session.id}:${reviewPreviewSnapshot?.snapshotId ?? "loading"}` : "current-training"}
+                bars={reviewPreviewBars}
+                instrument={reviewPreviewInstrument}
+                timeframe={timeframeLabel(reviewPreviewTimeframe)}
+                dataIndexOffset={reviewPreviewDataIndexOffset}
+                movingAverageSettings={movingAverageSettings}
+                initialDrawings={reviewState.drawings}
+                tradeMarkers={reviewPreviewTradeMarkers}
+                decisionMarkers={reviewPreviewDecisionMarkers}
+                loading={reviewedSession ? reviewChartLoading : loading}
+                error={reviewedSession ? reviewChartError : chartLoadError}
+              />
               <article className="decision-history-card">
                 <div className="section-label">事前决策记录</div>
                 <h2>{reviewState.decisionSubmissions.length ? `${reviewState.decisionSubmissions.length} 份已提交计划` : "还没有正式提交的计划"}</h2>

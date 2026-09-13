@@ -931,6 +931,7 @@ export function KLineReplayChart({
   drawingsRestoreNonce,
   hideDate,
   hidePrice,
+  enableCandleContextMenu = true,
   onDecisionSelect,
   onProtectionPriceSelect,
   onProtectionLineMove,
@@ -956,6 +957,7 @@ export function KLineReplayChart({
   drawingsRestoreNonce: number;
   hideDate: boolean;
   hidePrice: boolean;
+  enableCandleContextMenu?: boolean;
   onDecisionSelect: (id: string) => void;
   onProtectionPriceSelect: (kind: ProtectionPriceKind, price: number) => void;
   onProtectionLineMove: (line: ProtectionLine, price: number) => boolean;
@@ -1514,6 +1516,10 @@ export function KLineReplayChart({
   };
 
   const handleContextMenu = (event: ReactMouseEvent<HTMLDivElement>) => {
+    if (!enableCandleContextMenu) {
+      event.preventDefault();
+      return;
+    }
     if (drawingActive) {
       event.preventDefault();
       return;
@@ -1526,6 +1532,7 @@ export function KLineReplayChart({
   };
 
   const handlePointerDown = (event: ReactPointerEvent<HTMLDivElement>) => {
+    if (!enableCandleContextMenu) return;
     if (drawingActive) return;
     if (priceSelectionMode) return;
     if (event.pointerType !== "touch") return;
@@ -1570,12 +1577,14 @@ export function KLineReplayChart({
       ? `${symbol} K线图，正在绘图`
       : priceSelectionMode
         ? `${symbol} K线图，点击选择${priceSelectionMode === "stop-loss" ? "止损" : "止盈"}价格`
-        : symbol + " K线图，右键或长按已揭示的 K 线可补写事前决策"}
+        : enableCandleContextMenu
+          ? symbol + " K线图，右键或长按已揭示的 K 线可补写事前决策"
+          : symbol + " K线图，仅用于查看和添加图表标记"}
     title={drawingActive
       ? "正在绘图：拖动手指不会滚动页面或平移图表"
       : priceSelectionMode
         ? `点击图表选择${priceSelectionMode === "stop-loss" ? "止损" : "止盈"}价格`
-        : "右键或长按已揭示的 K 线可补写事前决策"}
+        : enableCandleContextMenu ? "右键或长按已揭示的 K 线可补写事前决策" : "仅用于查看行情和添加图表标记"}
     onClickCapture={handleClick}
     onContextMenu={handleContextMenu}
     onPointerDown={handlePointerDown}

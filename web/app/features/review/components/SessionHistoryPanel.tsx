@@ -1,4 +1,4 @@
-import { BookOpenCheck, RotateCcw, Trash2 } from "lucide-react";
+import { RotateCcw, Trash2 } from "lucide-react";
 import { useState } from "react";
 import {
   defaultReviewSessionFilters,
@@ -133,7 +133,20 @@ export function SessionHistoryPanel({
         </div>
         <div className="review-session-scroll" tabIndex={0} aria-label="全部可恢复训练，可滚动浏览">
           {visibleItems.length ? visibleItems.map((item) => (
-            <div className={`session-row ${item.selected ? "active" : ""}`} key={item.id}>
+            <div
+              className={`session-row ${item.selected ? "active" : ""}`}
+              key={item.id}
+              role="button"
+              tabIndex={0}
+              aria-label={`查看 ${item.instrumentId} ${timeframeLabel(item.timeframe)} 复盘`}
+              onClick={() => onReview(item.id)}
+              onKeyDown={(event) => {
+                if (event.key === "Enter" || event.key === " ") {
+                  event.preventDefault();
+                  onReview(item.id);
+                }
+              }}
+            >
               <div className="session-main">
                 <div className="session-title">
                   <strong>{item.instrumentId} · {timeframeLabel(item.timeframe)}</strong>
@@ -156,8 +169,11 @@ export function SessionHistoryPanel({
                 </div>
                 <small>创建时间 {item.createdAtLabel}</small>
               </div>
-              <div className="session-actions">
-                <button className="review-session" onClick={() => onReview(item.id)}><BookOpenCheck size={13} />查看复盘</button>
+              <div
+                className="session-actions"
+                onClick={(event) => event.stopPropagation()}
+                onKeyDown={(event) => event.stopPropagation()}
+              >
                 <button className="resume-session" onClick={() => onResume(item.id)}><RotateCcw size={13} />继续训练</button>
                 <button className="delete-session" aria-label={`将 ${item.instrumentId} 训练移入回收站`} onClick={() => onDelete(item.id)}><Trash2 size={13} />移入回收站</button>
               </div>

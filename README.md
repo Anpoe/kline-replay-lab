@@ -4,7 +4,7 @@
 
 当前公开版本支持 A 股、美股、外汇和现货黄金相关训练场景，并提供示例数据、逐根回放、模拟下单、仓位管理和训练记录功能。
 
-> 当前公开版本：`v0.1.0`<br>
+> 当前公开版本：`v0.1.1`<br>
 > [下载最新版本（GitHub Releases）](https://github.com/Anpoe/kline-replay-lab-public/releases/latest)
 
 ## 给普通用户：三分钟开始使用
@@ -13,7 +13,7 @@
 
 在 [Releases](https://github.com/Anpoe/kline-replay-lab-public/releases) 页面下载 Windows 便携版压缩包：
 
-`KLineTrainingCamp-Portable-v0.1.0.zip`
+`KLineTrainingCamp-Portable-v0.1.1.zip`
 
 请将压缩包完整解压到一个独立文件夹后再运行。建议使用你有读写权限的目录，例如：
 
