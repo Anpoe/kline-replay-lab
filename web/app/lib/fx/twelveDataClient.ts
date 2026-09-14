@@ -192,7 +192,7 @@ function toUrlDate(value: string | number | undefined) {
 }
 
 export function buildTwelveDataTimeSeriesUrl(request: TwelveDataUrlRequest) {
-  if (!request.apiKey?.trim()) throw new Error("Twelve Data API key is required");
+  if (!request.apiKey?.trim()) throw new Error("请先配置 Twelve Data 访问密钥");
   const baseUrl = request.baseUrl ?? TWELVE_DATA_TIME_SERIES_URL;
   const url = new URL(baseUrl);
   const params = url.searchParams;
@@ -259,7 +259,7 @@ export async function fetchTwelveDataOneMinuteChunk(
   request: TwelveDataOneMinuteRequest,
   fetcher: TwelveDataFetcher = fetch,
 ): Promise<TwelveDataOneMinuteChunk> {
-  if (!request.apiKey?.trim()) throw new Error("Twelve Data API key is required");
+  if (!request.apiKey?.trim()) throw new Error("请先配置 Twelve Data 访问密钥");
   const now = request.now ?? Date.now();
   const completedThroughTimestamp = getLastCompletedOneMinuteTimestamp(now);
   const hasSyncAnchor = request.lastCompletedTimestamp != null || request.historyBoundary != null;

@@ -508,7 +508,7 @@ export async function createMarketSyncRun(input: {
   await ensureSchema();
   const { secrets } = await loadProviderSecrets();
   if (!secrets.alpacaKeyId || !secrets.alpacaSecretKey) {
-    throw new MarketSyncError("请先配置 Alpaca API Key ID 和 Secret Key", 400);
+    throw new MarketSyncError("请先配置 Alpaca 访问密钥 ID 和访问密钥", 400);
   }
   const db = getRawDb();
   const requestedStartDate = input.startDate?.trim() || null;

@@ -287,6 +287,12 @@ export class BaoStockLocalStore {
   }
 
   getTask() {
+    // Do not expose a terminal state while its final atomic write is still
+    // pending. Callers can otherwise observe "completed" and immediately
+    // tear down the data directory while the temporary file is being renamed.
+    if (this.running && this.task && ["completed", "failed"].includes(this.task.status)) {
+      return { ...this.task, status: "running" };
+    }
     return this.task;
   }
 
@@ -595,7 +601,7 @@ export class BaoStockLocalStore {
       let manifest = await this.getManifest();
       if (!manifest || !this.task.catalogReady) {
         this.task.stage = "cataloging";
-        this.task.message = "正在读取 BaoStock 品种目录，不使用旧 TDX 文件。";
+        this.task.message = "正在读取 BaoStock 品种目录，并建立本地行情范围。";
         await this.persistTask(true);
         const instruments = await this.fetchCatalog();
         if (!instruments.length) throw new Error("BaoStock 未返回符合当前方案的 A 股品种，请检查 BaoStock 安装和方案范围");

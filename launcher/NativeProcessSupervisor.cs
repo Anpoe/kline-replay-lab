@@ -285,7 +285,7 @@ namespace KLineTrainingCamp.Launcher
             }
             catch (Exception error)
             {
-                return "后台 worker 未就绪：" + error.Message;
+                return "后台任务未就绪：" + error.Message;
             }
         }
 

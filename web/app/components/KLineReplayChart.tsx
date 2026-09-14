@@ -12,6 +12,7 @@ import type { CandleTooltipStyle, Chart, KLineData, Overlay, OverlayCreate, Over
 import type { MovingAverageSettings } from "../lib/chartIndicators";
 import type { ProtectionLine, ProtectionPriceKind } from "../lib/tradeProtection";
 import type { TimeframeId } from "../lib/timeframeCatalog";
+import type { CorporateActionMarker } from "../lib/corporateActions";
 
 export type { ProtectionLine, ProtectionPriceKind } from "../lib/tradeProtection";
 
@@ -66,10 +67,12 @@ export type CandleContextTarget = {
 
 type TradeOverlayData = TradeMarker;
 type DecisionOverlayData = DecisionMarker & { onSelect?: (id: string) => void };
+type CorporateActionOverlayData = CorporateActionMarker & { onSelect?: (id: string) => void };
 
 const USER_DRAWING_GROUP = "user-drawings";
 const TRADE_MARKER_GROUP = "trade-markers";
 const DECISION_MARKER_GROUP = "decision-markers";
+const CORPORATE_ACTION_GROUP = "corporate-action-markers";
 const PROTECTION_LINE_GROUP = "protection-lines";
 const MOBILE_CHART_QUERY = "(max-width: 600px)";
 const MOBILE_REPLAY_RIGHT_OFFSET = 16;
@@ -686,6 +689,53 @@ function ensureDecisionOverlay(registerOverlay: (template: OverlayTemplate<Decis
   decisionOverlayRegistered = true;
 }
 
+let corporateActionOverlayRegistered = false;
+
+function ensureCorporateActionOverlay(registerOverlay: (template: OverlayTemplate<CorporateActionOverlayData>) => void) {
+  if (corporateActionOverlayRegistered) return;
+  registerOverlay({
+    name: "corporateActionMarker",
+    totalStep: 1,
+    needDefaultPointFigure: false,
+    needDefaultXAxisFigure: false,
+    needDefaultYAxisFigure: false,
+    createPointFigures: ({ overlay, coordinates }) => {
+      const action = overlay.extendData;
+      const point = coordinates[0];
+      if (!action || !point) return [];
+      return [
+        {
+          type: "circle",
+          attrs: { x: point.x, y: point.y, r: 5 },
+          styles: { style: "stroke_fill", color: "#f1c86a", borderColor: "#261d08", borderSize: 2 },
+          ignoreEvent: overlayHoverIgnoreEvents,
+        },
+        {
+          type: "text",
+          attrs: { x: point.x, y: point.y - 10, text: action.label, align: "center", baseline: "bottom" },
+          styles: {
+            color: "#1b1508",
+            size: 10,
+            weight: 800,
+            backgroundColor: "#f1c86a",
+            borderRadius: 4,
+            paddingLeft: 4,
+            paddingRight: 4,
+            paddingTop: 2,
+            paddingBottom: 2,
+          },
+          ignoreEvent: overlayHoverIgnoreEvents,
+        },
+      ];
+    },
+    onClick: ({ overlay }) => {
+      const action = overlay.extendData;
+      if (action) action.onSelect?.(action.id);
+    },
+  });
+  corporateActionOverlayRegistered = true;
+}
+
 function syncTradeMarkers(chart: Chart, tradeMarkers: TradeMarker[]) {
   chart.removeOverlay({ groupId: TRADE_MARKER_GROUP });
   tradeMarkers.forEach((trade) => {
@@ -926,6 +976,7 @@ export function KLineReplayChart({
   clearNonce,
   tradeMarkers,
   decisionMarkers,
+  corporateActionMarkers,
   protectionLines,
   priceSelectionMode,
   drawings,
@@ -935,6 +986,7 @@ export function KLineReplayChart({
   hidePrice,
   enableCandleContextMenu = true,
   onDecisionSelect,
+  onCorporateActionSelect,
   onProtectionPriceSelect,
   onProtectionLineMove,
   onCandleContextMenu,
@@ -952,6 +1004,7 @@ export function KLineReplayChart({
   clearNonce: number;
   tradeMarkers: TradeMarker[];
   decisionMarkers: DecisionMarker[];
+  corporateActionMarkers: CorporateActionMarker[];
   protectionLines: ProtectionLine[];
   priceSelectionMode: PriceSelectionMode | null;
   drawings: PersistedDrawing[];
@@ -961,6 +1014,7 @@ export function KLineReplayChart({
   hidePrice: boolean;
   enableCandleContextMenu?: boolean;
   onDecisionSelect: (id: string) => void;
+  onCorporateActionSelect: (id: string) => void;
   onProtectionPriceSelect: (kind: PriceSelectionMode, price: number) => void;
   onProtectionLineMove: (line: ProtectionLine, price: number) => boolean;
   onCandleContextMenu: (target: CandleContextTarget) => void;
@@ -977,13 +1031,16 @@ export function KLineReplayChart({
   const dataIndexOffsetRef = useRef(dataIndexOffset);
   const tradeMarkersRef = useRef<TradeMarker[]>(tradeMarkers);
   const decisionMarkersRef = useRef<DecisionMarker[]>(decisionMarkers);
+  const corporateActionMarkersRef = useRef<CorporateActionMarker[]>(corporateActionMarkers);
   const protectionLinesRef = useRef<ProtectionLine[]>(protectionLines);
   const syncedTradeMarkersRef = useRef("");
   const syncedDecisionMarkersRef = useRef("");
+  const syncedCorporateActionMarkersRef = useRef("");
   const syncedProtectionLinesRef = useRef("");
   const drawingsRef = useRef<PersistedDrawing[]>(drawings);
   const movingAverageSettingsRef = useRef(movingAverageSettings);
   const onDecisionSelectRef = useRef(onDecisionSelect);
+  const onCorporateActionSelectRef = useRef(onCorporateActionSelect);
   const onProtectionPriceSelectRef = useRef(onProtectionPriceSelect);
   const onProtectionLineMoveRef = useRef(onProtectionLineMove);
   const onCandleContextMenuRef = useRef(onCandleContextMenu);
@@ -1090,6 +1147,7 @@ export function KLineReplayChart({
       ensureTradeOverlay(registerOverlay);
       ensureProtectionLineOverlay(registerOverlay);
       ensureDecisionOverlay(registerOverlay);
+      ensureCorporateActionOverlay(registerOverlay);
       ensureTrainingDrawingOverlays(registerOverlay);
       const chart = init(containerRef.current, {
         locale: "zh-CN",
@@ -1189,6 +1247,8 @@ export function KLineReplayChart({
       syncedTradeMarkersRef.current = tradeMarkerSignature(tradeMarkersRef.current);
       syncDecisionMarkers(chart, decisionMarkersRef.current, (id) => onDecisionSelectRef.current(id));
       syncedDecisionMarkersRef.current = decisionMarkerSignature(decisionMarkersRef.current);
+      syncCorporateActionMarkers(chart, corporateActionMarkersRef.current, (id) => onCorporateActionSelectRef.current(id));
+      syncedCorporateActionMarkersRef.current = corporateActionMarkerSignature(corporateActionMarkersRef.current);
       syncProtectionLines(chart, protectionLinesRef.current, (line, price) => onProtectionLineMoveRef.current(line, price));
       syncedProtectionLinesRef.current = protectionLineSignature(protectionLinesRef.current);
       restoreDrawings(chart, drawingsRef.current);
@@ -1214,6 +1274,7 @@ export function KLineReplayChart({
       updateBarRef.current = null;
       syncedTradeMarkersRef.current = "";
       syncedDecisionMarkersRef.current = "";
+      syncedCorporateActionMarkersRef.current = "";
       syncedProtectionLinesRef.current = "";
     };
   }, [applyResponsiveViewport, hideDate, hidePrice, pricePrecision, restoreDrawings, symbol, timeframe, timezone]);
@@ -1318,6 +1379,19 @@ export function KLineReplayChart({
   }, [decisionMarkers]);
 
   useEffect(() => {
+    corporateActionMarkersRef.current = corporateActionMarkers;
+    const signature = corporateActionMarkerSignature(corporateActionMarkers);
+    if (chartRef.current && signature !== syncedCorporateActionMarkersRef.current) {
+      syncCorporateActionMarkers(
+        chartRef.current,
+        corporateActionMarkers,
+        (id) => onCorporateActionSelectRef.current(id),
+      );
+      syncedCorporateActionMarkersRef.current = signature;
+    }
+  }, [corporateActionMarkers]);
+
+  useEffect(() => {
     protectionLinesRef.current = protectionLines;
     const signature = protectionLineSignature(protectionLines);
     if (chartRef.current && signature !== syncedProtectionLinesRef.current) {
@@ -1360,6 +1434,10 @@ export function KLineReplayChart({
   useEffect(() => {
     onDecisionSelectRef.current = onDecisionSelect;
   }, [onDecisionSelect]);
+
+  useEffect(() => {
+    onCorporateActionSelectRef.current = onCorporateActionSelect;
+  }, [onCorporateActionSelect]);
 
   useEffect(() => {
     onProtectionPriceSelectRef.current = onProtectionPriceSelect;
@@ -1601,4 +1679,26 @@ export function KLineReplayChart({
     onPointerCancel={cancelLongPress}
     onPointerLeave={cancelLongPress}
   />;
+}
+
+function syncCorporateActionMarkers(
+  chart: Chart,
+  markers: CorporateActionMarker[],
+  onSelect: (id: string) => void,
+) {
+  chart.removeOverlay({ groupId: CORPORATE_ACTION_GROUP });
+  markers.forEach((action) => {
+    chart.createOverlay({
+      name: "corporateActionMarker",
+      groupId: CORPORATE_ACTION_GROUP,
+      points: [{ timestamp: action.barTimestamp, value: action.price }],
+      extendData: { ...action, onSelect },
+      lock: true,
+      zLevel: 32,
+    });
+  });
+}
+
+function corporateActionMarkerSignature(markers: CorporateActionMarker[]) {
+  return markers.map((action) => [action.id, action.barTimestamp, action.price, action.label].join(":")).join("|");
 }

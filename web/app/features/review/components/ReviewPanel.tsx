@@ -61,10 +61,10 @@ export function ReviewPanel({
       </div>
       <article className="deterministic-review-card">
         <div className="performance-section-head">
-          <div><span className="section-label">确定性指标 · {reviewMetrics?.version ?? "旧版记录"}</span><h2>每个结果都能回到原始 K 线</h2></div>
+          <div><span className="section-label">确定性指标 · {reviewMetrics?.version ?? "历史记录"}</span><h2>每个结果都能回到原始 K 线</h2></div>
           <small>{reviewMetrics
-            ? `${reviewMetrics.generatedFromBarCount} 根证据 K 线 · ${reviewMetrics.evidenceComplete ? "证据完整" : "部分旧记录缺少入场/出场 K 线"}`
-            : "这份旧训练保存时尚未生成确定性指标；继续训练并重新保存后会补齐。"}</small>
+            ? `${reviewMetrics.generatedFromBarCount} 根证据 K 线 · ${reviewMetrics.evidenceComplete ? "证据完整" : "部分记录缺少入场/出场 K 线"}`
+            : "这份训练保存时尚未生成确定性指标；继续训练并重新保存后会补齐。"}</small>
         </div>
         {reviewMetrics ? (
           <>

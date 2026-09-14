@@ -707,6 +707,7 @@ export class TdxLocalStore {
           throw error;
         }
       }
+      this.corporateActions.deleteInstruments(deleted);
       manifest.instruments = manifest.instruments.filter((instrument) => !targets.has(instrument.id));
       manifest.datasetVersion = `${manifest.datasetVersion.split("-edit-")[0]}-edit-${Date.now()}`;
       manifest.updatedAt = now();
@@ -1026,6 +1027,15 @@ export class TdxLocalStore {
     }));
   }
 
+  async getLatestClosedTradeDate() {
+    const current = this.nowProvider();
+    const date = new Date(Date.UTC(current.getFullYear(), current.getMonth(), current.getDate()));
+    // TDX does not expose a calendar endpoint.  Weekends are skipped here;
+    // a holiday simply produces an empty daily-maintenance response.
+    while (date.getUTCDay() === 0 || date.getUTCDay() === 6) date.setUTCDate(date.getUTCDate() - 1);
+    return date.toISOString().slice(0, 10);
+  }
+
   async getCoverage({ offset = 0, limit = 100, query = "" } = {}) {
     const manifest = await this.getManifest();
     if (!manifest) return {
@@ -1125,6 +1135,9 @@ export class TdxLocalStore {
       adjustmentType: "none",
       source: overlays.length ? "tdx-official+tushare" : "tdx-official",
       datasetVersion: manifest.datasetVersion,
+      corporateActions: this.corporateActions.state.enabled
+        ? this.corporateActions.getEvents(instrumentId)
+        : [],
       candles: timeframe === "1w"
         ? aggregateWeekly(effectiveDaily)
         : timeframe === "1mo"

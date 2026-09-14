@@ -113,34 +113,34 @@ export async function PUT(request: Request) {
   }
   let credentials: Record<string, string>;
   if (payload.provider === "baostock") {
-    return Response.json({ error: "BaoStock 是本机内置数据源，无需配置 Token" }, { status: 400 });
+    return Response.json({ error: "BaoStock 已作为内置数据源提供，无需额外填写连接凭证" }, { status: 400 });
   } else if (payload.provider === "tushare") {
     const token = payload.tushareToken?.trim();
-    if (!token) return Response.json({ error: "请填写 Tushare Token" }, { status: 400 });
+    if (!token) return Response.json({ error: "请填写 Tushare 服务密钥" }, { status: 400 });
     credentials = { tushareToken: token };
   } else if (payload.provider === "alpaca") {
     const keyId = payload.alpacaKeyId?.trim();
     const secretKey = payload.alpacaSecretKey?.trim();
     if (!keyId || !secretKey) {
-      return Response.json({ error: "请同时填写 Alpaca API Key ID 和 Secret Key" }, { status: 400 });
+      return Response.json({ error: "请同时填写 Alpaca 访问密钥 ID 和访问密钥" }, { status: 400 });
     }
     credentials = { alpacaKeyId: keyId, alpacaSecretKey: secretKey };
   } else if (payload.provider === "tdxquant") {
     const endpoint = payload.tdxQuantEndpoint?.trim().replace(/\/+$/, "");
-    if (!endpoint) return Response.json({ error: "请填写 TdxQuant 本地端点" }, { status: 400 });
+    if (!endpoint) return Response.json({ error: "请填写 TdxQuant 本地服务地址" }, { status: 400 });
     let parsed: URL;
     try {
       parsed = new URL(endpoint);
     } catch {
-      return Response.json({ error: "TdxQuant 端点格式不正确" }, { status: 400 });
+      return Response.json({ error: "TdxQuant 服务地址格式不正确" }, { status: 400 });
     }
     if (!["127.0.0.1", "localhost"].includes(parsed.hostname)) {
-      return Response.json({ error: "TdxQuant 只能连接本机 127.0.0.1 或 localhost" }, { status: 400 });
+      return Response.json({ error: "TdxQuant 只能连接本机行情服务" }, { status: 400 });
     }
     credentials = { tdxQuantEndpoint: endpoint };
   } else if (payload.provider === "twelvedata") {
     const apiKey = payload.twelveDataApiKey?.trim();
-    if (!apiKey) return Response.json({ error: "请填写 Twelve Data API Key" }, { status: 400 });
+    if (!apiKey) return Response.json({ error: "请填写 Twelve Data 访问密钥" }, { status: 400 });
     credentials = { twelveDataApiKey: apiKey };
   } else if (payload.provider === "dukascopy") {
     const endpoint = payload.dukascopyEndpoint?.trim();

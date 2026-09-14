@@ -20,7 +20,7 @@ export async function GET() {
       {
         id: "tushare",
         name: "Tushare Pro",
-        market: "A股（旧方案）",
+        market: "A股不复权日线",
         configured: Boolean(secrets.tushareToken),
         supportedTimeframes: [...DIRECT_PROVIDER_TIMEFRAMES.tushare],
         credentialNames: ["TUSHARE_TOKEN"],
@@ -35,7 +35,7 @@ export async function GET() {
       },
       {
         id: "tdxquant",
-        name: "TdxQuant 本地客户端",
+        name: "TdxQuant 本地服务地址",
         market: "A股增强（可复权）",
         configured: Boolean(tdxQuantEndpoint),
         supportedTimeframes: ["5m", "1h", "1d", "1w"],

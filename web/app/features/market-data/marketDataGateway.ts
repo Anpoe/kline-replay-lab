@@ -1,4 +1,7 @@
 import { marketSyncWorkerCoordinator } from "../../lib/marketSyncWorkerCoordinator.ts";
+import type { CorporateActionEvent } from "../../lib/corporateActions";
+
+export type { CorporateActionEvent } from "../../lib/corporateActions";
 
 export type MarketDataGatewayFetchInit = {
   cache?: "no-store";
@@ -167,6 +170,27 @@ export function createMarketDataGateway(fetcher: MarketDataGatewayFetch) {
       body: JSON.stringify({ action: "start", plan }),
     }, signal),
     "初始化任务创建失败",
+  );
+
+  const loadCorporateActions = <T = {
+    corporateActions?: Record<string, unknown> | null;
+    events?: CorporateActionEvent[];
+  }>(instrumentId: string, signal?: AbortSignal) => requestJson<T>(
+    fetcher,
+    `/api/corporate-actions?instrument=${encodeURIComponent(instrumentId)}`,
+    withSignal({ cache: "no-store" }, signal),
+    "读取权息信息失败",
+  );
+
+  const corporateActionsAction = <T = unknown>(action: "start" | "pause" | "resume", signal?: AbortSignal) => requestJson<T>(
+    fetcher,
+    "/api/corporate-actions",
+    withSignal({
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ action }),
+    }, signal),
+    "权息维护操作失败",
   );
 
   const startLocalAdjustment = <T = unknown>(signal?: AbortSignal) => requestJson<T>(
@@ -415,6 +439,8 @@ export function createMarketDataGateway(fetcher: MarketDataGatewayFetch) {
     loadLocalTask,
     loadCatalogTask,
     loadCnMaintenanceTask,
+    loadCorporateActions,
+    corporateActionsAction,
     loadFxTask,
     startLocalInitialization,
     startLocalAdjustment,

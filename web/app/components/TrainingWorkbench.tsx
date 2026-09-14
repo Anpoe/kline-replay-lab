@@ -85,6 +85,8 @@ import { PersonalSopRecommendations } from "../features/sop/components/PersonalS
 import { evaluateDisciplineGate } from "../features/sop/sopController";
 import { DataSourceManager } from "../features/market-data/components/DataSourceManager";
 import { createMarketDataGateway } from "../features/market-data/marketDataGateway";
+import type { CorporateActionEvent, CorporateActionMarker } from "../lib/corporateActions";
+import { corporateActionMarkersForBars } from "../lib/corporateActions";
 import {
   adjustmentLabel,
   defaultAdjustmentTypeForInstrument,
@@ -1571,7 +1573,7 @@ function eventLabel(type: string) {
     decision_deleted: "删除事前决策",
     reason_tag_updated: "编辑交易理由标签",
     reason_tag_deleted: "删除交易理由标签",
-    decision_changed: "编辑决策草稿（旧版）",
+    decision_changed: "编辑决策草稿",
     replay_advanced: "推进K线",
     replay_rewound: "回看上一根",
     order_queued: "提交委托",
@@ -1714,6 +1716,9 @@ export function TrainingWorkbench() {
     pricePrecision: 2,
   });
   const [bars, setBars] = useState<KLineData[]>([]);
+  const [corporateActions, setCorporateActions] = useState<CorporateActionEvent[]>([]);
+  const [corporateActionsForInstrumentId, setCorporateActionsForInstrumentId] = useState("");
+  const [selectedCorporateActionId, setSelectedCorporateActionId] = useState("");
   const [chartTimeframe, setChartTimeframe] = useState("1d");
   const [chartBars, setChartBars] = useState<KLineData[]>([]);
   const [chartViewLoading, setChartViewLoading] = useState(false);
@@ -1902,6 +1907,7 @@ export function TrainingWorkbench() {
   const liveBarDragRef = useRef<{ pointerId: number; startX: number; startY: number; offsetX: number; offsetY: number } | null>(null);
   const trainingBarDragRef = useRef<{ pointerId: number; startX: number; startY: number; offsetX: number; offsetY: number } | null>(null);
   const startupRandomStartedRef = useRef(false);
+  const startupRandomCancelledRef = useRef(false);
   const syncedPreferencesLoadStartedRef = useRef(false);
   const syncedPreferencesHydratedRef = useRef(false);
   const syncedPreferencesRetryCountRef = useRef(0);
@@ -1913,6 +1919,12 @@ export function TrainingWorkbench() {
   });
   const trainingAutosaveGateRef = useRef<TrainingAutosaveGate>(resetTrainingAutosaveGate());
   const trainingAutosaveTimerRef = useRef<number | null>(null);
+
+  const preemptStartupRandom = useCallback(() => {
+    startupRandomStartedRef.current = true;
+    startupRandomCancelledRef.current = true;
+    setStartupReady(true);
+  }, []);
 
   const rememberOrderEntryPreference = (update: Partial<Pick<AppSettings, "orderType" | "positionSizeMode" | "riskPercent">>) => {
     const nextSettings = normalizeSettings({ ...appSettingsRef.current, ...update });
@@ -2069,6 +2081,26 @@ export function TrainingWorkbench() {
   const hideTaskInstrument = trainingTask?.status === "active" && trainingTask.hideInstrument;
   const hideTaskDate = trainingTask?.status === "active" && trainingTask.hideDate;
   const hideTaskPrice = trainingTask?.status === "active" && trainingTask.hidePrice;
+  const corporateActionMarkers = useMemo<CorporateActionMarker[]>(() => corporateActionMarkersForBars(
+    corporateActionsForInstrumentId === instrument.id ? corporateActions : [],
+    renderedChartBars,
+    chartTimeframe,
+    instrument.timezone,
+    currentBar?.timestamp ?? null,
+    Boolean(hideTaskInstrument || hideTaskDate || hideTaskPrice),
+  ), [
+    corporateActions,
+    corporateActionsForInstrumentId,
+    currentBar?.timestamp,
+    chartTimeframe,
+    hideTaskDate,
+    hideTaskInstrument,
+    hideTaskPrice,
+    instrument.id,
+    instrument.timezone,
+    renderedChartBars,
+  ]);
+  const selectedCorporateAction = corporateActionMarkers.find((action) => action.id === selectedCorporateActionId) ?? null;
   const trainingDateLabel = (timestamp: number) => {
     if (!hideTaskDate) return formatDate(timestamp, timeframe);
     const index = bars.findIndex((bar) => bar.timestamp === timestamp);
@@ -2498,6 +2530,7 @@ export function TrainingWorkbench() {
   const reviewPreviewDataIndexOffset = reviewedSession
     ? reviewPreviewSnapshot?.dataIndexOffset ?? 0
     : chartDataIndexOffset;
+  const reviewPreviewCorporateActionMarkers = reviewedSession ? [] : corporateActionMarkers;
   const reviewPreviewTradeMarkers = useMemo<TradeMarker[]>(() => {
     const previewLastBar = reviewPreviewBars.at(-1);
     return reviewState.positions
@@ -3049,6 +3082,30 @@ export function TrainingWorkbench() {
   useEffect(() => () => marketLoadRef.current.controller?.abort(), []);
 
   useEffect(() => {
+    if (instrument.market.toUpperCase() !== "CN" || !/^\d{6}\.(SH|SZ|BJ)$/.test(instrument.id)) return;
+    const controller = new AbortController();
+    void marketDataGateway.loadCorporateActions<{
+      corporateActions?: { enabled?: boolean } | null;
+      events?: CorporateActionEvent[];
+    }>(instrument.id, controller.signal).then((data) => {
+      if (controller.signal.aborted) return;
+      setCorporateActionsForInstrumentId(instrument.id);
+      setSelectedCorporateActionId("");
+      if (data.corporateActions?.enabled !== true) {
+        setCorporateActions([]);
+        return;
+      }
+      setCorporateActions(Array.isArray(data.events) ? data.events : []);
+    }).catch(() => {
+      if (!controller.signal.aborted) {
+        setCorporateActionsForInstrumentId(instrument.id);
+        setCorporateActions([]);
+      }
+    });
+    return () => controller.abort();
+  }, [instrument.id, instrument.market, marketDataGateway]);
+
+  useEffect(() => {
     if (!reviewedSession) return;
 
     const snapshotId = reviewedSession.state.dataSnapshotId ?? reviewedSession.session.dataSnapshotId;
@@ -3120,6 +3177,7 @@ export function TrainingWorkbench() {
   }, [currentBar?.timestamp]);
 
   const queueRestore = useCallback((request: RestoreRequest) => {
+    preemptStartupRandom();
     liveRequestRef.current = null;
     setLiveMode(false);
     setLiveContext(null);
@@ -3152,7 +3210,7 @@ export function TrainingWorkbench() {
     setTimeframe(request.timeframe);
     setView("replay");
     setLoadNonce((value) => value + 1);
-  }, []);
+  }, [preemptStartupRandom]);
 
   const loadBars = useCallback(async () => {
     if (!startupReady) return;
@@ -4707,6 +4765,7 @@ export function TrainingWorkbench() {
   };
 
   const startFreshTraining = (nextInstrumentId: string, nextTimeframe: string) => {
+    preemptStartupRandom();
     const targetMarket = availableInstruments.find((item) => item.id === nextInstrumentId)?.market
       ?? (/\.FX$/i.test(nextInstrumentId) ? "FX" : undefined);
     setDuplicateTrainingPreview(null);
@@ -5151,6 +5210,7 @@ export function TrainingWorkbench() {
   };
 
   const openLiveScanResult = (result: LiveScanResult, index?: number, source: LiveNavigatorSource = "scan") => {
+    preemptStartupRandom();
     const switchingInstrument = !liveMode || liveContext?.instrumentId !== result.instrumentId;
     if (switchingInstrument) {
       // Do not let the previous replay/live symbol remain visible while its
@@ -6226,7 +6286,7 @@ export function TrainingWorkbench() {
           ? task.randomRun
             ? task.mode === "blind" ? "随机盲测" : "随机训练"
             : trainingModeLabels[task.mode]
-          : "旧版自由训练",
+          : "自由训练",
         rangeLabel: task
           ? `${formatDate(task.startTimestamp, session.timeframe)} → ${formatDate(task.endTimestamp, session.timeframe)}`
           : `保存于 K线 ${state.cursor + 1}`,
@@ -7303,6 +7363,7 @@ export function TrainingWorkbench() {
       : (draft.patternPresetIds ?? []).filter((id) => visiblePatternPresets(patternPresets).some((preset) => preset.id === id));
     draft = { ...draft, patternPresetIds: selectedPatternIds };
     const randomConfig = taskSetupKind === "random" ? currentRandomConfig() : undefined;
+    preemptStartupRandom();
     setStartingTraining(true);
     setPatternScanStatus("");
     setSetupError("");
@@ -7371,6 +7432,7 @@ export function TrainingWorkbench() {
 
   const startQuickRandomTraining = async () => {
     if (startingTraining) return;
+    preemptStartupRandom();
     const blind = quickRandomMode === "blind";
     const randomConfig = currentRandomConfig();
     const selectedPatternIds = availablePatternPresets.some((preset) => preset.id === quickRandomPatternPresetId)
@@ -7418,6 +7480,7 @@ export function TrainingWorkbench() {
   const continueRandomTraining = async () => {
     const completedTask = trainingTask;
     if (!completedTask?.randomRun) return;
+    preemptStartupRandom();
     const randomConfig = completedTask.randomConfig ?? currentRandomConfig();
     const draft: TrainingTaskDraft = {
       ...defaultTrainingTaskDraft,
@@ -7467,7 +7530,12 @@ export function TrainingWorkbench() {
   }, [loadInstrumentCatalog]);
 
   useEffect(() => {
-    if (!settingsReady || !instrumentCatalogReady || startupRandomStartedRef.current) return;
+    if (
+      !settingsReady
+      || !instrumentCatalogReady
+      || startupRandomStartedRef.current
+      || startupRandomCancelledRef.current
+    ) return;
     startupRandomStartedRef.current = true;
     let cancelled = false;
     void resolveRandomRequest({
@@ -7478,7 +7546,7 @@ export function TrainingWorkbench() {
         randomRun: true,
       })
       .then((request) => {
-        if (cancelled) return;
+        if (cancelled || startupRandomCancelledRef.current) return;
         if (!request) {
           setChartLoadError("没有找到满足随机规则的训练片段，请在设置中调整市场范围或美股流动性门槛。");
           setStartupReady(true);
@@ -7497,6 +7565,11 @@ export function TrainingWorkbench() {
         setChartLoadError("");
         setStartupReady(true);
         setLoadNonce((value) => value + 1);
+      })
+      .catch(() => {
+        if (cancelled || startupRandomCancelledRef.current) return;
+        setChartLoadError("训练行情准备失败，请重试随机训练。");
+        setStartupReady(true);
       });
     return () => { cancelled = true; };
   }, [instrumentCatalogReady, resolveRandomRequest, settingsReady]);
@@ -7830,7 +7903,7 @@ export function TrainingWorkbench() {
                     const progressSummary = state && task ? taskProgress(task, state.cursor) : null;
                     const modeLabel = task
                       ? task.randomRun ? task.mode === "blind" ? "随机盲测" : "随机训练" : trainingModeLabels[task.mode]
-                      : "旧版自由训练";
+                      : "自由训练";
                     const totalResult = stats && state?.tradingMode === "capital" ? stats.pnl.total : stats?.returnPct ?? 0;
                     const realizedResult = stats && state?.tradingMode === "capital" ? stats.pnl.realized : stats?.realizedReturnPct ?? 0;
                     const floatingResult = stats && state?.tradingMode === "capital" ? stats.pnl.floating : stats?.floatingReturnPct ?? 0;
@@ -8642,6 +8715,7 @@ export function TrainingWorkbench() {
                       clearNonce={clearNonce}
                       tradeMarkers={tradeMarkers}
                       decisionMarkers={decisionMarkers}
+                      corporateActionMarkers={corporateActionMarkers}
                       protectionLines={protectionLines}
                       priceSelectionMode={showingCanonicalChart ? protectionPriceSelection : null}
                       drawings={showingCanonicalChart ? drawings : []}
@@ -8650,12 +8724,19 @@ export function TrainingWorkbench() {
                       hideDate={hideTaskDate}
                       hidePrice={hideTaskPrice}
                       onDecisionSelect={setSelectedDecisionId}
+                      onCorporateActionSelect={setSelectedCorporateActionId}
                       onProtectionPriceSelect={showingCanonicalChart ? applyDraftProtectionPrice : ignoreProtectionPriceSelect}
                       onProtectionLineMove={showingCanonicalChart ? moveProtectionLine : rejectProtectionLineMove}
                       onCandleContextMenu={showingCanonicalChart ? openDecisionForCandle : ignoreCandleContextMenu}
                       onDrawingsChange={showingCanonicalChart ? handleDrawingsChange : ignoreDrawingsChange}
                       onDrawingSelect={showingCanonicalChart ? (id) => setSelectedDrawingId(id ?? "") : ignoreDrawingSelect}
                     />
+                  )}
+                  {selectedCorporateAction && (
+                    <div className="corporate-action-card" role="status">
+                      <div><span>权息事件 · {selectedCorporateAction.label}</span><strong>{selectedCorporateAction.date}</strong></div>
+                      <p>{selectedCorporateAction.description}</p>
+                    </div>
                   )}
                   {protectionPriceSelection && (
                     <div className="price-selection-hint">
@@ -9611,7 +9692,7 @@ export function TrainingWorkbench() {
             <section className="performance-analysis">
               <div className="performance-section-head">
                 <div><span className="section-label">习惯优势分析</span><h2>什么组合最适合你</h2></div>
-                <small>按每笔已平仓交易的平均{performanceUsesCapital ? "盈亏" : "收益率"}排序；至少 2 笔才标为当前最优。严格事前计划优先，旧版补写计划作为兼容样本并单独标明。</small>
+                <small>按每笔已平仓交易的平均{performanceUsesCapital ? "盈亏" : "收益率"}排序；至少 2 笔才标为当前最优。严格事前计划优先，训练开始后补写的计划会单独标明。</small>
               </div>
               <div className="performance-analysis-grid">
                 <PerformanceInsightCard title="最优持仓时长" description="按持有的约略 K 线根数分组" items={performanceHabitAnalysis.holdingPeriods} formatResult={formatPerformanceValue} />
@@ -9874,6 +9955,8 @@ export function TrainingWorkbench() {
                 initialDrawings={reviewState.drawings}
                 tradeMarkers={reviewPreviewTradeMarkers}
                 decisionMarkers={reviewPreviewDecisionMarkers}
+                corporateActionMarkers={reviewPreviewCorporateActionMarkers}
+                onCorporateActionSelect={setSelectedCorporateActionId}
                 loading={reviewedSession ? reviewChartLoading : loading}
                 error={reviewedSession ? reviewChartError : chartLoadError}
               />

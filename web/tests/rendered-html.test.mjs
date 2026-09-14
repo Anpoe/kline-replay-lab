@@ -279,6 +279,24 @@ test("previews duplicate training in replay before offering review", async () =>
   assert.doesNotMatch(warningBlock, /setView\("review"\)/);
 });
 
+test("lets explicit replay restores preempt the startup random scan", async () => {
+  const workbench = await readFile(new URL("app/components/TrainingWorkbench.tsx", root), "utf8");
+  const queueRestoreStart = workbench.indexOf("const queueRestore = useCallback");
+  const loadBarsStart = workbench.indexOf("const loadBars = useCallback", queueRestoreStart);
+  const startupEffectStart = workbench.lastIndexOf("useEffect(() => {");
+  const startupEffect = startupEffectStart >= 0 ? workbench.slice(startupEffectStart) : "";
+  const queueRestore = queueRestoreStart >= 0 && loadBarsStart >= 0
+    ? workbench.slice(queueRestoreStart, loadBarsStart)
+    : "";
+
+  assert.match(workbench, /const startupRandomCancelledRef = useRef\(false\)/);
+  assert.match(workbench, /const preemptStartupRandom = useCallback\(\(\) => \{/);
+  assert.match(workbench, /startupRandomCancelledRef\.current = true/);
+  assert.match(workbench, /setStartupReady\(true\)/);
+  assert.match(queueRestore, /preemptStartupRandom\(\)/);
+  assert.match(startupEffect, /if \(cancelled \|\| startupRandomCancelledRef\.current\) return;/);
+});
+
 test("renders the review heading only inside the review feature", async () => {
   const [workbench, reviewPanel] = await Promise.all([
     readFile(new URL("app/components/TrainingWorkbench.tsx", root), "utf8"),

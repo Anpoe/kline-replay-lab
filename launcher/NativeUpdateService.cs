@@ -478,7 +478,7 @@ namespace KLineTrainingCamp.Launcher
                     {
                         parent.WaitForExit(500);
                     }
-                    if (!parent.HasExited) throw new TimeoutException("等待旧版本退出超时。");
+                    if (!parent.HasExited) throw new TimeoutException("等待当前版本退出超时。");
                 }
             }
             catch (ArgumentException)

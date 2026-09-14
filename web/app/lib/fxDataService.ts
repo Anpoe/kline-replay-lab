@@ -778,7 +778,7 @@ function rowTimestamp(row: { lastTimestamp: number | null } | null) {
 
 async function runIncrementalTask(db: D1Database, task: FxTaskRow, instrument: MarketInstrumentDefinition) {
   const { secrets } = await loadProviderSecrets();
-  if (!secrets.twelveDataApiKey) throw new Error("尚未配置 Twelve Data API Key，请在“设置 → 数据源设置”中保存凭证");
+  if (!secrets.twelveDataApiKey) throw new Error("尚未配置 Twelve Data 访问密钥，请在“设置 → 数据源设置”中保存凭证");
   const [historyMinuteRow, historyFiveMinuteRow, latestIncrementalRow] = await Promise.all([
     db.prepare(`SELECT MAX(timestamp) AS lastTimestamp FROM candles
       WHERE instrument_id = ? AND timeframe = '1m' AND adjustment_type = 'none' AND source = ?`)

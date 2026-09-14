@@ -67,11 +67,19 @@ async function readDatabaseMarketRows(db: D1Database) {
 }
 
 async function readLocalCnSummary() {
-  const response = await readLocalDataJson<{ instruments?: LocalInstrumentRow[] }>("/instruments", 12_000);
+  const response = await readLocalDataJson<{
+    activeSource?: string;
+    instruments?: LocalInstrumentRow[];
+  }>("/instruments", 12_000);
+  const status = await readLocalDataJson<{
+    dataset?: { corporateActions?: { enabled?: boolean } | null } | null;
+  }>("/tasks/current", 12_000);
   const instruments = (response?.instruments ?? []).filter((item) => (
     marketCode(item.market) === "CN" && Number(item.barCount ?? 0) > 0
   ));
   return {
+    source: response?.activeSource,
+    corporateActionsEnabled: Boolean(status?.dataset?.corporateActions?.enabled),
     instrumentCount: instruments.length,
     barCount: instruments.reduce((sum, item) => sum + Math.max(0, Number(item.barCount ?? 0)), 0),
     lastTimestamp: maxTimestamp(...instruments.map((item) => finiteTimestamp(item.lastTimestamp))),
@@ -89,9 +97,8 @@ async function latestClosedBaoStockDate() {
 async function inspectCnUpdate(
   _row: DatabaseMarketRow | undefined,
   local: Awaited<ReturnType<typeof readLocalCnSummary>>,
+  tushareToken?: string,
 ) {
-  // Only BaoStock-local rows count as existing CN data.  This prevents the
-  // old D1/Tushare dataset from silently reappearing in the update panel.
   const instrumentCount = local.instrumentCount;
   const barCount = local.barCount;
   const latestTimestamp = local.lastTimestamp;
@@ -103,7 +110,19 @@ async function inspectCnUpdate(
       needsUpdate: false,
       latestDate: null,
       expectedLatestDate: null,
-      reason: "A 股尚无可更新的 BaoStock 历史数据",
+      reason: "A 股尚无可更新的本地历史数据",
+    };
+  }
+  if (String(local.source).toLowerCase() === "tdx") {
+    return {
+      existing: true,
+      configured: Boolean(tushareToken),
+      needsUpdate: Boolean(tushareToken),
+      latestDate: dateFromTimestamp(latestTimestamp),
+      expectedLatestDate: null,
+      reason: tushareToken
+        ? `通达信不复权日线将继续检查增量${local.corporateActionsEnabled ? "，并维护权息信息" : ""}`
+        : "通达信不复权日线已有数据，但尚未配置日线增量所需的数据源凭证",
     };
   }
   try {
@@ -137,7 +156,7 @@ async function inspectCnUpdate(
       needsUpdate: false,
       latestDate: dateFromTimestamp(latestTimestamp),
       expectedLatestDate: null,
-      reason: "无法连接本机 BaoStock 检查交易日，已跳过自动更新",
+      reason: "无法连接本机数据服务检查交易日，已跳过自动更新",
     };
   }
 }
@@ -176,7 +195,7 @@ async function inspectFxUpdates(
         providerLatestTimestamp: null,
         needsUpdate: false,
       })),
-      reason: `${marketLabel}已有数据，但尚未配置 Twelve Data API Key`,
+      reason: `${marketLabel}已有数据，但尚未配置 Twelve Data 访问密钥`,
     };
   }
   for (const row of rows) {
@@ -242,7 +261,7 @@ export async function inspectExistingMarkets(db: D1Database) {
   const goldRows = marketRows.results.filter((row) => marketCode(row.market) === "GOLD");
 
   const [cn, us, fx, gold] = await Promise.all([
-    inspectCnUpdate(byMarket.get("CN"), localCn),
+    inspectCnUpdate(byMarket.get("CN"), localCn, secrets.tushareToken),
     inspectMarketSyncUpdate(db),
     inspectFxUpdates(
       fxRows.map((row) => ({

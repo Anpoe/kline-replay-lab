@@ -33,6 +33,7 @@ import {
   type TradeMarker,
 } from "../../../components/KLineReplayChart";
 import type { MovingAverageSettings } from "../../../lib/chartIndicators";
+import type { CorporateActionMarker } from "../../../lib/corporateActions";
 
 type ReviewChartInstrument = {
   symbol: string;
@@ -129,6 +130,8 @@ type ReviewChartPreviewProps = {
   initialDrawings: PersistedDrawing[];
   tradeMarkers: TradeMarker[];
   decisionMarkers: DecisionMarker[];
+  corporateActionMarkers?: CorporateActionMarker[];
+  onCorporateActionSelect?: (id: string) => void;
   loading?: boolean;
   error?: string;
 };
@@ -142,6 +145,8 @@ export function ReviewChartPreview({
   initialDrawings,
   tradeMarkers,
   decisionMarkers,
+  corporateActionMarkers = [],
+  onCorporateActionSelect = () => undefined,
   loading = false,
   error = "",
 }: ReviewChartPreviewProps) {
@@ -518,7 +523,8 @@ export function ReviewChartPreview({
             drawingRequest={drawingRequest}
             clearNonce={clearNonce}
             tradeMarkers={tradeMarkers}
-            decisionMarkers={decisionMarkers}
+      decisionMarkers={decisionMarkers}
+      corporateActionMarkers={corporateActionMarkers}
             protectionLines={[]}
             priceSelectionMode={null}
             drawings={drawings}
@@ -527,7 +533,8 @@ export function ReviewChartPreview({
             hideDate={false}
             hidePrice={false}
             enableCandleContextMenu={false}
-            onDecisionSelect={() => undefined}
+      onDecisionSelect={() => undefined}
+      onCorporateActionSelect={onCorporateActionSelect}
             onProtectionPriceSelect={() => undefined}
             onProtectionLineMove={() => false}
             onCandleContextMenu={() => undefined}

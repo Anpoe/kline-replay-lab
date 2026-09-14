@@ -83,15 +83,15 @@ function sourceList() {
       name: "Tushare daily",
       adjustmentType: "none",
       adjustmentLabel: "不复权",
-      description: "按交易日更新不复权日线。",
+      description: "提供逐批历史日线与每日增量更新。",
       active: false,
     },
     {
       id: "tdxquant",
       name: "TdxQuant",
       adjustmentType: "provider-defined",
-      adjustmentLabel: "可复权（按端点口径）",
-      description: "提供分钟行情，复权方式以数据源设置为准。",
+      adjustmentLabel: "可复权（按服务地址口径）",
+      description: "提供可配置的分钟及增强行情服务，复权口径由服务地址配置决定。",
       active: false,
     },
   ];
@@ -175,9 +175,10 @@ const server = http.createServer(async (request, response) => {
     if (url.pathname === "/corporate-actions" && request.method === "GET") {
       const instrumentId = url.searchParams.get("instrument");
       if (instrumentId && !/^\d{6}\.(SH|SZ|BJ)$/.test(instrumentId)) return send(response, 400, { error: "品种代码无效" });
+      const corporateActions = activeSource === "tdx" ? stores.tdx.corporateActions.getStatus() : null;
       return send(response, 200, {
-        corporateActions: stores.tdx.corporateActions.getStatus(),
-        events: instrumentId ? stores.tdx.corporateActions.getEvents(instrumentId) : [],
+        corporateActions,
+        events: activeSource === "tdx" && instrumentId ? stores.tdx.corporateActions.getEvents(instrumentId) : [],
       });
     }
     if (url.pathname === "/corporate-actions" && request.method === "POST") {
@@ -206,7 +207,7 @@ const server = http.createServer(async (request, response) => {
         return send(response, 409, { error: "Tushare daily 保留为逐批增量接口，不能单独替代全历史初始化；请选择 BaoStock 或通达信完整包。" });
       }
       if (requestedSource === "tdxquant") {
-        return send(response, 409, { error: "TdxQuant 保留为可复权分钟/增强数据端点；全历史日线初始化请选择 BaoStock 或通达信完整包。" });
+        return send(response, 409, { error: "TdxQuant 可用于分钟和增强行情；全历史日线初始化请选择 BaoStock 或通达信日线数据包。" });
       }
       await setActiveSource(requestedSource);
       return send(response, 201, { activeSource, task: await activeStore().createTask(payload) });
@@ -221,7 +222,7 @@ const server = http.createServer(async (request, response) => {
       return send(response, 410, {
         error: activeSource === "baostock"
           ? "BaoStock 初始化时直接返回前复权价格，不再需要单独复权任务。"
-          : "当前选择的通达信/Tushare 数据集是不复权数据；如需复权，请切换 BaoStock，或在 TdxQuant 端点选择复权口径。",
+          : "当前选择的通达信/Tushare 数据集是不复权数据；如需复权，请切换 BaoStock，或在 TdxQuant 服务地址中选择复权口径。",
       });
     }
     if (request.method === "POST" && url.pathname === "/catalog/refresh") {
@@ -304,7 +305,7 @@ const server = http.createServer(async (request, response) => {
 });
 
 server.listen(port, host, () => {
-  console.log(`K线训练营本机数据服务：http://${host}:${port}（默认 BaoStock，可切换旧 TDX/Tushare）`);
+  console.log(`K线训练营本机数据服务：http://${host}:${port}（可按设置选择行情来源）`);
 });
 
 for (const signal of ["SIGINT", "SIGTERM"]) {

@@ -60,6 +60,12 @@ export class CorporateActionsStore {
       CREATE TABLE IF NOT EXISTS state (id INTEGER PRIMARY KEY CHECK(id=1), payload TEXT NOT NULL);`);
     const saved = this.db.prepare('SELECT payload FROM state WHERE id=1').get();
     if (saved) this.state = JSON.parse(saved.payload);
+    if (this.state.task?.error?.includes("权息数据组件尚未安装")) {
+      this.state.task.status = "paused";
+      this.state.task.error = null;
+      this.state.task.message = "权息查询方式已更新为内置服务，可继续未完成品种。";
+      this.save();
+    }
     if (busy(this.state.task)) {
       this.state.task.status = 'paused';
       this.state.task.message = '权息更新已暂停，可继续未完成的品种。';
@@ -85,12 +91,25 @@ export class CorporateActionsStore {
     return row ? JSON.parse(row.events) : [];
   }
 
+  deleteInstruments(instrumentIds) {
+    if (!instrumentIds.length) return;
+    const remove = this.db.prepare('DELETE FROM records WHERE instrument_id=?');
+    this.db.exec('BEGIN');
+    try {
+      for (const instrumentId of instrumentIds) remove.run(instrumentId);
+      this.db.exec('COMMIT');
+    } catch (error) {
+      this.db.exec('ROLLBACK');
+      throw error;
+    }
+  }
+
   async start(instruments) {
     if (this.closed) throw new Error('权息服务已关闭');
     if (this.running || busy(this.state.task)) return this.getStatus();
     // An interrupted initial build must not be silently discarded by a daily update.
     if (this.state.task && ['paused', 'failed'].includes(this.state.task.status)) return this.resume();
-    const ids = [...new Set(instruments.filter(item => item.asset === 'stock' && /^\d{6}\.(SH|SZ)$/.test(item.id)).map(item => item.id))];
+    const ids = [...new Set(instruments.filter(item => (item.asset ?? item.assetType) === 'stock' && /^\d{6}\.(SH|SZ)$/.test(item.id)).map(item => item.id))];
     this.state.enabled = true;
     this.state.task = { status: 'queued', ids, nextIndex: 0, total: ids.length, processed: 0, failed: [],
       skipped: instruments.length - ids.length, message: '等待更新权息信息', startedAt: stamp(), error: null };

@@ -427,7 +427,7 @@ export async function fetchProviderChunk(
   fetcher: typeof fetch = fetch,
 ): Promise<ProviderChunk> {
   if (request.provider === "tushare") {
-    if (!secrets.tushareToken) throw new Error("尚未配置 TUSHARE_TOKEN");
+    if (!secrets.tushareToken) throw new Error("尚未配置 Tushare 服务密钥");
     const chunk = tushareChunkRequest(request);
     const response = await fetcher("https://api.tushare.pro", {
       method: "POST",

@@ -229,7 +229,7 @@ namespace KLineTrainingCamp.Launcher
             string normalized = NativeUpdateService.NormalizeVersion(version);
             if (!string.IsNullOrWhiteSpace(normalized)) return "v" + normalized;
             if (string.Equals(version, "development", StringComparison.OrdinalIgnoreCase)) return "开发版";
-            return "旧版";
+            return "版本信息不可用";
         }
 
         private ContextMenuStrip CreateTrayMenu()
@@ -285,7 +285,7 @@ namespace KLineTrainingCamp.Launcher
         {
             summaryLabel.Text = "正在启动本地服务…";
             await supervisor.StartAllAsync();
-            summaryLabel.Text = "本地服务已启动，后台任务仅通过本地 worker 执行。";
+            summaryLabel.Text = "本地服务已启动，后台任务正在运行。";
         }
 
         private async Task<bool> StopServicesAsync()

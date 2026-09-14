@@ -44,8 +44,8 @@ const emptyStatus: ProviderSettingsResponse["providers"] = {
 
 function sourceLabel(source: ProviderState["source"]) {
   if (source === "settings") return "已保存在本机设置";
-  if (source === "environment") return "来自本机环境文件";
-  if (source === "builtin") return "已启用官方内置适配器";
+  if (source === "environment") return "已配置";
+  if (source === "builtin") return "已启用内置数据源";
   return "尚未配置";
 }
 
@@ -179,11 +179,11 @@ export function ProviderSettingsPanel() {
       await loadStatus();
       window.dispatchEvent(new Event("provider-settings-updated"));
       setNotice(provider === "tushare"
-        ? "Tushare Token 已保存在本机；Tushare daily 日线保持不复权。"
+        ? "Tushare 服务密钥已保存在本机；日线价格保持不复权。"
         : provider === "tdxquant"
-        ? "TdxQuant 本地端点已保存；支持按端点选择复权口径，使用分钟数据时仍需启动并登录支持 TQ 的通达信客户端。"
+        ? "TdxQuant 服务地址已保存；可按服务地址选择复权口径，使用分钟数据前请完成行情终端连接。"
         : provider === "twelvedata"
-          ? "Twelve Data API Key 已保存在本机。"
+          ? "Twelve Data 访问密钥已保存在本机。"
           : provider === "dukascopy"
             ? "Dukascopy 自定义 CSV 地址已保存在本机。"
             : "Alpaca 凭证已保存在本机。");
@@ -216,7 +216,7 @@ export function ProviderSettingsPanel() {
     <div className="settings-section provider-settings-section">
       <div className="settings-section-head">
         <strong>历史行情数据源</strong>
-        <span>凭证只保存在这台电脑的本地数据库；界面不会回显完整内容，也不会写入 Git。</span>
+        <span>首次使用：先确认数据服务状态，再到“数据”页面建立训练数据。连接凭证只保存在本机，页面不会显示完整内容。</span>
       </div>
 
       <article className="provider-setting-card auto-update-setting-card">
@@ -272,7 +272,7 @@ export function ProviderSettingsPanel() {
             onClick={() => void saveAutoUpdateSchedule({ time: autoUpdateScheduleTime })}
           >保存时间</button>
         </div>
-        <p className="provider-setting-help">后台 worker 会在每天到达此时间后检查 A 股、美股和外汇；软件在此时间之后启动则立即执行，全天只执行一次。</p>
+        <p className="provider-setting-help">后台任务会在每天到达此时间后检查 A 股、美股和外汇；软件在此时间之后启动则立即执行，全天只执行一次。</p>
         <small className="auto-update-setting-status">
           {autoUpdateScheduledEnabled
             ? `当前计划：每天 ${autoUpdateScheduleTime}（系统时间）`
@@ -282,18 +282,18 @@ export function ProviderSettingsPanel() {
 
       <article className="provider-setting-card">
         <div className="provider-setting-title">
-          <div><KeyRound size={17} /><span><strong>Tushare Pro</strong><small>A 股旧日线接口（不复权）</small></span></div>
+          <div><KeyRound size={17} /><span><strong>Tushare Pro</strong><small>A 股日线数据（不复权）</small></span></div>
           <span className={status.tushare.configured ? "configured" : ""}>
             {statusLoaded ? sourceLabel(status.tushare.source) : "正在读取本机凭证状态…"}
             {statusLoaded && status.tushare.hint ? ` · ${status.tushare.hint}` : ""}
           </span>
         </div>
         <div className="provider-secret-fields single">
-          <label>Token
-            <input type="password" autoComplete="new-password" value={tushareToken} onChange={(event) => setTushareToken(event.target.value)} placeholder={status.tushare.configured ? "输入新值可替换现有 Token" : "填写 Tushare Token"} />
+          <label>服务密钥
+            <input type="password" autoComplete="new-password" value={tushareToken} onChange={(event) => setTushareToken(event.target.value)} placeholder={status.tushare.configured ? "输入新值可替换现有密钥" : "填写 Tushare 服务密钥"} />
           </label>
         </div>
-        <p className="provider-setting-help">保留原有逐批日线和维护入口；Tushare daily 返回的是不复权价格。需要复权时，优先选择 BaoStock，或使用已配置的 TdxQuant 复权端点。</p>
+        <p className="provider-setting-help">保留原有逐批日线和维护入口；Tushare daily 返回的是不复权价格。需要复权时，优先选择 BaoStock，或使用已配置的 TdxQuant 复权服务。</p>
         <div className="provider-setting-actions">
           {status.tushare.source === "settings" && <button className="delete-session" onClick={() => clearProvider("tushare")}><Trash2 size={13} />清除本机凭证</button>}
           <button className="primary-button" disabled={saving === "tushare"} onClick={() => saveProvider("tushare")}><Save size={14} />保存 Tushare</button>
@@ -309,11 +309,11 @@ export function ProviderSettingsPanel() {
           </span>
         </div>
         <div className="provider-secret-fields">
-          <label>API Key ID
-            <input type="password" autoComplete="new-password" value={alpacaKeyId} onChange={(event) => setAlpacaKeyId(event.target.value)} placeholder={status.alpaca.configured ? "输入新值可替换现有凭证" : "填写 Alpaca API Key ID"} />
+          <label>访问密钥 ID
+            <input type="password" autoComplete="new-password" value={alpacaKeyId} onChange={(event) => setAlpacaKeyId(event.target.value)} placeholder={status.alpaca.configured ? "输入新值可替换现有凭证" : "填写 Alpaca 访问密钥 ID"} />
           </label>
-          <label>Secret Key
-            <input type="password" autoComplete="new-password" value={alpacaSecretKey} onChange={(event) => setAlpacaSecretKey(event.target.value)} placeholder={status.alpaca.configured ? "输入新值可替换现有凭证" : "填写 Alpaca Secret Key"} />
+          <label>访问密钥
+            <input type="password" autoComplete="new-password" value={alpacaSecretKey} onChange={(event) => setAlpacaSecretKey(event.target.value)} placeholder={status.alpaca.configured ? "输入新值可替换现有凭证" : "填写 Alpaca 访问密钥"} />
           </label>
         </div>
         <div className="provider-setting-actions">
@@ -330,11 +330,11 @@ export function ProviderSettingsPanel() {
           </span>
         </div>
         <div className="provider-secret-fields single">
-          <label>本地 HTTP 端点
+          <label>本地服务地址
             <input value={tdxQuantEndpoint} onChange={(event) => setTdxQuantEndpoint(event.target.value)} placeholder="http://127.0.0.1:17709" />
           </label>
         </div>
-        <p className="provider-setting-help">不需要券商资金账号，但使用时必须启动并登录支持 TQ 的通达信客户端。该端点支持复权数据，具体复权口径由端点配置决定；这里只允许保存本机地址。</p>
+        <p className="provider-setting-help">使用前请完成本机行情终端连接。该服务地址支持复权数据，具体口径由服务提供方决定；这里只保存本机地址。</p>
         <div className="provider-setting-actions">
           {status.tdxquant.source === "settings" && <button className="delete-session" onClick={() => clearProvider("tdxquant")}><Trash2 size={13} />清除本机配置</button>}
           <button className="primary-button" disabled={saving === "tdxquant"} onClick={() => saveProvider("tdxquant")}><Save size={14} />保存 TdxQuant</button>
@@ -345,10 +345,10 @@ export function ProviderSettingsPanel() {
         <div className="provider-setting-title">
           <div><KeyRound size={17} /><span><strong>BaoStock</strong><small>A 股前复权日线（内置免费数据源）</small></span></div>
           <span className={status.baostock.configured ? "configured" : ""}>
-            {statusLoaded ? "内置，无需 Token" : "正在读取本机状态…"}
+            {statusLoaded ? "内置数据源" : "正在读取本机状态…"}
           </span>
         </div>
-          <p className="provider-setting-help">BaoStock 是默认 A 股历史日线来源，直接返回前复权价格。原有 TDX/Tushare 不复权方案继续保留；TdxQuant 作为可复权的分钟 / 增强数据备选。首次使用前请在项目目录执行：<code>python -m pip install -r web/local-data/requirements.txt</code></p>
+          <p className="provider-setting-help">BaoStock 是默认 A 股历史日线来源，直接返回前复权价格；需要不复权日线或其他复权口径时，可在高级自定义中选择相应来源。</p>
       </article>
 
       <article className="provider-setting-card">
@@ -360,8 +360,8 @@ export function ProviderSettingsPanel() {
           </span>
         </div>
         <div className="provider-secret-fields single">
-          <label>API Key
-            <input type="password" autoComplete="new-password" value={twelveDataApiKey} onChange={(event) => setTwelveDataApiKey(event.target.value)} placeholder={status.twelvedata.configured ? "输入新值可替换现有凭证" : "填写 Twelve Data API Key"} />
+          <label>访问密钥
+            <input type="password" autoComplete="new-password" value={twelveDataApiKey} onChange={(event) => setTwelveDataApiKey(event.target.value)} placeholder={status.twelvedata.configured ? "输入新值可替换现有凭证" : "填写 Twelve Data 访问密钥"} />
           </label>
         </div>
         <p className="provider-setting-help">密钥只在服务端请求 Twelve Data，前端不会把完整密钥回显。增量更新写入已经收盘的 M1，并在本机聚合 M5 / M15 / M30 / H1 / H4 / D1 / W1 / MN。</p>
@@ -383,7 +383,7 @@ export function ProviderSettingsPanel() {
             <input value={dukascopyEndpoint} onChange={(event) => setDukascopyEndpoint(event.target.value)} placeholder="留空即可使用官方内置适配器" />
           </label>
         </div>
-        <p className="provider-setting-help">系统已内置官方 Dukascopy 适配器，无需填写地址。只有在你要覆盖官方服务时，才填写一个直接返回 CSV 并接受 instrument、start、end、timeframe 参数的自定义地址。</p>
+        <p className="provider-setting-help">默认即可使用；如需指定其他来源，再填写自定义服务地址。地址需要返回对应周期的 CSV 行情。</p>
         <div className="provider-setting-actions">
           {status.dukascopy.source === "settings" && <button className="delete-session" onClick={() => clearProvider("dukascopy")}><Trash2 size={13} />清除本机配置</button>}
           {dukascopyEndpoint.trim() && <button className="primary-button" disabled={saving === "dukascopy"} onClick={() => saveProvider("dukascopy")}><Save size={14} />保存自定义地址</button>}

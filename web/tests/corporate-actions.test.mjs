@@ -4,10 +4,11 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { CorporateActionsStore, normalizeCorporateActions } from '../local-data/corporate-actions-store.mjs';
+import { parseTdxCorporateActionsResponse } from '../local-data/tdx-corporate-actions-client.mjs';
 import { TdxLocalStore } from '../local-data/legacy-tdx-store.mjs';
 
 const raw = { year: 2026, month: 3, day: 11, category: 1, fenhong: 2, songzhuangu: 3, peigu: 1, peigujia: 5 };
-const stocks = [{ id: '600000.SH', asset: 'stock' }, { id: '000001.SZ', asset: 'stock' }, { id: '920001.BJ', asset: 'stock' }, { id: '000001.SH', asset: 'index' }];
+const stocks = [{ id: '600000.SH', assetType: 'stock' }, { id: '000001.SZ', assetType: 'stock' }, { id: '920001.BJ', assetType: 'stock' }, { id: '000001.SH', assetType: 'index' }];
 async function settled(store) {
   for (let i = 0; i < 200; i++) {
     if (!['queued', 'running'].includes(store.getStatus().task?.status)) return store.getStatus();
@@ -34,6 +35,42 @@ test('normalizes ex-date and per-ten-share terms; never mistakes capital changes
   assert.match(dividend.description, /每10股/);
   assert.throws(() => normalizeCorporateActions('600000.SH', null));
   assert.throws(() => normalizeCorporateActions('600000.SH', [{ ...raw, month: 2, day: 31 }]));
+});
+
+test('parses TDX corporate-action response without a Python dependency', () => {
+  const body = Buffer.alloc(11 + 29);
+  body.writeUInt16LE(1, 9);
+  let offset = 11;
+  body[offset] = 0;
+  Buffer.from('000001').copy(body, offset + 1);
+  offset += 8;
+  body.writeUInt32LE(20260311, offset);
+  offset += 4;
+  body[offset++] = 1;
+  body.writeFloatLE(0.1, offset);
+  body.writeFloatLE(5, offset + 4);
+  body.writeFloatLE(2, offset + 8);
+  body.writeFloatLE(3, offset + 12);
+
+  const rows = parseTdxCorporateActionsResponse(body, '000001.SZ');
+  assert.deepEqual(rows, [{
+    year: 2026,
+    month: 3,
+    day: 11,
+    category: 1,
+    name: '除权除息',
+    fenhong: rows[0].fenhong,
+    peigujia: 5,
+    songzhuangu: 2,
+    peigu: 3,
+    suogu: null,
+    panqianliutong: null,
+    panhouliutong: null,
+    qianzongguben: null,
+    houzongguben: null,
+    fenshu: null,
+    xingquanjia: null,
+  }]);
 });
 
 test('empty successful history still enables daily upkeep, supported stocks only, corrections replace atomically', async t => {
