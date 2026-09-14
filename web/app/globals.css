@@ -577,7 +577,7 @@ button { color: inherit; }
 .decision-chart-levels span { display: grid; gap: 2px; color: var(--faint); font-size: 9px; }
 .decision-chart-levels strong { color: #cbd6d4; font-size: 10px; }
 .decision-chart-card > p { margin: 10px 0 0; padding-top: 9px; border-top: 1px solid var(--line); color: #a8b7b4; font-size: 10px; line-height: 1.55; white-space: pre-wrap; }
-.corporate-action-card { display: grid; gap: 5px; margin: 8px 0; padding: 9px 11px; border: 1px solid rgba(241, 200, 106, .24); border-radius: 8px; background: rgba(241, 200, 106, .07); color: #d7dfdb; font-size: 10px; }
+.corporate-action-card { position: absolute; top: 12px; left: 50%; z-index: 8; display: grid; gap: 5px; width: min(360px, calc(100% - 32px)); margin: 0; padding: 9px 11px; transform: translateX(-50%); pointer-events: none; border: 1px solid rgba(241, 200, 106, .24); border-radius: 8px; background: rgba(241, 200, 106, .07); color: #d7dfdb; font-size: 10px; }
 .corporate-action-card > div { display: flex; justify-content: space-between; gap: 10px; align-items: center; }
 .corporate-action-card span { color: #d4af5a; letter-spacing: .08em; }
 .corporate-action-card strong { color: #f1c86a; font-size: 11px; }
@@ -858,8 +858,28 @@ button { color: inherit; }
 .segmented-choice button { min-width: 110px; color: var(--muted); background: var(--surface-soft); border: 1px solid var(--line); border-radius: 8px; padding: 9px 12px; cursor: pointer; font-size: 10px; }
 .segmented-choice button.active { color: var(--accent); background: var(--accent-soft); border-color: rgba(32, 201, 151, .35); }
 .source-routing { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
+.source-routing-intro { grid-column: 1 / -1; display: flex; align-items: flex-end; justify-content: space-between; gap: 18px; padding-bottom: 2px; }
+.source-routing-intro > div { display: grid; gap: 5px; }
+.source-routing-intro strong { color: #d8e3e0; font-size: 12px; }
+.source-routing-intro small { max-width: 430px; color: var(--faint); font-size: 9px; line-height: 1.5; text-align: right; }
 .source-routing > label { display: grid; gap: 7px; min-width: 0; max-width: 100%; color: var(--muted); font-size: 9px; }
 .source-routing select { width: 100%; min-width: 0; max-width: 100%; color: #cbd6d4; background: var(--surface-soft); border: 1px solid var(--line-strong); border-radius: 8px; padding: 10px; outline: none; }
+.corporate-actions-option { grid-column: 1 / -1; display: grid; grid-template-columns: auto minmax(0, 1fr) auto; align-items: center; gap: 12px; margin-top: 1px; padding: 13px 14px; background: linear-gradient(105deg, rgba(32, 201, 151, .055), rgba(255, 255, 255, .012)); border: 1px solid var(--line); border-radius: 10px; }
+.corporate-actions-option.enabled { background: linear-gradient(105deg, rgba(32, 201, 151, .105), rgba(255, 255, 255, .012)); border-color: rgba(32, 201, 151, .32); }
+.corporate-actions-option-icon { display: grid; place-items: center; width: 34px; height: 34px; color: var(--accent); background: var(--accent-soft); border: 1px solid rgba(32, 201, 151, .2); border-radius: 9px; }
+.corporate-actions-option-copy { display: grid; gap: 5px; min-width: 0; }
+.corporate-actions-option-heading { display: flex; align-items: center; gap: 8px; }
+.corporate-actions-option-heading strong { color: #d8e3e0; font-size: 11px; }
+.corporate-actions-option-heading span { color: var(--faint); background: rgba(255, 255, 255, .035); border: 1px solid var(--line); border-radius: 99px; padding: 3px 7px; font-size: 8px; white-space: nowrap; }
+.corporate-actions-option-heading span.enabled { color: var(--accent-strong); background: rgba(32, 201, 151, .1); border-color: rgba(32, 201, 151, .25); }
+.corporate-actions-option-copy p { margin: 0; color: var(--faint); font-size: 9px; line-height: 1.5; }
+.corporate-actions-toggle { display: inline-flex; align-items: center; gap: 7px; min-width: 72px; justify-content: center; padding: 7px 9px; color: var(--muted); background: rgba(255, 255, 255, .02); border: 1px solid var(--line-strong); border-radius: 7px; cursor: pointer; font-size: 9px; }
+.corporate-actions-toggle:hover { color: #d8e3e0; border-color: rgba(32, 201, 151, .35); }
+.corporate-actions-toggle.active { color: var(--accent-strong); background: rgba(32, 201, 151, .1); border-color: rgba(32, 201, 151, .35); }
+.corporate-actions-toggle-track { position: relative; display: inline-flex; align-items: center; width: 24px; height: 14px; padding: 2px; background: #273337; border-radius: 99px; transition: background .15s ease; }
+.corporate-actions-toggle-track > span { display: block; width: 10px; height: 10px; background: #93a5a1; border-radius: 50%; transition: transform .15s ease, background .15s ease; }
+.corporate-actions-toggle.active .corporate-actions-toggle-track { background: var(--accent); }
+.corporate-actions-toggle.active .corporate-actions-toggle-track > span { background: #06110e; transform: translateX(10px); }
 .source-status-grid { grid-column: 1 / -1; display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 8px; margin-top: 5px; }
 .source-status-grid > div { display: flex; align-items: center; gap: 8px; padding: 11px; background: rgba(255, 255, 255, .014); border: 1px solid var(--line); border-radius: 8px; }
 .source-status-grid svg, .source-status-grid .ready .status-dot { color: var(--accent); }
@@ -1579,6 +1599,10 @@ button { color: inherit; }
   .onboarding-hero, .setup-detail-head { flex-direction: column; }
   .onboarding-storage, .setup-ready { width: 100%; min-width: 0; }
   .onboarding-paths, .choice-card-grid.two, .choice-card-grid.three, .source-routing, .plan-review { grid-template-columns: 1fr; }
+  .source-routing-intro { align-items: flex-start; flex-direction: column; gap: 7px; }
+  .source-routing-intro small { max-width: none; text-align: left; }
+  .corporate-actions-option { grid-template-columns: auto minmax(0, 1fr); }
+  .corporate-actions-toggle { grid-column: 2; justify-self: start; }
   .quick-plan-grid { grid-template-columns: 1fr; }
   .setup-progress small { display: none; }
   .source-status-grid { grid-template-columns: repeat(2, 1fr); }

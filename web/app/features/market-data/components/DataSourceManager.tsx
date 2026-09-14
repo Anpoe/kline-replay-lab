@@ -197,10 +197,12 @@ type CatalogTask = {
 };
 type CnMaintenanceTask = {
   id: string;
+  kind?: "tdx-realtime-daily-maintenance" | "tushare-cn-daily-maintenance" | string;
   mode: "incremental" | "repair";
   status: "queued" | "running" | "paused" | "completed" | "failed";
   message: string;
   error?: string | null;
+  assets?: string[];
   nextDateIndex: number;
   progress: {
     processedDates: number;
@@ -213,6 +215,9 @@ type CnMaintenanceTask = {
     factorRows?: number;
     ignoredRows: number;
     invalidRows: number;
+    processedInstruments?: number;
+    totalInstruments?: number;
+    skippedInstruments?: number;
   };
   updatedAt: string;
 };
@@ -228,7 +233,7 @@ type AdvancedSetup = {
   minimumTimeframe: TimeframeId;
   historyRange: "all" | "20y" | "10y";
   cnInitialSource: "baostock" | "tdxquant" | "tdx-zip" | "tushare";
-  cnIncrementalSource: "baostock" | "tushare" | "tdxquant" | "none";
+  cnIncrementalSource: "baostock" | "tushare" | "tdxquant" | "tdx-realtime" | "none";
   usSource: "none" | "alpaca";
   keepRawPackage: boolean;
   includeCorporateActions: boolean;
@@ -282,6 +287,20 @@ function timeframeLabel(value: AdvancedSetup["minimumTimeframe"]) {
   if (value === "1h") return `${catalogTimeframeLabel(value)}（自动生成 H4、D1、W1、MN）`;
   if (value === "1d") return `${catalogTimeframeLabel(value)}（自动生成 W1、MN）`;
   return catalogTimeframeLabel(value);
+}
+
+function cnAssetScopeLabel(assets?: string[]) {
+  const labels: Record<string, string> = {
+    stock: "A 股股票",
+    index: "交易所指数",
+    fund: "场内基金",
+    "convertible-bond": "可转债",
+    other: "其他品种",
+  };
+  const selected = (Array.isArray(assets) ? assets : [])
+    .map((asset) => labels[asset])
+    .filter(Boolean);
+  return selected.length ? selected.join("、") : "已保存品种范围";
 }
 
 const DIRECT_SETUP_TIMEFRAMES = new Set<TimeframeId>(["5m", "1h", "1d"]);
@@ -528,13 +547,16 @@ export function DataSourceManager({
       if (stored) {
         setSavedPlan(stored);
         if (stored.kind === "advanced") {
-          setAdvanced((current) => ({
-            ...current,
-            ...Object.fromEntries(Object.keys(defaultAdvancedSetup).map((key) => [
+          setAdvanced((current) => {
+            const restored = Object.fromEntries(Object.keys(defaultAdvancedSetup).map((key) => [
               key,
               stored[key] ?? current[key as keyof AdvancedSetup],
-            ])),
-          }) as AdvancedSetup);
+            ])) as AdvancedSetup;
+            if (restored.cnInitialSource === "tdx-zip" && restored.cnIncrementalSource !== "none") {
+              restored.cnIncrementalSource = "tdx-realtime";
+            }
+            return { ...current, ...restored };
+          });
         }
         setSetupView("manager");
       }
@@ -692,7 +714,7 @@ export function DataSourceManager({
           ? "系统将从本地最后日期之后，使用 BaoStock 拉取全市场股票前复权日线。确定开始吗？"
           : "系统将回查最近 30 个自然日，使用 BaoStock 修复 A 股前复权日线缺口；停牌和休市不会造数据。确定开始吗？"
         : mode === "incremental"
-          ? "系统将从本地最后日期之后，使用 Tushare daily 拉取 A 股不复权日线。确定开始吗？"
+          ? "系统将从通达信行情服务拉取当前最新交易日的日线快照；交易时段内数据可能尚未收盘，建议收盘后执行。确定开始吗？"
           : "系统将回查最近 30 个自然日，使用 Tushare daily 修复 A 股不复权日线缺口。确定开始吗？";
       if (!window.confirm(prompt)) return;
     }
@@ -1164,6 +1186,9 @@ export function DataSourceManager({
       advanced.convertibleBonds && "可转债",
     ].filter(Boolean).join("、") || "尚未选择";
     const intradaySetup = advanced.minimumTimeframe !== "1d";
+    const supportsCorporateActions = advanced.cnMarket
+      && !intradaySetup
+      && ["tdx-zip", "tushare"].includes(advanced.cnInitialSource);
     return (
       <section className="data-onboarding setup-detail advanced-setup">
         <button className="setup-back" onClick={() => setSetupView("welcome")}><ArrowLeft size={15} />退出高级自定义</button>
@@ -1231,6 +1256,7 @@ export function DataSourceManager({
                           cnIncrementalSource: value === "1d"
                             ? current.cnIncrementalSource
                             : current.cnIncrementalSource === "none" ? "none" : "tdxquant",
+                          includeCorporateActions: value === "1d" ? current.includeCorporateActions : false,
                         }))}
                       >
                         <span>{advanced.minimumTimeframe === value && <Check size={14} />}</span><strong>{catalogTimeframeLabel(value)}</strong><small>{hint}</small>
@@ -1253,10 +1279,29 @@ export function DataSourceManager({
 
           {advancedStep === 3 && (
             <div className="source-routing">
+              <div className="source-routing-intro">
+                <div>
+                  <span className="section-label">数据来源</span>
+                  <strong>选择首次建立和每日更新使用的行情来源</strong>
+                </div>
+                <small>不复权行情可以单独同步权息信息，用于在图表中识别分红和除权除息日期。</small>
+              </div>
               {advanced.cnMarket && (
                 <>
                   <label>{intradaySetup ? `首次 A 股完整${catalogTimeframeLabel(advanced.minimumTimeframe)}行情` : "首次 A 股完整日线"}
-                    <select value={advanced.cnInitialSource} onChange={(event) => setAdvanced((value) => ({ ...value, cnInitialSource: event.target.value as AdvancedSetup["cnInitialSource"] }))}>
+                    <select value={advanced.cnInitialSource} onChange={(event) => setAdvanced((value) => {
+                      const cnInitialSource = event.target.value as AdvancedSetup["cnInitialSource"];
+                      return {
+                        ...value,
+                        cnInitialSource,
+                        cnIncrementalSource: cnInitialSource === "tdx-zip" && value.cnIncrementalSource !== "none"
+                          ? "tdx-realtime"
+                          : value.cnIncrementalSource,
+                        includeCorporateActions: ["tdx-zip", "tushare"].includes(cnInitialSource)
+                          ? value.includeCorporateActions
+                          : false,
+                      };
+                    })}>
                       {intradaySetup ? (
                         <option value="tdxquant">TdxQuant {catalogTimeframeLabel(advanced.minimumTimeframe)}（可复权，需本机服务地址）</option>
                       ) : (
@@ -1277,6 +1322,7 @@ export function DataSourceManager({
                         <>
                           <option value="baostock">BaoStock 前复权增量（默认）</option>
                           <option value="tushare">Tushare daily 增量（不复权）</option>
+                          <option value="tdx-realtime">通达信实时日线增量（不复权）</option>
                           <option value="tdxquant">TdxQuant 增量（可复权）</option>
                         </>
                       )}
@@ -1294,15 +1340,33 @@ export function DataSourceManager({
                 </label>
               )}
 
-              {advanced.cnMarket && !intradaySetup && ["tdx-zip", "tushare"].includes(advanced.cnInitialSource) && (
-                <label className="setup-check source-option-wide">
-                  <input
-                    type="checkbox"
-                    checked={advanced.includeCorporateActions}
-                    onChange={(event) => setAdvanced((value) => ({ ...value, includeCorporateActions: event.target.checked }))}
-                  />
-                  <span><strong>同步权息信息</strong><small>在图表中标记分红和除权除息事件，不会修改不复权行情价格；首次建立可能需要较长时间。</small></span>
-                </label>
+              {supportsCorporateActions && (
+                <div
+                  className={`corporate-actions-option${advanced.includeCorporateActions ? " enabled" : ""}`}
+                  role="group"
+                  aria-label="权息信息设置"
+                >
+                  <div className="corporate-actions-option-icon"><Database size={17} /></div>
+                  <div className="corporate-actions-option-copy">
+                    <div className="corporate-actions-option-heading">
+                      <strong>同步权息信息</strong>
+                      <span className={advanced.includeCorporateActions ? "enabled" : ""}>
+                        {advanced.includeCorporateActions ? "已开启" : "默认关闭"}
+                      </span>
+                    </div>
+                    <p>同步分红、送转和除权除息信息，在图表对应日期显示标记；不会修改不复权行情价格。</p>
+                  </div>
+                  <button
+                    type="button"
+                    className={`corporate-actions-toggle${advanced.includeCorporateActions ? " active" : ""}`}
+                    aria-label={advanced.includeCorporateActions ? "关闭权息信息同步" : "开启权息信息同步"}
+                    aria-pressed={advanced.includeCorporateActions}
+                    onClick={() => setAdvanced((value) => ({ ...value, includeCorporateActions: !value.includeCorporateActions }))}
+                  >
+                    <span className="corporate-actions-toggle-track"><span /></span>
+                    {advanced.includeCorporateActions ? "已开启" : "开启"}
+                  </button>
+                </div>
               )}
 
               <div className="source-status-grid">
@@ -1312,7 +1376,7 @@ export function DataSourceManager({
                 ) : (
                   <>
                     <div className="ready"><CircleCheck size={16} /><span><strong>BaoStock</strong><small>默认 · 直接返回前复权</small></span></div>
-                    <div className="ready"><CircleCheck size={16} /><span><strong>通达信 / Tushare</strong><small>日线不复权 · 支持权息标记</small></span></div>
+                    <div className="ready"><CircleCheck size={16} /><span><strong>通达信</strong><small>日线不复权 · 支持每日更新和权息标记</small></span></div>
                     <div className={configured.tdxquant ? "ready" : ""}><span className="status-dot" /><span><strong>TdxQuant</strong><small>{configured.tdxquant ? "本机已配置 · 日线可复权" : "可配置 · 支持日线复权"}</small></span></div>
                   </>
                 ))}
@@ -1332,8 +1396,8 @@ export function DataSourceManager({
                 <div><span>历史范围</span><strong>{{ all: "全部历史", "20y": "最近20年", "10y": "最近10年" }[advanced.historyRange]}</strong></div>
                 <div><span>A股数据来源</span><strong>{!advanced.cnMarket ? "不下载 A 股" : advanced.cnInitialSource === "baostock" ? "BaoStock 前复权日线" : advanced.cnInitialSource === "tdxquant" ? (advanced.minimumTimeframe === "1d" ? "TdxQuant 前复权日线（本机服务地址）" : `TdxQuant ${catalogTimeframeLabel(advanced.minimumTimeframe)}（可复权，本机服务地址）`) : advanced.cnInitialSource === "tushare" ? "Tushare daily（不复权）" : "通达信日线包（不复权）"}</strong></div>
                 <div><span>复权口径</span><strong>{!advanced.cnMarket ? "—" : advanced.cnInitialSource === "baostock" || advanced.cnInitialSource === "tdxquant" ? (advanced.usMarket ? "A 股前复权 · 美股全复权" : "A 股前复权") : advanced.cnInitialSource === "tushare" || advanced.cnInitialSource === "tdx-zip" ? "A 股不复权" : "A 股按所选服务地址"}</strong></div>
-                <div><span>增量方案</span><strong>{!advanced.cnMarket ? "—" : advanced.cnIncrementalSource === "baostock" ? "BaoStock 前复权" : advanced.cnIncrementalSource === "tdxquant" ? `TdxQuant ${intradaySetup ? catalogTimeframeLabel(advanced.minimumTimeframe) : "日线"} 可复权` : advanced.cnIncrementalSource === "tushare" ? "Tushare 不复权" : "不设置"}</strong></div>
-                <div><span>权息信息</span><strong>{advanced.includeCorporateActions ? "同步并在图表中标记" : "不建立"}</strong></div>
+                <div><span>增量方案</span><strong>{!advanced.cnMarket ? "—" : advanced.cnIncrementalSource === "baostock" ? "BaoStock 前复权" : advanced.cnIncrementalSource === "tdxquant" ? `TdxQuant ${intradaySetup ? catalogTimeframeLabel(advanced.minimumTimeframe) : "日线"} 可复权` : advanced.cnIncrementalSource === "tushare" ? "Tushare 不复权" : advanced.cnIncrementalSource === "tdx-realtime" ? "通达信实时日线（不复权）" : "不设置"}</strong></div>
+                <div><span>权息信息</span><strong>{supportsCorporateActions && advanced.includeCorporateActions ? "同步并在图表中标记" : "不建立"}</strong></div>
                 <div><span>版本锁定</span><strong>开启 · 仅保存差异和被引用版本</strong></div>
               </div>
               {advanced.usMarket && advanced.usSource === "alpaca" && !configured.alpaca && (
@@ -1345,8 +1409,12 @@ export function DataSourceManager({
               {advanced.cnMarket && advanced.cnInitialSource === "tdxquant" && (
                 <div className="setup-warning">{intradaySetup ? `TdxQuant ${catalogTimeframeLabel(advanced.minimumTimeframe)} 通过本机服务地址返回可复权行情；请先在“数据源设置”完成服务地址配置。全历史初始化目前支持日线数据来源。` : "TdxQuant 日线通过本机服务地址返回前复权价格；请先在“数据源设置”完成服务地址配置。全历史初始化可选择 BaoStock 或通达信日线包。"}</div>
               )}
-              {advanced.cnMarket && ["tdx-zip", "tushare"].includes(advanced.cnInitialSource) && (
-                <div className="setup-warning">当前保存的是不复权行情；如开启权息信息，系统会在图表中标记分红和除权除息事件，但不会改写行情价格。</div>
+              {supportsCorporateActions && (
+                <div className="setup-warning">
+                  当前保存的是不复权行情；{advanced.includeCorporateActions
+                    ? "每日更新会保留原始价格，并在图表中标记分红和除权除息事件。"
+                    : "权息信息默认关闭，如需图表标记可返回上一步开启。"}
+                </div>
               )}
             </>
           )}
@@ -1371,7 +1439,7 @@ export function DataSourceManager({
                   includeDelisted: advanced.includeDelisted,
                   historyRange: advanced.historyRange,
                   keepRawPackage: advanced.keepRawPackage,
-                  includeCorporateActions: advanced.includeCorporateActions,
+                  includeCorporateActions: supportsCorporateActions && advanced.includeCorporateActions,
                   source: advanced.cnInitialSource,
                   provider: advanced.cnInitialSource === "baostock" ? "baostock" : "tdx",
                   adjustmentType: advanced.cnInitialSource === "baostock" ? "qfq" : "none",
@@ -1427,6 +1495,8 @@ export function DataSourceManager({
   const corporateActions = localDataset?.corporateActions ?? null;
   const corporateTaskStatus = corporateActions?.task?.status;
   const corporateTaskBusy = corporateTaskStatus === "queued" || corporateTaskStatus === "running";
+  const nativeTdxMaintenance = cnMaintenanceTask?.kind === "tdx-realtime-daily-maintenance";
+  const instrumentScopedMaintenance = nativeTdxMaintenance || cnMaintenanceTask?.kind === "baostock-cn-daily-maintenance";
 
   return (
     <section className="data-source-manager">
@@ -1529,7 +1599,7 @@ export function DataSourceManager({
         <div className={`market-maintenance-card ${localServiceAvailable ? "ready" : ""} ${cnMaintenanceTask?.status === "failed" ? "failed" : ""}`}>
           <div className="market-maintenance-icon"><Database size={22} /></div>
           <div>
-            <span>{localUsesBaoStock ? "BAOSTOCK · A 股前复权日线维护" : "TDX / TUSHARE · A 股不复权日线维护"}</span>
+            <span>{localUsesBaoStock ? "BAOSTOCK · A 股前复权日线维护" : "通达信 · A 股不复权日线维护"}</span>
             <strong>{cnMaintenanceTask
               ? {
                   queued: "等待开始",
@@ -1539,24 +1609,31 @@ export function DataSourceManager({
                   failed: "维护任务需要处理",
                 }[cnMaintenanceTask.status]
               : localServiceAvailable ? "可以进行每日增量和缺口修复" : `本机 ${localUsesBaoStock ? "BaoStock" : "TDX"} 服务不可用`}</strong>
-            <small>{cnMaintenanceTask?.error || cnMaintenanceTask?.message || (localServiceAvailable
+            <small>{cnMaintenanceTask?.status === "failed"
+              ? `${cnMaintenanceTask.message || "本次更新暂未完成"} 已写入的内容和进度已保留，请点击“继续维护”重试。`
+              : cnMaintenanceTask?.message || (localServiceAvailable
               ? localUsesBaoStock
                 ? "按品种使用 BaoStock 拉取前复权日线；周线和月线继续由本地日线生成。"
-                : "日线价格保持不复权；每日增量完成后，已开启的权息信息会在后台继续维护。"
+                : "日线价格保持不复权；每日更新使用通达信最新日线快照，已开启的权息信息会在后台继续维护。"
               : localServiceError || "请检查本机数据服务状态后重试。")}</small>
             {cnMaintenanceTask && (
               <>
                 <div className="local-task-progress">
-                  <i style={{ width: `${cnMaintenanceTask.progress.totalDates
+                  <i style={{ width: `${instrumentScopedMaintenance && cnMaintenanceTask.progress.totalInstruments
+                    ? (cnMaintenanceTask.progress.processedInstruments ?? 0) / cnMaintenanceTask.progress.totalInstruments * 100
+                    : cnMaintenanceTask.progress.totalDates
                     ? cnMaintenanceTask.progress.processedDates / cnMaintenanceTask.progress.totalDates * 100
                     : cnMaintenanceTask.status === "completed" ? 100 : 0}%` }} />
                 </div>
                 <small className="maintenance-task-summary">
-                  日期 {cnMaintenanceTask.progress.processedDates.toLocaleString()} / {cnMaintenanceTask.progress.totalDates.toLocaleString()}
+                  {instrumentScopedMaintenance
+                    ? `品种 ${(cnMaintenanceTask.progress.processedInstruments ?? 0).toLocaleString()} / ${(cnMaintenanceTask.progress.totalInstruments ?? 0).toLocaleString()}`
+                    : `日期 ${cnMaintenanceTask.progress.processedDates.toLocaleString()} / ${cnMaintenanceTask.progress.totalDates.toLocaleString()}`}
+                  {" · "}范围 {cnAssetScopeLabel(cnMaintenanceTask.assets ?? localTask?.plan?.assets)}
                   {" · "}新增 {cnMaintenanceTask.progress.insertedBars.toLocaleString()}
                   {" · "}校正 {cnMaintenanceTask.progress.correctedBars.toLocaleString()}
                   {" · "}未变化 {cnMaintenanceTask.progress.unchangedBars.toLocaleString()}
-                  {" · "}来源 {localUsesBaoStock ? "BaoStock 前复权" : "Tushare 不复权"}
+                  {" · "}来源 {localUsesBaoStock ? "BaoStock 前复权" : nativeTdxMaintenance ? "通达信实时日线" : "Tushare 不复权"}
                 </small>
               </>
             )}

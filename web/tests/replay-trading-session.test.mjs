@@ -3,11 +3,13 @@ import test from "node:test";
 import {
   advanceReplayCursor,
   firstReplaySkippedBarIndex,
+  isReplayOrderDueAtBar,
+  isReplayTradingSessionBar,
   normalizeReplayTradingSession,
 } from "../app/lib/replayTradingSession.ts";
 import { executeBarStep, DEFAULT_EXECUTION_COST_PROFILE } from "../app/lib/executionEngine.ts";
 
-const session = { enabled: true, startTime: "07:00", endTime: "18:00" };
+const session = { enabled: true, startTime: "07:00", endTime: "18:00", skipWeekends: false };
 const bar = (time, overrides = {}) => ({ timestamp: Date.parse(time), open: 100, high: 101, low: 99, close: 100, ...overrides });
 const bars = [
   bar("2026-09-07T17:55:00+08:00"),
@@ -60,6 +62,77 @@ test("identifies the first candle at which a replay session skip begins", () => 
     timeframe: "5m",
     timezone: "Asia/Shanghai",
   }), null);
+});
+
+test("automatically skips weekend candles without enabling a daily session", () => {
+  const weekendBars = [
+    bar("2026-09-11T17:55:00+08:00"),
+    bar("2026-09-12T09:00:00+08:00"),
+    bar("2026-09-13T09:00:00+08:00"),
+    bar("2026-09-14T07:00:00+08:00"),
+    bar("2026-09-14T07:05:00+08:00"),
+  ];
+  const options = {
+    bars: weekendBars,
+    cursor: 0,
+    endCursor: weekendBars.length - 1,
+    requestedCount: 1,
+    session: { ...session, enabled: false, skipWeekends: true },
+    timeframe: "5m",
+    timezone: "Asia/Shanghai",
+  };
+  assert.equal(advanceReplayCursor(options), 3);
+  assert.equal(advanceReplayCursor({ ...options, requestedCount: 2 }), 4);
+  assert.equal(firstReplaySkippedBarIndex({ ...options, destination: 3 }), 1);
+  assert.equal(isReplayTradingSessionBar(weekendBars[1].timestamp, options), false);
+  assert.equal(isReplayTradingSessionBar(weekendBars[3].timestamp, options), true);
+  assert.equal(advanceReplayCursor({
+    ...options,
+    session: { ...options.session, skipWeekends: false },
+  }), 1);
+});
+
+test("evaluates the weekend in the chart timezone and keeps exclusions unchanged", () => {
+  const boundaryBars = [
+    bar("2026-09-12T01:00:00Z"), // Friday evening in New York.
+    bar("2026-09-12T04:00:00Z"), // Saturday midnight in New York.
+    bar("2026-09-14T13:00:00Z"), // Monday morning in New York.
+  ];
+  const options = {
+    bars: boundaryBars,
+    cursor: 0,
+    endCursor: boundaryBars.length - 1,
+    requestedCount: 1,
+    session: { ...session, enabled: false, skipWeekends: true },
+    timeframe: "5m",
+    timezone: "America/New_York",
+  };
+  assert.equal(isReplayTradingSessionBar(boundaryBars[0].timestamp, options), true);
+  assert.equal(isReplayTradingSessionBar(boundaryBars[1].timestamp, options), false);
+  assert.equal(advanceReplayCursor(options), 2);
+  for (const excluded of [
+    { randomRun: true },
+    { liveMode: true },
+    { timeframe: "1d" },
+  ]) assert.equal(advanceReplayCursor({ ...options, ...excluded }), 1);
+  assert.equal(isReplayTradingSessionBar(boundaryBars[1].timestamp, {
+    ...options,
+    session: { ...options.session, skipWeekends: false },
+  }), true);
+});
+
+test("does not fill an order when replay re-enters its creation candle", () => {
+  const createdAt = bars[3].timestamp;
+  assert.equal(isReplayOrderDueAtBar({ createdAt }, createdAt), false);
+  assert.equal(isReplayOrderDueAtBar({ createdAt }, bars[4].timestamp), true);
+  assert.equal(
+    isReplayOrderDueAtBar({ createdAt, executeAtTimestamp: bars[5].timestamp }, bars[4].timestamp),
+    false,
+  );
+  assert.equal(
+    isReplayOrderDueAtBar({ createdAt, executeAtTimestamp: bars[5].timestamp }, bars[5].timestamp),
+    true,
+  );
 });
 
 test("uses the chart timezone and supports minute precision", () => {
@@ -162,4 +235,5 @@ test("legacy or corrupt stored sessions default to unrestricted replay", () => {
     assert.equal(normalizeReplayTradingSession(value).enabled, false);
   }
   assert.deepEqual(normalizeReplayTradingSession(session), session);
+  assert.equal(normalizeReplayTradingSession({ ...session, skipWeekends: true }).skipWeekends, true);
 });

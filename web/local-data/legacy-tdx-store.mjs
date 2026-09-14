@@ -27,11 +27,13 @@ import {
 } from "./tdx-day.mjs";
 import { screenLatestCandles } from "./pattern-scan.mjs";
 import { CorporateActionsStore } from "./corporate-actions-store.mjs";
+import { TdxCorporateActionsClient } from "./tdx-corporate-actions-client.mjs";
+import { writeJsonAtomic } from "./atomic-json.mjs";
+import { CN_ASSET_TYPES, DEFAULT_CN_ASSETS, filterCnInstruments, normalizeCnAssets } from "./cn-asset-scope.mjs";
 
 const moduleDir = path.dirname(fileURLToPath(import.meta.url));
 const DEFAULT_SOURCE_URL = "https://data.tdx.com.cn/vipdoc/hsjday.zip";
 const DEFAULT_TUSHARE_URL = "https://api.tushare.pro";
-const ASSET_KEYS = new Set(["stock", "index", "fund", "convertible-bond", "other"]);
 const DAY_MS = 86_400_000;
 
 function now() {
@@ -67,6 +69,32 @@ function sameCandle(left, right) {
     if (left[key] == null && right[key] == null) return true;
     return Math.abs(Number(left[key]) - Number(right[key])) < 0.000001;
   });
+}
+
+function normalizeTdxDailyQuote(instrumentId, quote, timestamp) {
+  const candle = {
+    timestamp,
+    open: Number(quote?.open),
+    high: Number(quote?.high),
+    low: Number(quote?.low),
+    close: Number(quote?.price ?? quote?.close),
+    volume: quote?.volume == null ? null : Number(quote.volume),
+    turnover: quote?.turnover == null ? null : Number(quote.turnover),
+  };
+  const valid = (
+    /^\d{6}\.(SH|SZ|BJ)$/.test(instrumentId)
+    && Number.isFinite(timestamp)
+    && Number.isFinite(candle.open)
+    && Number.isFinite(candle.high)
+    && Number.isFinite(candle.low)
+    && Number.isFinite(candle.close)
+    && candle.low > 0
+    && candle.low <= Math.min(candle.open, candle.close)
+    && candle.high >= Math.max(candle.open, candle.close)
+    && (candle.volume == null || Number.isFinite(candle.volume))
+    && (candle.turnover == null || Number.isFinite(candle.turnover))
+  );
+  return valid ? { instrumentId, ...candle } : null;
 }
 
 export function normalizeTushareDailyRows(payload) {
@@ -120,13 +148,6 @@ async function exists(target) {
   }
 }
 
-async function writeJsonAtomic(target, value) {
-  await mkdir(path.dirname(target), { recursive: true });
-  const temp = `${target}.${process.pid}.tmp`;
-  await writeFile(temp, `${JSON.stringify(value, null, 2)}\n`, "utf8");
-  await rename(temp, target);
-}
-
 async function fileSha256(target) {
   const hash = createHash("sha256");
   for await (const chunk of createReadStream(target)) hash.update(chunk);
@@ -135,13 +156,13 @@ async function fileSha256(target) {
 
 function safePlan(input = {}) {
   const assets = Array.isArray(input.assets)
-    ? input.assets.filter((item) => ASSET_KEYS.has(item))
-    : ["stock", "index"];
+    ? input.assets.filter((item) => CN_ASSET_TYPES.has(item))
+    : DEFAULT_CN_ASSETS;
   return {
     source: input.source === "local-zip" ? "local-zip" : "tdx-zip",
     provider: "tdx",
     adjustmentType: "none",
-    assets: assets.length ? [...new Set(assets)] : ["stock", "index"],
+    assets: assets.length ? [...new Set(assets)] : [...DEFAULT_CN_ASSETS],
     includeDelisted: input.includeDelisted !== false,
     historyRange: ["all", "20y", "10y"].includes(input.historyRange) ? input.historyRange : "all",
     keepRawPackage: Boolean(input.keepRawPackage),
@@ -178,6 +199,7 @@ export class TdxLocalStore {
     this.lastPersistAt = 0;
     this.manifestCache = undefined;
     this.corporateActionsClient = options.corporateActionsClient;
+    this.dailyQuotesClient = options.dailyQuotesClient ?? new TdxCorporateActionsClient();
     this.corporateActions = new CorporateActionsStore({ root: this.root, client: this.corporateActionsClient });
   }
 
@@ -214,7 +236,7 @@ export class TdxLocalStore {
         this.maintenanceTask = JSON.parse(await readFile(this.maintenanceTaskFile, "utf8"));
         if (["running", "queued"].includes(this.maintenanceTask.status)) {
           this.maintenanceTask.status = "paused";
-          this.maintenanceTask.message = "本地服务上次退出，维护任务已安全暂停；继续时需要重新读取本机 Token。";
+          this.maintenanceTask.message = "本地服务上次退出，维护任务已安全暂停；继续时会重新连接数据源。";
           this.maintenanceTask.updatedAt = now();
           await this.persistMaintenanceTask();
         }
@@ -227,6 +249,7 @@ export class TdxLocalStore {
 
   close() {
     this.corporateActions.close();
+    this.dailyQuotesClient?.close();
     this.overlayDb?.close();
     this.overlayDb = null;
   }
@@ -297,34 +320,40 @@ export class TdxLocalStore {
   }
 
   async startCnMaintenance({ mode = "incremental", token, repairDays = 30 } = {}) {
-    if (!token) throw new Error("请先在“设置 → 数据源设置”配置 Tushare Token");
     if (!["incremental", "repair"].includes(mode)) throw new Error("不支持的 A 股维护模式");
+    if (mode === "repair" && !token) throw new Error("开始缺口修复前，请先完成日线数据源配置");
     if (this.maintenanceRunning || ["queued", "running"].includes(this.maintenanceTask?.status)) {
       throw new Error("已有 A 股维护任务正在运行");
     }
     const manifest = await this.getManifest();
     if (!manifest) throw new Error("请先完成 TDX A 股全市场日线初始化");
     const days = Math.min(120, Math.max(7, Math.trunc(Number(repairDays) || 30)));
-    const effectiveLastTimestamp = this.effectiveLastTimestamp(manifest);
     const todayTimestamp = Date.UTC(
       this.nowProvider().getFullYear(),
       this.nowProvider().getMonth(),
       this.nowProvider().getDate(),
     );
-    const startTimestamp = mode === "incremental"
-      ? effectiveLastTimestamp + DAY_MS
+    const nativeRealtime = mode === "incremental";
+    const startTimestamp = nativeRealtime
+      ? todayTimestamp
       : Math.max(Date.UTC(1990, 0, 1), todayTimestamp - (days - 1) * DAY_MS);
-    const dates = startTimestamp <= todayTimestamp ? weekdayDates(startTimestamp, todayTimestamp) : [];
+    const dates = nativeRealtime
+      ? [0, 6].includes(new Date(todayTimestamp).getUTCDay()) ? [] : [compactDate(todayTimestamp)]
+      : startTimestamp <= todayTimestamp ? weekdayDates(startTimestamp, todayTimestamp) : [];
+    const maintenanceAssets = normalizeCnAssets(manifest.assets);
+    const selectedInstruments = filterCnInstruments(manifest.instruments, maintenanceAssets);
+    const totalInstruments = nativeRealtime ? selectedInstruments.length : 0;
     this.maintenanceTask = {
-      id: `tushare_${randomUUID()}`,
-      kind: "tushare-cn-daily-maintenance",
+      id: `${nativeRealtime ? "tdx_realtime" : "tushare"}_${randomUUID()}`,
+      kind: nativeRealtime ? "tdx-realtime-daily-maintenance" : "tushare-cn-daily-maintenance",
       mode,
       status: "queued",
       message: dates.length
-        ? mode === "incremental" ? "准备按交易日拉取全市场增量日线。" : `准备回查最近 ${days} 个自然日并修复缺口。`
-        : "本地 A 股日线已经是最新状态。",
+        ? nativeRealtime ? "准备拉取通达信最新交易日日线快照。" : `准备回查最近 ${days} 个自然日并修复缺口。`
+        : nativeRealtime ? "今天不是交易日，暂不拉取实时日线快照。" : "本地 A 股日线已经是最新状态。",
       error: null,
       repairDays: days,
+      assets: maintenanceAssets,
       dates,
       nextDateIndex: 0,
       progress: {
@@ -337,7 +366,11 @@ export class TdxLocalStore {
         unchangedBars: 0,
         ignoredRows: 0,
         invalidRows: 0,
+        processedInstruments: 0,
+        totalInstruments,
+        skippedInstruments: 0,
       },
+      nextInstrumentIndex: 0,
       createdAt: now(),
       updatedAt: now(),
     };
@@ -348,7 +381,7 @@ export class TdxLocalStore {
       await this.persistMaintenanceTask();
       return this.maintenanceTask;
     }
-    queueMicrotask(() => void this.runCnMaintenance(token));
+    queueMicrotask(() => void (nativeRealtime ? this.runTdxDailyMaintenance() : this.runCnMaintenance(token)));
     return this.maintenanceTask;
   }
 
@@ -364,16 +397,17 @@ export class TdxLocalStore {
   }
 
   async resumeCnMaintenance(token) {
-    if (!token) throw new Error("继续任务需要在本机配置 Tushare Token");
     if (!this.maintenanceTask || !["paused", "failed"].includes(this.maintenanceTask.status)) {
       return this.maintenanceTask;
     }
+    const nativeRealtime = this.maintenanceTask.kind === "tdx-realtime-daily-maintenance";
+    if (!nativeRealtime && !token) throw new Error("继续缺口修复前，请先完成日线数据源配置");
     this.maintenanceTask.status = "queued";
     this.maintenanceTask.error = null;
     this.maintenanceTask.message = "维护任务已恢复。";
     await this.persistMaintenanceTask();
     await this.maintainCorporateActions();
-    queueMicrotask(() => void this.runCnMaintenance(token));
+    queueMicrotask(() => void (nativeRealtime ? this.runTdxDailyMaintenance() : this.runCnMaintenance(token)));
     return this.maintenanceTask;
   }
 
@@ -429,6 +463,186 @@ export class TdxLocalStore {
     return normalizeTushareDailyRows(await response.json());
   }
 
+  async runTdxDailyMaintenance() {
+    if (
+      this.maintenanceRunning
+      || !this.maintenanceTask
+      || this.maintenanceTask.kind !== "tdx-realtime-daily-maintenance"
+      || !["queued", "running"].includes(this.maintenanceTask.status)
+    ) return;
+    this.maintenanceRunning = true;
+    this.maintenanceTask.status = "running";
+    this.maintenanceTask.error = null;
+    this.maintenanceAbortController = new AbortController();
+    try {
+      const manifest = await this.getManifest();
+      const instruments = filterCnInstruments(
+        manifest?.instruments,
+        this.maintenanceTask.assets ?? manifest?.assets,
+      );
+      const instrumentMap = new Map(instruments.map((instrument) => [instrument.id, instrument]));
+      const lastDateIndex = Math.max(0, this.maintenanceTask.dates.length - 1);
+      const requestedDateIndex = Math.trunc(Number(this.maintenanceTask.nextDateIndex) || 0);
+      const tradeDate = this.maintenanceTask.dates[Math.min(Math.max(0, requestedDateIndex), lastDateIndex)];
+      const timestamp = timestampFromCompactDate(tradeDate);
+      const overlayDb = this.ensureOverlayDb();
+      const existingRows = Number.isFinite(timestamp)
+        ? overlayDb.prepare(`
+          SELECT instrument_id, timestamp, open, high, low, close, volume, turnover, is_new
+          FROM daily_overlay WHERE timestamp = ?
+        `).all(timestamp)
+        : [];
+      const existingOverlay = new Map(
+        existingRows.map((row) => [`${row.instrument_id}:${row.timestamp}`, row]),
+      );
+      const upsert = overlayDb.prepare(`
+      INSERT INTO daily_overlay (
+        instrument_id, timestamp, open, high, low, close, volume, turnover, source, imported_at, is_new
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'tdx-realtime-daily', ?, ?)
+      ON CONFLICT(instrument_id, timestamp) DO UPDATE SET
+        open = excluded.open,
+        high = excluded.high,
+        low = excluded.low,
+        close = excluded.close,
+        volume = excluded.volume,
+        turnover = excluded.turnover,
+        source = excluded.source,
+        imported_at = excluded.imported_at,
+        is_new = excluded.is_new
+    `);
+      const batchSize = 80;
+      while (this.maintenanceTask.nextInstrumentIndex < instruments.length) {
+        if (this.maintenanceTask.status !== "running") {
+          const error = new Error("维护任务已暂停");
+          error.name = "AbortError";
+          throw error;
+        }
+        const startIndex = this.maintenanceTask.nextInstrumentIndex;
+        const batch = instruments.slice(startIndex, startIndex + batchSize);
+        this.maintenanceTask.message = `正在读取通达信实时日线 ${startIndex.toLocaleString()} / ${instruments.length.toLocaleString()} 个品种。`;
+        await this.persistMaintenanceTask();
+        const quotes = await this.dailyQuotesClient.fetchDailyQuotes(batch.map((instrument) => instrument.id));
+        if (this.maintenanceTask.status !== "running") {
+          const error = new Error("维护任务已暂停");
+          error.name = "AbortError";
+          throw error;
+        }
+        this.maintenanceTask.progress.receivedRows += quotes.length;
+        const returned = new Set(quotes.map((quote) => String(quote.instrumentId ?? "").toUpperCase()));
+        this.maintenanceTask.progress.skippedInstruments += Math.max(0, batch.length - returned.size);
+        const hasSessionActivity = quotes.some((quote) => (
+          Number(quote.volume) > 0
+          || Math.abs(Number(quote.price) - Number(quote.lastClose)) > 0.000001
+        ));
+        if (!hasSessionActivity) {
+          this.maintenanceTask.progress.skippedInstruments += returned.size;
+          this.maintenanceTask.nextInstrumentIndex += batch.length;
+          this.maintenanceTask.progress.processedInstruments = this.maintenanceTask.nextInstrumentIndex;
+          this.maintenanceTask.progress.processedDates = 1;
+          this.maintenanceTask.progress.totalDates = 1;
+          this.maintenanceTask.message = `已检查 ${this.maintenanceTask.nextInstrumentIndex.toLocaleString()} / ${instruments.length.toLocaleString()} 个品种，当前没有当日成交，暂不写入日线。`;
+          await this.persistMaintenanceTask();
+          continue;
+        }
+        let changed = false;
+        overlayDb.exec("BEGIN IMMEDIATE");
+        try {
+          for (const quote of quotes) {
+            const instrumentId = String(quote.instrumentId ?? "").toUpperCase();
+            const instrument = instrumentMap.get(instrumentId);
+            if (!instrument) {
+              this.maintenanceTask.progress.ignoredRows += 1;
+              continue;
+            }
+            const row = normalizeTdxDailyQuote(instrumentId, quote, timestamp);
+            if (!row) {
+              this.maintenanceTask.progress.invalidRows += 1;
+              continue;
+            }
+            this.maintenanceTask.progress.acceptedRows += 1;
+            const key = `${row.instrumentId}:${row.timestamp}`;
+            const overlay = existingOverlay.get(key);
+            const hasBaseBar = Number(instrument.lastTimestamp) === row.timestamp;
+            if (overlay && sameCandle(overlay, row)) {
+              this.maintenanceTask.progress.unchangedBars += 1;
+              continue;
+            }
+            const isNew = overlay ? Number(overlay.is_new ?? 0) : hasBaseBar ? 0 : 1;
+            if (overlay || hasBaseBar) this.maintenanceTask.progress.correctedBars += 1;
+            else this.maintenanceTask.progress.insertedBars += 1;
+            upsert.run(
+              row.instrumentId,
+              row.timestamp,
+              row.open,
+              row.high,
+              row.low,
+              row.close,
+              row.volume,
+              row.turnover,
+              now(),
+              isNew,
+            );
+            existingOverlay.set(key, { ...row, instrument_id: row.instrumentId, is_new: isNew });
+            if (isNew) {
+              instrument.barCount = Number(instrument.barCount ?? 0) + 1;
+              instrument.firstTimestamp = Number.isFinite(Number(instrument.firstTimestamp))
+                ? Math.min(Number(instrument.firstTimestamp), row.timestamp)
+                : row.timestamp;
+              instrument.lastTimestamp = Math.max(Number(instrument.lastTimestamp) || 0, row.timestamp);
+            }
+            changed = true;
+          }
+          overlayDb.exec("COMMIT");
+        } catch (error) {
+          overlayDb.exec("ROLLBACK");
+          throw error;
+        }
+        this.maintenanceTask.nextInstrumentIndex += batch.length;
+        this.maintenanceTask.progress.processedInstruments = this.maintenanceTask.nextInstrumentIndex;
+        this.maintenanceTask.progress.processedDates = 1;
+        this.maintenanceTask.progress.totalDates = 1;
+        if (changed) {
+          manifest.baseDatasetVersion ??= manifest.datasetVersion;
+          manifest.datasetVersion = `${manifest.baseDatasetVersion}-tdx-${Date.now()}`;
+          manifest.updatedAt = now();
+          manifest.maintenanceSource = "tdx-realtime-daily";
+          await writeJsonAtomic(this.manifestFile, manifest);
+          this.manifestCache = manifest;
+        }
+        this.maintenanceTask.message = `已读取通达信实时日线 ${this.maintenanceTask.nextInstrumentIndex.toLocaleString()} / ${instruments.length.toLocaleString()} 个品种。`;
+        await this.persistMaintenanceTask();
+      }
+      if (manifest.maintenanceSource !== "tdx-realtime-daily") {
+        manifest.maintenanceSource = "tdx-realtime-daily";
+        manifest.updatedAt = now();
+        await writeJsonAtomic(this.manifestFile, manifest);
+        this.manifestCache = manifest;
+      }
+      this.maintenanceTask.nextDateIndex = this.maintenanceTask.dates.length;
+      this.maintenanceTask.status = "completed";
+      this.maintenanceTask.message = `每日实时日线更新完成：新增 ${this.maintenanceTask.progress.insertedBars.toLocaleString()} 根，校正 ${this.maintenanceTask.progress.correctedBars.toLocaleString()} 根。`;
+      await this.persistMaintenanceTask();
+    } catch (error) {
+      if (this.maintenanceTask?.status === "paused" || error?.name === "AbortError") {
+        if (this.maintenanceTask) {
+          this.maintenanceTask.status = "paused";
+          this.maintenanceTask.message = "维护任务已暂停，继续时会从尚未完成的品种恢复。";
+          await this.persistMaintenanceTask();
+        }
+      } else if (this.maintenanceTask) {
+        this.maintenanceTask.status = "failed";
+        this.maintenanceTask.error = error instanceof Error ? error.message : String(error);
+        this.maintenanceTask.message = String(this.maintenanceTask.error).includes("行情节点未返回实时数据")
+          ? "通达信暂未返回可用的实时日线，本次没有写入当日 K 线；请稍后重试。"
+          : "A 股实时日线更新失败；已完成的品种和写入内容均已保留。";
+        await this.persistMaintenanceTask();
+      }
+    } finally {
+      this.maintenanceAbortController = null;
+      this.maintenanceRunning = false;
+    }
+  }
+
   async runCnMaintenance(token) {
     if (
       this.maintenanceRunning
@@ -440,9 +654,10 @@ export class TdxLocalStore {
     this.maintenanceTask.error = null;
     const manifest = await this.getManifest();
     const instrumentMap = new Map(
-      (manifest?.instruments ?? [])
-        .filter((instrument) => instrument.assetType === "stock")
-        .map((instrument) => [instrument.id, instrument]),
+      filterCnInstruments(
+        manifest?.instruments,
+        this.maintenanceTask.assets ?? manifest?.assets,
+      ).map((instrument) => [instrument.id, instrument]),
     );
     const firstDate = this.maintenanceTask.dates[this.maintenanceTask.nextDateIndex];
     const startTimestamp = firstDate ? timestampFromCompactDate(firstDate) : Date.now();
@@ -1075,7 +1290,9 @@ export class TdxLocalStore {
         firstTimestamp: instrument.firstTimestamp,
         lastTimestamp: instrument.lastTimestamp,
         adjustmentType: "none",
-        source: manifest.maintenanceSource ? "tdx-official+tushare" : "tdx-official",
+        source: manifest.maintenanceSource === "tdx-realtime-daily"
+          ? "tdx-official+tdx-realtime"
+          : manifest.maintenanceSource ? "tdx-official+tushare" : "tdx-official",
         datasetVersion: manifest.datasetVersion,
       });
     }
@@ -1133,7 +1350,9 @@ export class TdxLocalStore {
       },
       timeframe,
       adjustmentType: "none",
-      source: overlays.length ? "tdx-official+tushare" : "tdx-official",
+      source: overlays.length
+        ? manifest.maintenanceSource === "tdx-realtime-daily" ? "tdx-official+tdx-realtime" : "tdx-official+tushare"
+        : "tdx-official",
       datasetVersion: manifest.datasetVersion,
       corporateActions: this.corporateActions.state.enabled
         ? this.corporateActions.getEvents(instrumentId)

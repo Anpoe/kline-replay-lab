@@ -97,7 +97,6 @@ async function latestClosedBaoStockDate() {
 async function inspectCnUpdate(
   _row: DatabaseMarketRow | undefined,
   local: Awaited<ReturnType<typeof readLocalCnSummary>>,
-  tushareToken?: string,
 ) {
   const instrumentCount = local.instrumentCount;
   const barCount = local.barCount;
@@ -116,13 +115,11 @@ async function inspectCnUpdate(
   if (String(local.source).toLowerCase() === "tdx") {
     return {
       existing: true,
-      configured: Boolean(tushareToken),
-      needsUpdate: Boolean(tushareToken),
+      configured: true,
+      needsUpdate: true,
       latestDate: dateFromTimestamp(latestTimestamp),
       expectedLatestDate: null,
-      reason: tushareToken
-        ? `通达信不复权日线将继续检查增量${local.corporateActionsEnabled ? "，并维护权息信息" : ""}`
-        : "通达信不复权日线已有数据，但尚未配置日线增量所需的数据源凭证",
+      reason: `通达信不复权日线可直接拉取最新交易日快照${local.corporateActionsEnabled ? "，并维护权息信息" : ""}`,
     };
   }
   try {
@@ -261,7 +258,7 @@ export async function inspectExistingMarkets(db: D1Database) {
   const goldRows = marketRows.results.filter((row) => marketCode(row.market) === "GOLD");
 
   const [cn, us, fx, gold] = await Promise.all([
-    inspectCnUpdate(byMarket.get("CN"), localCn, secrets.tushareToken),
+    inspectCnUpdate(byMarket.get("CN"), localCn),
     inspectMarketSyncUpdate(db),
     inspectFxUpdates(
       fxRows.map((row) => ({

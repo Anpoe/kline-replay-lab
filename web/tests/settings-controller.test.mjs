@@ -79,10 +79,10 @@ test("does not call the persistence adapter after validation fails", async () =>
 test("validates trading hours before saving while allowing overnight sessions", () => {
   for (const [startTime, endTime] of [["", "18:00"], ["25:00", "18:00"], ["07:00", "07:00"]]) {
     assert.equal(prepareSettingsSave({
-      replayTradingSession: { enabled: true, startTime, endTime },
+      replayTradingSession: { enabled: true, startTime, endTime, skipWeekends: false },
     }).ok, false);
   }
-  const session = { enabled: true, startTime: "22:00", endTime: "07:00" };
+  const session = { enabled: true, startTime: "22:00", endTime: "07:00", skipWeekends: true };
   const result = prepareSettingsSave({ replayTradingSession: session });
   assert.equal(result.ok, true);
   assert.deepEqual(result.settings.replayTradingSession, session);

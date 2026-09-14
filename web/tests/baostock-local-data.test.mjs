@@ -308,8 +308,8 @@ test("BaoStock local store coexists with legacy A-share files and serves qfq dai
     await new Promise((resolve) => setTimeout(resolve, 10));
   }
   assert.equal(store.getCnMaintenanceTask()?.status, "completed", store.getCnMaintenanceTask()?.error);
-  assert.equal(store.getCnMaintenanceTask()?.progress.correctedBars, 1);
-  assert.equal(store.getCnMaintenanceTask()?.progress.insertedBars, 1);
+  assert.equal(store.getCnMaintenanceTask()?.progress.correctedBars, 2);
+  assert.equal(store.getCnMaintenanceTask()?.progress.insertedBars, 2);
   const maintained = await store.getCandles("600519.SH", "1d");
   assert.equal(maintained.candles.find((item) => item.timestamp === day("2026-07-21")).close, 11.9);
   assert.equal(maintained.candles.at(-1).close, 12.1);
@@ -317,4 +317,62 @@ test("BaoStock local store coexists with legacy A-share files and serves qfq dai
   const deleted = await store.deleteInstruments(["600519.SH"]);
   assert.deepEqual(deleted, { deletedInstruments: 1, instrumentIds: ["600519.SH"] });
   assert.equal(await store.getCandles("600519.SH", "1d"), null);
+});
+
+test("BaoStock daily maintenance follows the selected asset categories", async (context) => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "kline-baostock-maintenance-assets-"));
+  const requestedCodes = [];
+  const client = {
+    async queryHistory({ code }) {
+      requestedCodes.push(code);
+      return fakeHistory().map((row) => ({ ...row, code }));
+    },
+    close() {},
+  };
+  const store = await new BaoStockLocalStore({
+    root,
+    client,
+    nowProvider: () => new Date("2026-07-28T12:00:00+08:00"),
+  }).init();
+  context.after(async () => {
+    store.close();
+    await rm(root, { recursive: true, force: true });
+  });
+  store.manifestCache = {
+    assets: ["stock", "index"],
+    adjustmentStatus: "ready",
+    instruments: [
+      {
+        id: "600519.SH",
+        name: "贵州茅台",
+        assetType: "stock",
+        status: "1",
+        baostockCode: "sh.600519",
+        firstTimestamp: day("2026-07-20"),
+        lastTimestamp: day("2026-07-27"),
+        barCount: 3,
+      },
+      {
+        id: "399001.SZ",
+        name: "深证成指",
+        assetType: "index",
+        status: "1",
+        baostockCode: "sz.399001",
+        firstTimestamp: day("2026-07-20"),
+        lastTimestamp: day("2026-07-27"),
+        barCount: 3,
+      },
+    ],
+  };
+
+  await store.startCnMaintenance({ mode: "repair", repairDays: 8 });
+  const deadline = Date.now() + 5000;
+  while (!["completed", "failed"].includes(store.getCnMaintenanceTask()?.status) && Date.now() < deadline) {
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+
+  assert.equal(store.getCnMaintenanceTask()?.status, "completed", store.getCnMaintenanceTask()?.error);
+  assert.equal(store.getCnMaintenanceTask()?.progress.totalInstruments, 2);
+  assert.equal(store.getCnMaintenanceTask()?.progress.processedInstruments, 2);
+  assert.deepEqual(requestedCodes, ["sh.600519", "sz.399001"]);
 });

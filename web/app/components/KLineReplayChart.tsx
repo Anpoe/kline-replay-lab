@@ -8,7 +8,7 @@ import {
   type MouseEvent as ReactMouseEvent,
   type PointerEvent as ReactPointerEvent,
 } from "react";
-import type { CandleTooltipStyle, Chart, KLineData, Overlay, OverlayCreate, OverlayFigure, OverlayTemplate, Period, Point } from "klinecharts";
+import type { CandleTooltipStyle, Chart, Crosshair, KLineData, Overlay, OverlayCreate, OverlayFigure, OverlayTemplate, Period, Point } from "klinecharts";
 import type { MovingAverageSettings } from "../lib/chartIndicators";
 import type { ProtectionLine, ProtectionPriceKind } from "../lib/tradeProtection";
 import type { TimeframeId } from "../lib/timeframeCatalog";
@@ -699,20 +699,21 @@ function ensureCorporateActionOverlay(registerOverlay: (template: OverlayTemplat
     needDefaultPointFigure: false,
     needDefaultXAxisFigure: false,
     needDefaultYAxisFigure: false,
-    createPointFigures: ({ overlay, coordinates }) => {
+    createPointFigures: ({ overlay, coordinates, bounding }) => {
       const action = overlay.extendData;
       const point = coordinates[0];
       if (!action || !point) return [];
+      const markerY = bounding.height - 8;
       return [
         {
           type: "circle",
-          attrs: { x: point.x, y: point.y, r: 5 },
+          attrs: { x: point.x, y: markerY, r: 5 },
           styles: { style: "stroke_fill", color: "#f1c86a", borderColor: "#261d08", borderSize: 2 },
           ignoreEvent: overlayHoverIgnoreEvents,
         },
         {
           type: "text",
-          attrs: { x: point.x, y: point.y - 10, text: action.label, align: "center", baseline: "bottom" },
+          attrs: { x: point.x, y: markerY - 10, text: action.label, align: "center", baseline: "bottom" },
           styles: {
             color: "#1b1508",
             size: 10,
@@ -727,10 +728,6 @@ function ensureCorporateActionOverlay(registerOverlay: (template: OverlayTemplat
           ignoreEvent: overlayHoverIgnoreEvents,
         },
       ];
-    },
-    onClick: ({ overlay }) => {
-      const action = overlay.extendData;
-      if (action) action.onSelect?.(action.id);
     },
   });
   corporateActionOverlayRegistered = true;
@@ -1230,6 +1227,22 @@ export function KLineReplayChart({
         },
       });
       chart.setZoomAnchor("cursor");
+      let hoveredCorporateActionId = "";
+      const handleCorporateActionCrosshair = (data?: unknown) => {
+        const crosshair = data as Crosshair | undefined;
+        const point = crosshair?.x != null
+          ? (chart.convertFromPixel([{ x: crosshair.x, y: crosshair.y }], { paneId: PRICE_INDICATOR_PANE }) as Partial<Point>[])[0]
+          : undefined;
+        const timestamp = point?.timestamp;
+        const hoveredAction = crosshair?.paneId === PRICE_INDICATOR_PANE && timestamp != null
+          ? corporateActionMarkersRef.current.find((action) => action.barTimestamp === timestamp)
+          : undefined;
+        const nextId = hoveredAction?.id ?? "";
+        if (nextId === hoveredCorporateActionId) return;
+        hoveredCorporateActionId = nextId;
+        onCorporateActionSelectRef.current(nextId);
+      };
+      chart.subscribeAction("onCrosshairChange", handleCorporateActionCrosshair);
       const chartContainer = containerRef.current;
       const handleWheelZoom = (event: WheelEvent) => {
         if (!event.deltaY || !chartContainer) return;
@@ -1262,6 +1275,8 @@ export function KLineReplayChart({
         preservedBarSpaceRef.current = chart.getBarSpace().bar;
         chartContainer.removeEventListener("wheel", handleWheelZoom, { capture: true });
         chart.unsubscribeAction("onZoom", preserveCurrentZoom);
+        chart.unsubscribeAction("onCrosshairChange", handleCorporateActionCrosshair);
+        onCorporateActionSelectRef.current("");
         dispose(chart);
       };
     });
@@ -1382,6 +1397,7 @@ export function KLineReplayChart({
     corporateActionMarkersRef.current = corporateActionMarkers;
     const signature = corporateActionMarkerSignature(corporateActionMarkers);
     if (chartRef.current && signature !== syncedCorporateActionMarkersRef.current) {
+      onCorporateActionSelectRef.current("");
       syncCorporateActionMarkers(
         chartRef.current,
         corporateActionMarkers,
@@ -1677,7 +1693,10 @@ export function KLineReplayChart({
     onPointerMove={handlePointerMove}
     onPointerUp={handlePointerUp}
     onPointerCancel={cancelLongPress}
-    onPointerLeave={cancelLongPress}
+    onPointerLeave={() => {
+      cancelLongPress();
+      onCorporateActionSelectRef.current("");
+    }}
   />;
 }
 

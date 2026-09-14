@@ -90,6 +90,8 @@ test("ships the K-line training workbench instead of the starter", async () => {
   assert.match(workbench, /单纯浏览 K 线不会触发保存/);
   assert.match(settingsPanel, /随机训练规则/);
   assert.match(settingsPanel, /交易时段/);
+  assert.match(settingsPanel, /自动跳过周末/);
+  assert.match(settingsPanel, /<span>交易时段<\/span>[\s\S]*?<small>开启“只在指定时段训练”[\s\S]*?<\/div>\r?\n\s*<div className="settings-rule">\r?\n\s*<div className="settings-row-action">[\s\S]*?<span>周末时段<\/span>/);
   assert.match(settingsPanel, /跟随图表时区/);
   assert.match(workbench, /RANDOM_TRAINING_PATTERN_PRESETS_KEY/);
   assert.match(workbench, /patternPresetIds: randomTrainingPatternPresetIds/);
@@ -189,7 +191,7 @@ test("ships the K-line training workbench instead of the starter", async () => {
   assert.match(workbench, /次日开盘平仓/);
   assert.match(workbench, /order_queued_for_next_session/);
   assert.match(workbench, /positions_settled_at_replay_session_end/);
-  assert.match(workbench, /deferredOpenOrders/);
+  assert.match(workbench, /deferredOrders/);
   const replayAdvance = await readFile(new URL("app/lib/replayTradingSession.ts", root), "utf8");
   assert.match(workbench, /const nextCursor = advanceReplayCursor\(/);
   assert.match(replayAdvance, /earliestScheduledIndex - 1/);

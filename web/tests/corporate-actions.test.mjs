@@ -4,14 +4,20 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { CorporateActionsStore, normalizeCorporateActions } from '../local-data/corporate-actions-store.mjs';
-import { parseTdxCorporateActionsResponse } from '../local-data/tdx-corporate-actions-client.mjs';
+import {
+  buildTdxSecurityQuotesRequest,
+  parseTdxCorporateActionsResponse,
+  parseTdxSecurityQuotesResponse,
+  TdxCorporateActionsClient,
+} from '../local-data/tdx-corporate-actions-client.mjs';
 import { TdxLocalStore } from '../local-data/legacy-tdx-store.mjs';
 
 const raw = { year: 2026, month: 3, day: 11, category: 1, fenhong: 2, songzhuangu: 3, peigu: 1, peigujia: 5 };
 const stocks = [{ id: '600000.SH', assetType: 'stock' }, { id: '000001.SZ', assetType: 'stock' }, { id: '920001.BJ', assetType: 'stock' }, { id: '000001.SH', assetType: 'index' }];
 async function settled(store) {
   for (let i = 0; i < 200; i++) {
-    if (!['queued', 'running'].includes(store.getStatus().task?.status)) return store.getStatus();
+    const status = store.getStatus();
+    if (!['queued', 'running'].includes(status.task?.status) && !store.maintenanceRunning) return status;
     await new Promise(resolve => setTimeout(resolve, 5));
   }
   throw new Error('task did not settle');
@@ -71,6 +77,79 @@ test('parses TDX corporate-action response without a Python dependency', () => {
     fenshu: null,
     xingquanjia: null,
   }]);
+});
+
+function encodeTdxPrice(value) {
+  const sign = value < 0 ? 0x40 : 0;
+  let remaining = Math.abs(Math.trunc(value));
+  const bytes = [sign | (remaining & 0x3f)];
+  remaining >>>= 6;
+  let index = 0;
+  while (remaining > 0) {
+    bytes[index] |= 0x80;
+    bytes.push(remaining & 0x7f);
+    remaining >>>= 7;
+    index += 1;
+  }
+  return Buffer.from(bytes);
+}
+
+function buildSecurityQuotesBody() {
+  const chunks = [Buffer.from([0, 0, 1, 0])];
+  chunks.push(Buffer.from([0, ...Buffer.from('000001'), 1, 0]));
+  const beforeAmount = [
+    12345, -100, -50, 100, -200,
+    0, 0, 100000, 1000,
+  ];
+  for (const value of beforeAmount) chunks.push(encodeTdxPrice(value));
+  const amount = Buffer.alloc(4);
+  amount.writeUInt32LE(0, 0);
+  chunks.push(amount);
+  for (const value of [0, 0, 0, 0, ...Array.from({ length: 20 }, () => 0)]) {
+    chunks.push(encodeTdxPrice(value));
+  }
+  const tail = Buffer.alloc(10);
+  tail.writeUInt16LE(1, 8);
+  chunks.push(tail);
+  return Buffer.concat(chunks);
+}
+
+test('builds and parses batched real-time TDX security quotes', () => {
+  const request = buildTdxSecurityQuotesRequest(['000001.SZ', '600000.SH']);
+  assert.equal(request.readUInt16LE(0), 0x10c);
+  assert.equal(request.readUInt32LE(2), 0x02006320);
+  assert.equal(request.readUInt16LE(6), 26);
+  assert.equal(request.readUInt16LE(20), 2);
+  assert.equal(request.subarray(22, 29).toString('ascii'), '\u0000000001');
+  assert.equal(request[29], 1);
+  assert.equal(request.subarray(30, 36).toString('ascii'), '600000');
+
+  const [quote] = parseTdxSecurityQuotesResponse(buildSecurityQuotesBody());
+  assert.equal(quote.instrumentId, '000001.SZ');
+  assert.equal(quote.price, 123.45);
+  assert.equal(quote.lastClose, 122.45);
+  assert.equal(quote.open, 122.95);
+  assert.equal(quote.high, 124.45);
+  assert.equal(quote.low, 121.45);
+  assert.equal(quote.volume, 100000);
+  assert.equal(quote.active, true);
+});
+
+test('retries a quote request when a connected TDX node returns no rows', async () => {
+  const client = new TdxCorporateActionsClient({
+    hosts: [['empty-node', 7709], ['live-node', 7709]],
+  });
+  let attempts = 0;
+  client.connect = async () => { attempts += 1; };
+  client.reset = () => {};
+  client.requestResponse = async () => attempts === 1
+    ? Buffer.from([0x01, 0x02, 0x00, 0x00])
+    : buildSecurityQuotesBody();
+  const rows = await client.fetchDailyQuotes(['000001.SZ']);
+  client.close();
+  assert.equal(attempts, 2);
+  assert.equal(rows[0].instrumentId, '000001.SZ');
+  assert.equal(rows[0].price, 123.45);
 });
 
 test('empty successful history still enables daily upkeep, supported stocks only, corrections replace atomically', async t => {
@@ -147,7 +226,12 @@ test('pause does not publish in-flight response, then resumes without losing pen
 test('existing TDX dataset can build without initialization task; daily upkeep runs even with no new candles', async t => {
   const root = await mkdtemp(path.join(os.tmpdir(), 'kline-actions-integration-'));
   let requests = 0;
-  const store = await new TdxLocalStore({ root, corporateActionsClient: { fetchEvents: async () => { requests++; return []; }, close() {} }, nowProvider: () => new Date('2026-03-11T12:00:00Z') }).init();
+  const store = await new TdxLocalStore({
+    root,
+    corporateActionsClient: { fetchEvents: async () => { requests++; return []; }, close() {} },
+    dailyQuotesClient: { fetchDailyQuotes: async () => [], close() {} },
+    nowProvider: () => new Date('2026-03-11T12:00:00Z'),
+  }).init();
   t.after(async () => { store.close(); await rm(root, { recursive: true, force: true }); });
   store.manifestCache = { instruments: [{ id: '600000.SH', asset: 'stock', lastTimestamp: Date.UTC(2026, 2, 11) }] };
   assert.equal(store.getTask(), null);
@@ -155,7 +239,12 @@ test('existing TDX dataset can build without initialization task; daily upkeep r
   await settled(store.corporateActions);
   assert.equal(requests, 1);
   const maintenance = await store.startCnMaintenance({ token: 'test-only' });
-  assert.equal(maintenance.status, 'completed');
+  assert.ok(['queued', 'running', 'completed'].includes(maintenance.status));
+  await settled({
+    getStatus: () => ({ task: store.getCnMaintenanceTask() }),
+    get maintenanceRunning() { return store.maintenanceRunning; },
+  });
+  assert.equal(store.getCnMaintenanceTask().status, 'completed');
   await settled(store.corporateActions);
   assert.equal(requests, 2);
 });

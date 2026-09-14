@@ -163,7 +163,7 @@ test("preferences gateway exposes a stable error for non-OK responses", async ()
 
 test("restores chosen trading hours after saving and recreating the settings gateway", () => {
   const storage = createMemoryStorage();
-  const session = { enabled: true, startTime: "07:00", endTime: "18:00" };
+  const session = { enabled: true, startTime: "07:00", endTime: "18:00", skipWeekends: true };
   createSettingsStorageGateway(storage).saveAppSettings({ ...defaultAppSettings, replayTradingSession: session });
   assert.deepEqual(createSettingsStorageGateway(storage).loadAppSettings().settings.replayTradingSession, session);
 });

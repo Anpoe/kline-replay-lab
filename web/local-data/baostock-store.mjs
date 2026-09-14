@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { access, mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
+import { access, mkdir, readFile, rm } from "node:fs/promises";
 import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { fileURLToPath } from "node:url";
@@ -18,9 +18,10 @@ import {
   normalizeBaoStockRows,
 } from "./baostock.mjs";
 import { screenLatestCandles } from "./pattern-scan.mjs";
+import { writeJsonAtomic } from "./atomic-json.mjs";
+import { CN_ASSET_TYPES, DEFAULT_CN_ASSETS, filterCnInstruments, normalizeCnAssets } from "./cn-asset-scope.mjs";
 
 const DAY_MS = 86_400_000;
-const ASSET_KEYS = new Set(["stock", "index", "fund", "convertible-bond", "other"]);
 const TIMEFRAMES = ["1d", "1w", "1mo"];
 // BaoStock's official client is a single-socket C/S client. Do not expose a
 // concurrency escape hatch: multiple sessions can trigger provider throttling
@@ -64,14 +65,6 @@ function sameCandle(left, right) {
     .every((key) => sameValue(left[key], right[key]));
 }
 
-function writeJsonAtomic(target, value) {
-  return mkdir(path.dirname(target), { recursive: true }).then(async () => {
-    const temporary = `${target}.${process.pid}.tmp`;
-    await writeFile(temporary, `${JSON.stringify(value, null, 2)}\n`, "utf8");
-    await rename(temporary, target);
-  });
-}
-
 async function exists(target) {
   try {
     await access(target);
@@ -83,12 +76,12 @@ async function exists(target) {
 
 function safePlan(input = {}) {
   const assets = Array.isArray(input.assets)
-    ? input.assets.filter((value) => ASSET_KEYS.has(value))
-    : ["stock", "index"];
+    ? input.assets.filter((value) => CN_ASSET_TYPES.has(value))
+    : DEFAULT_CN_ASSETS;
   return {
     source: "baostock",
     provider: "baostock",
-    assets: assets.length ? [...new Set(assets)] : ["stock", "index"],
+    assets: assets.length ? [...new Set(assets)] : [...DEFAULT_CN_ASSETS],
     includeDelisted: input.includeDelisted !== false,
     historyRange: ["all", "20y", "10y"].includes(input.historyRange) ? input.historyRange : "all",
     // BaoStock returns adjusted prices directly.  The local contract is fixed
@@ -909,10 +902,11 @@ export class BaoStockLocalStore {
       throw new Error("请先完成 BaoStock A 股全市场前复权初始化");
     }
     const days = Math.min(120, Math.max(7, Math.trunc(Number(repairDays) || 30)));
-    const stocks = manifest.instruments.filter((instrument) => instrument.assetType === "stock");
+    const maintenanceAssets = normalizeCnAssets(manifest.assets);
+    const instruments = filterCnInstruments(manifest.instruments, maintenanceAssets);
     const progress = {
       processedDates: 0,
-      totalDates: stocks.length,
+      totalDates: instruments.length,
       receivedRows: 0,
       acceptedRows: 0,
       insertedBars: 0,
@@ -922,7 +916,7 @@ export class BaoStockLocalStore {
       ignoredRows: 0,
       invalidRows: 0,
       processedInstruments: 0,
-      totalInstruments: stocks.length,
+      totalInstruments: instruments.length,
     };
     this.maintenanceTask = {
       id: `baostock_maintenance_${randomUUID()}`,
@@ -932,6 +926,7 @@ export class BaoStockLocalStore {
       message: mode === "repair" ? `准备使用 BaoStock 回查最近 ${days} 个自然日。` : "准备使用 BaoStock 检查 A 股前复权增量。",
       error: null,
       repairDays: days,
+      assets: maintenanceAssets,
       nextInstrumentIndex: 0,
       nextDateIndex: 0,
       progress,
@@ -969,19 +964,22 @@ export class BaoStockLocalStore {
     this.maintenanceTask.status = "running";
     try {
       const manifest = await this.getManifest();
-      const stocks = (manifest?.instruments ?? []).filter((instrument) => instrument.assetType === "stock");
+      const instruments = filterCnInstruments(
+        manifest?.instruments,
+        this.maintenanceTask.assets ?? manifest?.assets,
+      );
       const today = todayText(this.nowProvider);
-      for (let index = Number(this.maintenanceTask.nextInstrumentIndex) || 0; index < stocks.length; index += 1) {
+      for (let index = Number(this.maintenanceTask.nextInstrumentIndex) || 0; index < instruments.length; index += 1) {
         if (this.maintenanceTask.status !== "running") {
           const error = new Error("BaoStock 维护任务已暂停");
           error.name = "AbortError";
           throw error;
         }
-        const instrument = stocks[index];
+        const instrument = instruments[index];
         const startDate = this.maintenanceTask.mode === "repair"
           ? dateOffset(today, -(this.maintenanceTask.repairDays - 1))
           : dateOffset(dateText(Number(instrument.lastTimestamp) || Date.UTC(1990, 0, 1)), 1);
-        this.maintenanceTask.message = `正在读取 ${instrument.id} 的 BaoStock 前复权增量（${index + 1} / ${stocks.length}）。`;
+        this.maintenanceTask.message = `正在读取 ${instrument.id} 的 BaoStock 前复权增量（${index + 1} / ${instruments.length}）。`;
         await this.persistMaintenanceTask();
         if (startDate <= today) {
           const rows = await this.client.queryHistory({

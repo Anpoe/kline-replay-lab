@@ -142,7 +142,26 @@ export function SettingsPanel({
                 </div>
               )}
               <small>跟随图表时区，按 K 线时间判断，包含开始、不含结束；结束早于开始时表示跨午夜，例如 22:00–07:00。</small>
-              <small>保存后从下一次推进生效。单步、快进和自动播放会跳过非交易时段，跳过的历史 K 线仍完整显示；已有平仓挂单及止损止盈照常执行，开仓挂单顺延到下一个交易时段。</small>
+              <small>保存后从下一次推进生效。</small>
+              <small>开启“只在指定时段训练”后，还会跳过所选时间外的历史 K 线；已有平仓挂单及止损止盈照常执行，开仓挂单顺延到下一个交易时段。</small>
+              <small>仅适用于非随机训练的分钟线、小时线；随机训练、日线及更大周期、实盘观察不受影响。</small>
+            </div>
+            <div className="settings-rule">
+              <div className="settings-row-action">
+                <div>
+                  <span>周末时段</span>
+                  <strong>自动跳过周末</strong>
+                </div>
+                <SettingsSwitch
+                  checked={draft.replayTradingSession.skipWeekends}
+                  label="自动跳过周末"
+                  onChange={() => onDraftChange((next) => ({
+                    ...next,
+                    replayTradingSession: { ...next.replayTradingSession, skipWeekends: !next.replayTradingSession.skipWeekends },
+                  }))}
+                />
+              </div>
+              <small>开启后，单步、快进和自动播放会跳过周六、周日的历史 K 线；周末不执行委托，已有持仓会保留。</small>
               <small>仅适用于非随机训练的分钟线、小时线；随机训练、日线及更大周期、实盘观察不受影响。</small>
             </div>
             <div className="settings-rule">

@@ -170,6 +170,7 @@ import {
   advanceReplayCursor,
   createReplayTradingSessionPredicate,
   firstReplaySkippedBarIndex,
+  isReplayOrderDueAtBar,
 } from "../lib/replayTradingSession";
 import {
   markTrainingAutosaveSaved,
@@ -3976,12 +3977,13 @@ export function TrainingWorkbench() {
       setPlaying(false);
       return;
     }
+    const replayTradingSession = appSettingsRef.current.replayTradingSession;
     const nextCursor = advanceReplayCursor({
       bars,
       cursor,
       requestedCount: count,
       endCursor,
-      session: appSettingsRef.current.replayTradingSession,
+      session: replayTradingSession,
       timeframe,
       timezone: instrument.timezone,
       randomRun: trainingTask?.randomRun,
@@ -3991,19 +3993,21 @@ export function TrainingWorkbench() {
         .map((order) => Number(order.executeAtTimestamp)),
     });
     const sessionOptions = {
-      session: appSettingsRef.current.replayTradingSession,
+      session: replayTradingSession,
       timeframe,
       timezone: instrument.timezone,
       randomRun: trainingTask?.randomRun,
       liveMode,
     };
     const isWithinReplaySession = createReplayTradingSessionPredicate(sessionOptions);
-    const firstSkippedBarIndex = firstReplaySkippedBarIndex({
-      bars,
-      cursor,
-      destination: nextCursor,
-      ...sessionOptions,
-    });
+    const firstSkippedBarIndex = replayTradingSession.enabled
+      ? firstReplaySkippedBarIndex({
+          bars,
+          cursor,
+          destination: nextCursor,
+          ...sessionOptions,
+        })
+      : null;
     let simulatedPositions = positions;
     let simulatedCashBalance = cashBalance;
     let remainingOrders = pendingOrders;
@@ -4011,6 +4015,7 @@ export function TrainingWorkbench() {
     for (let barIndex = cursor + 1; barIndex <= nextCursor; barIndex += 1) {
       const executionBar = bars[barIndex];
       const isSkippedBar = isWithinReplaySession != null && !isWithinReplaySession(executionBar.timestamp);
+      const isWeekendSkippedBar = isSkippedBar && !replayTradingSession.enabled;
       if (barIndex === firstSkippedBarIndex) {
         const positionsToClose = simulatedPositions.filter((position) => position.status === "open");
         if (positionsToClose.length) {
@@ -4070,29 +4075,31 @@ export function TrainingWorkbench() {
           }
         }
       }
-      const futureOrders = remainingOrders.filter((order) => (
-        order.executeAtTimestamp != null && order.executeAtTimestamp > executionBar.timestamp
-      ));
-      const dueOrders = remainingOrders.filter((order) => (
-        order.executeAtTimestamp == null || order.executeAtTimestamp <= executionBar.timestamp
-      ));
+      const dueOrders = remainingOrders.filter((order) => isReplayOrderDueAtBar(order, executionBar.timestamp));
+      const futureOrders = remainingOrders.filter((order) => !isReplayOrderDueAtBar(order, executionBar.timestamp));
       const executableOrders = isSkippedBar
-        ? dueOrders.filter((order) => order.action === "close")
+        ? isWeekendSkippedBar ? [] : dueOrders.filter((order) => order.action === "close")
         : dueOrders;
-      const deferredOpenOrders = isSkippedBar
-        ? dueOrders.filter((order) => order.action === "open")
+      const deferredOrders = isSkippedBar
+        ? isWeekendSkippedBar ? dueOrders : dueOrders.filter((order) => order.action === "open")
         : [];
-      const executionResult = executeOrders(
-        executableOrders,
-        executionBar,
-        barIndex,
-        simulatedPositions,
-        simulatedCashBalance,
-      );
-      simulatedPositions = executionResult.positions;
-      simulatedCashBalance = executionResult.cashBalance;
-      remainingOrders = [...futureOrders, ...deferredOpenOrders, ...executionResult.remainingOrders];
-      consumedOrderIds.push(...executionResult.consumedOrderIds);
+      if (isWeekendSkippedBar) {
+        // Weekend candles are revealed for chart continuity, but they have no
+        // executable market or protective orders and do not settle positions.
+        remainingOrders = [...futureOrders, ...deferredOrders];
+      } else {
+        const executionResult = executeOrders(
+          executableOrders,
+          executionBar,
+          barIndex,
+          simulatedPositions,
+          simulatedCashBalance,
+        );
+        simulatedPositions = executionResult.positions;
+        simulatedCashBalance = executionResult.cashBalance;
+        remainingOrders = [...futureOrders, ...deferredOrders, ...executionResult.remainingOrders];
+        consumedOrderIds.push(...executionResult.consumedOrderIds);
+      }
 
       const activePersonalSopRule = appSettingsRef.current.personalSopCheckEnabled
         ? appSettingsRef.current.activePersonalSopRule

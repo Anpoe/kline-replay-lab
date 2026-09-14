@@ -9,7 +9,7 @@ const moduleDir = path.dirname(fileURLToPath(import.meta.url));
 const root = path.resolve(process.env.KLINE_DATA_DIR ?? path.join(moduleDir, "..", ".local-data"));
 const host = process.env.KLINE_DATA_HOST ?? "127.0.0.1";
 const port = Number(process.env.KLINE_DATA_PORT ?? 3100);
-const serviceVersion = 5;
+const serviceVersion = 6;
 const sourceSelectionFile = path.join(root, "source-selection.json");
 const stores = {
   baostock: await new BaoStockLocalStore({ root }).init(),
@@ -28,7 +28,7 @@ const sourceDefinitions = {
     name: "通达信官方日线包",
     adjustmentType: "none",
     adjustmentLabel: "不复权",
-    description: "完整历史日线，保留原始交易价格，支持每日更新及权息标记。",
+    description: "完整历史日线，保留原始交易价格，支持每日最新行情更新及权息标记。",
   },
 };
 
@@ -104,10 +104,14 @@ async function datasetStatus(source = activeSource) {
   const providerStatus = source === "baostock"
     ? await store.getDatasetStatus()
     : {
-        source: manifest.maintenanceSource ? "tdx-official+tushare" : "tdx-official",
+        source: manifest.maintenanceSource === "tdx-realtime-daily"
+          ? "tdx-official+tdx-realtime"
+          : manifest.maintenanceSource ? "tdx-official+tushare" : "tdx-official",
         adjustmentType: "none",
         adjustmentStatus: "not-adjusted",
-        adjustmentSource: manifest.maintenanceSource ? "tushare-daily" : "tdx-official-hsjday",
+        adjustmentSource: manifest.maintenanceSource === "tdx-realtime-daily"
+          ? "tdx-realtime-daily"
+          : manifest.maintenanceSource ? "tushare-daily" : "tdx-official-hsjday",
         adjustmentUpdatedAt: null,
         factorCount: 0,
       };
