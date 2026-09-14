@@ -14,8 +14,10 @@ import {
   isAlpacaUrlTooLongError,
   planAlpacaBatches,
   splitSymbols,
+  US_SYNC_MAX_CONCURRENT_BATCHES,
   US_SYNC_MAX_ATTEMPTS,
   US_SYNC_REQUEST_SPACING_MS,
+  isMarketSyncRunTerminal,
   type AlpacaBatchPlan,
   type MarketSyncMode,
 } from "./marketSync";
@@ -26,6 +28,11 @@ import {
   newYorkDate,
   type AlpacaCalendarDay,
 } from "./usMarketSessions";
+import {
+  summarizeLegacyUsData,
+  type LegacyUsDataCoverageRow,
+  type LegacyUsDataSummary,
+} from "./legacyUsData.ts";
 
 export const US_HISTORY_START_DATE = "2016-01-01";
 const US_MARKET = "US";
@@ -288,6 +295,7 @@ async function loadUsInstruments(db: D1Database, requestedIds: string[] | null) 
       "MAX(CASE WHEN c.timeframe = '1d' AND c.source IN ('alpaca-sip', 'alpaca-iex') " +
       "THEN c.last_timestamp END) AS lastTimestamp " +
       "FROM instruments i LEFT JOIN candle_coverage c ON c.instrument_id = i.id " +
+      "AND c.adjustment_type = 'all' " +
       "WHERE i.market = 'US'" + scope +
       " GROUP BY i.id, i.symbol, i.name ORDER BY i.symbol");
     const result = group?.length
@@ -299,6 +307,38 @@ async function loadUsInstruments(db: D1Database, requestedIds: string[] | null) 
     ...row,
     lastTimestamp: row.lastTimestamp == null ? null : Number(row.lastTimestamp),
   }));
+}
+
+/**
+ * Old Alpaca jobs wrote raw bars into the `none` partition.  They remain on
+ * disk for recovery, but must not be relabeled as `all`: split/dividend
+ * adjustments cannot be reconstructed from an OHLC row alone.  Report only
+ * instruments that still have no adjusted daily bars, so the UI can guide the
+ * user into the existing resumable rebuild. Alpaca's canonical history can
+ * legitimately start later than an older raw import (for example after a
+ * symbol change), so comparing the two providers' first dates would keep
+ * showing a rebuild warning even after adjusted data exists.
+ */
+export async function getLegacyUsDataSummary(db: D1Database = getRawDb()): Promise<LegacyUsDataSummary> {
+  const result = await db.prepare(
+    "SELECT legacy.instrument_id AS instrumentId, " +
+    "COALESCE(SUM(legacy.bar_count), 0) AS legacyBarCount, " +
+    "MIN(legacy.first_timestamp) AS firstTimestamp, " +
+    "MAX(legacy.last_timestamp) AS lastTimestamp, " +
+    "COALESCE((SELECT SUM(adjusted.bar_count) " +
+    "FROM candle_coverage adjusted " +
+    "WHERE adjusted.instrument_id = legacy.instrument_id " +
+    "AND adjusted.timeframe = legacy.timeframe " +
+    "AND adjusted.adjustment_type = 'all' AND adjusted.bar_count > 0 " +
+    "AND adjusted.source IN ('alpaca-sip', 'alpaca-iex')), 0) AS adjustedBarCount " +
+    "FROM candle_coverage legacy " +
+    "JOIN instruments i ON i.id = legacy.instrument_id " +
+    "WHERE i.market = 'US' AND legacy.timeframe = '1d' " +
+    "AND legacy.adjustment_type = 'none' AND legacy.bar_count > 0 " +
+    "AND legacy.source IN ('alpaca-sip', 'alpaca-iex') " +
+    "GROUP BY legacy.instrument_id, legacy.timeframe",
+  ).all<LegacyUsDataCoverageRow & { instrumentId: string }>();
+  return summarizeLegacyUsData(result.results as LegacyUsDataCoverageRow[]);
 }
 
 async function acquireLock(db: D1Database, runId: string) {
@@ -623,7 +663,7 @@ export async function createMarketSyncRun(input: {
           "timeframe, start_date, end_date, adjustment_type, status, cursor_json, " +
           "inserted_count, quality_report_json, sync_run_id, sync_batch_id, " +
           "sync_mode, attempt_count, feed, created_at, updated_at) " +
-          "VALUES (?, 'alpaca', ?, ?, ?, 'US', '1d', ?, ?, 'none', 'queued', " +
+          "VALUES (?, 'alpaca', ?, ?, ?, 'US', '1d', ?, ?, 'all', 'queued', " +
           "'{}', 0, '{}', ?, ?, ?, 0, 'sip', ?, ?)").bind(
           crypto.randomUUID(),
           instrument.id,
@@ -678,7 +718,7 @@ async function refreshCoverage(db: D1Database, instrumentIds: string[]) {
       "SELECT instrument_id AS instrumentId, source, COUNT(*) AS barCount, " +
       "MIN(timestamp) AS firstTimestamp, MAX(timestamp) AS lastTimestamp " +
       "FROM candles WHERE instrument_id IN (" + placeholders + ") " +
-      "AND timeframe = '1d' AND adjustment_type = 'none' GROUP BY instrument_id, source",
+      "AND timeframe = '1d' AND adjustment_type = 'all' GROUP BY instrument_id, source",
     ).bind(...group).all<{
       instrumentId: string;
       source: string;
@@ -695,7 +735,7 @@ async function refreshCoverage(db: D1Database, instrumentIds: string[]) {
     }>).map((row) => db.prepare("INSERT OR REPLACE INTO candle_coverage " +
       "(instrument_id, timeframe, adjustment_type, source, bar_count, " +
       "first_timestamp, last_timestamp, updated_at) " +
-      "VALUES (?, '1d', 'none', ?, ?, ?, ?, ?)").bind(
+      "VALUES (?, '1d', 'all', ?, ?, ?, ?, ?)").bind(
       row.instrumentId,
       row.source,
       Number(row.barCount),
@@ -712,6 +752,7 @@ async function persistCandleRows(
   symbols: string[],
   candlesBySymbol: Map<string, NormalizedCandle[]>,
   source: string,
+  adjustmentType = "all",
 ) {
   const instrumentsBySymbol = await loadBatchInstruments(db, symbols);
   const affected = new Set<string>();
@@ -723,10 +764,8 @@ async function persistCandleRows(
     if (!instrument) continue;
     affected.add(instrument.id);
     insertedBySymbol.set(symbol.toUpperCase(), candles.length);
-    for (const group of chunks(candles, 8)) {
-      const placeholders = group.map(() => "(?, '1d', ?, ?, ?, ?, ?, ?, ?, 'none', ?, '[]')").join(",");
-      const values = group.flatMap((candle) => [
-        instrument.id,
+    for (const group of chunks(candles, 1_000)) {
+      const payload = JSON.stringify(group.map((candle) => [
         candle.timestamp,
         candle.open,
         candle.high,
@@ -734,11 +773,15 @@ async function persistCandleRows(
         candle.close,
         candle.volume,
         candle.turnover,
-        source,
-      ]);
+      ]));
       statements.push(db.prepare(insertVerb + " INTO candles " +
         "(instrument_id, timeframe, timestamp, open, high, low, close, volume, " +
-        "turnover, adjustment_type, source, quality_flags) VALUES " + placeholders).bind(...values));
+        "turnover, adjustment_type, source, quality_flags) " +
+        "SELECT ?, '1d', CAST(json_extract(value, '$[0]') AS INTEGER), " +
+        "json_extract(value, '$[1]'), json_extract(value, '$[2]'), " +
+        "json_extract(value, '$[3]'), json_extract(value, '$[4]'), " +
+        "json_extract(value, '$[5]'), json_extract(value, '$[6]'), ?, ?, '[]' " +
+        "FROM json_each(?)").bind(instrument.id, adjustmentType, source, payload));
     }
   }
   for (const group of chunks(statements, 16)) {
@@ -756,7 +799,32 @@ async function persistCandleRows(
   };
 }
 
+async function reconcileCompletedBatchJobs(db: D1Database, runId: string) {
+  const timestamp = nowIso();
+  const coverageExists = "EXISTS (SELECT 1 FROM candle_coverage c " +
+    "JOIN instruments i ON i.id = c.instrument_id " +
+    "WHERE i.symbol = data_download_jobs.vendor_symbol " +
+    "AND c.timeframe = '1d' AND c.source IN ('alpaca-sip', 'alpaca-iex') " +
+    "AND c.adjustment_type = 'all' " +
+    "AND c.bar_count > 0)";
+  await db.prepare("UPDATE data_download_jobs SET " +
+    "status = CASE WHEN " + coverageExists + " THEN 'completed' ELSE 'no_data' END, " +
+    "last_error = NULL, " +
+    "terminal_reason = CASE WHEN " + coverageExists + " THEN NULL ELSE 'no_bars_returned' END, " +
+    "updated_at = ? WHERE sync_run_id = ? " +
+    "AND status IN ('queued', 'running', 'paused') " +
+    "AND EXISTS (SELECT 1 FROM market_sync_batches b " +
+    "WHERE b.id = data_download_jobs.sync_batch_id " +
+    "AND b.run_id = ? AND b.status = 'completed')")
+    .bind(timestamp, runId, runId)
+    .run();
+}
+
 async function updateRunProgress(db: D1Database, runId: string) {
+  // A completed batch is authoritative for every symbol it contains. Repair
+  // rows left in queued/running state before calculating the public progress;
+  // this also makes interrupted historical runs self-healing on the next poll.
+  await reconcileCompletedBatchJobs(db, runId);
   const items = await db.prepare("SELECT COUNT(*) AS total, " +
     "SUM(CASE WHEN status IN ('completed', 'no_data') THEN 1 ELSE 0 END) AS completed, " +
     "SUM(CASE WHEN status = 'failed' THEN 1 ELSE 0 END) AS failed, " +
@@ -788,8 +856,17 @@ async function updateRunProgress(db: D1Database, runId: string) {
     .bind(runId).first<{ lastError: string | null }>();
   const queued = toNumber(batches?.queued);
   const running = toNumber(batches?.running);
+  const totalItems = toNumber(items?.total);
+  const completedItems = toNumber(items?.completed);
+  const failedItems = toNumber(items?.failed);
   const failedBatches = toNumber(batches?.failed);
-  const terminal = queued === 0 && running === 0;
+  const terminal = isMarketSyncRunTerminal({
+    queuedBatches: queued,
+    runningBatches: running,
+    totalJobs: totalItems,
+    completedJobs: completedItems,
+    failedJobs: failedItems,
+  });
   const status = current.status === "paused" || current.status === "cancelled"
     ? current.status
     : terminal
@@ -802,9 +879,9 @@ async function updateRunProgress(db: D1Database, runId: string) {
     "finished_at = ?, updated_at = ? " +
     "WHERE id = ?").bind(
     status,
-    toNumber(items?.total),
-    toNumber(items?.completed),
-    toNumber(items?.failed),
+    totalItems,
+    completedItems,
+    failedItems,
     toNumber(batches?.total),
     toNumber(batches?.completed),
     toNumber(batches?.inserted),
@@ -819,6 +896,16 @@ async function updateRunProgress(db: D1Database, runId: string) {
     await releaseLock(db, runId);
   }
   return next ?? null;
+}
+
+export async function reconcileMarketSyncProgress(db: D1Database = getRawDb()) {
+  await ensureSchema();
+  const runs = await db.prepare("SELECT DISTINCT sync_run_id AS id FROM data_download_jobs " +
+    "WHERE market = ? AND sync_run_id IS NOT NULL " +
+    "AND status IN ('queued', 'running', 'paused')")
+    .bind(US_MARKET)
+    .all<{ id: string }>();
+  for (const run of runs.results) await updateRunProgress(db, run.id);
 }
 
 async function splitBatch(db: D1Database, batch: BatchRow, message: string) {
@@ -886,9 +973,9 @@ async function processBatch(db: D1Database, run: RunRow, originalBatch: BatchRow
   const claim = await db.prepare("UPDATE market_sync_batches SET status = 'running', " +
     "attempt_count = attempt_count + 1, started_at = COALESCE(started_at, ?), " +
     "updated_at = ? WHERE id = ? AND status = 'queued' " +
-    "AND NOT EXISTS (SELECT 1 FROM market_sync_batches AS active " +
-    "WHERE active.run_id = ? AND active.status = 'running')")
-    .bind(claimTime, claimTime, originalBatch.id, originalBatch.runId).run();
+    "AND (SELECT COUNT(*) FROM market_sync_batches AS active " +
+    "WHERE active.run_id = ? AND active.status = 'running') < ?")
+    .bind(claimTime, claimTime, originalBatch.id, originalBatch.runId, US_SYNC_MAX_CONCURRENT_BATCHES).run();
   if (!claim.meta.changes) return;
   const batch = await db.prepare(batchSelect() + " WHERE id = ?").bind(originalBatch.id).first<BatchRow>();
   if (!batch) return;
@@ -931,7 +1018,7 @@ async function processBatch(db: D1Database, run: RunRow, originalBatch: BatchRow
 
   let persisted: Awaited<ReturnType<typeof persistCandleRows>>;
   try {
-    persisted = await persistCandleRows(db, symbols, chunk.candlesBySymbol, chunk.source);
+    persisted = await persistCandleRows(db, symbols, chunk.candlesBySymbol, chunk.source, "all");
   } catch (error) {
     const message = errorText(error);
     if (batch.attemptCount >= US_SYNC_MAX_ATTEMPTS) {
@@ -963,6 +1050,7 @@ async function processBatch(db: D1Database, run: RunRow, originalBatch: BatchRow
       "JOIN instruments i ON i.id = c.instrument_id " +
       "WHERE i.symbol = data_download_jobs.vendor_symbol " +
       "AND c.timeframe = '1d' AND c.source IN ('alpaca-sip', 'alpaca-iex') " +
+      "AND c.adjustment_type = 'all' " +
       "AND c.bar_count > 0)";
     const updates = symbols.map((symbol) => db.prepare("UPDATE data_download_jobs SET " +
       "status = CASE WHEN " + coverageExists + " THEN 'completed' ELSE 'no_data' END, " +
@@ -996,10 +1084,10 @@ async function processNextMarketSyncBatchInternal(runId: string) {
   await db.prepare("UPDATE market_sync_batches SET status = 'queued', updated_at = ? " +
     "WHERE run_id = ? AND status = 'running' AND updated_at < ?")
     .bind(nowIso(), runId, staleBefore).run();
-  const batch = await db.prepare(batchSelect() +
-    " WHERE run_id = ? AND status = 'queued' ORDER BY batch_no LIMIT 1")
-    .bind(runId).first<BatchRow>();
-  if (!batch) {
+  const batches = await db.prepare(batchSelect() +
+    " WHERE run_id = ? AND status = 'queued' ORDER BY batch_no LIMIT ?")
+    .bind(runId, US_SYNC_MAX_CONCURRENT_BATCHES).all<BatchRow>();
+  if (!batches.results.length) {
     await updateRunProgress(db, runId);
     return await getMarketSyncStatus(runId);
   }
@@ -1012,7 +1100,8 @@ async function processNextMarketSyncBatchInternal(runId: string) {
   const startedAt = nowIso();
   await db.prepare("UPDATE market_sync_runs SET status = 'running', started_at = COALESCE(started_at, ?), updated_at = ? WHERE id = ? AND status = 'queued'")
     .bind(startedAt, startedAt, runId).run();
-  await processBatch(db, run, batch, secrets);
+  await Promise.all(batches.results.map((batch) => processBatch(db, run, batch, secrets)));
+  await updateRunProgress(db, runId);
   return await getMarketSyncStatus(runId);
 }
 

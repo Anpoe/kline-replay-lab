@@ -1,7 +1,15 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { defaultPatternPresets, findPatternMatches, matchesPattern, normalizePatternPresets } from "../app/lib/patternFilters.ts";
+import {
+  defaultPatternPresets,
+  findPatternMatches,
+  isPatternPresetAvailable,
+  matchesPattern,
+  normalizePatternPresets,
+  requiredPatternHistory,
+  visiblePatternPresets,
+} from "../app/lib/patternFilters.ts";
 
 const candle = (timestamp, open, high, low, close, volume = 100) => ({ timestamp, open, high, low, close, volume });
 const breakout = defaultPatternPresets.find((preset) => preset.id === "breakout");
@@ -84,6 +92,59 @@ test("repairs replacement and control characters in preset text", () => {
   const repaired = normalized.find((preset) => preset.id === "contraction");
   assert.equal(repaired.name, "波幅收缩");
   assert.equal(repaired.description, contraction.description);
+});
+
+test("normalizes modular custom conditions and keeps hidden built-ins out of the available list", () => {
+  const normalized = normalizePatternPresets([
+    {
+      id: "custom-modular",
+      kind: "custom",
+      name: "自定义趋势",
+      description: "价格站上 EMA 且成交量放大",
+      builtIn: false,
+      parameters: {},
+      conditions: [
+        { id: "ema", kind: "price_vs_ema", parameters: { period: 20, relation: "above" } },
+        { id: "volume", kind: "volume_vs_average", parameters: { lookback: 20, relation: "at_least", multiplier: 1.5 } },
+        { id: "unsupported", kind: "not-a-condition", parameters: {} },
+      ],
+    },
+    { ...breakout, enabled: false },
+  ]);
+  const custom = normalized.find((preset) => preset.id === "custom-modular");
+  const hidden = normalized.find((preset) => preset.id === breakout.id);
+
+  assert.equal(custom?.kind, "custom");
+  assert.equal(custom?.conditions?.length, 2);
+  assert.equal(hidden?.enabled, false);
+  assert.equal(isPatternPresetAvailable(hidden), false);
+  assert.equal(visiblePatternPresets(normalized).some((preset) => preset.id === breakout.id), false);
+  assert.equal(visiblePatternPresets(normalized).some((preset) => preset.id === "custom-modular"), true);
+});
+
+test("evaluates modular custom conditions with AND semantics and reserves their history", () => {
+  const bars = Array.from({ length: 25 }, (_, index) => {
+    const close = 10 + index * 0.2;
+    return candle(index, close - 0.05, close + 0.25, close - 0.1, close, 100);
+  });
+  bars.at(-1).volume = 180;
+  const preset = normalizePatternPresets([{
+    id: "custom-and",
+    kind: "custom",
+    name: "模块化 AND",
+    description: "",
+    builtIn: false,
+    parameters: {},
+    conditions: [
+      { id: "ema", kind: "price_vs_ema", parameters: { period: 5, relation: "above" } },
+      { id: "volume", kind: "volume_vs_average", parameters: { lookback: 5, relation: "at_least", multiplier: 1.5 } },
+    ],
+  }])[0];
+
+  assert.equal(matchesPattern(bars, bars.length - 1, preset), true);
+  bars.at(-1).volume = 100;
+  assert.equal(matchesPattern(bars, bars.length - 1, preset), false);
+  assert.equal(requiredPatternHistory([preset]), 20);
 });
 
 test("upgrades saved Always In built-ins with the strict current-control fields", () => {

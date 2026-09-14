@@ -1,0 +1,2 @@
+baostock>=0.8.9
+pytdx==1.72

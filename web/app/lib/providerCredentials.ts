@@ -60,7 +60,9 @@ export async function loadProviderSecrets(): Promise<{
     secrets: { tushareToken, alpacaKeyId, alpacaSecretKey, twelveDataApiKey, dukascopyEndpoint },
     tdxQuantEndpoint,
     sources: {
-      tushare: stored.tushare?.tushareToken ? "settings" : runtime.TUSHARE_TOKEN ? "environment" : null,
+      tushare: stored.tushare?.tushareToken
+        ? "settings"
+        : runtime.TUSHARE_TOKEN ? "environment" : null,
       alpaca: stored.alpaca?.alpacaKeyId && stored.alpaca?.alpacaSecretKey
         ? "settings"
         : runtime.APCA_API_KEY_ID && runtime.APCA_API_SECRET_KEY ? "environment" : null,

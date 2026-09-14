@@ -244,6 +244,9 @@ test("原生控制面板通过 main Release 安全更新并保留本地数据", 
   assert.match(panel, /RunUpdateCheckAsync/);
   assert.match(panel, /ApplyUpdateAsync/);
   assert.match(panel, /NativeUpdateService/);
+  assert.match(panel, /private readonly Label versionLabel/);
+  assert.match(panel, /versionLabel[\s\S]{0,300}FormatInstalledVersion\(updateService\.InstalledVersion\)/);
+  assert.match(panel, /检查软件更新/);
   assert.match(panel, /21600000/);
   assert.match(nativeBuild, /NativeUpdateService\.cs/);
   assert.match(nativeBuild, /System\.IO\.Compression\.FileSystem\.dll/);

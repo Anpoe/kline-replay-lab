@@ -3,9 +3,34 @@ import test from "node:test";
 import {
   countTradingSessions,
   countWeekdaySessions,
+  isMarketSyncRunTerminal,
   planAlpacaBatches,
   splitSymbols,
 } from "../app/lib/marketSync.ts";
+
+test("批次都结束但仍有未终态任务时，市场同步不能提前标记完成", () => {
+  assert.equal(isMarketSyncRunTerminal({
+    queuedBatches: 0,
+    runningBatches: 0,
+    totalJobs: 2,
+    completedJobs: 0,
+    failedJobs: 0,
+  }), false);
+  assert.equal(isMarketSyncRunTerminal({
+    queuedBatches: 0,
+    runningBatches: 0,
+    totalJobs: 2,
+    completedJobs: 2,
+    failedJobs: 0,
+  }), true);
+  assert.equal(isMarketSyncRunTerminal({
+    queuedBatches: 0,
+    runningBatches: 0,
+    totalJobs: 2,
+    completedJobs: 1,
+    failedJobs: 1,
+  }), true);
+});
 
 test("美股批次规划按交易日预算把完整历史切成约 3 个品种一批", () => {
   const plans = planAlpacaBatches({
@@ -16,6 +41,18 @@ test("美股批次规划按交易日预算把完整历史切成约 3 个品种�
   });
   assert.deepEqual(plans.map((plan) => plan.symbols.length), [3, 3, 1]);
   assert.ok(plans.every((plan) => plan.estimatedPoints <= 8000));
+});
+
+test("十年日线历史默认把三个品种放入同一批次", () => {
+  const plans = planAlpacaBatches({
+    symbols: ["AAPL", "MSFT", "NVDA", "TSLA", "AMZN", "META"],
+    startDate: "2016-01-01",
+    endDate: "2026-09-11",
+    sessionCount: 2791,
+  });
+
+  assert.deepEqual(plans.map((plan) => plan.symbols.length), [3, 3]);
+  assert.ok(plans.every((plan) => plan.estimatedPoints <= 9500));
 });
 
 test("单日批次受实际 URL 长度保护，而不是硬编码品种数", () => {

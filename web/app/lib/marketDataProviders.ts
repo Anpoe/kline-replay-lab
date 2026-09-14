@@ -1,4 +1,5 @@
 import { canAggregateTimeframe, timeframeRank, type TimeframeId } from "./timeframeCatalog.ts";
+import { DEFAULT_US_ADJUSTMENT_TYPE } from "./marketAdjustments.ts";
 
 export type MarketDataProviderId = "tushare" | "alpaca";
 export type SupportedTimeframe = TimeframeId;
@@ -62,6 +63,7 @@ export type ProviderChunkRequest = {
   startDate: string;
   endDate: string;
   cursor: ProviderCursor;
+  adjustmentType?: string;
 };
 
 export type ProviderSecrets = {
@@ -80,15 +82,6 @@ export type ProviderChunk = {
   quality: QualityReport;
 };
 
-type TusharePayload = {
-  code?: number;
-  msg?: string;
-  data?: {
-    fields?: string[];
-    items?: unknown[][];
-  };
-};
-
 export type AlpacaBar = {
   t?: string;
   o?: number;
@@ -102,6 +95,15 @@ type AlpacaPayload = {
   bars?: AlpacaBar[];
   next_page_token?: string | null;
   message?: string;
+};
+
+type TusharePayload = {
+  code?: number;
+  msg?: string;
+  data?: {
+    fields?: string[];
+    items?: unknown[][];
+  };
 };
 
 type AlpacaMultiSymbolPayload = {
@@ -118,6 +120,7 @@ export type AlpacaMultiSymbolChunkRequest = {
   feed: AlpacaFeed;
   pageToken?: string;
   limit?: number;
+  adjustmentType?: string;
 };
 
 export type AlpacaMultiSymbolChunk = {
@@ -239,6 +242,12 @@ async function fetchAlpacaJson<T extends { message?: string }>(
   throw lastError instanceof Error ? lastError : new Error("Alpaca 请求失败");
 }
 
+function finiteOrNull(value: unknown) {
+  if (value === null || value === undefined || value === "") return null;
+  const numeric = Number(value);
+  return Number.isFinite(numeric) ? numeric : null;
+}
+
 function tushareTimestamp(value: unknown, timeframe: SupportedTimeframe) {
   const text = String(value ?? "");
   if (timeframe === "5m" || timeframe === "1h") {
@@ -246,12 +255,6 @@ function tushareTimestamp(value: unknown, timeframe: SupportedTimeframe) {
   }
   if (!/^\d{8}$/.test(text)) return Number.NaN;
   return Date.parse(`${text.slice(0, 4)}-${text.slice(4, 6)}-${text.slice(6, 8)}T00:00:00+08:00`);
-}
-
-function finiteOrNull(value: unknown) {
-  if (value === null || value === undefined || value === "") return null;
-  const numeric = Number(value);
-  return Number.isFinite(numeric) ? numeric : null;
 }
 
 export function validateCandles(candles: NormalizedCandle[]) {
@@ -292,6 +295,19 @@ export function validateCandles(candles: NormalizedCandle[]) {
   };
 }
 
+export function normalizeAlpacaBars(payload: AlpacaPayload) {
+  const candles = (payload.bars ?? []).map((bar) => ({
+    timestamp: Date.parse(String(bar.t ?? "")),
+    open: Number(bar.o),
+    high: Number(bar.h),
+    low: Number(bar.l),
+    close: Number(bar.c),
+    volume: finiteOrNull(bar.v),
+    turnover: null,
+  }));
+  return validateCandles(candles);
+}
+
 export function normalizeTusharePayload(
   payload: TusharePayload,
   timeframe: SupportedTimeframe,
@@ -314,19 +330,6 @@ export function normalizeTusharePayload(
   return validateCandles(candles);
 }
 
-export function normalizeAlpacaBars(payload: AlpacaPayload) {
-  const candles = (payload.bars ?? []).map((bar) => ({
-    timestamp: Date.parse(String(bar.t ?? "")),
-    open: Number(bar.o),
-    high: Number(bar.h),
-    low: Number(bar.l),
-    close: Number(bar.c),
-    volume: finiteOrNull(bar.v),
-    turnover: null,
-  }));
-  return validateCandles(candles);
-}
-
 export function buildAlpacaMultiSymbolUrl(request: AlpacaMultiSymbolChunkRequest) {
   const symbols = [...new Set(request.symbols.map((value) => String(value).trim().toUpperCase()).filter(Boolean))];
   const params = new URLSearchParams({
@@ -335,7 +338,7 @@ export function buildAlpacaMultiSymbolUrl(request: AlpacaMultiSymbolChunkRequest
     start: request.startDate,
     end: request.endDate,
     limit: String(Math.min(10_000, Math.max(1, request.limit ?? 10_000))),
-    adjustment: "raw",
+    adjustment: "all",
     feed: request.feed,
     sort: "asc",
   });
@@ -448,7 +451,6 @@ export async function fetchProviderChunk(
       source: "tushare",
     };
   }
-
   if (!secrets.alpacaKeyId || !secrets.alpacaSecretKey) {
     throw new Error("尚未配置 APCA_API_KEY_ID 和 APCA_API_SECRET_KEY");
   }
@@ -461,7 +463,7 @@ export async function fetchProviderChunk(
     start: request.startDate,
     end: request.endDate,
     limit: "10000",
-    adjustment: "raw",
+    adjustment: DEFAULT_US_ADJUSTMENT_TYPE,
     feed,
     sort: "asc",
   });

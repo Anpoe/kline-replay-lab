@@ -15,6 +15,8 @@ import type { TimeframeId } from "../lib/timeframeCatalog";
 
 export type { ProtectionLine, ProtectionPriceKind } from "../lib/tradeProtection";
 
+export type PriceSelectionMode = ProtectionPriceKind | "entry-trigger";
+
 export type DrawingRequest = {
   name: string;
   nonce: number;
@@ -951,7 +953,7 @@ export function KLineReplayChart({
   tradeMarkers: TradeMarker[];
   decisionMarkers: DecisionMarker[];
   protectionLines: ProtectionLine[];
-  priceSelectionMode: ProtectionPriceKind | null;
+  priceSelectionMode: PriceSelectionMode | null;
   drawings: PersistedDrawing[];
   selectedDrawingId: string;
   drawingsRestoreNonce: number;
@@ -959,7 +961,7 @@ export function KLineReplayChart({
   hidePrice: boolean;
   enableCandleContextMenu?: boolean;
   onDecisionSelect: (id: string) => void;
-  onProtectionPriceSelect: (kind: ProtectionPriceKind, price: number) => void;
+  onProtectionPriceSelect: (kind: PriceSelectionMode, price: number) => void;
   onProtectionLineMove: (line: ProtectionLine, price: number) => boolean;
   onCandleContextMenu: (target: CandleContextTarget) => void;
   onDrawingsChange: (drawings: PersistedDrawing[]) => void;
@@ -1570,20 +1572,26 @@ export function KLineReplayChart({
     cancelLongPress();
   };
 
+  const priceSelectionLabel = priceSelectionMode === "stop-loss"
+    ? "止损"
+    : priceSelectionMode === "take-profit"
+      ? "止盈"
+      : "触发价";
+
   return <div
     ref={containerRef}
     className={`chart-canvas${drawingActive ? " drawing-active" : ""}${priceSelectionMode ? " price-selecting" : ""}`}
     aria-label={drawingActive
       ? `${symbol} K线图，正在绘图`
       : priceSelectionMode
-        ? `${symbol} K线图，点击选择${priceSelectionMode === "stop-loss" ? "止损" : "止盈"}价格`
+        ? `${symbol} K线图，点击选择${priceSelectionLabel}`
         : enableCandleContextMenu
           ? symbol + " K线图，右键或长按已揭示的 K 线可补写事前决策"
           : symbol + " K线图，仅用于查看和添加图表标记"}
     title={drawingActive
       ? "正在绘图：拖动手指不会滚动页面或平移图表"
       : priceSelectionMode
-        ? `点击图表选择${priceSelectionMode === "stop-loss" ? "止损" : "止盈"}价格`
+        ? `点击图表选择${priceSelectionLabel}`
         : enableCandleContextMenu ? "右键或长按已揭示的 K 线可补写事前决策" : "仅用于查看行情和添加图表标记"}
     onClickCapture={handleClick}
     onContextMenu={handleContextMenu}

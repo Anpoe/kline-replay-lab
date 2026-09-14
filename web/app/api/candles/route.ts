@@ -7,15 +7,40 @@ import {
   type SeedCandle,
 } from "../../../db/sample-data";
 import { fetchLocalData, readLocalDataJson } from "../../lib/localDataService";
+import {
+  defaultAdjustmentTypeForMarket,
+  defaultAdjustmentTypeForInstrument,
+  normalizeStockAdjustmentType,
+} from "../../lib/marketAdjustments";
 import { normalizeTimeframeCoverage } from "../../lib/timeframeAvailability";
 import { isSupportedTimeframe } from "../../lib/timeframeCatalog";
+
+function isLocalCnSource(source: string) {
+  const normalized = source.toLowerCase();
+  return normalized.startsWith("baostock")
+    || normalized.startsWith("tdx-official")
+    || normalized.startsWith("local-zip");
+}
 
 type ImportedBar = Partial<SeedCandle> & { timestamp?: number | string };
 
 async function seedIfNeeded() {
   const db = getRawDb();
   const seeded = await db.prepare("SELECT value FROM app_metadata WHERE key = 'sample_data_seeded'").first();
-  if (seeded) return;
+  if (seeded) {
+    for (const instrument of SAMPLE_INSTRUMENTS) {
+      const adjustmentType = defaultAdjustmentTypeForMarket(instrument.market);
+      await db.prepare(`UPDATE candles SET adjustment_type = ?
+        WHERE instrument_id = ? AND source = 'sample' AND adjustment_type = 'none'`)
+        .bind(adjustmentType, instrument.id)
+        .run();
+      await db.prepare(`UPDATE candle_coverage SET adjustment_type = ?
+        WHERE instrument_id = ? AND source = 'sample' AND adjustment_type = 'none'`)
+        .bind(adjustmentType, instrument.id)
+        .run();
+    }
+    return;
+  }
   const count = await db.prepare("SELECT COUNT(*) AS count FROM instruments").first<{ count: number }>();
   if ((count?.count ?? 0) > 0) {
     await db.prepare("INSERT OR REPLACE INTO app_metadata (key, value) VALUES ('sample_data_seeded', '1')").run();
@@ -23,6 +48,7 @@ async function seedIfNeeded() {
   }
 
   for (const instrument of SAMPLE_INSTRUMENTS) {
+    const adjustmentType = defaultAdjustmentTypeForMarket(instrument.market);
     await db
       .prepare(`INSERT OR IGNORE INTO instruments
         (id, symbol, name, market, timezone, price_precision)
@@ -51,7 +77,7 @@ async function seedIfNeeded() {
         db
           .prepare(`INSERT OR IGNORE INTO candles
             (instrument_id, timeframe, timestamp, open, high, low, close, volume, turnover, adjustment_type, source, quality_flags)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'none', 'sample', '[]')`)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'sample', '[]')`)
           .bind(
             instrument.id,
             timeframe,
@@ -62,6 +88,7 @@ async function seedIfNeeded() {
             bar.close,
             bar.volume,
             bar.turnover,
+            adjustmentType,
           ),
       );
       for (let index = 0; index < statements.length; index += 80) {
@@ -70,10 +97,11 @@ async function seedIfNeeded() {
       await db.prepare(`INSERT OR REPLACE INTO candle_coverage
         (instrument_id, timeframe, adjustment_type, source, bar_count,
          first_timestamp, last_timestamp, updated_at)
-        VALUES (?, ?, 'none', 'sample', ?, ?, ?, ?)`)
+        VALUES (?, ?, ?, 'sample', ?, ?, ?, ?)`)
         .bind(
           instrument.id,
           timeframe,
+          adjustmentType,
           bars.length,
           bars[0]?.timestamp ?? 0,
           bars.at(-1)?.timestamp ?? 0,
@@ -114,7 +142,8 @@ export async function GET(request: Request) {
     const rows = await db
       .prepare(`SELECT i.id, i.symbol, i.name, i.market, i.timezone,
         i.price_precision AS pricePrecision,
-        GROUP_CONCAT(DISTINCT c.timeframe) AS timeframeList
+        GROUP_CONCAT(DISTINCT c.timeframe) AS timeframeList,
+        GROUP_CONCAT(DISTINCT c.adjustment_type) AS adjustmentTypeList
         FROM instruments i
         JOIN candle_coverage c ON c.instrument_id = i.id AND c.bar_count > 0
         GROUP BY i.id, i.symbol, i.name, i.market, i.timezone, i.price_precision
@@ -122,7 +151,12 @@ export async function GET(request: Request) {
       .all();
     const local = await readLocalDataJson<{ instruments: Array<Record<string, unknown>> }>("/instruments");
     const merged = new Map<string, Record<string, unknown>>();
-    for (const item of rows.results as Array<Record<string, unknown>>) {
+    const visibleRows = (rows.results as Array<Record<string, unknown>>).filter((item) => {
+      if (["CN", "A股"].includes(String(item.market ?? "").toUpperCase())) return false;
+      const expected = defaultAdjustmentTypeForMarket(String(item.market ?? ""));
+      return expected === "none" || String(item.adjustmentTypeList ?? "").split(",").includes(expected);
+    });
+    for (const item of visibleRows) {
       merged.set(String(item.id), {
         ...item,
         timeframes: normalizeTimeframeCoverage(item.timeframeList),
@@ -165,7 +199,11 @@ export async function GET(request: Request) {
       if (requestedMarket === "GOLD") return normalized === "GOLD" || normalized === "METAL";
       return normalized === requestedMarket;
     };
-    const allDatabaseRows = rows.results as Array<Record<string, unknown>>;
+    const allDatabaseRows = (rows.results as Array<Record<string, unknown>>).filter((item) => {
+      if (["CN", "A股"].includes(String(item.market ?? "").toUpperCase())) return false;
+      const expected = defaultAdjustmentTypeForMarket(String(item.market ?? ""));
+      return expected === "none" || String(item.adjustmentType ?? "") === expected;
+    });
     const marketDatabaseRows = allDatabaseRows.filter((item) => matchesMarket(item.market));
     const databaseRows = marketDatabaseRows.filter((item) =>
       !query ||
@@ -217,26 +255,46 @@ export async function GET(request: Request) {
       FROM instruments WHERE id = ?`)
     .bind(instrumentId)
     .first();
+  const adjustmentType = instrument
+    ? normalizeStockAdjustmentType(String((instrument as { market?: unknown }).market ?? ""), url.searchParams.get("adjustmentType") ?? undefined)
+    : defaultAdjustmentTypeForInstrument(instrumentId);
+  const preferLocal = String((instrument as { market?: unknown } | null)?.market ?? "").toUpperCase() === "CN"
+    || /\.(SH|SZ|BJ)$/.test(instrumentId.toUpperCase());
+  const local = preferLocal
+    ? await readLocalDataJson<{
+        instrument: Record<string, unknown>;
+        timeframe: string;
+        adjustmentType?: string;
+        candles: Array<Record<string, unknown>>;
+        source: string;
+        datasetVersion: string;
+      }>(`/candles?instrument=${encodeURIComponent(instrumentId)}&timeframe=${encodeURIComponent(timeframe)}&adjustmentType=${encodeURIComponent(adjustmentType)}`, 15000)
+    : null;
+  if (local) return Response.json(local);
+  if (preferLocal) {
+    return Response.json({ instrument, timeframe, adjustmentType, candles: [] });
+  }
   const rows = await db
     .prepare(`SELECT timestamp, open, high, low, close, volume, turnover
       FROM candles
-      WHERE instrument_id = ? AND timeframe = ? AND adjustment_type = 'none'
+      WHERE instrument_id = ? AND timeframe = ? AND adjustment_type = ?
       ORDER BY timestamp ASC`)
-    .bind(instrumentId, timeframe)
+    .bind(instrumentId, timeframe, adjustmentType)
     .all();
 
   if (instrument && rows.results.length) {
-    return Response.json({ instrument, timeframe, candles: rows.results });
+    return Response.json({ instrument, timeframe, adjustmentType, candles: rows.results });
   }
-  const local = await readLocalDataJson<{
+  const fallbackLocal = await readLocalDataJson<{
     instrument: Record<string, unknown>;
     timeframe: string;
+    adjustmentType?: string;
     candles: Array<Record<string, unknown>>;
     source: string;
     datasetVersion: string;
-  }>(`/candles?instrument=${encodeURIComponent(instrumentId)}&timeframe=${encodeURIComponent(timeframe)}`, 15000);
-  if (local) return Response.json(local);
-  return Response.json({ instrument, timeframe, candles: rows.results });
+  }>(`/candles?instrument=${encodeURIComponent(instrumentId)}&timeframe=${encodeURIComponent(timeframe)}&adjustmentType=${encodeURIComponent(adjustmentType)}`, 15000);
+  if (fallbackLocal) return Response.json(fallbackLocal);
+  return Response.json({ instrument, timeframe, adjustmentType, candles: rows.results });
 }
 
 export async function POST(request: Request) {
@@ -265,6 +323,9 @@ export async function POST(request: Request) {
   if (bars.length > 5000 || bars.some((bar) => !isValidBar(bar))) {
     return Response.json({ error: "单次最多 5000 根，且 OHLC 必须有效" }, { status: 400 });
   }
+
+  const market = instrument.market ?? "CUSTOM";
+  const adjustmentType = normalizeStockAdjustmentType(market, payload.adjustmentType);
 
   const db = getRawDb();
   await db
@@ -298,13 +359,12 @@ export async function POST(request: Request) {
         Number(bar.close),
         bar.volume == null ? null : Number(bar.volume),
         bar.turnover == null ? null : Number(bar.turnover),
-        payload.adjustmentType ?? "none",
+        adjustmentType,
       );
   });
   for (let index = 0; index < statements.length; index += 80) {
     await db.batch(statements.slice(index, index + 80));
   }
-  const adjustmentType = payload.adjustmentType ?? "none";
   const importedCoverage = await db.prepare(`SELECT COUNT(*) AS barCount,
     MIN(timestamp) AS firstTimestamp, MAX(timestamp) AS lastTimestamp
     FROM candles
@@ -346,7 +406,7 @@ export async function DELETE(request: Request) {
   }
 
   const localInstrumentIds = [...new Set(
-    selections.filter((item) => item.source === "tdx-official").map((item) => item.id as string),
+    selections.filter((item) => isLocalCnSource(String(item.source ?? ""))).map((item) => item.id as string),
   )];
   let deletedLocalInstruments = 0;
   if (localInstrumentIds.length) {
@@ -366,7 +426,7 @@ export async function DELETE(request: Request) {
     }
   }
 
-  const databaseSelections = selections.filter((item) => item.source !== "tdx-official");
+  const databaseSelections = selections.filter((item) => !isLocalCnSource(String(item.source ?? "")));
   const db = getRawDb();
   let deletedRows = 0;
   for (const item of databaseSelections) {
@@ -393,7 +453,7 @@ export async function DELETE(request: Request) {
     deletedRows,
     deletedLocalInstruments,
     note: deletedLocalInstruments
-      ? "TDX 周线由日线生成，因此删除任一 TDX 周期会同时删除该品种的日线和周线。"
+      ? "本机 A 股周线/月线由日线生成，因此删除任一周期会同时删除该品种在当前本机数据源中的日线和聚合周期。"
       : undefined,
   });
 }

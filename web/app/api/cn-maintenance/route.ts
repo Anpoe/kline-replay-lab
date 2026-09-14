@@ -26,15 +26,7 @@ export async function POST(request: Request) {
     : action === "resume"
       ? "/maintenance/cn/resume"
       : "/maintenance/cn/start";
-  let token: string | undefined;
-  if (action !== "pause") {
-    token = (await loadProviderSecrets()).secrets.tushareToken;
-    if (!token) {
-      return Response.json({
-        error: "请先进入“设置 → 数据源设置”配置 Tushare Token",
-      }, { status: 400 });
-    }
-  }
+  const token = action === "pause" ? undefined : (await loadProviderSecrets()).secrets.tushareToken;
   try {
     const response = await fetchLocalData(path, {
       method: "POST",

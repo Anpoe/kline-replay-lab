@@ -9,6 +9,7 @@ import {
 } from "../../../lib/marketDataProviders";
 import { aggregateCandlesToTimeframe } from "../../../lib/timeframeAggregation";
 import { loadProviderSecrets } from "../../../lib/providerCredentials";
+import { normalizeStockAdjustmentType } from "../../../lib/marketAdjustments";
 
 type DownloadJobRow = {
   id: string;
@@ -70,6 +71,12 @@ export async function POST(request: Request) {
 
   try {
     const { secrets } = await loadProviderSecrets();
+    const adjustmentType = normalizeStockAdjustmentType(job.market, job.adjustmentType);
+    if (adjustmentType !== job.adjustmentType) {
+      await db.prepare("UPDATE data_download_jobs SET adjustment_type = ?, updated_at = ? WHERE id = ?")
+        .bind(adjustmentType, new Date().toISOString(), job.id)
+        .run();
+    }
     const storedCursor = JSON.parse(job.cursorJson || "{}") as ProviderCursor;
     // Existing queued jobs may still carry an old IEX cursor.  Restart that
     // page from the beginning so the US library can migrate to SIP cleanly.
@@ -84,6 +91,7 @@ export async function POST(request: Request) {
       startDate: job.startDate,
       endDate: job.endDate,
       cursor,
+      adjustmentType,
     }, secrets);
     const chunk = sourceTimeframe === job.timeframe
       ? sourceChunk
@@ -113,7 +121,7 @@ export async function POST(request: Request) {
     if (Number(job.insertedCount) === 0 && chunk.candles.length > 0) {
       await db.prepare(`DELETE FROM candles
         WHERE instrument_id = ? AND timeframe = ? AND adjustment_type = ? AND source = 'sample'`)
-        .bind(job.instrumentId, job.timeframe, job.adjustmentType)
+        .bind(job.instrumentId, job.timeframe, adjustmentType)
         .run();
     }
 
@@ -138,7 +146,7 @@ export async function POST(request: Request) {
         bar.close,
         bar.volume,
         bar.turnover,
-        job.adjustmentType,
+        adjustmentType,
         chunk.source,
       ]);
       statements.push(db.prepare(`${insertVerb} INTO candles
@@ -155,7 +163,7 @@ export async function POST(request: Request) {
         MIN(timestamp) AS firstTimestamp, MAX(timestamp) AS lastTimestamp
         FROM candles
         WHERE instrument_id = ? AND timeframe = ? AND adjustment_type = ? AND source = ?`)
-        .bind(job.instrumentId, job.timeframe, job.adjustmentType, chunk.source)
+        .bind(job.instrumentId, job.timeframe, adjustmentType, chunk.source)
         .first<{ barCount: number; firstTimestamp: number; lastTimestamp: number }>();
       await db.prepare(`INSERT OR REPLACE INTO candle_coverage
         (instrument_id, timeframe, adjustment_type, source, bar_count,
@@ -164,7 +172,7 @@ export async function POST(request: Request) {
         .bind(
           job.instrumentId,
           job.timeframe,
-          job.adjustmentType,
+          adjustmentType,
           chunk.source,
           Number(coverage?.barCount ?? 0),
           Number(coverage?.firstTimestamp ?? 0),

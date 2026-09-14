@@ -44,7 +44,7 @@ import { TIMEFRAME_IDS, timeframeLabel as catalogTimeframeLabel, type TimeframeI
 // The worker route remains the polling transport behind marketDataGateway: /api/data-jobs/market/sync/worker.
 
 type DownloadProviderId = "tushare" | "alpaca";
-type ProviderId = DownloadProviderId | "tdxquant" | "twelvedata" | "dukascopy";
+type ProviderId = DownloadProviderId | "baostock" | "tdxquant" | "twelvedata" | "dukascopy";
 type Provider = {
   id: ProviderId;
   name: string;
@@ -81,6 +81,13 @@ type DownloadJobSummary = {
   completed: number;
   failed: number;
   insertedCount: number;
+};
+type LegacyUsDataSummary = {
+  needsRebuild: boolean;
+  instrumentCount: number;
+  barCount: number;
+  firstTimestamp?: number | null;
+  lastTimestamp?: number | null;
 };
 type JobRunResult = {
   status: DownloadJob["status"];
@@ -120,7 +127,7 @@ type MarketSyncStatus = {
 type LocalDataTask = {
   id: string;
   status: "queued" | "running" | "paused" | "completed" | "failed";
-  stage: "waiting" | "downloading" | "verifying" | "extracting" | "weekly-ready" | "completed";
+  stage: "waiting" | "cataloging" | "downloading" | "verifying" | "extracting" | "adjusting" | "weekly-ready" | "completed";
   message: string;
   error?: string | null;
   progress: {
@@ -129,14 +136,38 @@ type LocalDataTask = {
     processedFiles: number;
     totalFiles: number;
     indexedInstruments: number;
+    adjustmentProcessed?: number;
+    adjustmentTotal?: number;
+    adjustmentRows?: number;
+    adjustmentMissing?: number;
+    totalInstruments?: number;
+    processedInstruments?: number;
+    receivedBars?: number;
+    acceptedBars?: number;
+    insertedBars?: number;
+    correctedBars?: number;
+    unchangedBars?: number;
+    skippedInstruments?: number;
+    invalidBars?: number;
   };
   plan?: {
     assets?: string[];
     includeDelisted?: boolean;
     historyRange?: "all" | "20y" | "10y";
     keepRawPackage?: boolean;
+    adjustmentType?: "qfq" | "hfq" | "none" | "provider-defined";
+    source?: string;
+    provider?: string;
   };
   updatedAt: string;
+};
+type LocalDatasetStatus = {
+  source?: string | null;
+  adjustmentType?: "qfq" | "hfq" | "none" | "provider-defined";
+  adjustmentStatus?: "pending" | "building" | "ready" | "not-adjusted";
+  adjustmentSource?: string | null;
+  adjustmentUpdatedAt?: string | null;
+  factorCount?: number;
 };
 type CatalogTask = {
   id: string;
@@ -162,6 +193,7 @@ type CnMaintenanceTask = {
     insertedBars: number;
     correctedBars: number;
     unchangedBars: number;
+    factorRows?: number;
     ignoredRows: number;
     invalidRows: number;
   };
@@ -178,9 +210,8 @@ type AdvancedSetup = {
   includeDelisted: boolean;
   minimumTimeframe: TimeframeId;
   historyRange: "all" | "20y" | "10y";
-  cnInitialSource: "tdx-zip" | "local-zip" | "tushare";
-  cnIncrementalSource: "none" | "tushare" | "tdxquant";
-  intradaySource: "none" | "tdxquant";
+  cnInitialSource: "baostock" | "tdxquant" | "tdx-zip" | "tushare";
+  cnIncrementalSource: "baostock" | "tushare" | "tdxquant" | "none";
   usSource: "none" | "alpaca";
   keepRawPackage: boolean;
 };
@@ -195,9 +226,8 @@ const defaultAdvancedSetup: AdvancedSetup = {
   includeDelisted: true,
   minimumTimeframe: "1d",
   historyRange: "all",
-  cnInitialSource: "tdx-zip",
-  cnIncrementalSource: "none",
-  intradaySource: "none",
+  cnInitialSource: "baostock",
+  cnIncrementalSource: "baostock",
   usSource: "none",
   keepRawPackage: false,
 };
@@ -209,8 +239,8 @@ const quickPlan = {
   assets: ["A股股票（含退市）", "交易所指数"],
   minimumTimeframe: "1d",
   derivedTimeframes: ["1w"],
-  source: "通达信官方日线完整包",
-  catalog: "内置品种目录＋免 Token 更新",
+  source: "BaoStock 前复权日线",
+  catalog: "BaoStock 品种目录",
   snapshotPolicy: "仅保存变化分区和训练引用版本",
   keepRawPackage: false,
 };
@@ -274,13 +304,23 @@ export function DataSourceManager({
   });
   const [marketNotices, setMarketNotices] = useState<Record<DataMarket, string>>({ CN: "", US: "", FX: "", GOLD: "" });
   const [marketSync, setMarketSync] = useState<MarketSyncStatus | null>(null);
+  const [legacyUsData, setLegacyUsData] = useState<LegacyUsDataSummary | null>(null);
   const [marketSyncBusy, setMarketSyncBusy] = useState(false);
   const [setupView, setSetupView] = useState<SetupView>(market === "CN" ? "welcome" : "manager");
-  const effectiveSetupView: SetupView = market !== "CN" || hasData ? "manager" : setupView;
+  const [setupOpenedByUser, setSetupOpenedByUser] = useState(false);
+  // Existing data should choose the manager as the initial view, but must not
+  // prevent the user from reopening the initialization wizard afterwards.
+  const effectiveSetupView: SetupView = market !== "CN"
+    ? "manager"
+    : hasData && !setupOpenedByUser && setupView === "welcome"
+      ? "manager"
+      : setupView;
   const [advancedStep, setAdvancedStep] = useState(1);
   const [advanced, setAdvanced] = useState<AdvancedSetup>(defaultAdvancedSetup);
   const [savedPlan, setSavedPlan] = useState<Record<string, unknown> | null>(null);
   const [localTask, setLocalTask] = useState<LocalDataTask | null>(null);
+  const [localDataset, setLocalDataset] = useState<LocalDatasetStatus | null>(null);
+  const [localServiceError, setLocalServiceError] = useState("");
   const [catalogTask, setCatalogTask] = useState<CatalogTask | null>(null);
   const [cnMaintenanceTask, setCnMaintenanceTask] = useState<CnMaintenanceTask | null>(null);
   const [fxTask, setFxTask] = useState<FxDataTask | null>(null);
@@ -339,9 +379,19 @@ export function DataSourceManager({
       const data = await marketDataGateway.loadJobs<{
         jobs: DownloadJob[];
         summary?: Partial<DownloadJobSummary>;
+        legacy?: LegacyUsDataSummary | null;
       }>(requestMarket);
       if (!acceptsMarketDataResponse(activeMarketRef.current, requestMarket)) return;
       setJobs(data.jobs);
+      setLegacyUsData(requestMarket === "US" && data.legacy
+        ? {
+            needsRebuild: Boolean(data.legacy.needsRebuild),
+            instrumentCount: Number(data.legacy.instrumentCount ?? 0),
+            barCount: Number(data.legacy.barCount ?? 0),
+            firstTimestamp: data.legacy.firstTimestamp == null ? null : Number(data.legacy.firstTimestamp),
+            lastTimestamp: data.legacy.lastTimestamp == null ? null : Number(data.legacy.lastTimestamp),
+          }
+        : null);
       setJobSummary({
         total: Number(data.summary?.total ?? 0),
         queued: Number(data.summary?.queued ?? 0),
@@ -391,16 +441,25 @@ export function DataSourceManager({
       const data = await marketDataGateway.loadLocalTask<{
         available?: boolean;
         task?: LocalDataTask | null;
+        dataset?: LocalDatasetStatus | null;
+        error?: string;
       }>();
       const available = Boolean(data.available);
       const recovered = !localServiceAvailableRef.current && available;
       localServiceAvailableRef.current = available;
       setLocalServiceAvailable(available);
       setLocalTask(data.task ?? null);
+      setLocalDataset(data.dataset ?? null);
+      setLocalServiceError(available ? "" : data.error ?? "");
       return { available, recovered };
-    } catch {
+    } catch (error) {
       localServiceAvailableRef.current = false;
       setLocalServiceAvailable(false);
+      setLocalTask(null);
+      setLocalDataset(null);
+      setLocalServiceError(error instanceof Error && error.message
+        ? error.message
+        : "本机数据服务未启动。请关闭当前窗口后重新启动本地控制面板。");
       return { available: false, recovered: false };
     }
   }, [marketDataGateway]);
@@ -527,7 +586,9 @@ export function DataSourceManager({
       ? jobSummary.queued + jobSummary.running + jobSummary.paused
       : 0;
   const usRemaining = usPending + (market === "US" && !marketSync ? jobSummary.failed : 0);
+  const usNeedsRebuild = market === "US" && Boolean(legacyUsData?.needsRebuild);
   const usInitialized = market === "US"
+    && !usNeedsRebuild
     && ((marketSync?.run.status === "completed" && marketSync.run.failedSymbols === 0)
       || (!marketSync && usStarted && usRemaining === 0));
 
@@ -535,6 +596,7 @@ export function DataSourceManager({
     marketDataStorageGateway.saveOnboardingPlan(plan);
     setSavedPlan(plan);
     setNotice(message);
+    setSetupOpenedByUser(false);
     setSetupView("manager");
   };
 
@@ -550,7 +612,9 @@ export function DataSourceManager({
       setSavedPlan(saved);
       setLocalTask(result.task);
       setLocalServiceAvailable(true);
+      setLocalServiceError("");
       setNotice("初始化任务已开始。关闭网页不会丢失进度；再次打开后可以继续查看。");
+      setSetupOpenedByUser(false);
       setSetupView("manager");
     } catch (error) {
       setNotice(normalizeMarketDataError(error, "无法启动本机初始化任务"));
@@ -593,15 +657,14 @@ export function DataSourceManager({
     action: "start" | "pause" | "resume",
     mode: "incremental" | "repair" = "incremental",
   ) => {
-    if (action !== "pause" && !configured.tushare) {
-      setNotice("请先进入“设置 → 数据源设置”配置 Tushare Token。");
-      onOpenSettings?.();
-      return;
-    }
     if (action === "start") {
-      const prompt = mode === "incremental"
-        ? "系统将从本地最后日期之后，按工作日使用 Tushare 一次拉取全市场不复权股票日线。确定开始吗？"
-        : "系统将回查最近 30 个自然日，只补本地缺失或与来源不一致的普通 A 股日线；停牌和休市不会造数据。确定开始吗？";
+      const prompt = localUsesBaoStock
+        ? mode === "incremental"
+          ? "系统将从本地最后日期之后，使用 BaoStock 拉取全市场股票前复权日线。确定开始吗？"
+          : "系统将回查最近 30 个自然日，使用 BaoStock 修复 A 股前复权日线缺口；停牌和休市不会造数据。确定开始吗？"
+        : mode === "incremental"
+          ? "系统将从本地最后日期之后，使用 Tushare daily 拉取 A 股不复权日线。确定开始吗？"
+          : "系统将回查最近 30 个自然日，使用 Tushare daily 修复 A 股不复权日线缺口。确定开始吗？";
       if (!window.confirm(prompt)) return;
     }
     setMaintenanceBusy(true);
@@ -662,8 +725,15 @@ export function DataSourceManager({
       setNotice("请先完成 A 股全市场日线初始化。");
       return;
     }
-    if (!window.confirm("拉取通达信最新 A 股完整日线包？现有数据在更新完成前仍可使用，预计下载约 520 MB。")) return;
-    setNotice("正在创建 A 股市场更新任务；系统会下载最新完整包并自动替换发生变化的分区。");
+    const source = localTask.plan?.source ?? (localDataset?.source?.startsWith("tdx") ? "tdx-zip" : "baostock");
+    const usesBaoStock = source === "baostock";
+    if (!window.confirm(usesBaoStock
+      ? "重新从 BaoStock 拉取 A 股前复权历史数据？新任务会替换现有 BaoStock A 股数据。"
+      : "重新从通达信官方日线包拉取 A 股数据？该旧方案保持不复权，原有 BaoStock 数据不会被删除。")) return;
+    setNotice(usesBaoStock
+      ? "正在创建 BaoStock A 股市场更新任务；训练数据会统一切换到新版本。"
+      : "正在创建通达信 A 股市场更新任务；旧方案数据保持不复权。"
+    );
     try {
       await marketDataGateway.removeLocalTask(false);
     } catch {
@@ -677,6 +747,9 @@ export function DataSourceManager({
       includeDelisted: localTask.plan?.includeDelisted ?? true,
       historyRange: localTask.plan?.historyRange ?? "all",
       keepRawPackage: localTask.plan?.keepRawPackage ?? false,
+      source,
+      provider: usesBaoStock ? "baostock" : "tdx",
+      adjustmentType: usesBaoStock ? "qfq" : "none",
     });
   };
 
@@ -775,7 +848,9 @@ export function DataSourceManager({
       return;
     }
     const message = mode === "initialize"
-      ? "初始化会读取 Alpaca 的活跃可交易美股目录，并从 2016 年开始批量下载 SIP/IEX 日线。任务可能较多，可以随时暂停，确定继续吗？"
+      ? usNeedsRebuild
+        ? `检测到 ${legacyUsData?.instrumentCount.toLocaleString() ?? "部分"} 个品种仍只有旧版未复权数据。旧数据不会直接改名，系统将重新下载 Alpaca 全复权历史；任务可能较多，可以随时暂停，确定继续吗？`
+        : "初始化会读取 Alpaca 的活跃可交易美股目录，并从 2016 年开始批量下载 SIP/IEX 全复权日线。任务可能较多，可以随时暂停，确定继续吗？"
       : "只同步最新已收盘日线：服务端会根据缺失交易日和 URL 长度自动计算批量。不会删除旧训练快照，确定继续吗？";
     if (!window.confirm(message)) return;
     try {
@@ -933,11 +1008,11 @@ export function DataSourceManager({
             <div className="path-icon"><CloudDownload size={25} /></div>
             <span>QUICK START</span>
             <h3>快速初始化</h3>
-            <p>无需账号、Token 或通达信客户端，一次建立沪深京 A 股完整日线库。</p>
+            <p>安装 BaoStock Python 包即可一次建立沪深京 A 股前复权历史日线库，无需 Token 或通达信客户端。</p>
             <ul>
               <li><CircleCheck size={14} />A 股与主要指数，包含退市股票</li>
               <li><CircleCheck size={14} />自动识别证券类型，中文名按本地目录匹配</li>
-              <li><CircleCheck size={14} />由日线生成周线</li>
+              <li><CircleCheck size={14} />由日线生成周线，训练统一使用前复权</li>
               <li><CircleCheck size={14} />低占用锁定训练数据版本</li>
             </ul>
             <button className="primary-button" onClick={() => setSetupView("quick")}>
@@ -951,10 +1026,11 @@ export function DataSourceManager({
             <h3>高级自定义</h3>
             <p>自行选择市场、品种、最小周期、历史范围以及每一类数据的来源。</p>
             <ul>
-              <li><CircleCheck size={14} />Tushare 日线与增量更新</li>
-              <li><CircleCheck size={14} />TdxQuant 5m / 1h 数据</li>
+              <li><CircleCheck size={14} />BaoStock 前复权日线与增量更新（默认）</li>
+              <li><CircleCheck size={14} />保留 TDX/Tushare 不复权方案与 TdxQuant 可复权端点</li>
+              <li><CircleCheck size={14} />日线自动生成周线与月线</li>
               <li><CircleCheck size={14} />Alpaca 美股历史行情</li>
-              <li><CircleCheck size={14} />本地通达信 ZIP 与 CSV</li>
+              <li><CircleCheck size={14} />本机 BaoStock Python 依赖与本地数据服务</li>
             </ul>
             <button className="ghost-button" onClick={() => {
               setAdvancedStep(1);
@@ -985,14 +1061,14 @@ export function DataSourceManager({
             <h2>A 股全历史日线训练库</h2>
             <p>这是最少配置、最适合第一次使用的方案；分钟数据和美股可以以后补充。</p>
           </div>
-          <div className="setup-ready"><ShieldCheck size={20} /><span><strong>无需任何凭证</strong><small>证券类型识别与内置名称目录不需要 Token</small></span></div>
+          <div className="setup-ready"><ShieldCheck size={20} /><span><strong>BaoStock 内置数据源</strong><small>直接返回前复权价格；只需安装本机 Python 包</small></span></div>
         </div>
 
         <div className="quick-plan-grid">
           <div><span>市场与品种</span><strong>沪深京 A 股＋交易所指数</strong><small>包含当前上市及已退市股票</small></div>
           <div><span>历史范围</span><strong>全部可用历史</strong><small>避免随机训练出现幸存者偏差</small></div>
           <div><span>基础周期</span><strong>日线</strong><small>导入后自动生成周线</small></div>
-          <div><span>行情来源</span><strong>通达信官方完整包</strong><small>不安装、不登录通达信客户端</small></div>
+          <div><span>行情来源</span><strong>BaoStock 前复权日线</strong><small>直接使用 BaoStock 返回的前复权价格</small></div>
         </div>
 
         <div className="snapshot-explainer">
@@ -1002,8 +1078,8 @@ export function DataSourceManager({
         </div>
 
         <div className="setup-pipeline">
-          {["加载本地品种目录", "下载完整日线包", "校验并识别品种", "导入日线", "生成周线", "建立版本清单"].map((item, index) => (
-            <div key={item}><span>{index + 1}</span><strong>{item}</strong>{index < 5 && <ArrowRight size={14} />}</div>
+          {["读取 BaoStock 品种目录", "拉取前复权日线", "校验行情数据", "写入本地日线库", "更新品种覆盖", "生成周线/月线", "建立版本清单"].map((item, index) => (
+            <div key={item}><span>{index + 1}</span><strong>{item}</strong>{index < 6 && <ArrowRight size={14} />}</div>
           ))}
         </div>
 
@@ -1020,6 +1096,9 @@ export function DataSourceManager({
               includeDelisted: true,
               historyRange: "all",
               keepRawPackage: false,
+              source: "baostock",
+              provider: "baostock",
+              adjustmentType: "qfq",
             });
           }}><CloudDownload size={15} />开始快速初始化</button>
         </div>
@@ -1028,13 +1107,13 @@ export function DataSourceManager({
   }
 
   if (effectiveSetupView === "advanced") {
-    const needsTdxQuant = advanced.minimumTimeframe !== "1d";
     const assets = [
       advanced.stocks && "A股股票",
       advanced.indices && "交易所指数",
       advanced.funds && "场内基金",
       advanced.convertibleBonds && "可转债",
     ].filter(Boolean).join("、") || "尚未选择";
+    const intradaySetup = advanced.minimumTimeframe !== "1d";
     return (
       <section className="data-onboarding setup-detail advanced-setup">
         <button className="setup-back" onClick={() => setSetupView("welcome")}><ArrowLeft size={15} />退出高级自定义</button>
@@ -1059,7 +1138,7 @@ export function DataSourceManager({
               </div>
               {advanced.cnMarket && (
                 <div className="advanced-group">
-                  <div className="advanced-group-head"><strong>A 股品种</strong><small>完整包只下载一次，选择项主要影响导入后的磁盘占用。</small></div>
+                  <div className="advanced-group-head"><strong>A 股品种</strong><small>BaoStock 按品种拉取，选择项决定初始化范围。</small></div>
                   <div className="choice-card-grid">
                     {([
                       ["stocks", "A股股票", "训练主库"],
@@ -1085,13 +1164,11 @@ export function DataSourceManager({
                 <div className="choice-card-grid three">
                   {TIMEFRAME_IDS.map((value) => {
                     const available = DIRECT_SETUP_TIMEFRAMES.has(value);
-                    const hint = value === "1d"
-                      ? "生成 W1、MN · 无需客户端"
-                      : value === "1h"
-                        ? "生成 H4、D1、W1、MN · 需要 TdxQuant"
-                        : value === "5m"
-                          ? "生成 M15、M30、H1、H4、D1、W1、MN · 需要 TdxQuant"
-                          : "";
+                    const hint = !available
+                      ? "当前初始化方案不提供此直接周期"
+                      : value === "1d"
+                      ? "BaoStock 返回前复权日线；W1、MN 由本地生成"
+                      : "TdxQuant 可提供分钟周期，并按端点选择复权口径";
                     return (
                       <button
                         key={value}
@@ -1100,7 +1177,10 @@ export function DataSourceManager({
                         onClick={() => setAdvanced((current) => ({
                           ...current,
                           minimumTimeframe: value,
-                          intradaySource: value === "1d" ? "none" : "tdxquant",
+                          cnInitialSource: value === "1d" ? current.cnInitialSource : "tdxquant",
+                          cnIncrementalSource: value === "1d"
+                            ? current.cnIncrementalSource
+                            : current.cnIncrementalSource === "none" ? "none" : "tdxquant",
                         }))}
                       >
                         <span>{advanced.minimumTimeframe === value && <Check size={14} />}</span><strong>{catalogTimeframeLabel(value)}</strong><small>{hint}</small>
@@ -1110,7 +1190,7 @@ export function DataSourceManager({
                 </div>
               </div>
               <div className="advanced-group">
-                <div className="advanced-group-head"><strong>历史范围</strong><small>通达信完整包始终下载一次；范围决定实际导入量。</small></div>
+                <div className="advanced-group-head"><strong>历史范围</strong><small>{intradaySetup ? `TdxQuant 按所选 ${catalogTimeframeLabel(advanced.minimumTimeframe)} 周期返回可复权行情。` : "BaoStock 会按所选范围请求前复权日线。"}</small></div>
                 <div className="segmented-choice">
                   {([["all", "全部历史"], ["20y", "最近20年"], ["10y", "最近10年"]] as const).map(([value, label]) => (
                     <button key={value} className={advanced.historyRange === value ? "active" : ""} onClick={() => setAdvanced((current) => ({ ...current, historyRange: value }))}>{label}</button>
@@ -1125,28 +1205,34 @@ export function DataSourceManager({
             <div className="source-routing">
               {advanced.cnMarket && (
                 <>
-                  <label>首次 A 股完整日线
+                  <label>{intradaySetup ? `首次 A 股完整${catalogTimeframeLabel(advanced.minimumTimeframe)}行情` : "首次 A 股完整日线"}
                     <select value={advanced.cnInitialSource} onChange={(event) => setAdvanced((value) => ({ ...value, cnInitialSource: event.target.value as AdvancedSetup["cnInitialSource"] }))}>
-                      <option value="tdx-zip">通达信官方日线完整包（推荐，无需 Token）</option>
-                      <option value="local-zip">选择本机已有通达信 ZIP</option>
-                      <option value="tushare">Tushare 逐批下载</option>
+                      {intradaySetup ? (
+                        <option value="tdxquant">TdxQuant {catalogTimeframeLabel(advanced.minimumTimeframe)}（可复权，需本机端点）</option>
+                      ) : (
+                        <>
+                          <option value="baostock">BaoStock 前复权日线（默认）</option>
+                          <option value="tdxquant">TdxQuant 前复权日线（需本机端点）</option>
+                          <option value="tdx-zip">通达信官方日线完整包（不复权）</option>
+                          <option value="tushare">Tushare 逐批下载（不复权）</option>
+                        </>
+                      )}
                     </select>
                   </label>
-                  <label>日线增量更新
+                  <label>{intradaySetup ? `${catalogTimeframeLabel(advanced.minimumTimeframe)} 增量更新` : "日线增量更新"}
                     <select value={advanced.cnIncrementalSource} onChange={(event) => setAdvanced((value) => ({ ...value, cnIncrementalSource: event.target.value as AdvancedSetup["cnIncrementalSource"] }))}>
-                      <option value="none">暂不配置，手动更新完整包</option>
-                      <option value="tushare">Tushare（120积分可用于A股不复权日线）</option>
-                      <option value="tdxquant">TdxQuant</option>
+                      {intradaySetup ? (
+                        <option value="tdxquant">TdxQuant {catalogTimeframeLabel(advanced.minimumTimeframe)} 增量（可复权）</option>
+                      ) : (
+                        <>
+                          <option value="baostock">BaoStock 前复权增量（默认）</option>
+                          <option value="tushare">Tushare daily 增量（不复权）</option>
+                          <option value="tdxquant">TdxQuant 增量（可复权）</option>
+                        </>
+                      )}
+                      <option value="none">暂不设置增量</option>
                     </select>
                   </label>
-                  {needsTdxQuant && (
-                    <label>5m / 1h 分钟数据
-                      <select value={advanced.intradaySource} onChange={(event) => setAdvanced((value) => ({ ...value, intradaySource: event.target.value as AdvancedSetup["intradaySource"] }))}>
-                        <option value="tdxquant">TdxQuant 本地客户端</option>
-                        <option value="none">暂不下载分钟数据</option>
-                      </select>
-                    </label>
-                  )}
                 </>
               )}
               {advanced.usMarket && (
@@ -1160,10 +1246,16 @@ export function DataSourceManager({
 
               <div className="source-status-grid">
                 <div className="ready"><CircleCheck size={16} /><span><strong>品种目录</strong><small>可用 · 无需 Token</small></span></div>
-                <div className="ready"><CircleCheck size={16} /><span><strong>通达信完整包</strong><small>可用 · 无需登录</small></span></div>
-                <div className={configured.tushare ? "ready" : ""}><span className="status-dot" /><span><strong>Tushare</strong><small>{configured.tushare ? "本机已配置" : "尚未配置"}</small></span></div>
-                <div className={configured.tdxquant ? "ready" : ""}><span className="status-dot" /><span><strong>TdxQuant</strong><small>{configured.tdxquant ? "端点已保存" : "尚未配置"}</small></span></div>
-                <div className={configured.alpaca ? "ready" : ""}><span className="status-dot" /><span><strong>Alpaca</strong><small>{configured.alpaca ? "本机已配置" : "尚未配置"}</small></span></div>
+                {advanced.cnMarket && (intradaySetup ? (
+                  <div className={configured.tdxquant ? "ready" : ""}><span className="status-dot" /><span><strong>TdxQuant</strong><small>{configured.tdxquant ? `${catalogTimeframeLabel(advanced.minimumTimeframe)} · 本机已配置 · 可复权` : `${catalogTimeframeLabel(advanced.minimumTimeframe)} · 需配置本机端点`}</small></span></div>
+                ) : (
+                  <>
+                    <div className="ready"><CircleCheck size={16} /><span><strong>BaoStock</strong><small>默认 · 直接返回前复权</small></span></div>
+                    <div className="ready"><CircleCheck size={16} /><span><strong>通达信 / Tushare</strong><small>旧方案保留 · 日线不复权</small></span></div>
+                    <div className={configured.tdxquant ? "ready" : ""}><span className="status-dot" /><span><strong>TdxQuant</strong><small>{configured.tdxquant ? "本机已配置 · 日线可复权" : "可配置 · 支持日线复权"}</small></span></div>
+                  </>
+                ))}
+                {advanced.usMarket && <div className={configured.alpaca ? "ready" : ""}><span className="status-dot" /><span><strong>Alpaca</strong><small>{configured.alpaca ? "本机已配置 · 支持当前周期" : "尚未配置 · 支持当前周期"}</small></span></div>}
               </div>
 
               <button className="ghost-button source-settings-link" onClick={onOpenSettings}><Settings2 size={15} />前往数据源设置</button>
@@ -1177,17 +1269,22 @@ export function DataSourceManager({
                 <div><span>品种</span><strong>{advanced.cnMarket ? assets : "美股股票"}</strong></div>
                 <div><span>最小周期</span><strong>{timeframeLabel(advanced.minimumTimeframe)}</strong></div>
                 <div><span>历史范围</span><strong>{{ all: "全部历史", "20y": "最近20年", "10y": "最近10年" }[advanced.historyRange]}</strong></div>
-                <div><span>A股首次来源</span><strong>{{ "tdx-zip": "通达信官方完整包", "local-zip": "本机通达信 ZIP", tushare: "Tushare" }[advanced.cnInitialSource]}</strong></div>
+                <div><span>A股数据来源</span><strong>{!advanced.cnMarket ? "不下载 A 股" : advanced.cnInitialSource === "baostock" ? "BaoStock 前复权日线" : advanced.cnInitialSource === "tdxquant" ? (advanced.minimumTimeframe === "1d" ? "TdxQuant 前复权日线（本机端点）" : `TdxQuant ${catalogTimeframeLabel(advanced.minimumTimeframe)}（可复权，本机端点）`) : advanced.cnInitialSource === "tushare" ? "Tushare daily（不复权）" : "通达信日线包（不复权）"}</strong></div>
+                <div><span>复权口径</span><strong>{!advanced.cnMarket ? "—" : advanced.cnInitialSource === "baostock" || advanced.cnInitialSource === "tdxquant" ? (advanced.usMarket ? "A 股前复权 · 美股全复权" : "A 股前复权") : advanced.cnInitialSource === "tushare" || advanced.cnInitialSource === "tdx-zip" ? "A 股不复权" : "A 股按所选端点"}</strong></div>
+                <div><span>增量方案</span><strong>{!advanced.cnMarket ? "—" : advanced.cnIncrementalSource === "baostock" ? "BaoStock 前复权" : advanced.cnIncrementalSource === "tdxquant" ? `TdxQuant ${intradaySetup ? catalogTimeframeLabel(advanced.minimumTimeframe) : "日线"} 可复权` : advanced.cnIncrementalSource === "tushare" ? "Tushare 不复权" : "不设置"}</strong></div>
                 <div><span>版本锁定</span><strong>开启 · 仅保存差异和被引用版本</strong></div>
               </div>
-              {needsTdxQuant && advanced.intradaySource === "tdxquant" && !configured.tdxquant && (
-                <div className="setup-warning">分钟数据已选择 TdxQuant，但尚未保存本机端点。可以先保存方案，日线初始化不受影响。</div>
-              )}
               {advanced.usMarket && advanced.usSource === "alpaca" && !configured.alpaca && (
                 <div className="setup-warning">美股已选择 Alpaca，但尚未配置 API Key。可以先完成 A 股初始化。</div>
               )}
-              {advanced.cnIncrementalSource === "tushare" && !configured.tushare && (
-                <div className="setup-warning">Tushare 尚未配置 Token；首次完整包导入不受影响，增量更新会保持等待。</div>
+              {advanced.cnMarket && advanced.cnInitialSource === "baostock" && (
+                <div className="setup-warning">首次使用前请安装 BaoStock Python 包；BaoStock 初始化直接写入前复权价格。</div>
+              )}
+              {advanced.cnMarket && advanced.cnInitialSource === "tdxquant" && (
+                <div className="setup-warning">{intradaySetup ? `TdxQuant ${catalogTimeframeLabel(advanced.minimumTimeframe)} 通过本机端点返回可复权行情；请先在“数据源设置”配置端点并启动支持 TQ 的通达信客户端。当前本地全历史初始化任务尚未接入 TdxQuant。` : "TdxQuant 日线通过本机端点返回前复权价格；请先在“数据源设置”配置端点并启动支持 TQ 的通达信客户端。当前本地全历史初始化任务会保留该方案，实际建库仍需选择 BaoStock 或通达信完整包。"}</div>
+              )}
+              {advanced.cnMarket && ["tdx-zip", "tushare"].includes(advanced.cnInitialSource) && (
+                <div className="setup-warning">当前选择的是旧方案，日线明确标记为不复权；后续如需前复权，请切换 BaoStock，或使用已配置的 TdxQuant 复权端点。</div>
               )}
             </>
           )}
@@ -1200,7 +1297,7 @@ export function DataSourceManager({
           ) : (
             <button className="primary-button" onClick={() => {
               const saved = { kind: "advanced", ...advanced, createdAt: new Date().toISOString() };
-              if (advanced.cnMarket && advanced.cnInitialSource === "tdx-zip") {
+              if (advanced.cnMarket && advanced.minimumTimeframe === "1d" && ["baostock", "tdx-zip"].includes(advanced.cnInitialSource)) {
                 const selectedAssets = [
                   advanced.stocks && "stock",
                   advanced.indices && "index",
@@ -1212,7 +1309,19 @@ export function DataSourceManager({
                   includeDelisted: advanced.includeDelisted,
                   historyRange: advanced.historyRange,
                   keepRawPackage: advanced.keepRawPackage,
+                  source: advanced.cnInitialSource,
+                  provider: advanced.cnInitialSource === "baostock" ? "baostock" : "tdx",
+                  adjustmentType: advanced.cnInitialSource === "baostock" ? "qfq" : "none",
+                  cnIncrementalSource: advanced.cnIncrementalSource,
                 });
+              } else if (advanced.cnMarket) {
+                const message = advanced.cnInitialSource === "tdxquant"
+                  ? `已保留 TdxQuant ${advanced.minimumTimeframe === "1d" ? "前复权日线" : `${catalogTimeframeLabel(advanced.minimumTimeframe)} 可复权`}方案；请在数据源设置中配置本机端点。当前本地全历史初始化任务尚未接入 TdxQuant。`
+                  : "已保留该自定义方案。Tushare 逐批接口和 TdxQuant 可复权端点可在任务区/数据源设置中继续使用。";
+                saveSetupPlan(
+                  saved,
+                  message,
+                );
               } else {
                 saveSetupPlan(
                   saved,
@@ -1230,7 +1339,7 @@ export function DataSourceManager({
     CN: {
       label: "A股",
       title: "A 股数据维护",
-      description: "完整库由通达信官方日线包建立；之后直接按市场拉取最新版本，无需逐个输入证券代码。",
+      description: "完整库由 BaoStock 建立并直接返回前复权日线；之后按市场拉取最新版本，无需逐个输入证券代码。",
     },
     US: {
       label: "美股",
@@ -1248,6 +1357,10 @@ export function DataSourceManager({
       description: "黄金与贵金属使用独立数据集，后续可接入专门的历史行情源。",
     },
   }[market];
+  const localSourceValue = localTask?.plan?.source ?? localDataset?.source ?? "";
+  const localUsesBaoStock = !localSourceValue || localSourceValue.toLowerCase().includes("baostock");
+  const localAdjustmentReady = localDataset?.adjustmentStatus === "ready" || localDataset?.adjustmentStatus === "not-adjusted";
+  const localSourceTitle = localUsesBaoStock ? "BaoStock A 股全市场前复权日线库" : "通达信 A 股全市场日线库（不复权）";
 
   return (
     <section className="data-source-manager">
@@ -1258,7 +1371,10 @@ export function DataSourceManager({
           <p>{marketCopy.description}</p>
         </div>
         <div className="data-source-head-actions">
-          {market === "CN" && <button className="ghost-button" onClick={() => setSetupView("welcome")}><SlidersHorizontal size={15} />初始化设置</button>}
+          {market === "CN" && <button type="button" className="ghost-button" onClick={() => {
+            setSetupOpenedByUser(true);
+            setSetupView("welcome");
+          }}><SlidersHorizontal size={15} />初始化设置</button>}
           <CloudDownload size={24} />
         </div>
       </div>
@@ -1270,7 +1386,10 @@ export function DataSourceManager({
             <strong>{savedPlan.kind === "quick" ? "推荐初始化方案" : savedPlan.kind === "advanced" ? "高级初始化方案" : "现有数据库模式"}</strong>
             <small>{savedPlan.kind === "quick" ? "沪深京 A 股全历史日线＋自动周线" : savedPlan.kind === "advanced" ? "已按自定义市场、周期和来源保存" : "保留并管理当前已有行情"}</small>
           </span>
-          <button onClick={() => setSetupView(savedPlan.kind === "quick" ? "quick" : "advanced")}>查看或修改</button>
+          <button type="button" onClick={() => {
+            setSetupOpenedByUser(true);
+            setSetupView(savedPlan.kind === "quick" ? "quick" : "advanced");
+          }}>查看或修改</button>
         </div>
       )}
 
@@ -1278,19 +1397,23 @@ export function DataSourceManager({
         <div className={`local-initialization-card ${localTask?.status ?? "idle"}`}>
           <div className="local-task-icon"><FileArchive size={20} /></div>
           <div className="local-task-copy">
-            <span>TDX A 股全市场日线库</span>
+            <span>{localSourceTitle}</span>
             <strong>{localTask
               ? {
                   queued: "等待开始",
-                  running: "正在拉取最新市场数据",
+                  running: localTask.stage === "cataloging"
+                    ? `正在读取 ${localUsesBaoStock ? "BaoStock" : "通达信"} 品种目录`
+                    : localUsesBaoStock ? "正在拉取 BaoStock 前复权日线" : "正在导入通达信日线（不复权）",
                   paused: "已暂停",
-                  completed: "初始化完成，可拉取更新",
+                  completed: localAdjustmentReady ? "初始化完成，可拉取更新" : "需要处理",
                   failed: "需要处理",
                 }[localTask.status]
               : localServiceAvailable ? "尚未初始化" : "本机数据服务未启动"}</strong>
             <small>{localTask?.error || localTask?.message || (localServiceAvailable
-              ? "从初始化设置开始，一次建立全市场日线和周线，无需逐个代码下载。"
-              : "请关闭当前窗口后重新双击“启动本地网页版.bat”。")}</small>
+              ? localUsesBaoStock
+                ? "从初始化设置开始，一次建立 BaoStock 全市场前复权日线，并在本地生成周线和月线。"
+                : "从初始化设置开始，导入原有通达信日线包；该方案明确保持不复权。"
+              : localServiceError || "请关闭当前窗口后重新启动本地控制面板。")}</small>
             {catalogTask && <small className="catalog-task-status">
               中文名称：{catalogTask.error || catalogTask.message}
             </small>}
@@ -1298,26 +1421,20 @@ export function DataSourceManager({
               <div className="local-task-progress">
                 <i style={{ width: `${localTask.status === "completed"
                   ? 100
-                  : localTask.stage === "downloading"
-                    ? Math.min(100, localTask.progress.totalBytes
-                      ? localTask.progress.downloadedBytes / localTask.progress.totalBytes * 100
-                      : 0)
-                    : localTask.progress.totalFiles
-                      ? localTask.progress.processedFiles / localTask.progress.totalFiles * 100
-                      : localTask.stage === "verifying" ? 4 : 0}%` }} />
+                  : localTask.progress.totalFiles
+                    ? localTask.progress.processedFiles / localTask.progress.totalFiles * 100
+                    : localTask.stage === "cataloging" ? 2 : 0}%` }} />
               </div>
             )}
           </div>
           {localTask && (
             <div className="local-task-metrics">
-              <span><strong>{localTask.stage === "downloading"
-                ? `${(localTask.progress.downloadedBytes / 1024 / 1024).toFixed(1)} MB`
-                : localTask.progress.processedFiles.toLocaleString()}</strong><small>{localTask.stage === "downloading" ? "已下载" : "已扫描文件"}</small></span>
-              <span><strong>{localTask.progress.indexedInstruments.toLocaleString()}</strong><small>已索引品种</small></span>
+              <span><strong>{localTask.progress.processedFiles.toLocaleString()} / {Number(localTask.progress.totalFiles ?? 0).toLocaleString()}</strong><small>已处理品种</small></span>
+              <span><strong>{localTask.progress.indexedInstruments.toLocaleString()}</strong><small>已写入品种</small></span>
             </div>
           )}
           <div className="local-task-actions">
-            {localTask?.status === "completed" && <button disabled={catalogTask?.status === "running"} onClick={() => void refreshCnMarket()}><CloudDownload size={14} />刷新完整基础包</button>}
+            {localTask?.status === "completed" && localAdjustmentReady && <button disabled={catalogTask?.status === "running"} onClick={() => void refreshCnMarket()}><CloudDownload size={14} />{localUsesBaoStock ? "刷新 BaoStock 全量数据" : "刷新通达信全量数据"}</button>}
             {localTask?.status === "completed" && catalogTask?.status !== "running" && <button onClick={() => void refreshCatalog()}><RefreshCw size={14} />更新中文名称</button>}
             {localTask?.status === "running" && <button onClick={() => void updateLocalTask("pause")}><Pause size={14} />暂停</button>}
             {(localTask?.status === "paused" || localTask?.status === "failed") && <button onClick={() => void updateLocalTask("resume")}><Play size={14} />继续</button>}
@@ -1326,11 +1443,11 @@ export function DataSourceManager({
         </div>
       )}
 
-      {market === "CN" && localTask?.status === "completed" && (
-        <div className={`market-maintenance-card ${configured.tushare ? "ready" : ""} ${cnMaintenanceTask?.status === "failed" ? "failed" : ""}`}>
+      {market === "CN" && localTask?.status === "completed" && localAdjustmentReady && (
+        <div className={`market-maintenance-card ${localServiceAvailable ? "ready" : ""} ${cnMaintenanceTask?.status === "failed" ? "failed" : ""}`}>
           <div className="market-maintenance-icon"><Database size={22} /></div>
           <div>
-            <span>TUSHARE 120 · A 股日线维护</span>
+            <span>{localUsesBaoStock ? "BAOSTOCK · A 股前复权日线维护" : "TDX / TUSHARE · A 股不复权日线维护"}</span>
             <strong>{cnMaintenanceTask
               ? {
                   queued: "等待开始",
@@ -1339,10 +1456,12 @@ export function DataSourceManager({
                   completed: cnMaintenanceTask.mode === "repair" ? "缺口回查已完成" : "每日增量已完成",
                   failed: "维护任务需要处理",
                 }[cnMaintenanceTask.status]
-              : configured.tushare ? "可以进行每日增量和缺口修复" : "尚未配置 Tushare Token"}</strong>
-            <small>{cnMaintenanceTask?.error || cnMaintenanceTask?.message || (configured.tushare
-              ? "按日期一次拉取全市场普通股票不复权日线；指数、基金和可转债仍由上方 TDX 基础包维护。"
-              : "Token 只保存在本机设置中，不会写入维护任务或数据文件。")}</small>
+              : localServiceAvailable ? "可以进行每日增量和缺口修复" : `本机 ${localUsesBaoStock ? "BaoStock" : "TDX"} 服务不可用`}</strong>
+            <small>{cnMaintenanceTask?.error || cnMaintenanceTask?.message || (localServiceAvailable
+              ? localUsesBaoStock
+                ? "按品种使用 BaoStock 拉取前复权日线；周线和月线继续由本地日线生成。"
+                : "旧方案使用 Tushare daily 做日线维护，价格保持不复权；请先配置 Tushare Token。"
+              : localServiceError || "请安装 BaoStock Python 包并重启本地数据服务。")}</small>
             {cnMaintenanceTask && (
               <>
                 <div className="local-task-progress">
@@ -1355,13 +1474,13 @@ export function DataSourceManager({
                   {" · "}新增 {cnMaintenanceTask.progress.insertedBars.toLocaleString()}
                   {" · "}校正 {cnMaintenanceTask.progress.correctedBars.toLocaleString()}
                   {" · "}未变化 {cnMaintenanceTask.progress.unchangedBars.toLocaleString()}
+                  {" · "}来源 {localUsesBaoStock ? "BaoStock 前复权" : "Tushare 不复权"}
                 </small>
               </>
             )}
           </div>
           <div className="market-maintenance-actions">
-            {!configured.tushare && <button onClick={onOpenSettings}><Settings2 size={14} />配置 Tushare</button>}
-            {configured.tushare && !["queued", "running", "paused", "failed"].includes(cnMaintenanceTask?.status ?? "") && (
+            {localServiceAvailable && !["queued", "running", "paused", "failed"].includes(cnMaintenanceTask?.status ?? "") && (
               <>
                 <button className="primary" disabled={maintenanceBusy} onClick={() => void updateCnMaintenance("start", "incremental")}>
                   <CloudDownload size={14} />每日增量更新
@@ -1371,12 +1490,12 @@ export function DataSourceManager({
                 </button>
               </>
             )}
-            {configured.tushare && ["queued", "running"].includes(cnMaintenanceTask?.status ?? "") && (
+            {localServiceAvailable && ["queued", "running"].includes(cnMaintenanceTask?.status ?? "") && (
               <button className="danger" disabled={maintenanceBusy} onClick={() => void updateCnMaintenance("pause")}>
                 <Pause size={14} />暂停维护
               </button>
             )}
-            {configured.tushare && ["paused", "failed"].includes(cnMaintenanceTask?.status ?? "") && (
+            {localServiceAvailable && ["paused", "failed"].includes(cnMaintenanceTask?.status ?? "") && (
               <button className="primary" disabled={maintenanceBusy} onClick={() => void updateCnMaintenance("resume", cnMaintenanceTask?.mode ?? "incremental")}>
                 <Play size={14} />继续维护
               </button>
@@ -1386,14 +1505,18 @@ export function DataSourceManager({
       )}
 
       {market === "US" && (
-        <div className={`market-maintenance-card ${configured.alpaca ? "ready" : ""}`}>
+        <div className={`market-maintenance-card ${configured.alpaca ? "ready" : ""} ${usNeedsRebuild ? "needs-rebuild" : ""}`}>
           <div className="market-maintenance-icon"><Database size={22} /></div>
           <div>
             <span>ALPACA · SIP/IEX 历史行情</span>
-            <strong>{usInitialized
+            <strong>{usNeedsRebuild
+              ? "发现旧版未复权数据，需重建全复权历史"
+              : usInitialized
               ? "美股市场库已建立"
               : usStarted ? `初始化未完成：还剩 ${usRemaining.toLocaleString()} 个品种` : "美股市场库尚未初始化"}</strong>
-            <small>{usInitialized
+            <small>{usNeedsRebuild
+              ? `原有 ${legacyUsData?.instrumentCount.toLocaleString() ?? "部分"} 个品种、约 ${legacyUsData?.barCount.toLocaleString() ?? "—"} 根未复权 K 线仍保留，但已停止用于训练；点击重建后才会恢复全复权历史。`
+              : usInitialized
               ? "点击更新后，系统会检查已初始化的全部美股并从最后日期继续，不需要输入代码。"
               : marketSync
                 ? `当前批量任务：${marketSync.run.completedSymbols.toLocaleString()} / ${marketSync.run.totalSymbols.toLocaleString()} 个品种，${marketSync.run.completedBatches.toLocaleString()} / ${marketSync.run.totalBatches.toLocaleString()} 批，数据源 ${marketSync.run.feed.toUpperCase()}。`
@@ -1404,8 +1527,10 @@ export function DataSourceManager({
           <div className="market-maintenance-actions">
             {!configured.alpaca && <button onClick={onOpenSettings}><Settings2 size={14} />配置 Alpaca</button>}
             {configured.alpaca && !marketSyncBusy && !["queued", "running", "paused"].includes(marketSync?.run.status ?? "") && (
-              <button className="primary" onClick={() => void syncUsMarket(chooseUsSyncMode({ started: usStarted, remaining: usRemaining }))}>
-                <CloudDownload size={14} />{usInitialized
+              <button className="primary" onClick={() => void syncUsMarket(usNeedsRebuild ? "initialize" : chooseUsSyncMode({ started: usStarted, remaining: usRemaining }))}>
+                <CloudDownload size={14} />{usNeedsRebuild
+                  ? "重建美股全复权数据"
+                  : usInitialized
                   ? "拉取最新美股数据"
                   : usStarted ? "继续初始化美股" : "初始化美股市场库"}
               </button>

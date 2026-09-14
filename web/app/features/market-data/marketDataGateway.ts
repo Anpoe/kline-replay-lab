@@ -169,6 +169,17 @@ export function createMarketDataGateway(fetcher: MarketDataGatewayFetch) {
     "初始化任务创建失败",
   );
 
+  const startLocalAdjustment = <T = unknown>(signal?: AbortSignal) => requestJson<T>(
+    fetcher,
+    "/api/local-data",
+    withSignal({
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ action: "adjustment-start" }),
+    }, signal),
+    "历史复权任务创建失败",
+  );
+
   const localTaskAction = <T = unknown>(action: "pause" | "resume" | "catalog-refresh", signal?: AbortSignal) => requestJson<T>(
     fetcher,
     "/api/local-data",
@@ -406,6 +417,7 @@ export function createMarketDataGateway(fetcher: MarketDataGatewayFetch) {
     loadCnMaintenanceTask,
     loadFxTask,
     startLocalInitialization,
+    startLocalAdjustment,
     localTaskAction,
     removeLocalTask,
     cnMaintenanceAction,

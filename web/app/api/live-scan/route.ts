@@ -7,6 +7,8 @@ type ScanFilters = {
   maxPrice?: number;
   minAverageVolume?: number;
   minAverageTurnover?: number;
+  minChangePct?: number;
+  maxChangePct?: number;
   excludeLimitUp?: boolean;
 };
 
@@ -33,6 +35,12 @@ function average(values: number[]) {
 function finite(value: unknown) {
   const parsed = Number(value);
   return Number.isFinite(parsed) ? parsed : 0;
+}
+
+function normalizeScanLimit(value: unknown) {
+  const parsed = Number(value);
+  if (parsed === 0 && (typeof value === "number" || (typeof value === "string" && value.trim() === "0"))) return 0;
+  return Number.isFinite(parsed) ? Math.min(500, Math.max(1, Math.round(parsed))) : 100;
 }
 
 export async function POST(request: Request) {
@@ -74,10 +82,10 @@ export async function POST(request: Request) {
         JOIN (
           SELECT instrument_id, MAX(timestamp) AS timestamp
           FROM candles
-          WHERE timeframe = '1d' AND adjustment_type = 'none' AND instrument_id IN (${placeholders})
+          WHERE timeframe = '1d' AND adjustment_type = 'all' AND instrument_id IN (${placeholders})
           GROUP BY instrument_id
         ) latest ON latest.instrument_id = c.instrument_id AND latest.timestamp = c.timestamp
-        WHERE c.timeframe = '1d' AND c.adjustment_type = 'none'
+        WHERE c.timeframe = '1d' AND c.adjustment_type = 'all'
       `).bind(...batch).all<{ instrumentId: string; timestamp: number; open: number; close: number }>();
       const entryByInstrument = new Map<string, { entryTimestamp: number; entryOpen: number }>();
       for (const instrumentId of batch) {
@@ -86,7 +94,7 @@ export async function POST(request: Request) {
         const entry = await db.prepare(`
           SELECT timestamp AS entryTimestamp, open AS entryOpen
           FROM candles
-          WHERE instrument_id = ? AND timeframe = '1d' AND adjustment_type = 'none' AND timestamp > ?
+          WHERE instrument_id = ? AND timeframe = '1d' AND adjustment_type = 'all' AND timestamp > ?
           ORDER BY timestamp ASC
           LIMIT 1
         `).bind(instrumentId, after).first<{ entryTimestamp: number; entryOpen: number }>();
@@ -117,7 +125,7 @@ export async function POST(request: Request) {
   const body = {
     presets,
     filters: payload.filters ?? {},
-    limit: Math.min(500, Math.max(1, Number(payload.limit) || 100)),
+    limit: normalizeScanLimit(payload.limit),
     sort: payload.sort ?? "turnover",
   };
 
@@ -141,7 +149,7 @@ export async function POST(request: Request) {
       MAX(c.last_timestamp) AS lastTimestamp
     FROM instruments i JOIN candle_coverage c ON c.instrument_id = i.id
     WHERE i.market = 'US' AND c.timeframe = '1d' AND c.bar_count > 0
-      AND c.source IN ('alpaca-sip', 'alpaca-iex')
+      AND c.source IN ('alpaca-sip', 'alpaca-iex') AND c.adjustment_type = 'all'
     GROUP BY i.id, i.symbol, i.name ORDER BY i.symbol`).all<UsInstrument>();
   const instruments = (rows.results as UsInstrument[]).map((row) => ({ ...row, lastTimestamp: Number(row.lastTimestamp) }));
   const latestTimestamp = instruments.reduce((maximum, item) => Math.max(maximum, item.lastTimestamp), 0);
@@ -154,7 +162,7 @@ export async function POST(request: Request) {
     const placeholders = batch.map(() => "?").join(",");
     const candleRows = await db.prepare(`SELECT instrument_id AS instrumentId, timestamp,
         open, high, low, close, volume, turnover
-      FROM candles WHERE timeframe = '1d' AND adjustment_type = 'none'
+      FROM candles WHERE timeframe = '1d' AND adjustment_type = 'all'
         AND timestamp >= ? AND instrument_id IN (${placeholders})
       ORDER BY instrument_id, timestamp`).bind(cutoff, ...batch.map((item) => item.id)).all<CandleRow>();
     const grouped = new Map<string, CandleRow[]>();
@@ -171,17 +179,20 @@ export async function POST(request: Request) {
       const recent = candles.slice(-20);
       const averageVolume = average(recent.map((bar) => finite(bar.volume)));
       const averageTurnover = average(recent.map((bar) => finite(bar.turnover)));
+      const changePct = previous?.close ? (latest.close / previous.close - 1) * 100 : 0;
       const filters = body.filters;
       if (filters.minPrice != null && latest.close < filters.minPrice) continue;
       if (filters.maxPrice != null && latest.close > filters.maxPrice) continue;
       if (filters.minAverageVolume != null && averageVolume < filters.minAverageVolume) continue;
       if (filters.minAverageTurnover != null && averageTurnover < filters.minAverageTurnover) continue;
+      if (filters.minChangePct != null && changePct < filters.minChangePct) continue;
+      if (filters.maxChangePct != null && changePct > filters.maxChangePct) continue;
       const hits = presets.filter((preset) => matchesPattern(candles, candles.length - 1, preset));
       if (presets.length && !hits.length) continue;
       results.push({
         instrumentId: item.id, symbol: item.symbol, name: item.name, market: "US",
         timestamp: latest.timestamp, close: latest.close,
-        changePct: previous?.close ? (latest.close / previous.close - 1) * 100 : 0,
+        changePct,
         volume: finite(latest.volume), turnover: finite(latest.turnover),
         averageVolume, averageTurnover,
         presetIds: hits.map((preset) => preset.id), presetNames: hits.map((preset) => preset.name),
@@ -192,6 +203,6 @@ export async function POST(request: Request) {
   results.sort((left, right) => finite(right[key]) - finite(left[key]));
   return Response.json({
     market: "US", latestTimestamp, scannedCount: eligible.length,
-    matchedCount: results.length, results: results.slice(0, body.limit),
+    matchedCount: results.length, results: body.limit > 0 ? results.slice(0, body.limit) : results,
   });
 }

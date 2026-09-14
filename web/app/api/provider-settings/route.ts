@@ -7,7 +7,7 @@ import {
 import { loadProviderSecrets } from "../../lib/providerCredentials";
 
 type ProviderSettingsInput = {
-  provider?: "tushare" | "alpaca" | "tdxquant" | "twelvedata" | "dukascopy";
+  provider?: "baostock" | "tushare" | "alpaca" | "tdxquant" | "twelvedata" | "dukascopy";
   tushareToken?: string;
   alpacaKeyId?: string;
   alpacaSecretKey?: string;
@@ -39,6 +39,10 @@ export async function GET() {
   ]);
   return Response.json({
     providers: {
+      baostock: {
+        configured: true,
+        source: "builtin",
+      },
       tushare: {
         configured: Boolean(secrets.tushareToken),
         source: sources.tushare,
@@ -108,7 +112,9 @@ export async function PUT(request: Request) {
     return Response.json({ autoUpdate: publicAutoUpdateSettings(autoUpdate) });
   }
   let credentials: Record<string, string>;
-  if (payload.provider === "tushare") {
+  if (payload.provider === "baostock") {
+    return Response.json({ error: "BaoStock 是本机内置数据源，无需配置 Token" }, { status: 400 });
+  } else if (payload.provider === "tushare") {
     const token = payload.tushareToken?.trim();
     if (!token) return Response.json({ error: "请填写 Tushare Token" }, { status: 400 });
     credentials = { tushareToken: token };
@@ -186,7 +192,7 @@ export async function DELETE(request: Request) {
   const configured = provider === "tushare"
     ? Boolean(secrets.tushareToken)
     : provider === "alpaca"
-      ? Boolean(secrets.alpacaKeyId && secrets.alpacaSecretKey)
+    ? Boolean(secrets.alpacaKeyId && secrets.alpacaSecretKey)
       : provider === "tdxquant"
         ? Boolean(tdxQuantEndpoint)
         : provider === "twelvedata"

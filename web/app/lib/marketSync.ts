@@ -4,12 +4,25 @@ import {
   type SupportedTimeframe,
 } from "./marketDataProviders.ts";
 
-export const US_SYNC_POINT_BUDGET = 8_000;
+export const US_SYNC_POINT_BUDGET = 9_500;
 export const US_SYNC_MAX_URL_LENGTH = 6_500;
 export const US_SYNC_REQUEST_SPACING_MS = 400;
+export const US_SYNC_MAX_CONCURRENT_BATCHES = 2;
 export const US_SYNC_MAX_ATTEMPTS = 5;
 
 export type MarketSyncMode = "initialize" | "update";
+
+export function isMarketSyncRunTerminal(input: {
+  queuedBatches: number;
+  runningBatches: number;
+  totalJobs: number;
+  completedJobs: number;
+  failedJobs: number;
+}) {
+  return input.queuedBatches === 0
+    && input.runningBatches === 0
+    && input.completedJobs + input.failedJobs >= input.totalJobs;
+}
 
 export type AlpacaBatchPlan = {
   batchNo: number;

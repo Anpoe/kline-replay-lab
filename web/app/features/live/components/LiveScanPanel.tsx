@@ -13,6 +13,8 @@ type LiveScanPanelProps = {
   minPrice: string;
   maxPrice: string;
   minVolume: string;
+  minChangePct: string;
+  maxChangePct: string;
   excludeLimitUp: boolean;
   sort: LiveScanSort;
   limit: number;
@@ -27,6 +29,8 @@ type LiveScanPanelProps = {
   onMinPriceChange: (value: string) => void;
   onMaxPriceChange: (value: string) => void;
   onMinVolumeChange: (value: string) => void;
+  onMinChangePctChange: (value: string) => void;
+  onMaxChangePctChange: (value: string) => void;
   onExcludeLimitUpChange: (value: boolean) => void;
   onSortChange: (sort: LiveScanSort) => void;
   onLimitChange: (limit: number) => void;
@@ -42,6 +46,8 @@ export function LiveScanPanel({
   minPrice,
   maxPrice,
   minVolume,
+  minChangePct,
+  maxChangePct,
   excludeLimitUp,
   sort,
   limit,
@@ -56,6 +62,8 @@ export function LiveScanPanel({
   onMinPriceChange,
   onMaxPriceChange,
   onMinVolumeChange,
+  onMinChangePctChange,
+  onMaxChangePctChange,
   onExcludeLimitUpChange,
   onSortChange,
   onLimitChange,
@@ -80,7 +88,7 @@ export function LiveScanPanel({
         <div className="live-scan-market" role="group" aria-label="筛选市场">
           {(["CN", "US"] as LiveScanMarket[]).map((value) => (
             <button key={value} className={market === value ? "active" : ""} onClick={() => onMarketChange(value)}>
-              {value === "CN" ? "A 股" : "美股"}<small>{value === "CN" ? "Tushare 增量" : "Alpaca SIP/IEX"}</small>
+              {value === "CN" ? "A 股" : "美股"}<small>{value === "CN" ? "BaoStock 前复权增量" : "Alpaca SIP/IEX"}</small>
             </button>
           ))}
         </div>
@@ -103,8 +111,10 @@ export function LiveScanPanel({
           <label>最低收盘价<input type="number" min="0" step="0.01" placeholder="不限" value={minPrice} onChange={(event) => onMinPriceChange(event.target.value)} /></label>
           <label>最高收盘价<input type="number" min="0" step="0.01" placeholder="不限" value={maxPrice} onChange={(event) => onMaxPriceChange(event.target.value)} /></label>
           <label>20 日平均成交量<input type="number" min="0" step="1000" placeholder="不限" value={minVolume} onChange={(event) => onMinVolumeChange(event.target.value)} /></label>
+          <label>最低涨幅 (%)<input type="number" step="0.1" placeholder="不限" value={minChangePct} onChange={(event) => onMinChangePctChange(event.target.value)} /></label>
+          <label>最高涨幅 (%)<input type="number" step="0.1" placeholder="不限" value={maxChangePct} onChange={(event) => onMaxChangePctChange(event.target.value)} /></label>
           <label>排序<select value={sort} onChange={(event) => onSortChange(event.target.value as LiveScanSort)}><option value="turnover">平均成交额从高到低</option><option value="volume">平均成交量从高到低</option><option value="change">当日涨幅从高到低</option></select></label>
-          <label>最多显示<select value={limit} onChange={(event) => onLimitChange(Number(event.target.value))}><option value={50}>50 个</option><option value={100}>100 个</option><option value={200}>200 个</option><option value={500}>500 个</option></select></label>
+          <label>最多显示<select value={limit} onChange={(event) => onLimitChange(Number(event.target.value))}><option value={50}>50 个</option><option value={100}>100 个</option><option value={200}>200 个</option><option value={500}>500 个</option><option value={0}>无限制</option></select></label>
         </div>
 
         {market === "CN" && (

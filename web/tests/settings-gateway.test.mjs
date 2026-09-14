@@ -88,6 +88,24 @@ test("loads pattern, reason-tag, and indicator preferences with legacy fallbacks
   assert.deepEqual(indicators, defaultMovingAverageSettings);
 });
 
+test("does not keep hidden built-ins in quick or random pattern selections", () => {
+  const hiddenId = defaultPatternPresets[0].id;
+  const storage = createMemoryStorage({
+    [settingsStorageKeys.patternPresets]: JSON.stringify(defaultPatternPresets.map((preset) => (
+      preset.id === hiddenId ? { ...preset, enabled: false } : preset
+    ))),
+    [settingsStorageKeys.quickRandomPattern]: hiddenId,
+    [settingsStorageKeys.randomTrainingPatternPresets]: JSON.stringify([hiddenId, defaultPatternPresets[1].id]),
+  });
+  const gateway = createSettingsStorageGateway(storage);
+
+  const patterns = gateway.loadPatternPreferences();
+
+  assert.equal(patterns.patternPresets.find((preset) => preset.id === hiddenId)?.enabled, false);
+  assert.equal(patterns.quickRandomPatternPresetId, "");
+  assert.deepEqual(patterns.randomTrainingPatternPresetIds, [defaultPatternPresets[1].id]);
+});
+
 test("cleans all related pattern keys when one pattern preference is malformed", () => {
   const storage = createMemoryStorage({
     [settingsStorageKeys.patternPresets]: "{not-json",

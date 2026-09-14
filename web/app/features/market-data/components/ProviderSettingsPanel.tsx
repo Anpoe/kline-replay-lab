@@ -15,6 +15,7 @@ type ProviderState = {
 
 type ProviderSettingsResponse = {
   providers: {
+    baostock: ProviderState;
     tushare: ProviderState;
     alpaca: ProviderState;
     tdxquant: ProviderState;
@@ -33,6 +34,7 @@ type ProviderSettingsResponse = {
 };
 
 const emptyStatus: ProviderSettingsResponse["providers"] = {
+  baostock: { configured: true, source: "builtin" },
   tushare: { configured: false, source: null },
   alpaca: { configured: false, source: null },
   tdxquant: { configured: false, source: null },
@@ -165,24 +167,26 @@ export function ProviderSettingsPanel() {
         ? { provider, tushareToken }
         : provider === "alpaca"
           ? { provider, alpacaKeyId, alpacaSecretKey }
-        : provider === "tdxquant"
+          : provider === "tdxquant"
           ? { provider, tdxQuantEndpoint }
           : provider === "twelvedata"
             ? { provider, twelveDataApiKey }
             : { provider, dukascopyEndpoint });
-      setTushareToken("");
       setAlpacaKeyId("");
       setAlpacaSecretKey("");
+      setTushareToken("");
       setTwelveDataApiKey("");
       await loadStatus();
       window.dispatchEvent(new Event("provider-settings-updated"));
-      setNotice(provider === "tdxquant"
-        ? "TdxQuant 本地端点已保存。使用分钟数据时仍需启动并登录支持 TQ 的通达信客户端。"
+      setNotice(provider === "tushare"
+        ? "Tushare Token 已保存在本机；Tushare daily 日线保持不复权。"
+        : provider === "tdxquant"
+        ? "TdxQuant 本地端点已保存；支持按端点选择复权口径，使用分钟数据时仍需启动并登录支持 TQ 的通达信客户端。"
         : provider === "twelvedata"
           ? "Twelve Data API Key 已保存在本机。"
           : provider === "dukascopy"
             ? "Dukascopy 自定义 CSV 地址已保存在本机。"
-            : `${provider === "alpaca" ? "Alpaca" : "Tushare"} 凭证已保存在本机。`);
+            : "Alpaca 凭证已保存在本机。");
     } catch (error) {
       setNotice(error instanceof Error ? error.message : "保存失败");
     } finally {
@@ -191,7 +195,7 @@ export function ProviderSettingsPanel() {
   };
 
   const clearProvider = async (provider: "tushare" | "alpaca" | "tdxquant" | "twelvedata" | "dukascopy") => {
-    const label = provider === "alpaca" ? "Alpaca" : provider === "tushare" ? "Tushare" : provider === "tdxquant" ? "TdxQuant" : provider === "twelvedata" ? "Twelve Data" : "Dukascopy";
+    const label = provider === "tushare" ? "Tushare" : provider === "alpaca" ? "Alpaca" : provider === "tdxquant" ? "TdxQuant" : provider === "twelvedata" ? "Twelve Data" : "Dukascopy";
     if (!window.confirm(`清除本机保存的 ${label} 配置？`)) return;
     try {
       const result = await marketDataGateway.deleteProviderSettings<{ error?: string }>(provider);
@@ -278,6 +282,26 @@ export function ProviderSettingsPanel() {
 
       <article className="provider-setting-card">
         <div className="provider-setting-title">
+          <div><KeyRound size={17} /><span><strong>Tushare Pro</strong><small>A 股旧日线接口（不复权）</small></span></div>
+          <span className={status.tushare.configured ? "configured" : ""}>
+            {statusLoaded ? sourceLabel(status.tushare.source) : "正在读取本机凭证状态…"}
+            {statusLoaded && status.tushare.hint ? ` · ${status.tushare.hint}` : ""}
+          </span>
+        </div>
+        <div className="provider-secret-fields single">
+          <label>Token
+            <input type="password" autoComplete="new-password" value={tushareToken} onChange={(event) => setTushareToken(event.target.value)} placeholder={status.tushare.configured ? "输入新值可替换现有 Token" : "填写 Tushare Token"} />
+          </label>
+        </div>
+        <p className="provider-setting-help">保留原有逐批日线和维护入口；Tushare daily 返回的是不复权价格。需要复权时，优先选择 BaoStock，或使用已配置的 TdxQuant 复权端点。</p>
+        <div className="provider-setting-actions">
+          {status.tushare.source === "settings" && <button className="delete-session" onClick={() => clearProvider("tushare")}><Trash2 size={13} />清除本机凭证</button>}
+          <button className="primary-button" disabled={saving === "tushare"} onClick={() => saveProvider("tushare")}><Save size={14} />保存 Tushare</button>
+        </div>
+      </article>
+
+      <article className="provider-setting-card">
+        <div className="provider-setting-title">
           <div><KeyRound size={17} /><span><strong>Alpaca</strong><small>美股历史 K 线</small></span></div>
           <span className={status.alpaca.configured ? "configured" : ""}>
             {statusLoaded ? sourceLabel(status.alpaca.source) : "正在读取本机凭证状态…"}
@@ -300,7 +324,7 @@ export function ProviderSettingsPanel() {
 
       <article className="provider-setting-card">
         <div className="provider-setting-title">
-          <div><Link2 size={17} /><span><strong>TdxQuant</strong><small>A 股 5m / 1h 与增强历史数据</small></span></div>
+          <div><Link2 size={17} /><span><strong>TdxQuant</strong><small>A 股分钟 / 增强数据（可复权）</small></span></div>
           <span className={status.tdxquant.configured ? "configured" : ""}>
             {statusLoaded ? sourceLabel(status.tdxquant.source) : "正在读取本机配置…"}
           </span>
@@ -310,7 +334,7 @@ export function ProviderSettingsPanel() {
             <input value={tdxQuantEndpoint} onChange={(event) => setTdxQuantEndpoint(event.target.value)} placeholder="http://127.0.0.1:17709" />
           </label>
         </div>
-        <p className="provider-setting-help">不需要券商资金账号，但使用时必须启动并登录支持 TQ 的通达信客户端。这里只允许保存本机地址。</p>
+        <p className="provider-setting-help">不需要券商资金账号，但使用时必须启动并登录支持 TQ 的通达信客户端。该端点支持复权数据，具体复权口径由端点配置决定；这里只允许保存本机地址。</p>
         <div className="provider-setting-actions">
           {status.tdxquant.source === "settings" && <button className="delete-session" onClick={() => clearProvider("tdxquant")}><Trash2 size={13} />清除本机配置</button>}
           <button className="primary-button" disabled={saving === "tdxquant"} onClick={() => saveProvider("tdxquant")}><Save size={14} />保存 TdxQuant</button>
@@ -319,22 +343,12 @@ export function ProviderSettingsPanel() {
 
       <article className="provider-setting-card">
         <div className="provider-setting-title">
-          <div><KeyRound size={17} /><span><strong>Tushare Pro</strong><small>A 股历史 K 线</small></span></div>
-          <span className={status.tushare.configured ? "configured" : ""}>
-            {statusLoaded ? sourceLabel(status.tushare.source) : "正在读取本机凭证状态…"}
-            {statusLoaded && status.tushare.hint ? ` · ${status.tushare.hint}` : ""}
+          <div><KeyRound size={17} /><span><strong>BaoStock</strong><small>A 股前复权日线（内置免费数据源）</small></span></div>
+          <span className={status.baostock.configured ? "configured" : ""}>
+            {statusLoaded ? "内置，无需 Token" : "正在读取本机状态…"}
           </span>
         </div>
-        <div className="provider-secret-fields single">
-          <label>Token
-            <input type="password" autoComplete="new-password" value={tushareToken} onChange={(event) => setTushareToken(event.target.value)} placeholder={status.tushare.configured ? "输入新值可替换现有 Token" : "填写 Tushare Token"} />
-          </label>
-        </div>
-        <p className="provider-setting-help">5m / 1h 历史分钟线仍取决于 Tushare 账户的数据权限。</p>
-        <div className="provider-setting-actions">
-          {status.tushare.source === "settings" && <button className="delete-session" onClick={() => clearProvider("tushare")}><Trash2 size={13} />清除本机凭证</button>}
-          <button className="primary-button" disabled={saving === "tushare"} onClick={() => saveProvider("tushare")}><Save size={14} />保存 Tushare</button>
-        </div>
+          <p className="provider-setting-help">BaoStock 是默认 A 股历史日线来源，直接返回前复权价格。原有 TDX/Tushare 不复权方案继续保留；TdxQuant 作为可复权的分钟 / 增强数据备选。首次使用前请在项目目录执行：<code>python -m pip install -r web/local-data/requirements.txt</code></p>
       </article>
 
       <article className="provider-setting-card">

@@ -179,6 +179,168 @@ function volumeConfirmed(candles, index, lookback, multiplier) {
   return mean <= 0 || finite(candles[index].volume) >= mean * multiplier;
 }
 
+function averageTrueRangeAt(candles, index, period) {
+  const start = Math.max(1, index - period + 1);
+  if (index - start + 1 < period) return Number.NaN;
+  const ranges = [];
+  for (let cursor = start; cursor <= index; cursor += 1) {
+    const current = candles[cursor];
+    const previousClose = candles[cursor - 1].close;
+    ranges.push(Math.max(
+      current.high - current.low,
+      Math.abs(current.high - previousClose),
+      Math.abs(current.low - previousClose),
+    ));
+  }
+  return average(ranges);
+}
+
+function conditionNumber(condition, key, fallback) {
+  return finite(condition.parameters?.[key], fallback);
+}
+
+function conditionRelation(condition, key, fallback) {
+  return String(condition.parameters?.[key] ?? fallback);
+}
+
+function averageVolumeAt(candles, index, lookback) {
+  return average(candles
+    .slice(Math.max(0, index - lookback), index)
+    .map((bar) => finite(bar.volume))
+    .filter((value) => value > 0));
+}
+
+function matchesPatternCondition(candles, index, condition) {
+  const current = candles[index];
+  if (!current) return false;
+  const p = condition.parameters ?? {};
+  if (condition.kind === "price_vs_ema") {
+    const period = patternInteger(p.period, 20, 3, 200);
+    const ema = emaAt(candles, index, period);
+    return conditionRelation(condition, "relation", "above") === "below" ? current.close < ema : current.close > ema;
+  }
+  if (condition.kind === "ema_relation") {
+    const fastPeriod = patternInteger(p.fastPeriod, 10, 3, 200);
+    const slowPeriod = patternInteger(p.slowPeriod, 20, 3, 300);
+    const fast = emaAt(candles, index, fastPeriod);
+    const slow = emaAt(candles, index, slowPeriod);
+    return conditionRelation(condition, "relation", "above") === "below" ? fast < slow : fast > slow;
+  }
+  if (condition.kind === "ema_slope") {
+    const period = patternInteger(p.period, 20, 3, 200);
+    const lookback = patternInteger(p.lookback, 5, 1, 120);
+    if (index < lookback) return false;
+    const currentEma = emaAt(candles, index, period);
+    const priorEma = emaAt(candles, index - lookback, period);
+    const minimum = conditionNumber(condition, "minimumPct", 0) / 100;
+    return conditionRelation(condition, "direction", "rising") === "falling"
+      ? currentEma <= priorEma * (1 - minimum)
+      : currentEma >= priorEma * (1 + minimum);
+  }
+  if (condition.kind === "breakout") {
+    const lookback = patternInteger(p.lookback, 20, 5, 120);
+    if (index < lookback) return false;
+    const boundary = priorExtremes(candles, index, lookback);
+    const margin = conditionNumber(condition, "minimumPct", 0.2) / 100;
+    const direction = conditionRelation(condition, "direction", "either");
+    const brokeUp = current.close > boundary.high * (1 + margin);
+    const brokeDown = current.close < boundary.low * (1 - margin);
+    return direction === "up" ? brokeUp : direction === "down" ? brokeDown : brokeUp || brokeDown;
+  }
+  if (condition.kind === "volume_vs_average") {
+    const lookback = patternInteger(p.lookback, 20, 5, 120);
+    const currentVolume = finite(current.volume);
+    const averageVolume = averageVolumeAt(candles, index, lookback);
+    if (currentVolume <= 0 || averageVolume <= 0) return false;
+    const threshold = averageVolume * Math.max(0, conditionNumber(condition, "multiplier", 1));
+    return conditionRelation(condition, "relation", "at_least") === "at_most"
+      ? currentVolume <= threshold
+      : currentVolume >= threshold;
+  }
+  if (condition.kind === "range_contraction") {
+    const lookback = patternInteger(p.lookback, 8, 3, 60);
+    if (index < lookback * 2 - 1) return false;
+    const ranges = candles.map((bar) => Math.max(0, bar.high - bar.low));
+    const recent = average(ranges.slice(index - lookback + 1, index + 1));
+    const previous = average(ranges.slice(index - lookback * 2 + 1, index - lookback + 1));
+    return previous > 0 && recent / previous <= conditionNumber(condition, "ratio", 0.65);
+  }
+  if (condition.kind === "atr_percent") {
+    const period = patternInteger(p.period, 20, 5, 100);
+    const atr = averageTrueRangeAt(candles, index, period);
+    if (!Number.isFinite(atr) || current.close <= 0) return false;
+    const percentage = atr / current.close * 100;
+    const threshold = conditionNumber(condition, "percentage", 8);
+    return conditionRelation(condition, "relation", "at_most") === "at_least"
+      ? percentage >= threshold
+      : percentage <= threshold;
+  }
+  if (condition.kind === "candle_body") {
+    const bodyRatio = Math.abs(current.close - current.open)
+      / Math.max(current.high - current.low, Number.EPSILON) * 100;
+    const direction = conditionRelation(condition, "direction", "bullish");
+    const directionMatches = direction === "any"
+      || (direction === "bullish" && current.close > current.open)
+      || (direction === "bearish" && current.close < current.open);
+    return directionMatches && bodyRatio >= conditionNumber(condition, "minimumPct", 45);
+  }
+  if (condition.kind === "close_location") {
+    const location = (current.close - current.low)
+      / Math.max(current.high - current.low, Number.EPSILON) * 100;
+    const minimum = conditionNumber(condition, "minimumPct", 60);
+    return conditionRelation(condition, "direction", "upper") === "lower"
+      ? location <= 100 - minimum
+      : location >= minimum;
+  }
+  if (condition.kind === "wick_ratio") {
+    const body = Math.max(Math.abs(current.close - current.open), (current.high - current.low) * 0.03);
+    const side = conditionRelation(condition, "side", "lower");
+    const wick = side === "upper"
+      ? current.high - Math.max(current.open, current.close)
+      : Math.min(current.open, current.close) - current.low;
+    return wick / body >= conditionNumber(condition, "minimumRatio", 2.5);
+  }
+  if (condition.kind === "engulfing") {
+    const previous = candles[index - 1];
+    if (!previous) return false;
+    const bodyRatio = Math.abs(current.close - current.open)
+      / Math.max(current.high - current.low, Number.EPSILON) * 100;
+    if (bodyRatio < conditionNumber(condition, "minimumBodyPct", 45)) return false;
+    return conditionRelation(condition, "direction", "bullish") === "bearish"
+      ? previous.close > previous.open && current.close < current.open
+        && current.open >= previous.close && current.close <= previous.open
+      : previous.close < previous.open && current.close > current.open
+        && current.open <= previous.close && current.close >= previous.open;
+  }
+  if (condition.kind === "breakout_retest") {
+    const lookback = patternInteger(p.lookback, 20, 5, 120);
+    const window = patternInteger(p.window, 6, 1, 30);
+    if (index < lookback + 1) return false;
+    const tolerance = conditionNumber(condition, "tolerancePct", 1.2) / 100;
+    const direction = conditionRelation(condition, "direction", "up");
+    for (let breakoutIndex = Math.max(lookback, index - window); breakoutIndex < index; breakoutIndex += 1) {
+      const boundary = priorExtremes(candles, breakoutIndex, lookback);
+      if (direction === "down") {
+        if (!Number.isFinite(boundary.low) || candles[breakoutIndex].close >= boundary.low) continue;
+        if (current.high >= boundary.low * (1 - tolerance)
+          && current.high <= boundary.low * (1 + tolerance)
+          && current.close <= boundary.low) return true;
+      } else {
+        if (!Number.isFinite(boundary.high) || candles[breakoutIndex].close <= boundary.high) continue;
+        if (current.low <= boundary.high * (1 + tolerance)
+          && current.low >= boundary.high * (1 - tolerance)
+          && current.close >= boundary.high) return true;
+      }
+    }
+  }
+  return false;
+}
+
+function matchesCustomPattern(candles, preset) {
+  const conditions = Array.isArray(preset.conditions) ? preset.conditions : [];
+  return conditions.length > 0 && conditions.every((condition) => matchesPatternCondition(candles, candles.length - 1, condition));
+}
+
 function roundToTick(value, tick) {
   const precision = String(tick).includes(".") ? String(tick).length - String(tick).indexOf(".") - 1 : 0;
   return Number((Math.round((value + Number.EPSILON) / tick) * tick).toFixed(precision));
@@ -205,8 +367,9 @@ function isLimitUpCandle(latest, previous, ratio = 0.1, tick = 0.01) {
 export function matchesLatestPattern(candles, preset) {
   const index = candles.length - 1;
   const current = candles[index];
-  if (!current) return false;
+  if (!current || preset.enabled === false) return false;
   const p = preset.parameters ?? {};
+  if (preset.kind === "custom") return matchesCustomPattern(candles, preset);
   if (preset.kind === "breakout") {
     const lookback = Math.round(p.lookback);
     if (index < lookback) return false;
@@ -287,17 +450,20 @@ export function screenLatestCandles(candles, presets, filters = {}) {
   if (!latest) return null;
   const averageVolume = average(candles.slice(-20).map((bar) => finite(bar.volume)));
   const averageTurnover = average(candles.slice(-20).map((bar) => finite(bar.turnover)));
+  const changePct = previous?.close ? (latest.close / previous.close - 1) * 100 : 0;
   if (filters.minPrice != null && latest.close < filters.minPrice) return null;
   if (filters.maxPrice != null && latest.close > filters.maxPrice) return null;
   if (filters.minAverageVolume != null && averageVolume < filters.minAverageVolume) return null;
   if (filters.minAverageTurnover != null && averageTurnover < filters.minAverageTurnover) return null;
+  if (filters.minChangePct != null && changePct < filters.minChangePct) return null;
+  if (filters.maxChangePct != null && changePct > filters.maxChangePct) return null;
   if (filters.excludeLimitUp && isLimitUpCandle(latest, previous, filters.limitUpRatio, filters.priceTick)) return null;
   const hits = presets.filter((preset) => matchesLatestPattern(candles, preset));
   if (presets.length && !hits.length) return null;
   return {
     timestamp: latest.timestamp,
     close: latest.close,
-    changePct: previous?.close ? (latest.close / previous.close - 1) * 100 : 0,
+    changePct,
     volume: finite(latest.volume),
     turnover: finite(latest.turnover),
     averageVolume,

@@ -7,6 +7,7 @@ import {
   defaultPatternPresets,
   normalizePatternPresets,
   type PatternPreset,
+  visiblePatternPresets,
 } from "../../lib/patternFilters.ts";
 import {
   defaultAppSettings,
@@ -140,14 +141,15 @@ export function createSettingsStorageGateway(storage: SettingsStorage) {
     try {
       const storedPresets = readJson(storage, settingsStorageKeys.patternPresets);
       const patternPresets = normalizePatternPresets(storedPresets ?? defaultPatternPresets);
+      const availablePatternPresets = visiblePatternPresets(patternPresets);
       const storedQuickPattern = storage.getItem(settingsStorageKeys.quickRandomPattern) ?? "";
       const storedRandomPatterns = readJson(storage, settingsStorageKeys.randomTrainingPatternPresets);
-      const quickRandomPatternPresetId = patternPresets.some((preset) => preset.id === storedQuickPattern)
+      const quickRandomPatternPresetId = availablePatternPresets.some((preset) => preset.id === storedQuickPattern)
         ? storedQuickPattern
         : "";
       const randomTrainingPatternPresetIds = Array.isArray(storedRandomPatterns)
         ? storedRandomPatterns.filter((id): id is string => (
-          typeof id === "string" && patternPresets.some((preset) => preset.id === id)
+          typeof id === "string" && availablePatternPresets.some((preset) => preset.id === id)
         ))
         : [];
       return {

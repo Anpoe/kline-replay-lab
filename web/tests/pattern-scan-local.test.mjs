@@ -28,6 +28,24 @@ test("latest scanner applies price and liquidity gates", () => {
   assert.equal(screenLatestCandles(candles, [], { minAverageVolume: 2_000_000 }), null);
 });
 
+test("latest scanner applies the current-day change range", () => {
+  const candles = makeCandles();
+  candles[candles.length - 2] = { ...candles.at(-2), close: 100 };
+  candles[candles.length - 1] = {
+    ...candles.at(-1),
+    open: 104,
+    high: 106,
+    low: 99,
+    close: 105,
+  };
+
+  const accepted = screenLatestCandles(candles, [], { minChangePct: 4, maxChangePct: 6 });
+  assert.ok(accepted);
+  assert.ok(Math.abs(accepted.changePct - 5) < 1e-9);
+  assert.equal(screenLatestCandles(candles, [], { minChangePct: 6 }), null);
+  assert.equal(screenLatestCandles(candles, [], { maxChangePct: 4 }), null);
+});
+
 test("latest scanner excludes a close at the configured limit-up price", () => {
   const candles = makeCandles();
   candles[candles.length - 2] = {
@@ -100,6 +118,30 @@ test("selected patterns reject a symbol when none match", () => {
     parameters: { lookback: 20, minimumBreakoutPct: 100, volumeMultiplier: 0 },
   }]);
   assert.equal(result, null);
+});
+
+test("local scanner recognizes modular custom conditions with AND semantics", () => {
+  const candles = makeCandles(25);
+  candles[candles.length - 1] = {
+    ...candles.at(-1),
+    volume: 2_000_000,
+  };
+  const preset = {
+    id: "custom-modular",
+    name: "模块化趋势",
+    kind: "custom",
+    parameters: {},
+    conditions: [
+      { id: "ema", kind: "price_vs_ema", parameters: { period: 5, relation: "above" } },
+      { id: "volume", kind: "volume_vs_average", parameters: { lookback: 5, relation: "at_least", multiplier: 1.5 } },
+    ],
+  };
+
+  const result = screenLatestCandles(candles, [preset]);
+  assert.ok(result);
+  assert.deepEqual(result.presetIds, ["custom-modular"]);
+  candles[candles.length - 1].volume = 1_000_000;
+  assert.equal(screenLatestCandles(candles, [preset]), null);
 });
 
 test("local scanner recognizes the structural Always In Long preset", () => {

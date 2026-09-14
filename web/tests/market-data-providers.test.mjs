@@ -10,6 +10,47 @@ import {
   validateCandles,
 } from "../app/lib/marketDataProviders.ts";
 
+test("Tushare daily 仍保留为不复权旧接口并换算 A 股成交量单位", () => {
+  const result = normalizeTusharePayload({
+    code: 0,
+    data: {
+      fields: ["trade_date", "open", "high", "low", "close", "vol", "amount"],
+      items: [["20260910", 10, 12, 9, 11, 100, 200]],
+    },
+  }, "1d");
+  assert.equal(result.candles.length, 1);
+  assert.equal(result.candles[0].volume, 10000);
+  assert.equal(result.candles[0].turnover, 200000);
+  assert.equal(result.report.accepted, 1);
+});
+
+test("Tushare 旧接口支持按时间游标逐批读取", async () => {
+  let body;
+  const result = await fetchProviderChunk({
+    provider: "tushare",
+    vendorSymbol: "000001.SZ",
+    timeframe: "1d",
+    startDate: "2026-01-01",
+    endDate: "2026-01-02",
+    cursor: {},
+  }, { tushareToken: "local-token" }, async (_url, init) => {
+    body = JSON.parse(init.body);
+    return Response.json({
+      code: 0,
+      data: {
+        fields: ["trade_date", "open", "high", "low", "close", "vol", "amount"],
+        items: [["20260101", 10, 12, 9, 11, 100, 200]],
+      },
+    });
+  });
+  assert.equal(body.api_name, "daily");
+  assert.equal(body.token, "local-token");
+  assert.equal(body.params.ts_code, "000001.SZ");
+  assert.equal(result.source, "tushare");
+  assert.equal(result.complete, true);
+  assert.equal(result.candles.length, 1);
+});
+
 test("Alpaca 美股目录兼容官方 class 字段和旧 asset_class 字段", () => {
   const assets = filterTradableUsAssets([
     { symbol: "AAPL", class: "us_equity", status: "active", tradable: true },
@@ -18,25 +59,6 @@ test("Alpaca 美股目录兼容官方 class 字段和旧 asset_class 字段", ()
     { symbol: "LOCKED", class: "us_equity", status: "active", tradable: false },
   ]);
   assert.deepEqual(assets.map((asset) => asset.symbol), ["AAPL", "MSFT"]);
-});
-
-test("Tushare 日线被标准化、排序，并把手和千元转换为股和元", () => {
-  const result = normalizeTusharePayload({
-    code: 0,
-    data: {
-      fields: ["ts_code", "trade_date", "open", "high", "low", "close", "vol", "amount"],
-      items: [
-        ["600519.SH", "20260106", 101, 105, 99, 103, 12, 34],
-        ["600519.SH", "20260105", 100, 103, 98, 101, 10, 30],
-      ],
-    },
-  }, "1d");
-
-  assert.equal(result.candles.length, 2);
-  assert.ok(result.candles[0].timestamp < result.candles[1].timestamp);
-  assert.equal(result.candles[0].volume, 1000);
-  assert.equal(result.candles[0].turnover, 30000);
-  assert.equal(result.report.invalid, 0);
 });
 
 test("Alpaca bars 去重并排除 OHLC 不合法的数据", () => {
@@ -83,6 +105,7 @@ test("Alpaca 多品种日线请求按 symbols 返回并保留分页游标", asyn
   assert.equal(url.searchParams.get("timeframe"), "1Day");
   assert.equal(url.searchParams.get("feed"), "iex");
   assert.equal(url.searchParams.get("limit"), "10000");
+  assert.equal(url.searchParams.get("adjustment"), "all");
   assert.deepEqual([...result.candlesBySymbol.keys()], ["AAPL", "MSFT"]);
   assert.equal(result.candlesBySymbol.get("MSFT")[0].close, 21);
   assert.deepEqual(result.cursor, { pageToken: "page-2", feed: "iex" });

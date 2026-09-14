@@ -1,5 +1,10 @@
 import { ensureSchema, getRawDb } from "../../../db/runtime";
 import type { MarketDataProviderId, SupportedTimeframe } from "../../lib/marketDataProviders";
+import { defaultAdjustmentTypeForMarket } from "../../lib/marketAdjustments";
+import {
+  getLegacyUsDataSummary,
+  reconcileMarketSyncProgress,
+} from "../../lib/marketSyncService";
 import { TIMEFRAME_IDS } from "../../lib/timeframeCatalog";
 
 type DownloadJobInput = {
@@ -19,7 +24,17 @@ const timeframes = new Set<string>(TIMEFRAME_IDS);
 export async function GET(request: Request) {
   await ensureSchema();
   const market = new URL(request.url).searchParams.get("market");
+  const adjustmentType = market ? defaultAdjustmentTypeForMarket(market) : null;
+  const marketFilter = market
+    ? market.toUpperCase() === "CN"
+      ? "WHERE market = ?"
+      : adjustmentType === "none" ? "WHERE market = ? AND provider <> 'tushare'" : "WHERE market = ? AND adjustment_type = ? AND provider <> 'tushare'"
+    : "WHERE provider <> 'tushare' AND (market NOT IN ('CN', 'US') OR (market = 'CN' AND adjustment_type = 'qfq') OR (market = 'US' AND adjustment_type = 'all'))";
+  const marketBindings = market
+    ? market.toUpperCase() === "CN" || adjustmentType === "none" ? [market] : [market, adjustmentType]
+    : [];
   const db = getRawDb();
+  if (market?.toUpperCase() === "US") await reconcileMarketSyncProgress(db);
   const statement = db
     .prepare(`SELECT id, provider, instrument_id AS instrumentId, vendor_symbol AS vendorSymbol,
       instrument_name AS instrumentName, market, timeframe, start_date AS startDate,
@@ -29,16 +44,18 @@ export async function GET(request: Request) {
       sync_run_id AS syncRunId, sync_batch_id AS syncBatchId, sync_mode AS syncMode,
       attempt_count AS attemptCount, feed, terminal_reason AS terminalReason,
       created_at AS createdAt, updated_at AS updatedAt
-      FROM data_download_jobs ${market ? "WHERE market = ?" : ""}
-      ORDER BY updated_at DESC LIMIT 100`);
-  const rows = market ? await statement.bind(market).all() : await statement.all();
+      FROM data_download_jobs ${marketFilter}
+      ORDER BY CASE WHEN status IN ('queued', 'running', 'paused') THEN 0
+                    WHEN status IN ('failed', 'cancelled') THEN 1 ELSE 2 END,
+        updated_at DESC LIMIT 100`);
+  const rows = marketBindings.length ? await statement.bind(...marketBindings).all() : await statement.all();
   const summaryStatement = db.prepare(`WITH ranked_jobs AS (
       SELECT instrument_id, status, inserted_count,
         ROW_NUMBER() OVER (
           PARTITION BY instrument_id
           ORDER BY updated_at DESC, created_at DESC, id DESC
         ) AS row_number
-      FROM data_download_jobs ${market ? "WHERE market = ?" : ""}
+      FROM data_download_jobs ${marketFilter}
     ), instrument_status AS (
       SELECT instrument_id,
         MAX(CASE WHEN status IN ('completed', 'no_data') THEN 1 ELSE 0 END) AS has_completed,
@@ -60,9 +77,10 @@ export async function GET(request: Request) {
       COALESCE(SUM(inserted_count), 0) AS insertedCount
     FROM instrument_status`);
   const summary = market
-    ? await summaryStatement.bind(market).first()
+    ? await summaryStatement.bind(...marketBindings).first()
     : await summaryStatement.first();
-  return Response.json({ jobs: rows.results, summary });
+  const legacy = market?.toUpperCase() === "US" ? await getLegacyUsDataSummary(db) : null;
+  return Response.json({ jobs: rows.results, summary, legacy });
 }
 
 export async function POST(request: Request) {
@@ -92,6 +110,9 @@ export async function POST(request: Request) {
     return Response.json({ error: "Alpaca 下载任务当前只用于美股" }, { status: 400 });
   }
 
+  const adjustmentType = payload.provider === "tushare"
+    ? "none"
+    : defaultAdjustmentTypeForMarket(payload.market);
   const id = crypto.randomUUID();
   const now = new Date().toISOString();
   await getRawDb()
@@ -99,7 +120,7 @@ export async function POST(request: Request) {
       (id, provider, instrument_id, vendor_symbol, instrument_name, market, timeframe,
        start_date, end_date, adjustment_type, status, cursor_json, inserted_count,
        quality_report_json, created_at, updated_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'none', 'queued', '{}', 0, '{}', ?, ?)`)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'queued', '{}', 0, '{}', ?, ?)`)
     .bind(
       id,
       payload.provider,
@@ -110,6 +131,7 @@ export async function POST(request: Request) {
       payload.timeframe,
       payload.startDate,
       payload.endDate,
+      adjustmentType,
       now,
       now,
     )

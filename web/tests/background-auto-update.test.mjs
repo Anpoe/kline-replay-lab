@@ -290,7 +290,7 @@ test("单个市场失败后继续执行其他市场并记录 partial", async () 
         GOLD: { existing: false, needsUpdate: false, reason: "未接入" },
       },
     },
-    "POST /api/cn-maintenance": response({ error: "Tushare 不可用" }, 400),
+    "POST /api/cn-maintenance": response({ error: "BaoStock 不可用" }, 400),
     "POST /api/data-jobs/market/sync": { run: { id: "us-run", status: "running" } },
     "POST /api/data-jobs/market/sync/worker": { run: { id: "us-run", status: "completed" } },
   });

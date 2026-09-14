@@ -24,6 +24,7 @@ namespace KLineTrainingCamp.Launcher
         private readonly TextBox logBox;
         private readonly Label workerLabel;
         private readonly Label summaryLabel;
+        private readonly Label versionLabel;
         private readonly CheckBox startupCheckBox;
         private readonly NotifyIcon trayIcon;
         private readonly FormsTimer logTimer;
@@ -73,8 +74,14 @@ namespace KLineTrainingCamp.Launcher
             root.RowStyles.Add(new RowStyle(SizeType.AutoSize));
             root.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
             Controls.Add(root);
-            summaryLabel = new Label { AutoSize = true, Font = new Font(Font.FontFamily, 11.0f, FontStyle.Bold), Padding = new Padding(0, 0, 0, 8), Text = "正在准备本地服务…" };
-            root.Controls.Add(summaryLabel, 0, 0);
+            var heading = new TableLayoutPanel { AutoSize = true, Dock = DockStyle.Top, ColumnCount = 2, RowCount = 1, Margin = new Padding(0, 0, 0, 8) };
+            heading.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+            heading.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
+            summaryLabel = new Label { AutoSize = true, Dock = DockStyle.Fill, Font = new Font(Font.FontFamily, 11.0f, FontStyle.Bold), Padding = new Padding(0, 0, 0, 8), Text = "正在准备本地服务…" };
+            versionLabel = new Label { AutoSize = true, Anchor = AnchorStyles.Top | AnchorStyles.Right, ForeColor = Color.DimGray, Padding = new Padding(12, 2, 0, 0), Text = "当前版本：" + FormatInstalledVersion(updateService.InstalledVersion) };
+            heading.Controls.Add(summaryLabel, 0, 0);
+            heading.Controls.Add(versionLabel, 1, 0);
+            root.Controls.Add(heading, 0, 0);
 
             var cards = new TableLayoutPanel { AutoSize = true, Dock = DockStyle.Top, ColumnCount = 3, Margin = new Padding(0, 0, 0, 10) };
             cards.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 33.333f));
@@ -215,6 +222,14 @@ namespace KLineTrainingCamp.Launcher
             var button = new Button { AutoSize = true, Text = text, UseVisualStyleBackColor = true };
             button.Click += delegate { action(); };
             return button;
+        }
+
+        private static string FormatInstalledVersion(string version)
+        {
+            string normalized = NativeUpdateService.NormalizeVersion(version);
+            if (!string.IsNullOrWhiteSpace(normalized)) return "v" + normalized;
+            if (string.Equals(version, "development", StringComparison.OrdinalIgnoreCase)) return "开发版";
+            return "旧版";
         }
 
         private ContextMenuStrip CreateTrayMenu()

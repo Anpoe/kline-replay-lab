@@ -5,7 +5,7 @@ import test from "node:test";
 const root = new URL("../", import.meta.url);
 
 test("ships the K-line training workbench instead of the starter", async () => {
-  const [page, layout, workbench, dataSourceManager, providerSettings, settingsPanel, reviewHistory, providerSettingsRoute, packageJson, replayChart, sessionsRoute, snapshotsRoute, marketRules, marketJobsRoute, dataJobsRoute, downloadRunner] = await Promise.all([
+  const [page, layout, workbench, dataSourceManager, providerSettings, settingsPanel, reviewHistory, providerSettingsRoute, packageJson, replayChart, sessionsRoute, snapshotsRoute, marketRules, marketJobsRoute, dataJobsRoute, downloadRunner, localDataRoute] = await Promise.all([
     readFile(new URL("app/page.tsx", root), "utf8"),
     readFile(new URL("app/layout.tsx", root), "utf8"),
     readFile(new URL("app/components/TrainingWorkbench.tsx", root), "utf8"),
@@ -22,6 +22,7 @@ test("ships the K-line training workbench instead of the starter", async () => {
     readFile(new URL("app/api/data-jobs/market/route.ts", root), "utf8"),
     readFile(new URL("app/api/data-jobs/route.ts", root), "utf8"),
     readFile(new URL("app/api/data-jobs/run/route.ts", root), "utf8"),
+    readFile(new URL("app/api/local-data/route.ts", root), "utf8"),
   ]);
 
   assert.match(page, /<TrainingWorkbenchShell\s*\/>/);
@@ -148,13 +149,17 @@ test("ships the K-line training workbench instead of the starter", async () => {
   assert.match(workbench, /deleteSession/);
   assert.match(workbench, /dataSnapshotId/);
   assert.match(workbench, /DataSourceManager/);
-  assert.match(dataSourceManager, /Tushare/);
+  assert.match(dataSourceManager, /BaoStock/);
   assert.match(dataSourceManager, /Alpaca/);
   assert.match(dataSourceManager, /快速初始化/);
   assert.match(dataSourceManager, /高级自定义/);
   assert.match(dataSourceManager, /TdxQuant/);
+  assert.match(dataSourceManager, /<option value="tdxquant">TdxQuant 前复权日线/);
+  assert.match(dataSourceManager, /不复权/);
+  assert.match(dataSourceManager, /可复权/);
+  assert.doesNotMatch(dataSourceManager, /<label>分钟 \/ 增强数据/);
   assert.match(dataSourceManager, /锁定训练数据版本/);
-  assert.match(dataSourceManager, /刷新完整基础包/);
+  assert.match(dataSourceManager, /刷新 BaoStock 全量数据/);
   assert.match(dataSourceManager, /每日增量更新/);
   assert.match(dataSourceManager, /扫描并修复缺口/);
   assert.match(dataSourceManager, /初始化美股市场库/);
@@ -169,6 +174,7 @@ test("ships the K-line training workbench instead of the starter", async () => {
   assert.match(providerSettings, /正在读取本机凭证状态/);
   assert.match(providerSettings, /1200/);
   assert.match(dataSourceManager, /MarketSyncStatus/);
+  assert.match(localDataRoute, /本机数据服务版本过旧/);
   assert.match(dataSourceManager, /market\/sync\/worker/);
   assert.match(dataSourceManager, /URL 长度自动计算批量/);
   assert.doesNotMatch(dataSourceManager, /usDownloadConcurrency/);
@@ -231,6 +237,9 @@ test("ships the K-line training workbench instead of the starter", async () => {
   assert.match(snapshotsRoute, /timeframeView/);
   assert.match(snapshotsRoute, /aggregateCandlesToTimeframe/);
   assert.match(snapshotsRoute, /getCachedTimeframeView/);
+  assert.doesNotMatch(snapshotsRoute, /isLegacyUnadjustedStockSnapshot/);
+  assert.doesNotMatch(snapshotsRoute, /旧的不复权价格，已停用/);
+  assert.match(snapshotsRoute, /adjustmentType = sourceViewRow\.adjustmentType/);
   assert.match(workbench, /createRandomWindowSnapshot/);
   assert.match(workbench, /replayWindow: newTaskRequest/);
   assert.match(workbench, /data\.selection\.startCursor \+ 1/);

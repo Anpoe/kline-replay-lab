@@ -10,9 +10,17 @@ export async function GET() {
     timeframeCatalog: [...TIMEFRAME_IDS],
     providers: [
       {
+        id: "baostock",
+        name: "BaoStock",
+        market: "A股",
+        configured: true,
+        supportedTimeframes: ["1d", "1w", "1mo"],
+        credentialNames: [],
+      },
+      {
         id: "tushare",
         name: "Tushare Pro",
-        market: "A股",
+        market: "A股（旧方案）",
         configured: Boolean(secrets.tushareToken),
         supportedTimeframes: [...DIRECT_PROVIDER_TIMEFRAMES.tushare],
         credentialNames: ["TUSHARE_TOKEN"],
@@ -28,7 +36,7 @@ export async function GET() {
       {
         id: "tdxquant",
         name: "TdxQuant 本地客户端",
-        market: "A股增强",
+        market: "A股增强（可复权）",
         configured: Boolean(tdxQuantEndpoint),
         supportedTimeframes: ["5m", "1h", "1d", "1w"],
         credentialNames: [],

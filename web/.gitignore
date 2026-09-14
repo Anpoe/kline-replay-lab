@@ -42,6 +42,7 @@ next-env.d.ts
 /outputs/
 /work/
 .sites-dev.log
+__pycache__/
 /.local-data/
 /artifacts/
 *.tsbuildinfo

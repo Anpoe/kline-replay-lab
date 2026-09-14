@@ -126,7 +126,7 @@
 
 支持的连接方向包括：
 
-- A 股：Tushare、通达信量化等
+- A 股：BaoStock（默认前复权）、通达信/Tushare（旧版不复权方案）、TdxQuant（可复权端点）
 - 美股：Alpaca 等
 - 外汇和现货黄金：Twelve Data、Dukascopy 等
 

@@ -1,4 +1,5 @@
 const localDataOrigin = process.env.KLINE_DATA_SERVICE_URL ?? "http://127.0.0.1:3100";
+export const REQUIRED_LOCAL_DATA_SERVICE_VERSION = 5;
 
 export async function fetchLocalData(path: string, init?: RequestInit, timeoutMs = 5000) {
   const controller = new AbortController();

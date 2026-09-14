@@ -6,6 +6,7 @@ import type {
 
 export function normalizeLiveScanLimit(value: unknown) {
   const limit = Number(value);
+  if (value === 0 || value === "0") return 0;
   return Number.isFinite(limit) ? Math.min(500, Math.max(50, Math.round(limit))) : 100;
 }
 
@@ -27,6 +28,8 @@ export function buildLiveScanRequest(input: {
   minPrice: string;
   maxPrice: string;
   minVolume: string;
+  minChangePct: string;
+  maxChangePct: string;
   excludeLimitUp?: boolean;
   sort: LiveScanSort;
   limit: number;
@@ -39,6 +42,8 @@ export function buildLiveScanRequest(input: {
       ...(input.minPrice ? { minPrice: Number(input.minPrice) } : {}),
       ...(input.maxPrice ? { maxPrice: Number(input.maxPrice) } : {}),
       ...(input.minVolume ? { minAverageVolume: Number(input.minVolume) } : {}),
+      ...(input.minChangePct ? { minChangePct: Number(input.minChangePct) } : {}),
+      ...(input.maxChangePct ? { maxChangePct: Number(input.maxChangePct) } : {}),
       ...(input.market === "CN" && input.excludeLimitUp ? { excludeLimitUp: true } : {}),
     },
     sort: input.sort,

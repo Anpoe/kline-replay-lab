@@ -17,15 +17,6 @@ type LocalInstrumentRow = {
   lastTimestamp?: unknown;
 };
 
-type TusharePayload = {
-  code?: number;
-  msg?: string;
-  data?: {
-    fields?: string[];
-    items?: unknown[][];
-  };
-};
-
 function marketCode(value: unknown) {
   const normalized = String(value ?? "").trim().toUpperCase();
   if (normalized === "A股") return "CN";
@@ -55,68 +46,9 @@ function dateFromTimestamp(timestamp: number | null) {
   }).format(new Date(timestamp));
 }
 
-function dateOffset(value: string, days: number) {
-  const date = new Date(`${value}T12:00:00Z`);
-  date.setUTCDate(date.getUTCDate() + days);
-  return date.toISOString().slice(0, 10);
-}
-
-function zonedDateTime(timeZone: string, now = new Date()) {
-  const parts = new Intl.DateTimeFormat("en-CA", {
-    timeZone,
-    year: "numeric",
-    month: "2-digit",
-    day: "2-digit",
-    hour: "2-digit",
-    minute: "2-digit",
-    hourCycle: "h23",
-  }).formatToParts(now);
-  const values = Object.fromEntries(parts.map((part) => [part.type, part.value]));
-  return {
-    date: `${values.year}-${values.month}-${values.day}`,
-    minutes: Number(values.hour) * 60 + Number(values.minute),
-  };
-}
-
-async function latestClosedTushareDate(token: string) {
-  const now = zonedDateTime("Asia/Shanghai");
-  // A daily bar is not considered complete until the regular A-share session
-  // has ended. This prevents a morning startup from requesting today's bar.
-  const cutoffDate = now.minutes >= 15 * 60 + 30 ? now.date : dateOffset(now.date, -1);
-  const response = await fetch("https://api.tushare.pro", {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({
-      api_name: "trade_cal",
-      token,
-      params: {
-        exchange: "SSE",
-        start_date: dateOffset(cutoffDate, -60).replaceAll("-", ""),
-        end_date: now.date.replaceAll("-", ""),
-        is_open: "1",
-      },
-      fields: "cal_date,is_open",
-    }),
-  });
-  if (!response.ok) return { date: null, error: `Tushare 交易日检查失败（HTTP ${response.status}）` };
-  const payload = await response.json() as TusharePayload;
-  if (payload.code !== 0) return { date: null, error: payload.msg || "Tushare 交易日检查失败" };
-  const fields = payload.data?.fields ?? [];
-  const rows = payload.data?.items ?? [];
-  const dateIndex = fields.indexOf("cal_date");
-  const openIndex = fields.indexOf("is_open");
-  const dates = rows
-    .map((row) => ({
-      date: String(row[dateIndex] ?? "").replace(/^(\d{4})(\d{2})(\d{2})$/, "$1-$2-$3"),
-      isOpen: openIndex < 0 || String(row[openIndex] ?? "") === "1",
-    }))
-    .filter((row) => row.isOpen && /^\d{4}-\d{2}-\d{2}$/.test(row.date) && row.date <= cutoffDate)
-    .map((row) => row.date)
-    .sort();
-  return { date: dates.at(-1) ?? null };
-}
-
 async function readDatabaseMarketRows(db: D1Database) {
+  // CN is owned by the BaoStock local service.  Legacy TDX/Tushare rows in
+  // the application database must not make automatic update decisions.
   const result = await db.prepare(`SELECT i.market AS market,
       COUNT(DISTINCT i.id) AS instrumentCount,
       COALESCE(SUM(c.bar_count), 0) AS barCount,
@@ -124,6 +56,7 @@ async function readDatabaseMarketRows(db: D1Database) {
     FROM instruments i
     JOIN candle_coverage c ON c.instrument_id = i.id
     WHERE c.bar_count > 0 AND c.source <> 'sample'
+      AND UPPER(i.market) NOT IN ('CN', 'A股')
     GROUP BY i.market`).all<DatabaseMarketRow>();
   return result.results.map((row) => ({
     market: marketCode(row.market),
@@ -145,41 +78,40 @@ async function readLocalCnSummary() {
   };
 }
 
+async function latestClosedBaoStockDate() {
+  const result = await readLocalDataJson<{ latestClosedDate?: string; error?: string }>("/market/cn/status", 12_000);
+  if (!result?.latestClosedDate) {
+    return { date: null, error: result?.error ?? "无法连接本机 BaoStock 交易日服务" };
+  }
+  return { date: result.latestClosedDate, error: null };
+}
+
 async function inspectCnUpdate(
-  row: DatabaseMarketRow | undefined,
+  _row: DatabaseMarketRow | undefined,
   local: Awaited<ReturnType<typeof readLocalCnSummary>>,
-  tushareToken: string | undefined,
 ) {
-  const instrumentCount = Math.max(Number(row?.instrumentCount ?? 0), local.instrumentCount);
-  const barCount = Number(row?.barCount ?? 0) + local.barCount;
-  const latestTimestamp = maxTimestamp(row?.lastTimestamp, local.lastTimestamp);
+  // Only BaoStock-local rows count as existing CN data.  This prevents the
+  // old D1/Tushare dataset from silently reappearing in the update panel.
+  const instrumentCount = local.instrumentCount;
+  const barCount = local.barCount;
+  const latestTimestamp = local.lastTimestamp;
   const existing = instrumentCount > 0 && barCount > 0;
   if (!existing) {
     return {
       existing: false,
-      configured: Boolean(tushareToken),
+      configured: true,
       needsUpdate: false,
       latestDate: null,
       expectedLatestDate: null,
-      reason: "A 股尚无可更新的历史数据",
-    };
-  }
-  if (!tushareToken) {
-    return {
-      existing: true,
-      configured: false,
-      needsUpdate: false,
-      latestDate: dateFromTimestamp(latestTimestamp),
-      expectedLatestDate: null,
-      reason: "A 股已有数据，但尚未配置 Tushare Token",
+      reason: "A 股尚无可更新的 BaoStock 历史数据",
     };
   }
   try {
-    const provider = await latestClosedTushareDate(tushareToken);
+    const provider = await latestClosedBaoStockDate();
     if (!provider.date) {
       return {
         existing: true,
-        configured: true,
+        configured: false,
         needsUpdate: false,
         latestDate: dateFromTimestamp(latestTimestamp),
         expectedLatestDate: null,
@@ -201,11 +133,11 @@ async function inspectCnUpdate(
   } catch {
     return {
       existing: true,
-      configured: true,
+      configured: false,
       needsUpdate: false,
       latestDate: dateFromTimestamp(latestTimestamp),
       expectedLatestDate: null,
-      reason: "无法连接 Tushare 检查交易日，已跳过自动更新",
+      reason: "无法连接本机 BaoStock 检查交易日，已跳过自动更新",
     };
   }
 }
@@ -310,7 +242,7 @@ export async function inspectExistingMarkets(db: D1Database) {
   const goldRows = marketRows.results.filter((row) => marketCode(row.market) === "GOLD");
 
   const [cn, us, fx, gold] = await Promise.all([
-    inspectCnUpdate(byMarket.get("CN"), localCn, secrets.tushareToken),
+    inspectCnUpdate(byMarket.get("CN"), localCn),
     inspectMarketSyncUpdate(db),
     inspectFxUpdates(
       fxRows.map((row) => ({
@@ -330,12 +262,7 @@ export async function inspectExistingMarkets(db: D1Database) {
   ]);
   return {
     checkedAt: new Date().toISOString(),
-    markets: {
-      CN: cn,
-      US: us,
-      FX: fx,
-      GOLD: gold,
-    },
+    markets: { CN: cn, US: us, FX: fx, GOLD: gold },
     fxCatalogCount: FX_INSTRUMENT_CATALOG.length,
     goldCatalogCount: GOLD_INSTRUMENT_CATALOG.length,
   };

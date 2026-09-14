@@ -53,26 +53,26 @@ npm run dev
 
 - 训练记录、小规模导入和不可变训练快照保存在项目本地的开发数据库中。v2 快照按周期分桶、按约 1.25 MB 上限拆块并复用相同内容块；设置中可把训练起点左侧历史窗口配置为 100～5000 根，恢复训练和表现分析只读取需要的分块。
 - 数据目录由本地 Cloudflare Miniflare/D1 运行时管理，状态文件位于被忽略的 `.wrangler/` 目录。
-- 通达信全市场数据保存在被忽略的 `.local-data/` 目录：下载支持 HTTP Range 断点续传，完成后按交易所保留 `.day` 分区文件并生成数据版本清单；默认删除原始 ZIP，避免双份占用。
+- BaoStock A 股数据保存在被忽略的 `.local-data/baostock/` 目录：本地服务通过 Python 桥接按品种读取前复权日线，并生成数据版本清单；旧 TDX `.day` 文件、Tushare daily 入口和 TdxQuant 端点继续保留为可选方案，启动 BaoStock 不会清理它们。
 - CSV 导入格式：`timestamp,open,high,low,close,volume,turnover`。
-- 当前内置 A 股和美股样例行情；“数据”页面首次进入提供快速初始化与高级自定义，高级方案可组合 Tushare、TdxQuant、Alpaca 和本地文件。
-- 快速初始化已接入通达信官方沪深京日线完整包；自动识别股票、交易所指数、场内基金和可转债，日线直接读取，周线按需聚合。导入完成后自动从在线证券目录补全中文名称，也可手动更新；无法匹配的历史代码使用确定性占位名，并可在 `.local-data/catalog.json` 中补充映射。
-- 数据页按 A股、美股、外汇、黄金独立管理，不再提供逐个代码下载表单。A股用 TDX 完整包建立全历史基础层，之后用 Tushare 120 按日期做全市场普通股票日线增量和最近 30 日缺口修复；美股使用 Alpaca SIP 并按最后日期限速更新。账户无 SIP 权限时会明确报错，不静默回退到只覆盖部分成交场所的 IEX，避免同一历史序列在更新中改变数据定义。
+- 当前内置 A 股和美股样例行情；“数据”页面首次进入提供快速初始化与高级自定义。A 股默认使用 BaoStock，旧 TDX/Tushare 不复权方案与 TdxQuant 可复权端点仍可在高级自定义中选择，美股继续使用 Alpaca。
+- 快速初始化通过 BaoStock 品种目录识别股票、指数、场内基金和可转债，并按 `adjustflag=2` 直接获取前复权日线；周线/月线按需由本地日线聚合。单次请求超时或网络接收错误会销毁当前 Python 会话、重新登录并最多自动重试 2 次；会话连续运行 30 分钟后也会在下一次请求前刷新。初始化和维护都支持暂停、继续与失败重试。BaoStock 不返回数据的品种会保留为无数据记录，不回退到旧数据源。
+- BaoStock 全市场初始化采用单个 Python 会话串行下载；官方客户端是单 socket C/S 协议，不使用多会话并发，避免触发服务商限流或压缩响应损坏。
+- 数据页按 A股、美股、外汇、黄金独立管理，不再提供逐个代码下载表单。A股默认使用 BaoStock 前复权日线并按品种做增量及最近 30 日缺口修复；选择旧方案时会明确显示“不复权”，TdxQuant 的复权口径由端点配置决定。美股使用 Alpaca SIP 并按最后日期限速更新。账户无 SIP 权限时会明确报错，不静默回退到只覆盖部分成交场所的 IEX，避免同一历史序列在更新中改变数据定义。
 - 数据覆盖表支持逐行勾选、全选当前页和二次确认删除；样例数据删除后不会自动恢复，既有不可变训练快照不随行情库删除。
-- Tushare 变化数据保存在 `.local-data/tdx/tushare-overlay.sqlite`，只记录新增或修正的日线；读取时与 TDX 分区合并后生成日线和周线，不复制整库。
-- Tushare 维护状态保存在本地任务文件中，可暂停、继续和失败重试，但 Token 不落任务文件；Alpaca 下载任务仍保存在本地 D1。
+- BaoStock 与旧 TDX 维护状态分别保存在本地任务文件中，可暂停、继续和失败重试；BaoStock A 股不需要 Token 或复权因子覆盖层，旧 TDX 维护仍可使用 Tushare Token，Alpaca 下载任务仍保存在本地 D1。
 
 ### 本地行情凭证
 
-打开应用侧栏“设置 → 数据源设置”，直接保存 Alpaca API Key ID、Secret Key、Tushare Token、Twelve Data API Key 或 TdxQuant 本地端点。配置保存在本地 D1，接口只返回状态和掩码，不会回显完整凭证，也不会进入 Git；保存后无需重启。外汇历史初始化默认使用内置 Dukascopy 官方适配器，服务端读取官方 widget 配置并解码 Jetta 分钟数据；适配器优先使用正式 Jetta 主机和官方 `EUR-USD/BID` 路径，单日请求对网络断开、超时、429、5xx 自动重试。历史任务每 7 天保存一次游标，分片内最多并发下载 4 天，并复用品种元数据缓存；已有 5m/1h/1d/1w 覆盖的区间只补 M1，不重复写入高周期。界面显示当前阶段、M1 分片写入数、分片用时和最近活动时间。历史初始化同时保存 M1 与 5m/1h/1d/1w，训练页可直接选择 1m 回放。已有高周期历史不能反推 M1，需要重新下载对应范围。如需覆盖官方服务，才填写可选的自定义 CSV 地址。Twelve Data 增量只请求已收盘 1min，写入 M1 后由本地生成 5m/1h/1d/1w。
+打开应用侧栏“设置 → 数据源设置”，A 股 BaoStock 为内置数据源，无需填写 Token；旧 Tushare 方案可保存 Token，TdxQuant 可保存本机端点，真实美股仍保存 Alpaca API Key ID、Secret Key，外汇仍可保存 Twelve Data API Key 或 Dukascopy 相关配置。配置保存在本地 D1，接口只返回状态和掩码，不会回显完整凭证，也不会进入 Git；保存后无需重启。首次使用 BaoStock 前，在项目目录执行 `python -m pip install -r web/local-data/requirements.txt`，然后重启本地数据服务。
 
-`.env.local` 仍作为高级兼容方式保留，对应字段见 `.env.example`。Tushare 的 5m/1h 历史分钟线还需要对应的数据权限。
+`.env.local` 仍作为高级兼容方式保留，对应字段见 `.env.example`。BaoStock 使用本机 Python 包，不需要 API Key；Tushare Token 仅用于旧的不复权逐批接口，TdxQuant 端点可按自身配置返回复权数据。
 
 ## 常用命令
 
 ```bash
 npm run dev         # 启动本地开发版
-npm run local-data  # 启动 TDX 大文件与分区数据服务
+npm run local-data  # 启动 BaoStock 默认、兼容 TDX/Tushare 的 A 股本地数据服务
 npm run build       # 验证生产构建
 npm run lint        # 代码检查
 npm test            # 构建并运行自动测试

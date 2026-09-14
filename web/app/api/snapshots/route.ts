@@ -1,6 +1,10 @@
 import { ensureSchema, getRawDb } from "../../../db/runtime";
 import type { SnapshotCandle } from "../../lib/dataSnapshots";
 import { readLocalDataJson } from "../../lib/localDataService";
+import {
+  defaultAdjustmentTypeForInstrument,
+  normalizeStockAdjustmentType,
+} from "../../lib/marketAdjustments";
 import { tradingDate } from "../../lib/marketRules";
 import { isSupportedTimeframe, TIMEFRAME_IDS, timeframeLookbackMs } from "../../lib/timeframeCatalog";
 import {
@@ -50,6 +54,7 @@ type SourceCoverageRow = {
 type LocalCandleResponse = {
   instrument: Record<string, unknown>;
   candles: SnapshotCandle[];
+  adjustmentType?: string;
   source?: string;
   datasetVersion?: string;
 };
@@ -573,7 +578,7 @@ async function readDirectTimeframeViewCandles(
   if (database.results.length) return database.results;
 
   const local = await readLocalDataJson<LocalCandleResponse>(
-    `/candles?instrument=${encodeURIComponent(instrumentId)}&timeframe=${encodeURIComponent(timeframe)}`,
+    `/candles?instrument=${encodeURIComponent(instrumentId)}&timeframe=${encodeURIComponent(timeframe)}&adjustmentType=${encodeURIComponent(adjustmentType)}`,
     15000,
   );
   if (!local?.candles?.length) return null;
@@ -790,8 +795,15 @@ export async function POST(request: Request) {
     return Response.json({ error: `不支持的周期：${payload.timeframe}` }, { status: 400 });
   }
 
-  const adjustmentType = payload.adjustmentType ?? "none";
   const db = getRawDb();
+  let instrument = await db
+    .prepare(`SELECT id, symbol, name, market, timezone, price_precision AS pricePrecision
+      FROM instruments WHERE id = ?`)
+    .bind(payload.instrumentId)
+    .first<Record<string, unknown>>();
+  let adjustmentType: string = instrument
+    ? normalizeStockAdjustmentType(String(instrument.market ?? ""), payload.adjustmentType)
+    : defaultAdjustmentTypeForInstrument(payload.instrumentId, undefined);
   let sourceViewRow: SnapshotRow | null = null;
   if (payload.timeframeView) {
     const sourceSnapshotId = String(payload.timeframeView.sourceSnapshotId ?? "").trim();
@@ -809,19 +821,17 @@ export async function POST(request: Request) {
     if (
       sourceViewRow.instrumentId !== payload.instrumentId
       || sourceViewRow.timeframe !== sourceTimeframe
-      || sourceViewRow.adjustmentType !== adjustmentType
     ) {
       return Response.json({ error: "观察周期来源快照与当前训练不匹配" }, { status: 409 });
     }
+    // A timeframe view belongs to the immutable source snapshot. Inherit its
+    // adjustment type so switching the market-data policy cannot invalidate a
+    // historical training session or silently mix price series.
+    adjustmentType = sourceViewRow.adjustmentType;
     if (payload.timeframe === sourceTimeframe) {
       return Response.json(await snapshotResponse(db, sourceViewRow));
     }
   }
-  let instrument = await db
-    .prepare(`SELECT id, symbol, name, market, timezone, price_precision AS pricePrecision
-      FROM instruments WHERE id = ?`)
-    .bind(payload.instrumentId)
-    .first<Record<string, unknown>>();
   if (!sourceViewRow && instrument) {
     await ensureDerivedTimeframeCandleSource(
       db,
@@ -831,7 +841,15 @@ export async function POST(request: Request) {
       instrument,
     );
   }
-  const databaseWindowResult = !sourceViewRow && instrument && payload.randomWindow
+  const preferLocal = !sourceViewRow && (String(instrument?.market ?? "").toUpperCase() === "CN"
+    || /\.(SH|SZ|BJ)$/.test(payload.instrumentId.toUpperCase()));
+  const localSource = preferLocal
+    ? await readLocalDataJson<LocalCandleResponse>(
+        `/candles?instrument=${encodeURIComponent(payload.instrumentId)}&timeframe=${encodeURIComponent(payload.timeframe)}&adjustmentType=${encodeURIComponent(adjustmentType)}`,
+        15000,
+      )
+    : null;
+  const databaseWindowResult = !sourceViewRow && !preferLocal && instrument && payload.randomWindow
     ? await selectDatabaseRandomWindow(
         db,
         payload.instrumentId,
@@ -841,7 +859,7 @@ export async function POST(request: Request) {
         payload.randomWindow,
       )
     : null;
-  const databaseReplayWindowResult = !sourceViewRow && instrument && payload.replayWindow
+  const databaseReplayWindowResult = !sourceViewRow && !preferLocal && instrument && payload.replayWindow
     ? await selectDatabaseReplayWindow(
         db,
         payload.instrumentId,
@@ -864,7 +882,7 @@ export async function POST(request: Request) {
     return Response.json({ error: "没有足够的 K 线可创建 Replay 窗口" }, { status: 422 });
   }
   const boundedWindowRequested = Boolean(payload.randomWindow || payload.replayWindow);
-  const candlesResult = sourceViewRow || boundedWindowRequested ? null : await db
+  const candlesResult = sourceViewRow || preferLocal || boundedWindowRequested ? null : await db
     .prepare(`SELECT timestamp, open, high, low, close, volume, turnover, source
       FROM candles WHERE instrument_id = ? AND timeframe = ? AND adjustment_type = ?
       ORDER BY timestamp ASC`)
@@ -970,10 +988,7 @@ export async function POST(request: Request) {
       ...(randomPatternMatch ? { patternMatch: randomPatternMatch } : {}),
     };
   } else {
-    const local = await readLocalDataJson<LocalCandleResponse>(
-      `/candles?instrument=${encodeURIComponent(payload.instrumentId)}&timeframe=${encodeURIComponent(payload.timeframe)}`,
-      15000,
-    );
+    const local = localSource;
     if (local?.instrument && local.candles?.length) {
       instrument = local.instrument;
       const localWindow = payload.randomWindow

@@ -1,6 +1,20 @@
-import { fetchLocalData, readLocalDataJson } from "../../lib/localDataService";
+import {
+  fetchLocalData,
+  readLocalDataJson,
+  REQUIRED_LOCAL_DATA_SERVICE_VERSION,
+} from "../../lib/localDataService";
 
 type LocalTask = Record<string, unknown> | null;
+
+function staleServiceError(version?: number) {
+  const current = Number.isFinite(version) ? `当前 v${version}` : "当前版本未知";
+  return `本机数据服务版本过旧（${current}，需要 v${REQUIRED_LOCAL_DATA_SERVICE_VERSION}）。请关闭当前窗口后重新启动本地控制面板。`;
+}
+
+function isCompatibleService(result: Record<string, unknown>) {
+  const version = Number(result.serviceVersion);
+  return Number.isFinite(version) && version >= REQUIRED_LOCAL_DATA_SERVICE_VERSION;
+}
 
 export async function GET(request: Request) {
   const action = new URL(request.url).searchParams.get("action") ?? "status";
@@ -17,26 +31,41 @@ export async function GET(request: Request) {
       error: "本机数据服务未启动。请关闭当前窗口后重新双击“启动本地网页版.bat”。",
     }, { status: 503 });
   }
+  if (!isCompatibleService(result)) {
+    return Response.json({
+      available: false,
+      task: null,
+      dataset: null,
+      error: staleServiceError(Number(result.serviceVersion)),
+    }, { status: 503 });
+  }
   return Response.json({ available: true, ...result });
 }
 
 export async function POST(request: Request) {
   const payload = (await request.json()) as {
-    action?: "start" | "pause" | "resume" | "catalog-refresh";
+    action?: "start" | "pause" | "resume" | "catalog-refresh" | "adjustment-start";
     plan?: Record<string, unknown>;
   };
   const path = payload.action === "catalog-refresh"
     ? "/catalog/refresh"
+    : payload.action === "adjustment-start"
+      ? "/adjustment/start"
     : payload.action === "pause"
     ? "/tasks/current/pause"
     : payload.action === "resume"
       ? "/tasks/current/resume"
       : "/tasks";
+  const body = payload.action === "start" || !payload.action
+    ? { ...(payload.plan ?? {}) }
+    : payload.action === "resume"
+      ? {}
+      : {};
   try {
     const response = await fetchLocalData(path, {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify(payload.action === "start" || !payload.action ? payload.plan ?? {} : {}),
+      body: JSON.stringify(body),
     }, 10000);
     const result = await response.json() as { task?: LocalTask; error?: string };
     return Response.json(result, { status: response.status });

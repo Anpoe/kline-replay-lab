@@ -12,7 +12,30 @@ export type PatternKind =
   | "failed_breakout"
   | "long_lower_wick"
   | "us_daily_first_pullback"
-  | "fx_5m_hourly_first_pullback";
+  | "fx_5m_hourly_first_pullback"
+  | "custom";
+
+export type PatternConditionKind =
+  | "price_vs_ema"
+  | "ema_relation"
+  | "ema_slope"
+  | "breakout"
+  | "volume_vs_average"
+  | "range_contraction"
+  | "candle_body"
+  | "close_location"
+  | "wick_ratio"
+  | "atr_percent"
+  | "engulfing"
+  | "breakout_retest";
+
+export type PatternConditionValue = number | string;
+
+export type PatternCondition = {
+  id: string;
+  kind: PatternConditionKind;
+  parameters: Record<string, PatternConditionValue>;
+};
 
 export type PatternPreset = {
   id: string;
@@ -21,6 +44,8 @@ export type PatternPreset = {
   description: string;
   builtIn: boolean;
   parameters: Record<string, number>;
+  conditions?: PatternCondition[];
+  enabled?: boolean;
 };
 
 export type PatternParameterDefinition = {
@@ -30,6 +55,31 @@ export type PatternParameterDefinition = {
   max: number;
   step: number;
   suffix?: string;
+};
+
+export type PatternConditionOption = {
+  value: string;
+  label: string;
+};
+
+export type PatternConditionField = {
+  key: string;
+  label: string;
+  type: "number" | "select";
+  defaultValue: PatternConditionValue;
+  min?: number;
+  max?: number;
+  step?: number;
+  suffix?: string;
+  options?: readonly PatternConditionOption[];
+};
+
+export type PatternConditionDefinition = {
+  kind: PatternConditionKind;
+  group: string;
+  label: string;
+  description: string;
+  fields: readonly PatternConditionField[];
 };
 
 export type PatternCandle = {
@@ -159,7 +209,218 @@ export const patternParameterDefinitions: Record<PatternKind, PatternParameterDe
     { key: "minimumSignalBodyPct", label: "信号 K 最小实体", min: 20, max: 90, step: 5, suffix: "%" },
     { key: "minimumCloseLocationPct", label: "信号 K 最低收盘位置", min: 50, max: 95, step: 5, suffix: "%" },
   ],
+  custom: [],
 };
+
+export const patternConditionDefinitions: readonly PatternConditionDefinition[] = [
+  {
+    kind: "price_vs_ema",
+    group: "趋势指标",
+    label: "收盘价与 EMA",
+    description: "判断收盘价位于 EMA 上方或下方。",
+    fields: [
+      { key: "period", label: "EMA", type: "number", defaultValue: 20, min: 3, max: 200, step: 1, suffix: "根" },
+      {
+        key: "relation",
+        label: "关系",
+        type: "select",
+        defaultValue: "above",
+        options: [{ value: "above", label: "高于" }, { value: "below", label: "低于" }],
+      },
+    ],
+  },
+  {
+    kind: "ema_relation",
+    group: "趋势指标",
+    label: "EMA 之间关系",
+    description: "比较两条 EMA 的多空排列。",
+    fields: [
+      { key: "fastPeriod", label: "快线", type: "number", defaultValue: 10, min: 3, max: 200, step: 1, suffix: "根" },
+      { key: "slowPeriod", label: "慢线", type: "number", defaultValue: 20, min: 3, max: 300, step: 1, suffix: "根" },
+      {
+        key: "relation",
+        label: "关系",
+        type: "select",
+        defaultValue: "above",
+        options: [{ value: "above", label: "高于" }, { value: "below", label: "低于" }],
+      },
+    ],
+  },
+  {
+    kind: "ema_slope",
+    group: "趋势指标",
+    label: "EMA 方向",
+    description: "判断 EMA 在指定回看范围内的方向和最小变化。",
+    fields: [
+      { key: "period", label: "EMA", type: "number", defaultValue: 20, min: 3, max: 200, step: 1, suffix: "根" },
+      { key: "lookback", label: "回看", type: "number", defaultValue: 5, min: 1, max: 120, step: 1, suffix: "根" },
+      {
+        key: "direction",
+        label: "方向",
+        type: "select",
+        defaultValue: "rising",
+        options: [{ value: "rising", label: "上升" }, { value: "falling", label: "下降" }],
+      },
+      { key: "minimumPct", label: "最小变化", type: "number", defaultValue: 0, min: 0, max: 50, step: 0.1, suffix: "%" },
+    ],
+  },
+  {
+    kind: "breakout",
+    group: "突破与回踩",
+    label: "区间突破",
+    description: "判断收盘价是否突破前方区间边界。",
+    fields: [
+      { key: "lookback", label: "回看", type: "number", defaultValue: 20, min: 5, max: 120, step: 1, suffix: "根" },
+      {
+        key: "direction",
+        label: "方向",
+        type: "select",
+        defaultValue: "either",
+        options: [{ value: "either", label: "任一方向" }, { value: "up", label: "向上" }, { value: "down", label: "向下" }],
+      },
+      { key: "minimumPct", label: "最小幅度", type: "number", defaultValue: 0.2, min: 0, max: 20, step: 0.1, suffix: "%" },
+    ],
+  },
+  {
+    kind: "breakout_retest",
+    group: "突破与回踩",
+    label: "突破回踩",
+    description: "判断突破后是否回踩关键边界并守住。",
+    fields: [
+      { key: "lookback", label: "基准回看", type: "number", defaultValue: 20, min: 5, max: 120, step: 1, suffix: "根" },
+      { key: "window", label: "回踩窗口", type: "number", defaultValue: 6, min: 1, max: 30, step: 1, suffix: "根" },
+      {
+        key: "direction",
+        label: "方向",
+        type: "select",
+        defaultValue: "up",
+        options: [{ value: "up", label: "向上突破" }, { value: "down", label: "向下突破" }],
+      },
+      { key: "tolerancePct", label: "回踩容差", type: "number", defaultValue: 1.2, min: 0.1, max: 8, step: 0.1, suffix: "%" },
+    ],
+  },
+  {
+    kind: "volume_vs_average",
+    group: "量价与波幅",
+    label: "成交量相对均量",
+    description: "比较当前成交量与此前平均成交量。",
+    fields: [
+      { key: "lookback", label: "均量回看", type: "number", defaultValue: 20, min: 5, max: 120, step: 1, suffix: "根" },
+      {
+        key: "relation",
+        label: "关系",
+        type: "select",
+        defaultValue: "at_least",
+        options: [{ value: "at_least", label: "至少" }, { value: "at_most", label: "至多" }],
+      },
+      { key: "multiplier", label: "倍数", type: "number", defaultValue: 1.5, min: 0, max: 10, step: 0.1, suffix: "倍" },
+    ],
+  },
+  {
+    kind: "range_contraction",
+    group: "量价与波幅",
+    label: "波幅收缩",
+    description: "比较近期平均振幅与此前同长度窗口。",
+    fields: [
+      { key: "lookback", label: "窗口", type: "number", defaultValue: 8, min: 3, max: 60, step: 1, suffix: "根" },
+      { key: "ratio", label: "最大比例", type: "number", defaultValue: 0.65, min: 0.1, max: 1, step: 0.05 },
+    ],
+  },
+  {
+    kind: "atr_percent",
+    group: "量价与波幅",
+    label: "ATR 占价格",
+    description: "限制 ATR 相对当前价格的比例。",
+    fields: [
+      { key: "period", label: "ATR", type: "number", defaultValue: 20, min: 5, max: 100, step: 1, suffix: "根" },
+      {
+        key: "relation",
+        label: "关系",
+        type: "select",
+        defaultValue: "at_most",
+        options: [{ value: "at_most", label: "至多" }, { value: "at_least", label: "至少" }],
+      },
+      { key: "percentage", label: "比例", type: "number", defaultValue: 8, min: 0.1, max: 50, step: 0.5, suffix: "%" },
+    ],
+  },
+  {
+    kind: "candle_body",
+    group: "K 线形态",
+    label: "K 线实体",
+    description: "限制当前 K 线方向和实体占整根振幅的比例。",
+    fields: [
+      {
+        key: "direction",
+        label: "方向",
+        type: "select",
+        defaultValue: "bullish",
+        options: [{ value: "bullish", label: "阳线" }, { value: "bearish", label: "阴线" }, { value: "any", label: "任意" }],
+      },
+      { key: "minimumPct", label: "最小实体", type: "number", defaultValue: 45, min: 0, max: 100, step: 5, suffix: "%" },
+    ],
+  },
+  {
+    kind: "close_location",
+    group: "K 线形态",
+    label: "收盘位置",
+    description: "判断收盘价位于当前 K 线振幅的上方或下方。",
+    fields: [
+      {
+        key: "direction",
+        label: "位置",
+        type: "select",
+        defaultValue: "upper",
+        options: [{ value: "upper", label: "上方" }, { value: "lower", label: "下方" }],
+      },
+      { key: "minimumPct", label: "最低位置", type: "number", defaultValue: 60, min: 5, max: 95, step: 5, suffix: "%" },
+    ],
+  },
+  {
+    kind: "wick_ratio",
+    group: "K 线形态",
+    label: "影线与实体",
+    description: "比较上影线或下影线与实体的长度。",
+    fields: [
+      {
+        key: "side",
+        label: "影线",
+        type: "select",
+        defaultValue: "lower",
+        options: [{ value: "lower", label: "下影线" }, { value: "upper", label: "上影线" }],
+      },
+      { key: "minimumRatio", label: "最低倍数", type: "number", defaultValue: 2.5, min: 1, max: 15, step: 0.25, suffix: "倍" },
+    ],
+  },
+  {
+    kind: "engulfing",
+    group: "K 线形态",
+    label: "吞没形态",
+    description: "判断当前 K 线是否完整吞没上一根 K 线实体。",
+    fields: [
+      {
+        key: "direction",
+        label: "方向",
+        type: "select",
+        defaultValue: "bullish",
+        options: [{ value: "bullish", label: "看涨吞没" }, { value: "bearish", label: "看跌吞没" }],
+      },
+      { key: "minimumBodyPct", label: "最小实体", type: "number", defaultValue: 45, min: 0, max: 100, step: 5, suffix: "%" },
+    ],
+  },
+];
+
+const patternConditionDefinitionMap = new Map(
+  patternConditionDefinitions.map((definition) => [definition.kind, definition]),
+);
+
+export function createDefaultPatternCondition(kind: PatternConditionKind, id = "condition-1"): PatternCondition {
+  const definition = patternConditionDefinitionMap.get(kind) ?? patternConditionDefinitions[0];
+  return {
+    id,
+    kind: definition.kind,
+    parameters: Object.fromEntries(definition.fields.map((field) => [field.key, field.defaultValue])),
+  };
+}
 
 export const defaultPatternPresets: PatternPreset[] = [
   { id: "breakout", kind: "breakout", name: "区间突破", description: "收盘有效越过此前区间高点或低点，可附加成交量确认。", builtIn: true, parameters: { lookback: 20, minimumBreakoutPct: 0.2, volumeMultiplier: 0 } },
@@ -178,8 +439,38 @@ export const defaultPatternPresets: PatternPreset[] = [
   { id: "fx-5m-hourly-first-pullback", kind: "fx_5m_hourly_first_pullback", name: "外汇 5 分钟｜1 小时顺势首次回调", description: "只使用已完成的 1 小时 K 线确认多头控制，再筛选 5 分钟强突破后的第一次回踩。", builtIn: true, parameters: { higherTimeframeMinutes: 60, higherEmaPeriod: 20, higherSlopeBars: 1, higherControlWindow: 4, higherMinimumTrendCloses: 3, emaPeriod: 20, pivotStrength: 1, followThroughBars: 1, emaSlopeBars: 1, stateLookback: 160, recentBreakoutBars: 30, controlWindow: 8, minimumTrendCloses: 5, maximumEmaCrosses: 3, breakoutLookback: 20, breakoutWindow: 18, minimumBreakoutPct: 0, atrPeriod: 20, retestToleranceAtr: 1, maximumExtensionAtr: 5, minimumSignalBodyPct: 30, minimumCloseLocationPct: 60 } },
 ];
 
+function patternConditionHistory(condition: PatternCondition) {
+  const p = condition.parameters;
+  switch (condition.kind) {
+    case "price_vs_ema":
+    case "atr_percent":
+      return Math.round(finite(p.period, 20) * 4);
+    case "ema_relation":
+      return Math.round(Math.max(finite(p.fastPeriod, 10), finite(p.slowPeriod, 20)) * 4);
+    case "ema_slope":
+      return Math.round(finite(p.period, 20) * 4 + finite(p.lookback, 5));
+    case "breakout":
+    case "volume_vs_average":
+      return Math.round(finite(p.lookback, 20));
+    case "breakout_retest":
+      return Math.round(finite(p.lookback, 20) + finite(p.window, 6));
+    case "range_contraction":
+      return Math.round(finite(p.lookback, 8) * 2);
+    case "candle_body":
+    case "close_location":
+    case "wick_ratio":
+    case "engulfing":
+      return 1;
+    default:
+      return 0;
+  }
+}
+
 export function requiredPatternHistory(presets: PatternPreset[]) {
   return Math.min(1_000, Math.max(0, ...presets.map((preset) => {
+    if (preset.kind === "custom") {
+      return Math.max(0, ...(preset.conditions ?? []).map(patternConditionHistory));
+    }
     const p = preset.parameters;
     if (preset.kind === "uptrend" || preset.kind === "uptrend_breakout") {
       return Math.max(
@@ -253,13 +544,75 @@ function normalizePresetText(value: unknown, fallback: string, maxLength: number
   return text;
 }
 
+function normalizeConditionFieldValue(field: PatternConditionField, value: unknown) {
+  if (field.type === "number") {
+    const fallback = Number(field.defaultValue);
+    const parsed = finite(value, fallback);
+    const minimum = field.min ?? Number.NEGATIVE_INFINITY;
+    const maximum = field.max ?? Number.POSITIVE_INFINITY;
+    return Math.max(minimum, Math.min(maximum, parsed));
+  }
+  const candidate = String(value ?? field.defaultValue);
+  return field.options?.some((option) => option.value === candidate)
+    ? candidate
+    : String(field.defaultValue);
+}
+
+export function normalizePatternConditions(value: unknown): PatternCondition[] {
+  if (!Array.isArray(value)) return [];
+  const usedIds = new Set<string>();
+  return value.flatMap((candidate, index): PatternCondition[] => {
+    if (!candidate || typeof candidate !== "object" || Array.isArray(candidate)) return [];
+    const item = candidate as Partial<PatternCondition>;
+    const definition = patternConditionDefinitionMap.get(String(item.kind) as PatternConditionKind);
+    if (!definition) return [];
+    const rawParameters = item.parameters && typeof item.parameters === "object" && !Array.isArray(item.parameters)
+      ? item.parameters as Record<string, unknown>
+      : {};
+    const baseId = typeof item.id === "string" && item.id.trim() ? item.id.trim().slice(0, 80) : `condition-${index + 1}`;
+    let id = baseId;
+    let suffix = 2;
+    while (usedIds.has(id)) id = `${baseId}-${suffix++}`;
+    usedIds.add(id);
+    return [{
+      id,
+      kind: definition.kind,
+      parameters: Object.fromEntries(definition.fields.map((field) => [
+        field.key,
+        normalizeConditionFieldValue(field, rawParameters[field.key]),
+      ])),
+    }];
+  }).slice(0, 12);
+}
+
+export function isPatternPresetAvailable(preset: PatternPreset | null | undefined) {
+  return Boolean(preset && preset.enabled !== false);
+}
+
+export function visiblePatternPresets(presets: readonly PatternPreset[]) {
+  return presets.filter((preset) => isPatternPresetAvailable(preset));
+}
+
 export function normalizePatternPresets(value: unknown): PatternPreset[] {
   if (!Array.isArray(value)) return defaultPatternPresets.map((preset) => ({ ...preset, parameters: { ...preset.parameters } }));
   const defaultsById = new Map(defaultPatternPresets.map((preset) => [preset.id, preset]));
   const normalized = value.flatMap((candidate): PatternPreset[] => {
     if (!candidate || typeof candidate !== "object") return [];
     const item = candidate as Partial<PatternPreset>;
-    if (!item.id || !item.kind || !(item.kind in patternParameterDefinitions)) return [];
+    if (!item.id || !item.kind) return [];
+    if (item.kind === "custom") {
+      return [{
+        id: String(item.id),
+        kind: "custom",
+        name: normalizePresetText(item.name, "自定义形态", 30),
+        description: normalizePresetText(item.description, "由多个筛选条件组合而成。", 160),
+        builtIn: false,
+        parameters: {},
+        conditions: normalizePatternConditions(item.conditions),
+        ...(item.enabled === false ? { enabled: false } : {}),
+      }];
+    }
+    if (!(item.kind in patternParameterDefinitions)) return [];
     const fallback = defaultsById.get(item.id) ?? defaultPatternPresets.find((preset) => preset.kind === item.kind);
     if (!fallback) return [];
     const parameters = Object.fromEntries(patternParameterDefinitions[item.kind].map((definition) => {
@@ -275,6 +628,7 @@ export function normalizePatternPresets(value: unknown): PatternPreset[] {
       description: builtIn ? fallback.description : normalizePresetText(item.description, fallback.description, 160),
       builtIn,
       parameters,
+      ...(item.enabled === false ? { enabled: false } : {}),
     }];
   });
   const found = new Set(normalized.map((preset) => preset.id));
@@ -712,10 +1066,167 @@ function matchesFxFiveMinuteFirstPullback(candles: PatternCandle[], index: numbe
   ));
 }
 
-export function matchesPattern(candles: PatternCandle[], index: number, preset: PatternPreset) {
+function conditionNumber(condition: PatternCondition, key: string, fallback: number) {
+  return finite(condition.parameters[key], fallback);
+}
+
+function conditionRelation(condition: PatternCondition, key: string, fallback: string) {
+  return String(condition.parameters[key] ?? fallback);
+}
+
+function averageVolumeAt(candles: PatternCandle[], index: number, lookback: number) {
+  return average(candles
+    .slice(Math.max(0, index - lookback), index)
+    .map((bar) => finite(bar.volume, 0))
+    .filter((value) => value > 0));
+}
+
+function matchesPatternCondition(candles: PatternCandle[], index: number, condition: PatternCondition) {
   const current = candles[index];
   if (!current) return false;
+  const p = condition.parameters;
+  switch (condition.kind) {
+    case "price_vs_ema": {
+      const period = patternInteger(p.period, 20, 3, 200);
+      const ema = emaAt(candles, index, period);
+      return conditionRelation(condition, "relation", "above") === "below"
+        ? current.close < ema
+        : current.close > ema;
+    }
+    case "ema_relation": {
+      const fastPeriod = patternInteger(p.fastPeriod, 10, 3, 200);
+      const slowPeriod = patternInteger(p.slowPeriod, 20, 3, 300);
+      const fast = emaAt(candles, index, fastPeriod);
+      const slow = emaAt(candles, index, slowPeriod);
+      return conditionRelation(condition, "relation", "above") === "below" ? fast < slow : fast > slow;
+    }
+    case "ema_slope": {
+      const period = patternInteger(p.period, 20, 3, 200);
+      const lookback = patternInteger(p.lookback, 5, 1, 120);
+      if (index < lookback) return false;
+      const currentEma = emaAt(candles, index, period);
+      const priorEma = emaAt(candles, index - lookback, period);
+      const minimum = conditionNumber(condition, "minimumPct", 0) / 100;
+      return conditionRelation(condition, "direction", "rising") === "falling"
+        ? currentEma <= priorEma * (1 - minimum)
+        : currentEma >= priorEma * (1 + minimum);
+    }
+    case "breakout": {
+      const lookback = patternInteger(p.lookback, 20, 5, 120);
+      if (index < lookback) return false;
+      const boundary = priorExtremes(candles, index, lookback);
+      const margin = conditionNumber(condition, "minimumPct", 0.2) / 100;
+      const direction = conditionRelation(condition, "direction", "either");
+      const brokeUp = current.close > boundary.high * (1 + margin);
+      const brokeDown = current.close < boundary.low * (1 - margin);
+      return direction === "up" ? brokeUp : direction === "down" ? brokeDown : brokeUp || brokeDown;
+    }
+    case "volume_vs_average": {
+      const lookback = patternInteger(p.lookback, 20, 5, 120);
+      const currentVolume = finite(current.volume, 0);
+      const averageVolume = averageVolumeAt(candles, index, lookback);
+      if (currentVolume <= 0 || averageVolume <= 0) return false;
+      const threshold = averageVolume * Math.max(0, conditionNumber(condition, "multiplier", 1));
+      return conditionRelation(condition, "relation", "at_least") === "at_most"
+        ? currentVolume <= threshold
+        : currentVolume >= threshold;
+    }
+    case "range_contraction": {
+      const lookback = patternInteger(p.lookback, 8, 3, 60);
+      if (index < lookback * 2 - 1) return false;
+      const ranges = candles.map((bar) => Math.max(0, bar.high - bar.low));
+      const recent = average(ranges.slice(index - lookback + 1, index + 1));
+      const previous = average(ranges.slice(index - lookback * 2 + 1, index - lookback + 1));
+      return previous > 0 && recent / previous <= conditionNumber(condition, "ratio", 0.65);
+    }
+    case "candle_body": {
+      const bodyRatio = Math.abs(current.close - current.open)
+        / Math.max(current.high - current.low, Number.EPSILON) * 100;
+      const direction = conditionRelation(condition, "direction", "bullish");
+      const directionMatches = direction === "any"
+        || (direction === "bullish" && current.close > current.open)
+        || (direction === "bearish" && current.close < current.open);
+      return directionMatches && bodyRatio >= conditionNumber(condition, "minimumPct", 45);
+    }
+    case "close_location": {
+      const location = (current.close - current.low)
+        / Math.max(current.high - current.low, Number.EPSILON) * 100;
+      const minimum = conditionNumber(condition, "minimumPct", 60);
+      return conditionRelation(condition, "direction", "upper") === "lower"
+        ? location <= 100 - minimum
+        : location >= minimum;
+    }
+    case "wick_ratio": {
+      const body = Math.max(Math.abs(current.close - current.open), (current.high - current.low) * 0.03);
+      const side = conditionRelation(condition, "side", "lower");
+      const wick = side === "upper"
+        ? current.high - Math.max(current.open, current.close)
+        : Math.min(current.open, current.close) - current.low;
+      return wick / body >= conditionNumber(condition, "minimumRatio", 2.5);
+    }
+    case "atr_percent": {
+      const period = patternInteger(p.period, 20, 5, 100);
+      const atr = averageTrueRangeAt(candles, index, period);
+      if (!Number.isFinite(atr) || current.close <= 0) return false;
+      const percentage = atr / current.close * 100;
+      const threshold = conditionNumber(condition, "percentage", 8);
+      return conditionRelation(condition, "relation", "at_most") === "at_least"
+        ? percentage >= threshold
+        : percentage <= threshold;
+    }
+    case "engulfing": {
+      const previous = candles[index - 1];
+      if (!previous) return false;
+      const bodyRatio = Math.abs(current.close - current.open)
+        / Math.max(current.high - current.low, Number.EPSILON) * 100;
+      if (bodyRatio < conditionNumber(condition, "minimumBodyPct", 45)) return false;
+      return conditionRelation(condition, "direction", "bullish") === "bearish"
+        ? previous.close > previous.open
+          && current.close < current.open
+          && current.open >= previous.close
+          && current.close <= previous.open
+        : previous.close < previous.open
+          && current.close > current.open
+          && current.open <= previous.close
+          && current.close >= previous.open;
+    }
+    case "breakout_retest": {
+      const lookback = patternInteger(p.lookback, 20, 5, 120);
+      const window = patternInteger(p.window, 6, 1, 30);
+      if (index < lookback + 1) return false;
+      const tolerance = conditionNumber(condition, "tolerancePct", 1.2) / 100;
+      const direction = conditionRelation(condition, "direction", "up");
+      for (let breakoutIndex = Math.max(lookback, index - window); breakoutIndex < index; breakoutIndex += 1) {
+        const boundary = priorExtremes(candles, breakoutIndex, lookback);
+        if (direction === "down") {
+          if (!Number.isFinite(boundary.low) || candles[breakoutIndex].close >= boundary.low) continue;
+          if (current.high >= boundary.low * (1 - tolerance)
+            && current.high <= boundary.low * (1 + tolerance)
+            && current.close <= boundary.low) return true;
+        } else {
+          if (!Number.isFinite(boundary.high) || candles[breakoutIndex].close <= boundary.high) continue;
+          if (current.low <= boundary.high * (1 + tolerance)
+            && current.low >= boundary.high * (1 - tolerance)
+            && current.close >= boundary.high) return true;
+        }
+      }
+      return false;
+    }
+    default:
+      return false;
+  }
+}
+
+function matchesCustomPattern(candles: PatternCandle[], index: number, preset: PatternPreset) {
+  const conditions = preset.conditions ?? [];
+  return conditions.length > 0 && conditions.every((condition) => matchesPatternCondition(candles, index, condition));
+}
+
+export function matchesPattern(candles: PatternCandle[], index: number, preset: PatternPreset) {
+  const current = candles[index];
+  if (!current || !isPatternPresetAvailable(preset)) return false;
   const p = preset.parameters;
+  if (preset.kind === "custom") return matchesCustomPattern(candles, index, preset);
   if (preset.kind === "breakout") {
     const lookback = Math.round(p.lookback);
     if (index < lookback) return false;

@@ -15,6 +15,7 @@ const results = [
 ];
 
 test("实时筛选数量限制在既有 UI 范围内", () => {
+  assert.equal(normalizeLiveScanLimit(0), 0);
   assert.equal(normalizeLiveScanLimit(1), 50);
   assert.equal(normalizeLiveScanLimit(101.6), 102);
   assert.equal(normalizeLiveScanLimit(999), 500);
@@ -72,6 +73,23 @@ test("A 股扫描请求可携带排除涨停条件，美股不发送该条件", 
     limit: 100,
   });
   assert.equal("excludeLimitUp" in usRequest.filters, false);
+});
+
+test("扫描请求支持当日涨幅区间和无限制输出", () => {
+  const request = buildLiveScanRequest({
+    market: "CN",
+    presetIds: [],
+    presets: [],
+    minPrice: "",
+    maxPrice: "",
+    minVolume: "",
+    minChangePct: "-2.5",
+    maxChangePct: "8",
+    sort: "change",
+    limit: 0,
+  });
+  assert.deepEqual(request.filters, { minChangePct: -2.5, maxChangePct: 8 });
+  assert.equal(request.limit, 0);
 });
 
 test("实时扫描错误统一为用户可见文本", () => {

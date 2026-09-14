@@ -29,6 +29,7 @@ import {
   Redo2,
   RotateCcw,
   Save,
+  Search,
   Settings2,
   Shuffle,
   Square,
@@ -50,6 +51,7 @@ import {
   type DecisionMarker,
   type DrawingRequest,
   type PersistedDrawing,
+  type PriceSelectionMode,
   type ProtectionLine,
   type ProtectionPriceKind,
   type TradeMarker,
@@ -83,6 +85,11 @@ import { PersonalSopRecommendations } from "../features/sop/components/PersonalS
 import { evaluateDisciplineGate } from "../features/sop/sopController";
 import { DataSourceManager } from "../features/market-data/components/DataSourceManager";
 import { createMarketDataGateway } from "../features/market-data/marketDataGateway";
+import {
+  adjustmentLabel,
+  defaultAdjustmentTypeForInstrument,
+  defaultAdjustmentTypeForMarket,
+} from "../lib/marketAdjustments";
 import {
   buildReviewSessionSummariesInBatches,
   filterReviewSessions,
@@ -186,11 +193,17 @@ import {
   type PersonalSopRecommendation,
 } from "../lib/performanceSop";
 import {
+  createDefaultPatternCondition,
   defaultPatternPresets,
   findPatternMatches,
+  isPatternPresetAvailable,
   normalizePatternPresets,
+  patternConditionDefinitions,
   patternParameterDefinitions,
+  visiblePatternPresets,
   type PatternCandle,
+  type PatternCondition,
+  type PatternConditionKind,
   type PatternMatch,
   type PatternPreset,
 } from "../lib/patternFilters";
@@ -855,6 +868,8 @@ type SyncedPreferences = {
     minPrice: string;
     maxPrice: string;
     minVolume: string;
+    minChangePct: string;
+    maxChangePct: string;
     excludeLimitUp?: boolean;
     sort: LiveScanSort;
     limit: number;
@@ -1647,6 +1662,16 @@ const ignoreCandleContextMenu = () => undefined;
 const ignoreDrawingsChange = () => undefined;
 const ignoreDrawingSelect = () => undefined;
 
+function clonePatternPresetValue(preset: PatternPreset): PatternPreset {
+  return {
+    ...preset,
+    parameters: { ...preset.parameters },
+    ...(preset.conditions
+      ? { conditions: preset.conditions.map((condition) => ({ ...condition, parameters: { ...condition.parameters } })) }
+      : {}),
+  };
+}
+
 export function TrainingWorkbench() {
   const settingsGateway = useMemo(
     () => createSettingsStorageGateway(
@@ -1711,7 +1736,7 @@ export function TrainingWorkbench() {
   const [orderTriggerPrice, setOrderTriggerPrice] = useState("");
   const [orderStopLoss, setOrderStopLoss] = useState("");
   const [orderTakeProfit, setOrderTakeProfit] = useState("");
-  const [protectionPriceSelection, setProtectionPriceSelection] = useState<ProtectionPriceKind | null>(null);
+  const [protectionPriceSelection, setProtectionPriceSelection] = useState<PriceSelectionMode | null>(null);
   const [orderPanelTab, setOrderPanelTab] = useState<"positions" | "pending" | "history">("positions");
   const [hoveredClosedPositionId, setHoveredClosedPositionId] = useState<string | null>(null);
   const [mobileOrdersExpanded, setMobileOrdersExpanded] = useState(false);
@@ -1765,6 +1790,8 @@ export function TrainingWorkbench() {
   const [liveScanMinPrice, setLiveScanMinPrice] = useState("");
   const [liveScanMaxPrice, setLiveScanMaxPrice] = useState("");
   const [liveScanMinVolume, setLiveScanMinVolume] = useState("");
+  const [liveScanMinChangePct, setLiveScanMinChangePct] = useState("");
+  const [liveScanMaxChangePct, setLiveScanMaxChangePct] = useState("");
   const [liveScanExcludeLimitUp, setLiveScanExcludeLimitUp] = useState(false);
   const [liveScanSort, setLiveScanSort] = useState<LiveScanSort>("turnover");
   const [liveScanLimit, setLiveScanLimit] = useState(100);
@@ -1793,6 +1820,10 @@ export function TrainingWorkbench() {
   const [trashPreview, setTrashPreview] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
   const [showPatternFilters, setShowPatternFilters] = useState(false);
+  const [patternConditionPickerOpen, setPatternConditionPickerOpen] = useState(false);
+  const [patternConditionSearch, setPatternConditionSearch] = useState("");
+  const [patternConditionGroup, setPatternConditionGroup] = useState("全部");
+  const [patternEditorError, setPatternEditorError] = useState("");
   const [settingsTab, setSettingsTab] = useState<SettingsTab>("basic");
   const [appSettings, setAppSettings] = useState<AppSettings>(defaultAppSettings);
   const [settingsDraft, setSettingsDraft] = useState<AppSettings>(defaultAppSettings);
@@ -2020,6 +2051,21 @@ export function TrainingWorkbench() {
   ]);
   const selectedPatternPresetDraft = patternPresetDrafts.find((preset) => preset.id === selectedPatternPresetId)
     ?? patternPresetDrafts[0];
+  const availablePatternPresets = useMemo(
+    () => visiblePatternPresets(patternPresets),
+    [patternPresets],
+  );
+  const availablePatternPresetDrafts = useMemo(
+    () => visiblePatternPresets(patternPresetDrafts),
+    [patternPresetDrafts],
+  );
+  const filteredPatternConditionDefinitions = useMemo(() => {
+    const search = patternConditionSearch.trim().toLowerCase();
+    return patternConditionDefinitions.filter((definition) => (
+      (patternConditionGroup === "全部" || definition.group === patternConditionGroup)
+      && (!search || `${definition.label}${definition.description}`.toLowerCase().includes(search))
+    ));
+  }, [patternConditionGroup, patternConditionSearch]);
   const hideTaskInstrument = trainingTask?.status === "active" && trainingTask.hideInstrument;
   const hideTaskDate = trainingTask?.status === "active" && trainingTask.hideDate;
   const hideTaskPrice = trainingTask?.status === "active" && trainingTask.hidePrice;
@@ -2584,6 +2630,8 @@ export function TrainingWorkbench() {
       minPrice: liveScanMinPrice,
       maxPrice: liveScanMaxPrice,
       minVolume: liveScanMinVolume,
+      minChangePct: liveScanMinChangePct,
+      maxChangePct: liveScanMaxChangePct,
       excludeLimitUp: liveScanExcludeLimitUp,
       sort: liveScanSort,
       limit: liveScanLimit,
@@ -2604,6 +2652,8 @@ export function TrainingWorkbench() {
     liveScanMaxPrice,
     liveScanMinPrice,
     liveScanMinVolume,
+    liveScanMinChangePct,
+    liveScanMaxChangePct,
     liveScanExcludeLimitUp,
     liveScanPresetIds,
     liveScanResume,
@@ -2619,6 +2669,10 @@ export function TrainingWorkbench() {
   const applySyncedPreferences = useCallback((value: unknown) => {
     if (!value || typeof value !== "object" || Array.isArray(value)) return;
     const stored = value as Partial<SyncedPreferences>;
+    const syncedPatternPresets = Array.isArray(stored.patternPresets)
+      ? normalizePatternPresets(stored.patternPresets)
+      : patternPresets;
+    const syncedAvailablePatternPresets = visiblePatternPresets(syncedPatternPresets);
     if (stored.appSettings && typeof stored.appSettings === "object") {
       const nextSettings = normalizeSettings(stored.appSettings);
       appSettingsRef.current = nextSettings;
@@ -2630,22 +2684,23 @@ export function TrainingWorkbench() {
       settingsGateway.saveAppSettings(nextSettings);
     }
     if (Array.isArray(stored.patternPresets)) {
-      const nextPresets = normalizePatternPresets(stored.patternPresets);
+      const nextPresets = syncedPatternPresets;
+      const availablePatternPresets = syncedAvailablePatternPresets;
       setPatternPresets(nextPresets);
-      setPatternPresetDrafts(nextPresets);
+      setPatternPresetDrafts(nextPresets.map(clonePatternPresetValue));
       setSelectedPatternPresetId((selected) => (
-        nextPresets.some((preset) => preset.id === selected) ? selected : nextPresets[0]?.id ?? ""
+        availablePatternPresets.some((preset) => preset.id === selected) ? selected : availablePatternPresets[0]?.id ?? ""
       ));
       settingsGateway.savePatternPresets(nextPresets);
       const quickPattern = typeof stored.quickRandomPatternPresetId === "string"
-        && nextPresets.some((preset) => preset.id === stored.quickRandomPatternPresetId)
+        && availablePatternPresets.some((preset) => preset.id === stored.quickRandomPatternPresetId)
         ? stored.quickRandomPatternPresetId
         : "";
       setQuickRandomPatternPresetId(quickPattern);
       settingsGateway.saveQuickRandomPattern(quickPattern);
       if (Array.isArray(stored.randomTrainingPatternPresetIds)) {
         const randomPatternIds = stored.randomTrainingPatternPresetIds.filter((id): id is string => (
-          typeof id === "string" && nextPresets.some((preset) => preset.id === id)
+          typeof id === "string" && availablePatternPresets.some((preset) => preset.id === id)
         ));
         setRandomTrainingPatternPresetIds(randomPatternIds);
         settingsGateway.saveRandomTrainingPatternPresets(randomPatternIds);
@@ -2688,10 +2743,14 @@ export function TrainingWorkbench() {
     if (stored.liveScanSettings && typeof stored.liveScanSettings === "object") {
       const settings = stored.liveScanSettings;
       if (settings.market === "CN" || settings.market === "US") setLiveScanMarket(settings.market);
-      if (Array.isArray(settings.presetIds)) setLiveScanPresetIds(settings.presetIds.filter((id): id is string => typeof id === "string"));
+      if (Array.isArray(settings.presetIds)) setLiveScanPresetIds(settings.presetIds.filter((id): id is string => (
+        typeof id === "string" && syncedAvailablePatternPresets.some((preset) => preset.id === id)
+      )));
       if (typeof settings.minPrice === "string") setLiveScanMinPrice(settings.minPrice);
       if (typeof settings.maxPrice === "string") setLiveScanMaxPrice(settings.maxPrice);
       if (typeof settings.minVolume === "string") setLiveScanMinVolume(settings.minVolume);
+      if (typeof settings.minChangePct === "string") setLiveScanMinChangePct(settings.minChangePct);
+      if (typeof settings.maxChangePct === "string") setLiveScanMaxChangePct(settings.maxChangePct);
       if (typeof settings.excludeLimitUp === "boolean") setLiveScanExcludeLimitUp(settings.excludeLimitUp);
       if (settings.sort === "turnover" || settings.sort === "volume" || settings.sort === "change") setLiveScanSort(settings.sort);
       if (Number.isFinite(settings.limit)) setLiveScanLimit(normalizeLiveScanLimit(settings.limit));
@@ -2727,7 +2786,7 @@ export function TrainingWorkbench() {
           : {}),
       });
     }
-  }, [instrument.id, instrument.market, marketRules, settingsGateway]);
+  }, [instrument.id, instrument.market, marketRules, patternPresets, settingsGateway]);
 
   useEffect(() => {
     const timer = window.setTimeout(() => {
@@ -2749,8 +2808,8 @@ export function TrainingWorkbench() {
     const timer = window.setTimeout(() => {
       const stored = settingsGateway.loadPatternPreferences();
       setPatternPresets(stored.patternPresets);
-      setPatternPresetDrafts(stored.patternPresets);
-      setSelectedPatternPresetId(stored.patternPresets[0]?.id ?? "");
+      setPatternPresetDrafts(stored.patternPresets.map(clonePatternPresetValue));
+      setSelectedPatternPresetId(visiblePatternPresets(stored.patternPresets)[0]?.id ?? "");
       setQuickRandomPatternPresetId(stored.quickRandomPatternPresetId);
       setRandomTrainingPatternPresetIds(stored.randomTrainingPatternPresetIds);
       setQuickRandomMode(stored.quickRandomMode);
@@ -3165,7 +3224,7 @@ export function TrainingWorkbench() {
         data = await marketDataGateway.createSnapshot<typeof data>({
             instrumentId: requestInstrumentId,
             timeframe: requestTimeframe,
-            adjustmentType: "none",
+            adjustmentType: defaultAdjustmentTypeForInstrument(requestInstrumentId),
             replayWindow: newTaskRequest ? {
               mode: newTaskRequest.draft.mode,
               startMode: newTaskRequest.draft.startMode,
@@ -3521,7 +3580,7 @@ export function TrainingWorkbench() {
       }>({
         instrumentId,
         timeframe: nextTimeframe,
-        adjustmentType: "none",
+        adjustmentType: defaultAdjustmentTypeForInstrument(instrumentId, instrument.market),
         timeframeView: {
           sourceSnapshotId: dataSnapshotId,
           sourceTimeframe: timeframe,
@@ -3545,6 +3604,7 @@ export function TrainingWorkbench() {
     bars,
     chartTimeframe,
     dataSnapshotId,
+    instrument.market,
     instrumentId,
     marketDataGateway,
     timeframe,
@@ -4213,24 +4273,30 @@ export function TrainingWorkbench() {
     return submission.id;
   };
 
-  const applyDraftProtectionPrice = (kind: ProtectionPriceKind, rawPrice: number) => {
+  const applyDraftProtectionPrice = (kind: PriceSelectionMode, rawPrice: number) => {
     if (!Number.isFinite(rawPrice) || rawPrice <= 0) return false;
     const value = protectionPriceText(rawPrice);
     if (kind === "stop-loss") {
       setOrderStopLoss(value);
       setDecision((current) => ({ ...current, stop: value }));
-    } else {
+    } else if (kind === "take-profit") {
       setOrderTakeProfit(value);
       setDecision((current) => ({ ...current, target: value }));
+    } else {
+      setOrderTriggerPrice(value);
     }
     setProtectionPriceSelection(null);
     setRuleNotice("");
-    ensureProtectiveDecisionCard(
-      kind === "stop-loss" ? Number(value) : undefined,
-      kind === "take-profit" ? Number(value) : undefined,
-      "protective_level_selected_on_chart",
-    );
-    appendEvent("protective_level_selected", { kind, price: Number(value), source: "chart" });
+    if (kind === "stop-loss" || kind === "take-profit") {
+      ensureProtectiveDecisionCard(
+        kind === "stop-loss" ? Number(value) : undefined,
+        kind === "take-profit" ? Number(value) : undefined,
+        "protective_level_selected_on_chart",
+      );
+      appendEvent("protective_level_selected", { kind, price: Number(value), source: "chart" });
+    } else {
+      appendEvent("entry_trigger_selected", { price: Number(value), source: "chart" });
+    }
     return true;
   };
 
@@ -5039,10 +5105,12 @@ export function TrainingWorkbench() {
       const request = buildLiveScanRequest({
         market: liveScanMarket,
         presetIds: liveScanPresetIds,
-        presets: patternPresets,
+        presets: visiblePatternPresets(patternPresets),
         minPrice: liveScanMinPrice,
         maxPrice: liveScanMaxPrice,
         minVolume: liveScanMinVolume,
+        minChangePct: liveScanMinChangePct,
+        maxChangePct: liveScanMaxChangePct,
         excludeLimitUp: liveScanExcludeLimitUp,
         sort: liveScanSort,
         limit: liveScanLimit,
@@ -5940,10 +6008,10 @@ export function TrainingWorkbench() {
     const selected = coverage.filter((item) => selectedCoverageKeys.includes(coverageKey(item)));
     if (!selected.length) return;
     const localCount = new Set(
-      selected.filter((item) => item.source === "tdx-official").map((item) => item.id),
+      selected.filter((item) => item.source.startsWith("baostock") || item.source.startsWith("tdx-official") || item.source.startsWith("local-zip")).map((item) => item.id),
     ).size;
     const explanation = localCount
-      ? `\n\n其中包含 ${localCount} 个 TDX 品种。TDX 周线由日线生成，删除任一周期会同时删除该品种的日线和周线。`
+      ? `\n\n其中包含 ${localCount} 个本机 A 股品种。本机周线/月线由日线生成，删除任一周期会同时删除该品种的日线和聚合周期。`
       : "";
     if (!window.confirm(`确定删除选中的 ${selected.length} 条数据记录？训练快照会保留，但当前行情库数据将被删除。${explanation}`)) return;
     setCoverageLoading(true);
@@ -5958,7 +6026,7 @@ export function TrainingWorkbench() {
         adjustmentType: item.adjustmentType,
         source: item.source,
       })));
-      setImportStatus(`删除完成：数据库 K 线 ${Number(result.deletedRows ?? 0).toLocaleString()} 根，TDX 品种 ${Number(result.deletedLocalInstruments ?? 0).toLocaleString()} 个。训练快照未受影响。`);
+      setImportStatus(`删除完成：数据库 K 线 ${Number(result.deletedRows ?? 0).toLocaleString()} 根，本机 A 股品种 ${Number(result.deletedLocalInstruments ?? 0).toLocaleString()} 个。训练快照未受影响。`);
       setSelectedCoverageKeys([]);
       await Promise.all([loadCoverage(), loadInstrumentCatalog()]);
     } catch (error) {
@@ -6720,48 +6788,131 @@ export function TrainingWorkbench() {
   };
 
   const openPatternFiltersPanel = () => {
-    setPatternPresetDrafts(patternPresets.map((preset) => ({ ...preset, parameters: { ...preset.parameters } })));
-    setSelectedPatternPresetId((selected) => patternPresets.some((preset) => preset.id === selected) ? selected : patternPresets[0]?.id ?? "");
+    const drafts = patternPresets.map(clonePatternPresetValue);
+    const available = visiblePatternPresets(drafts);
+    setPatternPresetDrafts(drafts);
+    setSelectedPatternPresetId((selected) => available.some((preset) => preset.id === selected) ? selected : available[0]?.id ?? "");
+    setPatternConditionPickerOpen(false);
+    setPatternConditionSearch("");
+    setPatternConditionGroup("全部");
+    setPatternEditorError("");
     setShowPatternFilters(true);
   };
 
   const savePatternFilters = () => {
+    const invalidPreset = patternPresetDrafts.find((preset) => (
+      isPatternPresetAvailable(preset) && preset.kind === "custom" && !(preset.conditions?.length)
+    ));
+    if (invalidPreset) {
+      setSelectedPatternPresetId(invalidPreset.id);
+      setPatternEditorError("自定义形态至少需要添加一条筛选条件。请先添加条件，或删除这个空预设。");
+      return;
+    }
     const nextPresets = normalizePatternPresets(patternPresetDrafts);
+    const available = visiblePatternPresets(nextPresets);
     settingsGateway.savePatternPresets(nextPresets);
     setPatternPresets(nextPresets);
-    setPatternPresetDrafts(nextPresets);
-    if (quickRandomPatternPresetId && !nextPresets.some((preset) => preset.id === quickRandomPatternPresetId)) {
+    setPatternPresetDrafts(nextPresets.map(clonePatternPresetValue));
+    setSelectedPatternPresetId((selected) => available.some((preset) => preset.id === selected) ? selected : available[0]?.id ?? "");
+    if (quickRandomPatternPresetId && !available.some((preset) => preset.id === quickRandomPatternPresetId)) {
       settingsGateway.saveQuickRandomPattern("");
       setQuickRandomPatternPresetId("");
     }
     setRandomTrainingPatternPresetIds((selectedIds) => (
-      selectedIds.filter((id) => nextPresets.some((preset) => preset.id === id))
+      selectedIds.filter((id) => available.some((preset) => preset.id === id))
     ));
+    setLiveScanPresetIds((selectedIds) => selectedIds.filter((id) => available.some((preset) => preset.id === id)));
+    setPatternEditorError("");
     setShowPatternFilters(false);
   };
 
   const updatePatternPresetDraft = (id: string, update: (preset: PatternPreset) => PatternPreset) => {
     setPatternPresetDrafts((presets) => presets.map((preset) => preset.id === id ? update(preset) : preset));
+    setPatternEditorError("");
+  };
+
+  const createCustomPatternPreset = () => {
+    const copy: PatternPreset = {
+      id: `custom-${createUuid()}`,
+      kind: "custom",
+      name: "自定义形态",
+      description: "用多条简短条件组合而成的形态。",
+      builtIn: false,
+      parameters: {},
+      conditions: [],
+    };
+    setPatternPresetDrafts((presets) => [...presets, copy]);
+    setSelectedPatternPresetId(copy.id);
+    setPatternConditionPickerOpen(false);
+    setPatternEditorError("");
+  };
+
+  const addPatternCondition = (kind: PatternConditionKind) => {
+    const source = patternPresetDrafts.find((preset) => preset.id === selectedPatternPresetId);
+    if (!source || source.kind !== "custom") return;
+    const condition = createDefaultPatternCondition(kind, `condition-${createUuid()}`);
+    updatePatternPresetDraft(source.id, (preset) => ({
+      ...preset,
+      conditions: [...(preset.conditions ?? []), condition],
+    }));
+    setPatternConditionPickerOpen(false);
+    setPatternConditionSearch("");
+  };
+
+  const updatePatternCondition = (
+    presetId: string,
+    conditionId: string,
+    update: (condition: PatternCondition) => PatternCondition,
+  ) => {
+    updatePatternPresetDraft(presetId, (preset) => ({
+      ...preset,
+      conditions: (preset.conditions ?? []).map((condition) => condition.id === conditionId ? update(condition) : condition),
+    }));
+  };
+
+  const removePatternCondition = (presetId: string, conditionId: string) => {
+    updatePatternPresetDraft(presetId, (preset) => ({
+      ...preset,
+      conditions: (preset.conditions ?? []).filter((condition) => condition.id !== conditionId),
+    }));
   };
 
   const clonePatternPreset = () => {
     const source = patternPresetDrafts.find((preset) => preset.id === selectedPatternPresetId);
     if (!source) return;
     const copy: PatternPreset = {
-      ...source,
+      ...clonePatternPresetValue(source),
       id: `custom-${createUuid()}`,
       name: `${source.name}（自定义）`,
       builtIn: false,
-      parameters: { ...source.parameters },
+      enabled: true,
     };
     setPatternPresetDrafts((presets) => [...presets, copy]);
     setSelectedPatternPresetId(copy.id);
+    setPatternEditorError("");
+  };
+
+  const removeSelectedPatternPreset = () => {
+    const source = patternPresetDrafts.find((preset) => preset.id === selectedPatternPresetId);
+    if (!source) return;
+    const nextDrafts = source.builtIn
+      ? patternPresetDrafts.map((preset) => preset.id === source.id ? { ...preset, enabled: false } : preset)
+      : patternPresetDrafts.filter((preset) => preset.id !== source.id);
+    const nextAvailable = visiblePatternPresets(nextDrafts);
+    setPatternPresetDrafts(nextDrafts);
+    setSelectedPatternPresetId(nextAvailable[0]?.id ?? "");
+    setPatternConditionPickerOpen(false);
+    setPatternEditorError("");
   };
 
   const resetPatternPresets = () => {
     const nextPresets = normalizePatternPresets(defaultPatternPresets);
-    setPatternPresetDrafts(nextPresets);
+    setPatternPresetDrafts(nextPresets.map(clonePatternPresetValue));
     setSelectedPatternPresetId(nextPresets[0]?.id ?? "");
+    setPatternConditionPickerOpen(false);
+    setPatternConditionSearch("");
+    setPatternConditionGroup("全部");
+    setPatternEditorError("");
   };
 
   const openTaskSetup = () => {
@@ -6869,6 +7020,7 @@ export function TrainingWorkbench() {
     draft: TrainingTaskDraft,
     randomConfig: RandomTrainingConfig,
     selectedPresets: PatternPreset[] = [],
+    requestMarket?: string,
   ) => {
     const data = await marketDataGateway.createSnapshot<{
       snapshot?: SnapshotMeta;
@@ -6882,7 +7034,7 @@ export function TrainingWorkbench() {
     }>({
         instrumentId: requestInstrumentId,
         timeframe: requestTimeframe,
-        adjustmentType: "none",
+        adjustmentType: defaultAdjustmentTypeForInstrument(requestInstrumentId, requestMarket),
         randomWindow: {
           length: draft.length > 0 ? draft.length : randomConfig.length,
           historyBars: appSettingsRef.current.replayHistoryBars,
@@ -6905,7 +7057,7 @@ export function TrainingWorkbench() {
     applyRandomDateRange: boolean,
     randomConfig: RandomTrainingConfig = currentRandomConfig(),
   ): Promise<PatternMatch | null> => {
-    const selectedPresets = patternPresets.filter((preset) => draft.patternPresetIds?.includes(preset.id));
+    const selectedPresets = visiblePatternPresets(patternPresets).filter((preset) => draft.patternPresetIds?.includes(preset.id));
     if (!selectedPresets.length) return null;
     const loaded = await loadPatternCandles(requestInstrumentId, requestTimeframe);
     const requestedLength = draft.length > 0 ? draft.length : applyRandomDateRange ? randomConfig.length : 0;
@@ -6995,6 +7147,8 @@ export function TrainingWorkbench() {
             pair.timeframe,
             draft,
             randomConfig,
+            [],
+            pair.instrument.market,
           );
           if (!windowSnapshot) continue;
           return {
@@ -7047,7 +7201,7 @@ export function TrainingWorkbench() {
   ) => {
     const pairs = randomCandidatePairs(randomConfig);
     const attemptLimit = Math.min(pairs.length, appSettings.patternScanAttempts);
-    const selectedPresets = patternPresets.filter((preset) => draft.patternPresetIds?.includes(preset.id));
+    const selectedPresets = visiblePatternPresets(patternPresets).filter((preset) => draft.patternPresetIds?.includes(preset.id));
     for (let index = 0; index < attemptLimit; index += 1) {
       const pair = pairs[index];
       setPatternScanStatus(`正在检查候选 ${index + 1}/${attemptLimit}：${pair.instrument.short} · ${timeframeLabel(pair.timeframe)}`);
@@ -7061,6 +7215,7 @@ export function TrainingWorkbench() {
             draft,
             randomConfig,
             selectedPresets,
+            pair.instrument.market,
           );
           const match = windowSnapshot?.patternMatch;
           if (!windowSnapshot || !Number.isFinite(match?.timestamp) || !match?.presetIds?.length) continue;
@@ -7145,7 +7300,7 @@ export function TrainingWorkbench() {
 
     const selectedPatternIds = draft.mode === "range" || draft.mode === "mistake"
       ? []
-      : (draft.patternPresetIds ?? []).filter((id) => patternPresets.some((preset) => preset.id === id));
+      : (draft.patternPresetIds ?? []).filter((id) => visiblePatternPresets(patternPresets).some((preset) => preset.id === id));
     draft = { ...draft, patternPresetIds: selectedPatternIds };
     const randomConfig = taskSetupKind === "random" ? currentRandomConfig() : undefined;
     setStartingTraining(true);
@@ -7170,7 +7325,7 @@ export function TrainingWorkbench() {
           setSetupError("当前品种和周期没有找到符合所选形态的可训练历史位置。请调整形态或参数。");
           return;
         }
-        const selectedPresets = patternPresets.filter((preset) => selectedPatternIds.includes(preset.id));
+        const selectedPresets = visiblePatternPresets(patternPresets).filter((preset) => selectedPatternIds.includes(preset.id));
         draft = {
           ...draft,
           startMode: "bar",
@@ -7198,7 +7353,7 @@ export function TrainingWorkbench() {
   };
 
   const updateQuickRandomPattern = (presetId: string) => {
-    const nextPresetId = patternPresets.some((preset) => preset.id === presetId) ? presetId : "";
+    const nextPresetId = availablePatternPresets.some((preset) => preset.id === presetId) ? presetId : "";
     setQuickRandomPatternPresetId(nextPresetId);
     setQuickRandomError("");
     settingsGateway.saveQuickRandomPattern(nextPresetId);
@@ -7218,7 +7373,7 @@ export function TrainingWorkbench() {
     if (startingTraining) return;
     const blind = quickRandomMode === "blind";
     const randomConfig = currentRandomConfig();
-    const selectedPatternIds = patternPresets.some((preset) => preset.id === quickRandomPatternPresetId)
+    const selectedPatternIds = availablePatternPresets.some((preset) => preset.id === quickRandomPatternPresetId)
       ? [quickRandomPatternPresetId]
       : [];
     const draft: TrainingTaskDraft = {
@@ -7387,7 +7542,7 @@ export function TrainingWorkbench() {
         const result = await marketDataGateway.importCandles<{ imported?: number; error?: string }>({
           instrument: { id: customId, symbol: customId, name: file.name, market: dataMarket, timezone },
           timeframe: importTimeframe,
-          adjustmentType: "none",
+          adjustmentType: defaultAdjustmentTypeForMarket(dataMarket),
           bars: barsToImport.slice(offset, offset + 4000),
         });
         imported += Number(result.imported ?? 0);
@@ -7619,7 +7774,7 @@ export function TrainingWorkbench() {
                   onChange={(event) => updateQuickRandomPattern(event.target.value)}
                 >
                   <option value="">不限形态</option>
-                  {patternPresets.map((preset) => <option key={preset.id} value={preset.id}>{preset.name}</option>)}
+                  {availablePatternPresets.map((preset) => <option key={preset.id} value={preset.id}>{preset.name}</option>)}
                 </select>
                 <small>会记住本机选择，一键随机时自动寻找该形态。</small>
               </label>
@@ -7757,8 +7912,13 @@ export function TrainingWorkbench() {
 
               <div className="pattern-filter-layout">
                 <aside className="pattern-preset-list" aria-label="形态预设">
-                  {patternPresetDrafts.map((preset) => (
+                  <div className="pattern-preset-list-head">
+                    <span>形态预设</span>
+                    <button type="button" onClick={createCustomPatternPreset}><Plus size={13} />新建</button>
+                  </div>
+                  {availablePatternPresetDrafts.map((preset) => (
                     <button
+                      type="button"
                       key={preset.id}
                       className={selectedPatternPresetDraft?.id === preset.id ? "active" : ""}
                       onClick={() => setSelectedPatternPresetId(preset.id)}
@@ -7767,6 +7927,10 @@ export function TrainingWorkbench() {
                       <span>{preset.builtIn ? "内置" : "自定义"}</span>
                     </button>
                   ))}
+                  {!availablePatternPresetDrafts.length && <div className="pattern-preset-empty">暂无可用形态，请新建一个自定义形态。</div>}
+                  {patternPresetDrafts.some((preset) => preset.builtIn && !isPatternPresetAvailable(preset)) && (
+                    <small className="pattern-preset-hidden-note">已隐藏的内置形态可通过底部“恢复内置默认值”找回。</small>
+                  )}
                 </aside>
 
                 {selectedPatternPresetDraft && (
@@ -7776,7 +7940,12 @@ export function TrainingWorkbench() {
                         <strong>{selectedPatternPresetDraft.name}</strong>
                         <span>{selectedPatternPresetDraft.description}</span>
                       </div>
-                      <button className="ghost-button" onClick={clonePatternPreset}>复制为自定义</button>
+                      <div className="pattern-editor-head-actions">
+                        {selectedPatternPresetDraft.kind === "custom" && (
+                          <button className="ghost-button" onClick={() => setPatternConditionPickerOpen(true)}><Plus size={14} />添加条件</button>
+                        )}
+                        <button className="ghost-button" onClick={clonePatternPreset}>复制为自定义</button>
+                      </div>
                     </div>
 
                     <label>预设名称
@@ -7794,38 +7963,147 @@ export function TrainingWorkbench() {
                       />
                     </label>
 
-                    <div className="pattern-parameter-grid">
-                      {patternParameterDefinitions[selectedPatternPresetDraft.kind].map((definition) => (
-                        <label key={definition.key}>{definition.label}
-                          <span className="pattern-number-input">
-                            <input
-                              type="number"
-                              min={definition.min}
-                              max={definition.max}
-                              step={definition.step}
-                              value={selectedPatternPresetDraft.parameters[definition.key]}
-                              onChange={(event) => updatePatternPresetDraft(selectedPatternPresetDraft.id, (preset) => ({
-                                ...preset,
-                                parameters: { ...preset.parameters, [definition.key]: Number(event.target.value) },
-                              }))}
-                            />
-                            {definition.suffix && <small>{definition.suffix}</small>}
-                          </span>
+                    {selectedPatternPresetDraft.kind === "custom" ? (
+                      <div className="pattern-condition-section">
+                        <div className="pattern-condition-section-head">
+                          <div>
+                            <strong>筛选条件</strong>
+                            <span>添加简短条件；同一形态内的条件全部满足才算命中。</span>
+                          </div>
+                          <button className="ghost-button" onClick={() => setPatternConditionPickerOpen(true)}><Plus size={14} />添加条件</button>
+                        </div>
+                        <div className="pattern-condition-list">
+                          {(selectedPatternPresetDraft.conditions ?? []).map((condition) => {
+                            const definition = patternConditionDefinitions.find((item) => item.kind === condition.kind);
+                            if (!definition) return null;
+                            return (
+                              <div className="pattern-condition-row" key={condition.id}>
+                                <div className="pattern-condition-row-head">
+                                  <div>
+                                    <strong>{definition.label}</strong>
+                                    <span>{definition.description}</span>
+                                  </div>
+                                  <button type="button" aria-label={`删除${definition.label}条件`} onClick={() => removePatternCondition(selectedPatternPresetDraft.id, condition.id)}><X size={15} /></button>
+                                </div>
+                                <div className="pattern-condition-fields">
+                                  {definition.fields.map((field) => (
+                                    <label key={field.key}>{field.label}
+                                      {field.type === "select" ? (
+                                        <select
+                                          value={String(condition.parameters[field.key] ?? field.defaultValue)}
+                                          onChange={(event) => updatePatternCondition(selectedPatternPresetDraft.id, condition.id, (current) => ({
+                                            ...current,
+                                            parameters: { ...current.parameters, [field.key]: event.target.value },
+                                          }))}
+                                        >
+                                          {(field.options ?? []).map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}
+                                        </select>
+                                      ) : (
+                                        <span className="pattern-number-input">
+                                          <input
+                                            type="number"
+                                            min={field.min}
+                                            max={field.max}
+                                            step={field.step}
+                                            value={Number(condition.parameters[field.key] ?? field.defaultValue)}
+                                            onChange={(event) => updatePatternCondition(selectedPatternPresetDraft.id, condition.id, (current) => ({
+                                              ...current,
+                                              parameters: { ...current.parameters, [field.key]: Number(event.target.value) },
+                                            }))}
+                                          />
+                                          {field.suffix && <small>{field.suffix}</small>}
+                                        </span>
+                                      )}
+                                    </label>
+                                  ))}
+                                </div>
+                              </div>
+                            );
+                          })}
+                        </div>
+                        {!(selectedPatternPresetDraft.conditions ?? []).length && (
+                          <div className="pattern-condition-empty"><Plus size={16} />还没有条件，从“添加条件”开始。</div>
+                        )}
+                      </div>
+                    ) : (
+                      <div className="pattern-parameter-grid">
+                        {patternParameterDefinitions[selectedPatternPresetDraft.kind].map((definition) => (
+                          <label key={definition.key}>{definition.label}
+                            <span className="pattern-number-input">
+                              <input
+                                type="number"
+                                min={definition.min}
+                                max={definition.max}
+                                step={definition.step}
+                                value={selectedPatternPresetDraft.parameters[definition.key]}
+                                onChange={(event) => updatePatternPresetDraft(selectedPatternPresetDraft.id, (preset) => ({
+                                  ...preset,
+                                  parameters: { ...preset.parameters, [definition.key]: Number(event.target.value) },
+                                }))}
+                              />
+                              {definition.suffix && <small>{definition.suffix}</small>}
+                            </span>
+                          </label>
+                        ))}
+                      </div>
+                    )}
+
+                    {patternConditionPickerOpen && selectedPatternPresetDraft.kind === "custom" && (
+                      <div className="pattern-condition-picker">
+                        <div className="pattern-condition-picker-head">
+                          <div>
+                            <strong>选择条件</strong>
+                            <span>把一个短条件加入当前自定义形态。</span>
+                          </div>
+                          <button type="button" aria-label="关闭条件选择器" onClick={() => setPatternConditionPickerOpen(false)}><X size={16} /></button>
+                        </div>
+                        <label className="pattern-condition-search">
+                          <Search size={15} />
+                          <input
+                            value={patternConditionSearch}
+                            placeholder="搜索指标"
+                            onChange={(event) => setPatternConditionSearch(event.target.value)}
+                          />
                         </label>
-                      ))}
-                    </div>
+                        <div className="pattern-condition-groups" role="tablist" aria-label="条件分类">
+                          {[
+                            "全部",
+                            ...Array.from(new Set(patternConditionDefinitions.map((definition) => definition.group))),
+                          ].map((group) => (
+                            <button
+                              type="button"
+                              key={group}
+                              className={patternConditionGroup === group ? "active" : ""}
+                              onClick={() => setPatternConditionGroup(group)}
+                            >
+                              {group}
+                            </button>
+                          ))}
+                        </div>
+                        <div className="pattern-condition-catalog">
+                          {filteredPatternConditionDefinitions.map((definition) => (
+                            <button type="button" key={definition.kind} onClick={() => addPatternCondition(definition.kind)}>
+                              <span>
+                                <strong>{definition.label}</strong>
+                                <small>{definition.description}</small>
+                              </span>
+                              <Plus size={16} />
+                            </button>
+                          ))}
+                          {!filteredPatternConditionDefinitions.length && <div className="pattern-condition-empty">没有找到匹配条件。</div>}
+                        </div>
+                      </div>
+                    )}
 
                     <div className="pattern-logic-note">
                       <ListChecks size={17} />
-                      <span>本预设参数之间使用 AND；训练时勾选多个预设使用 OR。检测只读取命中 K 线及之前的数据，不读取未来。</span>
+                      <span>{selectedPatternPresetDraft.kind === "custom" ? "本形态内的简短条件使用 AND；训练时勾选多个形态使用 OR。检测只读取命中 K 线及之前的数据，不读取未来。" : "本预设参数之间使用 AND；训练时勾选多个预设使用 OR。检测只读取命中 K 线及之前的数据，不读取未来。"}</span>
                     </div>
 
-                    {!selectedPatternPresetDraft.builtIn && (
-                      <button className="delete-pattern-preset" onClick={() => {
-                        setPatternPresetDrafts((presets) => presets.filter((preset) => preset.id !== selectedPatternPresetDraft.id));
-                        setSelectedPatternPresetId(patternPresetDrafts.find((preset) => preset.id !== selectedPatternPresetDraft.id)?.id ?? "");
-                      }}><Trash2 size={14} />删除这个自定义预设</button>
-                    )}
+                    <button className="delete-pattern-preset" onClick={removeSelectedPatternPreset}>
+                      {selectedPatternPresetDraft.builtIn ? <><EyeOff size={14} />隐藏这个内置形态</> : <><Trash2 size={14} />删除这个自定义预设</>}
+                    </button>
+                    {patternEditorError && <div className="pattern-editor-error" role="alert">{patternEditorError}</div>}
                   </div>
                 )}
               </div>
@@ -7843,11 +8121,13 @@ export function TrainingWorkbench() {
         {showLiveScan && (
           <LiveScanPanel
             market={liveScanMarket}
-            presets={patternPresets}
+            presets={availablePatternPresets}
             presetIds={liveScanPresetIds}
             minPrice={liveScanMinPrice}
             maxPrice={liveScanMaxPrice}
             minVolume={liveScanMinVolume}
+            minChangePct={liveScanMinChangePct}
+            maxChangePct={liveScanMaxChangePct}
             excludeLimitUp={liveScanExcludeLimitUp}
             sort={liveScanSort}
             limit={liveScanLimit}
@@ -7868,6 +8148,8 @@ export function TrainingWorkbench() {
             onMinPriceChange={setLiveScanMinPrice}
             onMaxPriceChange={setLiveScanMaxPrice}
             onMinVolumeChange={setLiveScanMinVolume}
+            onMinChangePctChange={setLiveScanMinChangePct}
+            onMaxChangePctChange={setLiveScanMaxChangePct}
             onExcludeLimitUpChange={setLiveScanExcludeLimitUp}
             onSortChange={setLiveScanSort}
             onLimitChange={(limit) => setLiveScanLimit(normalizeLiveScanLimit(limit))}
@@ -7988,7 +8270,7 @@ export function TrainingWorkbench() {
                     }}>管理预设</button>
                   </div>
                   <div className="task-pattern-options">
-                    {patternPresets.map((preset) => {
+                    {availablePatternPresets.map((preset) => {
                       const selected = taskDraft.patternPresetIds?.includes(preset.id) ?? false;
                       return (
                         <button
@@ -8519,7 +8801,24 @@ export function TrainingWorkbench() {
                   </label>
                   {!liveMode && orderType !== "market" && (
                     <label>触发价
-                      <input aria-label="委托触发价" type="number" min="0" step="any" value={orderTriggerPrice} onChange={(event) => setOrderTriggerPrice(event.target.value)} placeholder={currentBar?.close.toFixed(instrument.pricePrecision)} />
+                      <span className="entry-trigger-control">
+                        <input aria-label="委托触发价" type="number" min="0" step="any" value={orderTriggerPrice} onChange={(event) => setOrderTriggerPrice(event.target.value)} placeholder={currentBar?.close.toFixed(instrument.pricePrecision)} />
+                        <button
+                          aria-label="在图表选择委托触发价"
+                          aria-pressed={protectionPriceSelection === "entry-trigger"}
+                          className={protectionPriceSelection === "entry-trigger" ? "active" : ""}
+                          type="button"
+                          title={showingCanonicalChart ? "点击 K 线图选择委托触发价" : `请先切换回训练基准周期 ${timeframeLabel(timeframe)}`}
+                          onClick={() => {
+                            if (!showingCanonicalChart) {
+                              setRuleNotice(`请先切换回训练基准周期 ${timeframeLabel(timeframe)}，再在图表选择委托触发价`);
+                              return;
+                            }
+                            setProtectionPriceSelection((current) => current === "entry-trigger" ? null : "entry-trigger");
+                            setRuleNotice("请在上方 K 线图点击选择委托触发价");
+                          }}
+                        ><MousePointer2 size={12} />图表</button>
+                      </span>
                     </label>
                   )}
                   {!liveMode && <label>止损
@@ -8573,7 +8872,7 @@ export function TrainingWorkbench() {
                       : "请先在图表点击或拖动止损线；系统会按账户余额和单笔风险自动计算数量/手数。"}
                   </small>}
                   {!liveMode && protectionPriceSelection && <div className="mobile-protection-selection-hint" role="status">
-                    请在上方 K 线图点击选择{protectionPriceSelection === "stop-loss" ? "止损" : "止盈"}价格{positionSizeMode === "risk-percent" && protectionPriceSelection === "stop-loss" ? "，风险手数/数量会自动更新" : ""}。
+                    请在上方 K 线图点击选择{protectionPriceSelection === "stop-loss" ? "止损" : protectionPriceSelection === "take-profit" ? "止盈" : "委托触发价"}{positionSizeMode === "risk-percent" && protectionPriceSelection === "stop-loss" ? "，风险手数/数量会自动更新" : ""}。
                   </div>}
                   </div>
                 </div>
@@ -9058,7 +9357,7 @@ export function TrainingWorkbench() {
             {performanceSection === "live" ? (
               <section className="live-performance-panel">
                 <div className="performance-section-head">
-                  <div><span className="section-label">LIVE PERFORMANCE</span><h2>实盘观察</h2></div>
+                  <div><span className="section-label">LIVE PERFORMANCE</span><h2>实盘表现</h2></div>
                   <div className="live-performance-actions">
                     <small>实盘筛选标的不会进入训练表现；待成交不计入收益/胜率，撤单不保留。</small>
                     <button
@@ -9121,7 +9420,7 @@ export function TrainingWorkbench() {
                   <small className="live-performance-filter-hint">买入日期按持仓开仓时间或待成交买入订单时间匹配；筛选结果会同步更新上方统计。</small>
                 </article>
                 <div className="performance-sessions live-performance-sessions">
-                  <div className="performance-section-head"><div><span className="section-label">WATCHLIST</span><h2>实盘观察标的</h2></div><div className="live-performance-actions"><small>点击打开标的，继续观察或交易</small><button type="button" className="ghost-button live-review-button" disabled={!livePortfolios.length} onClick={reviewLivePortfolios}><BookOpenCheck size={13} />审阅</button></div></div>
+                  <div className="performance-section-head"><div><span className="section-label">WATCHLIST</span><h2>实盘表现标的</h2></div><div className="live-performance-actions"><small>点击打开标的，继续观察或交易</small><button type="button" className="ghost-button live-review-button" disabled={!livePortfolios.length} onClick={reviewLivePortfolios}><BookOpenCheck size={13} />审阅</button></div></div>
                   {filteredLivePerformanceRows.length ? (
                     <div className="live-performance-list">
                       {filteredLivePerformanceRows.map((row) => {
@@ -9534,7 +9833,7 @@ export function TrainingWorkbench() {
                     <td data-label="市场">{item.market}</td><td data-label="周期"><span className="tf-badge">{timeframeLabel(item.timeframe)}</span></td>
                     <td data-label="数量">{Number(item.barCount).toLocaleString()}</td>
                     <td data-label="覆盖范围">{new Date(item.firstTimestamp).toLocaleDateString("zh-CN")} — {new Date(item.lastTimestamp).toLocaleDateString("zh-CN")}</td>
-                    <td data-label="复权">{item.adjustmentType}</td><td data-label="来源">{item.source}</td><td data-label="状态"><span className="healthy-dot" />完整</td>
+                    <td data-label="复权">{adjustmentLabel(item.adjustmentType)}</td><td data-label="来源">{item.source}</td><td data-label="状态"><span className="healthy-dot" />完整</td>
                   </tr>
                 );})}</tbody>
               </table>
