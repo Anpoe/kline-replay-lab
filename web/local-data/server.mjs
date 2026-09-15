@@ -9,7 +9,7 @@ const moduleDir = path.dirname(fileURLToPath(import.meta.url));
 const root = path.resolve(process.env.KLINE_DATA_DIR ?? path.join(moduleDir, "..", ".local-data"));
 const host = process.env.KLINE_DATA_HOST ?? "127.0.0.1";
 const port = Number(process.env.KLINE_DATA_PORT ?? 3100);
-const serviceVersion = 6;
+const serviceVersion = 7;
 const sourceSelectionFile = path.join(root, "source-selection.json");
 const stores = {
   baostock: await new BaoStockLocalStore({ root }).init(),
@@ -104,14 +104,33 @@ async function datasetStatus(source = activeSource) {
   const providerStatus = source === "baostock"
     ? await store.getDatasetStatus()
     : {
-        source: manifest.maintenanceSource === "tdx-realtime-daily"
+      initialSource: manifest.initialSource ?? "tdx-zip",
+      incrementalSource: manifest.incrementalSource ?? "tdx-realtime",
+      includeCorporateActions: manifest.includeCorporateActions === true,
+      source: manifest.incrementalSource === "none"
+          ? "tdx-official"
+          : manifest.incrementalSource === "tushare"
+          ? "tdx-official+tushare-daily"
+          : manifest.maintenanceSource === "tdx-realtime-daily"
           ? "tdx-official+tdx-realtime"
-          : manifest.maintenanceSource ? "tdx-official+tushare" : "tdx-official",
+          : manifest.maintenanceSource === "tdx-official-gap-repair"
+            ? "tdx-official+tdx-gap-repair"
+            : manifest.incrementalSource === "tdx-realtime"
+              ? "tdx-official+tdx-realtime"
+              : manifest.maintenanceSource ? "tdx-official+tushare-legacy" : "tdx-official",
         adjustmentType: "none",
         adjustmentStatus: "not-adjusted",
-        adjustmentSource: manifest.maintenanceSource === "tdx-realtime-daily"
+      adjustmentSource: manifest.incrementalSource === "none"
+          ? "tdx-official-hsjday"
+          : manifest.incrementalSource === "tushare"
+          ? "tushare-daily"
+          : manifest.maintenanceSource === "tdx-realtime-daily"
           ? "tdx-realtime-daily"
-          : manifest.maintenanceSource ? "tushare-daily" : "tdx-official-hsjday",
+          : manifest.maintenanceSource === "tdx-official-gap-repair"
+            ? "tdx-official-gap-repair"
+            : manifest.incrementalSource === "tdx-realtime"
+              ? "tdx-realtime-daily"
+              : manifest.maintenanceSource ? "tushare-daily-legacy" : "tdx-official-hsjday",
         adjustmentUpdatedAt: null,
         factorCount: 0,
       };
@@ -119,7 +138,9 @@ async function datasetStatus(source = activeSource) {
     datasetVersion: manifest.datasetVersion,
     createdAt: manifest.createdAt,
     instrumentCount: Array.isArray(manifest.instruments) ? manifest.instruments.length : 0,
-    corporateActions: source === "tdx" ? store.corporateActions.getStatus() : null,
+    corporateActions: source === "tdx" && manifest.includeCorporateActions === true
+      ? store.corporateActions.getStatus()
+      : null,
     ...providerStatus,
   };
 }
@@ -179,14 +200,18 @@ const server = http.createServer(async (request, response) => {
     if (url.pathname === "/corporate-actions" && request.method === "GET") {
       const instrumentId = url.searchParams.get("instrument");
       if (instrumentId && !/^\d{6}\.(SH|SZ|BJ)$/.test(instrumentId)) return send(response, 400, { error: "品种代码无效" });
-      const corporateActions = activeSource === "tdx" ? stores.tdx.corporateActions.getStatus() : null;
+      const manifest = activeSource === "tdx" ? await stores.tdx.getManifest() : null;
+      const enabled = manifest?.includeCorporateActions === true;
+      const corporateActions = enabled ? stores.tdx.corporateActions.getStatus() : null;
       return send(response, 200, {
         corporateActions,
-        events: activeSource === "tdx" && instrumentId ? stores.tdx.corporateActions.getEvents(instrumentId) : [],
+        events: enabled && instrumentId ? stores.tdx.corporateActions.getEvents(instrumentId) : [],
       });
     }
     if (url.pathname === "/corporate-actions" && request.method === "POST") {
       if (activeSource !== "tdx") return send(response, 409, { error: "当前数据源不需要建立权息信息" });
+      const manifest = await stores.tdx.getManifest();
+      if (manifest?.includeCorporateActions !== true) return send(response, 409, { error: "当前初始化方案未开启权息信息同步" });
       const { action = "start" } = await readJson(request);
       if (!["start", "pause", "resume"].includes(action)) return send(response, 400, { error: "不支持的权息操作" });
       const corporateActions = action === "start" ? await store.startCorporateActions()
@@ -197,12 +222,25 @@ const server = http.createServer(async (request, response) => {
       return send(response, 200, { serviceVersion, activeSource, maintenanceTask: store.getCnMaintenanceTask() });
     }
     if (request.method === "GET" && url.pathname === "/market/cn/status") {
+      const dataset = await datasetStatus();
       return send(response, 200, {
         serviceVersion,
         activeSource,
         source: sourceDefinitions[activeSource].id,
+        initialSource: dataset?.initialSource ?? null,
+        incrementalSource: dataset?.incrementalSource ?? null,
+        incrementalEnabled: Boolean(dataset?.incrementalSource && dataset.incrementalSource !== "none"),
+        includeCorporateActions: dataset?.includeCorporateActions === true,
         latestClosedDate: store.getLatestClosedTradeDate ? await store.getLatestClosedTradeDate() : null,
+        realtimeQuotes: activeSource === "tdx",
+        realtimeUpdateEligible: activeSource === "tdx" && store.isRealtimeUpdateEligible
+          ? store.isRealtimeUpdateEligible()
+          : false,
       });
+    }
+    if (request.method === "GET" && url.pathname === "/quality/cn") {
+      if (activeSource !== "tdx") return send(response, 409, { error: "当前数据源不是通达信" });
+      return send(response, 200, { activeSource, quality: await stores.tdx.getQualityReport() });
     }
     if (request.method === "POST" && url.pathname === "/tasks") {
       const payload = await readJson(request);
@@ -298,6 +336,22 @@ const server = http.createServer(async (request, response) => {
         Array.isArray(payload.instrumentIds) ? payload.instrumentIds : [],
         payload.entryAfter && typeof payload.entryAfter === "object" ? payload.entryAfter : {},
       ) });
+    }
+    if (request.method === "POST" && url.pathname === "/quotes/realtime") {
+      const payload = await readJson(request);
+      const instrumentIds = Array.isArray(payload.instrumentIds) ? payload.instrumentIds : [];
+      if (activeSource !== "tdx") {
+        return send(response, 200, {
+          activeSource,
+          prices: await store.getLatestCandles(instrumentIds),
+        });
+      }
+      return send(response, 200, {
+        activeSource,
+        prices: await stores.tdx.getRealtimeQuotes(
+          instrumentIds,
+        ),
+      });
     }
     if (request.method === "POST" && url.pathname === "/scan/latest") {
       return send(response, 200, await store.scanLatest(await readJson(request)));

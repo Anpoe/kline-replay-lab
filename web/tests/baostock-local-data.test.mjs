@@ -376,3 +376,65 @@ test("BaoStock daily maintenance follows the selected asset categories", async (
   assert.equal(store.getCnMaintenanceTask()?.progress.processedInstruments, 2);
   assert.deepEqual(requestedCodes, ["sh.600519", "sz.399001"]);
 });
+
+test("BaoStock incremental maintenance rechecks a rolling window and repairs a gap before the latest bar", async (context) => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "kline-baostock-incremental-gap-"));
+  const requests = [];
+  const client = {
+    async queryHistory(request) {
+      requests.push(request);
+      return [
+        { date: "2026-07-21", code: request.code, open: "10.5", high: "12", low: "10.2", close: "11.9", volume: "200", amount: "2300", adjustflag: "2" },
+        { date: "2026-07-23", code: request.code, open: "11.9", high: "12.3", low: "11.7", close: "12.1", volume: "250", amount: "3000", adjustflag: "2" },
+      ];
+    },
+    close() {},
+  };
+  const store = await new BaoStockLocalStore({
+    root,
+    client,
+    nowProvider: () => new Date("2026-07-28T16:00:00+08:00"),
+  }).init();
+  context.after(async () => {
+    store.close();
+    await rm(root, { recursive: true, force: true });
+  });
+  store.manifestCache = {
+    assets: ["stock"],
+    adjustmentStatus: "ready",
+    instruments: [{
+      id: "600519.SH",
+      name: "贵州茅台",
+      assetType: "stock",
+      status: "1",
+      baostockCode: "sh.600519",
+      firstTimestamp: day("2026-07-21"),
+      // The local latest bar is newer than the missing 23rd. A lastTimestamp
+      // cursor alone would skip that gap; the rolling window must not.
+      lastTimestamp: day("2026-07-28"),
+      barCount: 2,
+    }],
+  };
+  store.writeDaily("600519.SH", [
+    { timestamp: day("2026-07-21"), open: 10.5, high: 12, low: 10.2, close: 11.8, volume: 200, turnover: 2300 },
+    { timestamp: day("2026-07-28"), open: 12, high: 12.4, low: 11.8, close: 12.2, volume: 300, turnover: 3300 },
+  ]);
+
+  await store.startCnMaintenance({ mode: "incremental", repairDays: 8 });
+  const deadline = Date.now() + 5000;
+  while (!["completed", "failed"].includes(store.getCnMaintenanceTask()?.status) && Date.now() < deadline) {
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+
+  assert.equal(store.getCnMaintenanceTask()?.status, "completed", store.getCnMaintenanceTask()?.error);
+  assert.equal(store.getCnMaintenanceTask()?.progress.correctedBars, 1);
+  assert.equal(store.getCnMaintenanceTask()?.progress.insertedBars, 1);
+  assert.deepEqual(requests.map(({ startDate, endDate }) => ({ startDate, endDate })), [{
+    startDate: "2026-07-21",
+    endDate: "2026-07-28",
+  }]);
+  const daily = await store.getCandles("600519.SH", "1d");
+  assert.equal(daily.candles.find((item) => item.timestamp === day("2026-07-21")).close, 11.9);
+  assert.equal(daily.candles.find((item) => item.timestamp === day("2026-07-23")).close, 12.1);
+  assert.equal(daily.candles.at(-1).timestamp, day("2026-07-28"));
+});

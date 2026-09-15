@@ -88,7 +88,7 @@ export function LiveScanPanel({
         <div className="live-scan-market" role="group" aria-label="筛选市场">
           {(["CN", "US"] as LiveScanMarket[]).map((value) => (
             <button key={value} className={market === value ? "active" : ""} onClick={() => onMarketChange(value)}>
-              {value === "CN" ? "A 股" : "美股"}<small>{value === "CN" ? "BaoStock 前复权增量" : "Alpaca SIP/IEX"}</small>
+              {value === "CN" ? "A 股" : "美股"}<small>{value === "CN" ? "本地日线数据" : "Alpaca SIP/IEX"}</small>
             </button>
           ))}
         </div>

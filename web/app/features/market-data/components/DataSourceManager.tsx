@@ -157,13 +157,18 @@ type LocalDataTask = {
     keepRawPackage?: boolean;
     adjustmentType?: "qfq" | "hfq" | "none" | "provider-defined";
     source?: string;
+    initialSource?: string;
     provider?: string;
+    cnIncrementalSource?: string;
     includeCorporateActions?: boolean;
   };
   updatedAt: string;
 };
 type LocalDatasetStatus = {
   source?: string | null;
+  initialSource?: string | null;
+  incrementalSource?: string | null;
+  includeCorporateActions?: boolean;
   adjustmentType?: "qfq" | "hfq" | "none" | "provider-defined";
   adjustmentStatus?: "pending" | "building" | "ready" | "not-adjusted";
   adjustmentSource?: string | null;
@@ -197,11 +202,14 @@ type CatalogTask = {
 };
 type CnMaintenanceTask = {
   id: string;
-  kind?: "tdx-realtime-daily-maintenance" | "tushare-cn-daily-maintenance" | string;
+  kind?: "tdx-realtime-daily-maintenance" | "tdx-native-gap-repair" | "tushare-cn-daily-maintenance" | string;
+  source?: string;
   mode: "incremental" | "repair";
   status: "queued" | "running" | "paused" | "completed" | "failed";
   message: string;
   error?: string | null;
+  deferred?: boolean;
+  writeCompleted?: boolean;
   assets?: string[];
   nextDateIndex: number;
   progress: {
@@ -287,6 +295,21 @@ function timeframeLabel(value: AdvancedSetup["minimumTimeframe"]) {
   if (value === "1h") return `${catalogTimeframeLabel(value)}（自动生成 H4、D1、W1、MN）`;
   if (value === "1d") return `${catalogTimeframeLabel(value)}（自动生成 W1、MN）`;
   return catalogTimeframeLabel(value);
+}
+
+function initialSourceLabel(value: string | null | undefined) {
+  if (value === "baostock") return "BaoStock 前复权日线";
+  if (value === "tushare") return "Tushare daily 不复权日线";
+  if (value === "tdxquant") return "TdxQuant 日线";
+  return "通达信官方日线包不复权";
+}
+
+function incrementalSourceLabel(value: string | null | undefined) {
+  if (value === "baostock") return "BaoStock 前复权";
+  if (value === "tushare") return "Tushare daily 不复权";
+  if (value === "tdxquant") return "TdxQuant";
+  if (value === "none") return "未设置增量";
+  return "通达信实时日线不复权";
 }
 
 function cnAssetScopeLabel(assets?: string[]) {
@@ -552,8 +575,19 @@ export function DataSourceManager({
               key,
               stored[key] ?? current[key as keyof AdvancedSetup],
             ])) as AdvancedSetup;
-            if (restored.cnInitialSource === "tdx-zip" && restored.cnIncrementalSource !== "none") {
+            if (restored.cnInitialSource === "tdx-zip"
+              && !["none", "tushare", "tdx-realtime"].includes(restored.cnIncrementalSource)) {
               restored.cnIncrementalSource = "tdx-realtime";
+            }
+            if (restored.cnInitialSource === "baostock"
+              && !["none", "baostock"].includes(restored.cnIncrementalSource)) {
+              restored.cnIncrementalSource = "baostock";
+            }
+            if (restored.cnInitialSource === "tushare") {
+              restored.cnIncrementalSource = "tushare";
+            }
+            if (restored.cnInitialSource === "tdxquant") {
+              restored.cnIncrementalSource = "tdxquant";
             }
             return { ...current, ...restored };
           });
@@ -708,20 +742,34 @@ export function DataSourceManager({
     action: "start" | "pause" | "resume",
     mode: "incremental" | "repair" = "incremental",
   ) => {
+    if (action === "start" && !incrementalEnabled) {
+      setNotice("初始化方案未设置日线增量来源，当前不能执行每日更新或缺口修复。");
+      return;
+    }
     if (action === "start") {
       const prompt = localUsesBaoStock
         ? mode === "incremental"
-          ? "系统将从本地最后日期之后，使用 BaoStock 拉取全市场股票前复权日线。确定开始吗？"
+          ? "系统将回查最近 30 个自然日，使用 BaoStock 自动补齐漏掉的前复权日线并校正已有数据。确定开始吗？"
           : "系统将回查最近 30 个自然日，使用 BaoStock 修复 A 股前复权日线缺口；停牌和休市不会造数据。确定开始吗？"
+        : localIncrementalSource === "tushare"
+          ? mode === "incremental"
+            ? "系统将使用初始化方案绑定的 Tushare daily 更新最近一个已收盘交易日；缺口修复也只使用 Tushare。确定开始吗？"
+            : "系统将使用初始化方案绑定的 Tushare daily 回查最近 30 个自然日并修复缺口，不会混入通达信或 BaoStock。确定开始吗？"
         : mode === "incremental"
-          ? "系统将从通达信行情服务拉取当前最新交易日的日线快照；交易时段内数据可能尚未收盘，建议收盘后执行。确定开始吗？"
-          : "系统将回查最近 30 个自然日，使用 Tushare daily 修复 A 股不复权日线缺口。确定开始吗？";
+          ? "系统将在收盘后使用通达信写入最新日线快照；如果之前漏过交易日，可用本地通达信日线文件扫描并修复。确定开始吗？"
+          : "系统将回查最近 30 个自然日，使用本地通达信日线文件修复 A 股不复权日线缺口；本地文件未覆盖的日期会明确标记，不会混入其他数据源。确定开始吗？";
       if (!window.confirm(prompt)) return;
     }
     setMaintenanceBusy(true);
     setNotice(action === "pause"
       ? "正在安全暂停 A 股维护任务……"
-      : mode === "repair" ? "正在建立最近 30 日缺口回查任务……" : "正在建立每日增量任务……");
+      : mode === "repair"
+        ? "正在建立最近 30 日缺口回查任务……"
+        : localUsesBaoStock
+          ? "正在建立 BaoStock 每日增量任务……"
+          : localIncrementalSource === "tushare"
+            ? "正在建立 Tushare 每日增量任务……"
+            : "正在检查收盘状态并准备通达信日线更新……");
     try {
       const result = await marketDataGateway.cnMaintenanceAction<{
         maintenanceTask?: CnMaintenanceTask | null;
@@ -796,8 +844,18 @@ export function DataSourceManager({
       setNotice("请先完成 A 股全市场日线初始化。");
       return;
     }
-    const source = localTask?.plan?.source ?? (localDataset?.source?.startsWith("tdx") ? "tdx-zip" : "baostock");
+    const source = localDataset?.initialSource
+      ?? localTask?.plan?.initialSource
+      ?? localTask?.plan?.source
+      ?? (localDataset?.source?.startsWith("tdx") ? "tdx-zip" : "baostock");
+    if (!['baostock', 'tdx-zip'].includes(source)) {
+      setNotice(`当前初始化来源为${initialSourceLabel(source)}，本机暂不支持用其他来源替换全量历史数据。`);
+      return;
+    }
     const usesBaoStock = source === "baostock";
+    const incrementalSource = localDataset?.incrementalSource
+      ?? localTask?.plan?.cnIncrementalSource
+      ?? (usesBaoStock ? "baostock" : "tdx-realtime");
     if (!window.confirm(usesBaoStock
       ? "重新从 BaoStock 拉取 A 股前复权历史数据？新任务会替换现有 BaoStock A 股数据。"
       : "重新从通达信官方日线包拉取 A 股数据？行情价格保持不复权，原有 BaoStock 数据不会被删除。")) return;
@@ -818,10 +876,13 @@ export function DataSourceManager({
       includeDelisted: localTask?.plan?.includeDelisted ?? true,
       historyRange: localTask?.plan?.historyRange ?? "all",
       keepRawPackage: localTask?.plan?.keepRawPackage ?? false,
-      includeCorporateActions: localTask?.plan?.includeCorporateActions ?? Boolean(localDataset?.corporateActions?.enabled),
+      includeCorporateActions: localDataset?.includeCorporateActions
+        ?? localTask?.plan?.includeCorporateActions
+        ?? false,
       source,
       provider: usesBaoStock ? "baostock" : "tdx",
       adjustmentType: usesBaoStock ? "qfq" : "none",
+      cnIncrementalSource: incrementalSource,
     });
   };
 
@@ -1291,12 +1352,19 @@ export function DataSourceManager({
                   <label>{intradaySetup ? `首次 A 股完整${catalogTimeframeLabel(advanced.minimumTimeframe)}行情` : "首次 A 股完整日线"}
                     <select value={advanced.cnInitialSource} onChange={(event) => setAdvanced((value) => {
                       const cnInitialSource = event.target.value as AdvancedSetup["cnInitialSource"];
+                      const cnIncrementalSource = cnInitialSource === "baostock"
+                        ? value.cnIncrementalSource === "none" ? "none" : "baostock"
+                        : cnInitialSource === "tushare"
+                          ? "tushare"
+                          : cnInitialSource === "tdxquant"
+                            ? "tdxquant"
+                            : ["none", "tushare", "tdx-realtime"].includes(value.cnIncrementalSource)
+                              ? value.cnIncrementalSource
+                              : "tdx-realtime";
                       return {
                         ...value,
                         cnInitialSource,
-                        cnIncrementalSource: cnInitialSource === "tdx-zip" && value.cnIncrementalSource !== "none"
-                          ? "tdx-realtime"
-                          : value.cnIncrementalSource,
+                        cnIncrementalSource,
                         includeCorporateActions: ["tdx-zip", "tushare"].includes(cnInitialSource)
                           ? value.includeCorporateActions
                           : false,
@@ -1470,7 +1538,7 @@ export function DataSourceManager({
     CN: {
       label: "A股",
       title: "A 股数据维护",
-      description: "管理 A 股历史行情、每日更新和权息信息；权息信息用于在图表中标记分红及除权除息事件，由本机数据服务直接维护。",
+      description: "管理 A 股历史行情和每日更新；全量、增量及缺口修复均遵循初始化方案绑定的数据来源。",
     },
     US: {
       label: "美股",
@@ -1488,15 +1556,43 @@ export function DataSourceManager({
       description: "黄金与贵金属使用独立数据集，后续可接入专门的历史行情源。",
     },
   }[market];
-  const localSourceValue = localTask?.plan?.source ?? localDataset?.source ?? "";
-  const localUsesBaoStock = !localSourceValue || localSourceValue.toLowerCase().includes("baostock");
+  const localInitialSource = localDataset?.initialSource
+    ?? localTask?.plan?.initialSource
+    ?? localTask?.plan?.source
+    ?? (localDataset?.source?.toLowerCase().startsWith("tdx") ? "tdx-zip" : "baostock");
+  const localIncrementalSource = localDataset?.incrementalSource
+    ?? localTask?.plan?.cnIncrementalSource
+    ?? (localInitialSource === "baostock" ? "baostock" : "tdx-realtime");
+  const localUsesBaoStock = localInitialSource === "baostock";
+  const incrementalEnabled = Boolean(localIncrementalSource && localIncrementalSource !== "none");
+  const localCorporateActionsEnabled = localDataset?.includeCorporateActions
+    ?? localTask?.plan?.includeCorporateActions
+    ?? false;
   const localAdjustmentReady = localDataset?.adjustmentStatus === "ready" || localDataset?.adjustmentStatus === "not-adjusted";
-  const localSourceTitle = localUsesBaoStock ? "BaoStock A 股全市场前复权日线库" : "通达信 A 股全市场日线库（不复权）";
+  const localSourceTitle = `${initialSourceLabel(localInitialSource)}库`;
+  const fullRefreshLabel = localUsesBaoStock
+    ? "刷新 BaoStock 全量数据"
+    : localInitialSource === "tdx-zip"
+      ? "刷新通达信全量数据"
+      : `刷新${initialSourceLabel(localInitialSource)}全量数据`;
   const corporateActions = localDataset?.corporateActions ?? null;
   const corporateTaskStatus = corporateActions?.task?.status;
   const corporateTaskBusy = corporateTaskStatus === "queued" || corporateTaskStatus === "running";
   const nativeTdxMaintenance = cnMaintenanceTask?.kind === "tdx-realtime-daily-maintenance";
-  const instrumentScopedMaintenance = nativeTdxMaintenance || cnMaintenanceTask?.kind === "baostock-cn-daily-maintenance";
+  const nativeTdxGapRepair = cnMaintenanceTask?.kind === "tdx-native-gap-repair";
+  const tushareMaintenance = cnMaintenanceTask?.kind === "tushare-cn-daily-maintenance"
+    || localIncrementalSource === "tushare";
+  const nativeTdxMaintenanceDeferred = nativeTdxMaintenance
+    && cnMaintenanceTask?.status === "completed"
+    && cnMaintenanceTask?.deferred === true;
+  const instrumentScopedMaintenance = nativeTdxMaintenance || nativeTdxGapRepair || cnMaintenanceTask?.kind === "baostock-cn-daily-maintenance";
+  const maintenanceLabel = incrementalSourceLabel(localIncrementalSource);
+  const displayedPlanInitialSource = localDataset || localTask
+    ? localInitialSource
+    : String(savedPlan?.cnInitialSource ?? "");
+  const displayedPlanIncrementalSource = localDataset || localTask
+    ? localIncrementalSource
+    : String(savedPlan?.cnIncrementalSource ?? "none");
 
   return (
     <section className="data-source-manager">
@@ -1521,6 +1617,10 @@ export function DataSourceManager({
           <span>
             <strong>{savedPlan.kind === "quick" ? "推荐初始化方案" : savedPlan.kind === "advanced" ? "高级初始化方案" : "现有数据库模式"}</strong>
             <small>{savedPlan.kind === "quick" ? "沪深京 A 股全历史日线＋自动周线" : savedPlan.kind === "advanced" ? "已按自定义市场、周期和来源保存" : "保留并管理当前已有行情"}</small>
+            {(savedPlan.kind === "advanced" || localDataset || localTask) && <small>
+              全量：{initialSourceLabel(displayedPlanInitialSource)} · 增量：{incrementalSourceLabel(displayedPlanIncrementalSource)}
+              {((localDataset || localTask) ? localCorporateActionsEnabled : savedPlan.includeCorporateActions) ? " · 权息同步已开启" : ""}
+            </small>}
           </span>
           <button type="button" onClick={() => {
             setSetupOpenedByUser(true);
@@ -1548,7 +1648,9 @@ export function DataSourceManager({
             <small>{localTask?.error || localTask?.message || (localServiceAvailable
               ? localUsesBaoStock
                 ? "从初始化设置开始，一次建立 BaoStock 全市场前复权日线，并在本地生成周线和月线。"
-                : "已保存通达信不复权日线；可以单独建立权息信息并继续每日更新。"
+                : localCorporateActionsEnabled
+                  ? "已保存通达信不复权日线；按初始化方案继续维护日线和权息信息。"
+                  : "已保存通达信不复权日线；初始化方案未开启权息同步。"
               : localServiceError || "请关闭当前窗口后重新启动本地控制面板。")}</small>
             {catalogTask && <small className="catalog-task-status">
               中文名称：{catalogTask.error || catalogTask.message}
@@ -1570,16 +1672,16 @@ export function DataSourceManager({
             </div>
           )}
           <div className="local-task-actions">
-            {localDataset && localAdjustmentReady && <button disabled={catalogTask?.status === "running" || Boolean(localTask && ["queued", "running"].includes(localTask.status))} onClick={() => void refreshCnMarket()}><CloudDownload size={14} />{localUsesBaoStock ? "刷新 BaoStock 全量数据" : "刷新通达信全量数据"}</button>}
-            {localDataset && !localUsesBaoStock && !corporateTaskBusy && corporateTaskStatus !== "paused" && corporateTaskStatus !== "failed" && <button disabled={corporateActionsBusy} onClick={() => void updateCorporateActions("start")}><Database size={14} />{corporateActions?.enabled ? "更新权息信息" : "建立权息信息"}</button>}
-            {localDataset && !localUsesBaoStock && corporateTaskBusy && <button className="danger" disabled={corporateActionsBusy} onClick={() => void updateCorporateActions("pause")}><Pause size={14} />暂停权息维护</button>}
-            {localDataset && !localUsesBaoStock && ["paused", "failed"].includes(corporateTaskStatus ?? "") && <button disabled={corporateActionsBusy} onClick={() => void updateCorporateActions("resume")}><Play size={14} />继续权息维护</button>}
+            {localDataset && localAdjustmentReady && <button disabled={catalogTask?.status === "running" || Boolean(localTask && ["queued", "running"].includes(localTask.status))} onClick={() => void refreshCnMarket()}><CloudDownload size={14} />{fullRefreshLabel}</button>}
+            {localDataset && localCorporateActionsEnabled && !localUsesBaoStock && !corporateTaskBusy && corporateTaskStatus !== "paused" && corporateTaskStatus !== "failed" && <button disabled={corporateActionsBusy} onClick={() => void updateCorporateActions("start")}><Database size={14} />{corporateActions?.enabled ? "更新权息信息" : "建立权息信息"}</button>}
+            {localDataset && localCorporateActionsEnabled && !localUsesBaoStock && corporateTaskBusy && <button className="danger" disabled={corporateActionsBusy} onClick={() => void updateCorporateActions("pause")}><Pause size={14} />暂停权息维护</button>}
+            {localDataset && localCorporateActionsEnabled && !localUsesBaoStock && ["paused", "failed"].includes(corporateTaskStatus ?? "") && <button disabled={corporateActionsBusy} onClick={() => void updateCorporateActions("resume")}><Play size={14} />继续权息维护</button>}
             {localTask?.status === "completed" && catalogTask?.status !== "running" && <button onClick={() => void refreshCatalog()}><RefreshCw size={14} />更新中文名称</button>}
             {localTask?.status === "running" && <button onClick={() => void updateLocalTask("pause")}><Pause size={14} />暂停</button>}
             {(localTask?.status === "paused" || localTask?.status === "failed") && <button onClick={() => void updateLocalTask("resume")}><Play size={14} />继续</button>}
             {localTask && !["running", "queued"].includes(localTask.status) && <button className="danger" onClick={() => void removeLocalTaskRecord()}><Trash2 size={14} />移除任务记录</button>}
           </div>
-          {localDataset && !localUsesBaoStock && corporateActions && (
+          {localDataset && localCorporateActionsEnabled && !localUsesBaoStock && corporateActions && (
             <small className="corporate-actions-status">
               权息信息：{corporateTaskBusy
                 ? `${corporateActions.task?.processed ?? 0} / ${corporateActions.task?.total ?? 0} 个品种处理中`
@@ -1599,22 +1701,32 @@ export function DataSourceManager({
         <div className={`market-maintenance-card ${localServiceAvailable ? "ready" : ""} ${cnMaintenanceTask?.status === "failed" ? "failed" : ""}`}>
           <div className="market-maintenance-icon"><Database size={22} /></div>
           <div>
-            <span>{localUsesBaoStock ? "BAOSTOCK · A 股前复权日线维护" : "通达信 · A 股不复权日线维护"}</span>
+            <span>{localUsesBaoStock
+              ? "BAOSTOCK · A 股前复权日线维护"
+              : tushareMaintenance
+                ? "TUSHARE · A 股不复权日线维护"
+                : "通达信 · A 股不复权日线维护"}</span>
             <strong>{cnMaintenanceTask
               ? {
                   queued: "等待开始",
                   running: cnMaintenanceTask.mode === "repair" ? "正在扫描并修复缺口" : "正在拉取每日增量",
                   paused: "维护任务已暂停",
-                  completed: cnMaintenanceTask.mode === "repair" ? "缺口回查已完成" : "每日增量已完成",
+                  completed: nativeTdxMaintenanceDeferred
+                    ? "本次未执行（尚未收市）"
+                    : cnMaintenanceTask.mode === "repair" ? "缺口回查已完成" : "每日增量已完成",
                   failed: "维护任务需要处理",
                 }[cnMaintenanceTask.status]
-              : localServiceAvailable ? "可以进行每日增量和缺口修复" : `本机 ${localUsesBaoStock ? "BaoStock" : "TDX"} 服务不可用`}</strong>
+              : !incrementalEnabled
+                ? "初始化方案未设置增量来源"
+                : localServiceAvailable ? "可以进行每日增量和缺口修复" : `本机 ${maintenanceLabel} 服务不可用`}</strong>
             <small>{cnMaintenanceTask?.status === "failed"
               ? `${cnMaintenanceTask.message || "本次更新暂未完成"} 已写入的内容和进度已保留，请点击“继续维护”重试。`
               : cnMaintenanceTask?.message || (localServiceAvailable
               ? localUsesBaoStock
-                ? "按品种使用 BaoStock 拉取前复权日线；周线和月线继续由本地日线生成。"
-                : "日线价格保持不复权；每日更新使用通达信最新日线快照，已开启的权息信息会在后台继续维护。"
+                ? "每日更新会回查最近 30 个自然日，自动补齐漏日并校正已有前复权日线；周线和月线继续由本地日线生成。"
+                : localIncrementalSource === "tushare"
+                  ? "日线价格保持不复权；每日增量和缺口修复都只使用初始化时绑定的 Tushare daily 接口。"
+                  : "日线价格保持不复权；每日增量只在收盘后写入通达信最新快照，缺口修复只读取本地通达信日线文件。"
               : localServiceError || "请检查本机数据服务状态后重试。")}</small>
             {cnMaintenanceTask && (
               <>
@@ -1633,13 +1745,13 @@ export function DataSourceManager({
                   {" · "}新增 {cnMaintenanceTask.progress.insertedBars.toLocaleString()}
                   {" · "}校正 {cnMaintenanceTask.progress.correctedBars.toLocaleString()}
                   {" · "}未变化 {cnMaintenanceTask.progress.unchangedBars.toLocaleString()}
-                  {" · "}来源 {localUsesBaoStock ? "BaoStock 前复权" : nativeTdxMaintenance ? "通达信实时日线" : "Tushare 不复权"}
+                  {" · "}来源 {maintenanceLabel}
                 </small>
               </>
             )}
           </div>
           <div className="market-maintenance-actions">
-            {localServiceAvailable && !["queued", "running", "paused", "failed"].includes(cnMaintenanceTask?.status ?? "") && (
+            {localServiceAvailable && incrementalEnabled && !["queued", "running", "paused", "failed"].includes(cnMaintenanceTask?.status ?? "") && (
               <>
                 <button className="primary" disabled={maintenanceBusy} onClick={() => void updateCnMaintenance("start", "incremental")}>
                   <CloudDownload size={14} />每日增量更新
@@ -1649,6 +1761,7 @@ export function DataSourceManager({
                 </button>
               </>
             )}
+            {localServiceAvailable && !incrementalEnabled && <small>初始化方案未设置增量来源，当前不可执行每日更新或缺口修复。</small>}
             {localServiceAvailable && ["queued", "running"].includes(cnMaintenanceTask?.status ?? "") && (
               <button className="danger" disabled={maintenanceBusy} onClick={() => void updateCnMaintenance("pause")}>
                 <Pause size={14} />暂停维护

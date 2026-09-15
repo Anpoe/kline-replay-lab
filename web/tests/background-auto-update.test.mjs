@@ -203,6 +203,81 @@ test("按 A 股、美股、外汇顺序执行并用同一 token 完成", async (
   assert.doesNotMatch(JSON.stringify(logs), /safe-token/);
 });
 
+test("初始化未设置 A 股增量来源时后台不会创建维护任务", async () => {
+  const { fetchImpl, calls } = createFakeFetch({
+    "GET /api/data-auto-update": { settings: { enabled: true, lastStatus: "idle" } },
+    "POST /api/data-auto-update": ({ calls: currentCalls }) => {
+      const body = currentCalls.at(-1).body;
+      if (body.action === "claim") return { shouldRun: true, runToken: "no-increment-token" };
+      assert.equal(body.action, "complete");
+      assert.equal(body.status, "completed");
+      return { completed: true };
+    },
+    "GET /api/data-auto-update?scope=existing": {
+      markets: {
+        CN: {
+          existing: true,
+          needsUpdate: false,
+          incrementalSource: "none",
+          reason: "初始化方案未设置日线增量来源，已跳过自动更新",
+        },
+        US: { existing: false, needsUpdate: false },
+        FX: { existing: false, needsUpdate: false, duePairIds: [] },
+        GOLD: { existing: false, needsUpdate: false, duePairIds: [] },
+      },
+    },
+  });
+  const runner = createBackgroundAutoUpdateRunner({
+    fetchImpl,
+    now: () => new Date("2026-08-23T08:00:00.000Z"),
+    randomUUID: () => "no-increment-token",
+    sleep: async () => undefined,
+  });
+
+  const result = await runner.runIfDue();
+
+  assert.equal(result.status, "completed");
+  assert.deepEqual(result.updated, []);
+  assert.ok(result.skipped.some((item) => item.includes("初始化方案未设置日线增量来源")));
+  assert.doesNotMatch(calls.map((call) => call.key).join("\n"), /cn-maintenance/);
+});
+
+test("A 股尚未收市时自动更新完成为 deferred，并保留同日重试机会", async () => {
+  const { fetchImpl, calls } = createFakeFetch({
+    "GET /api/data-auto-update": { settings: { enabled: true, lastStatus: "idle" } },
+    "POST /api/data-auto-update": ({ calls: currentCalls }) => {
+      const body = currentCalls.at(-1).body;
+      if (body.action === "claim") return { shouldRun: true, runToken: "deferred-token" };
+      assert.equal(body.action, "complete");
+      assert.equal(body.status, "deferred");
+      return { completed: true };
+    },
+    "GET /api/data-auto-update?scope=existing": {
+      markets: {
+        CN: { existing: true, needsUpdate: true, reason: "尚未收市" },
+        US: { existing: false, needsUpdate: false },
+        FX: { existing: false, needsUpdate: false, duePairIds: [] },
+        GOLD: { existing: false, needsUpdate: false, duePairIds: [] },
+      },
+    },
+    "POST /api/cn-maintenance": { maintenanceTask: { status: "completed", deferred: true } },
+    "GET /api/cn-maintenance": { maintenanceTask: { status: "completed", deferred: true } },
+  });
+  const runner = createBackgroundAutoUpdateRunner({
+    fetchImpl,
+    now: () => new Date("2026-08-23T08:00:00.000Z"),
+    randomUUID: () => "deferred-token",
+    sleep: async () => undefined,
+  });
+
+  const result = await runner.runIfDue();
+
+  assert.equal(result.claimed, true);
+  assert.equal(result.status, "deferred");
+  assert.deepEqual(result.updated, []);
+  assert.ok(calls.some((call) => call.body?.action === "complete" && call.body.status === "deferred"));
+});
+
 test("已有黄金数据且有新 M1 时会调度 XAUUSD.GOLD 增量任务", async () => {
   const { fetchImpl, calls } = createFakeFetch({
     "GET /api/data-auto-update": { settings: { enabled: true, lastStatus: "idle" } },

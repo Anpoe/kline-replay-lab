@@ -94,6 +94,21 @@ test("自动更新时间判定使用系统本地时间而不是固定时区", as
   assert.match(source, /getHours\(\)/);
 });
 
+test("A 股自动更新读取初始化时绑定的增量来源", async () => {
+  const [service, localServer] = await Promise.all([
+    readFile(new URL("../app/lib/dataAutoUpdateService.ts", import.meta.url), "utf8"),
+    readFile(new URL("../local-data/server.mjs", import.meta.url), "utf8"),
+  ]);
+  assert.match(service, /incrementalSource/);
+  assert.match(service, /incrementalSource === "none"/);
+  assert.match(service, /incrementalSource === "tdx-realtime"/);
+  assert.match(service, /latestClosedCnDate/);
+  assert.match(service, /typeof dataset\?\.includeCorporateActions === "boolean"/);
+  assert.match(localServer, /incrementalEnabled/);
+  assert.match(localServer, /incrementalSource: dataset\?\.incrementalSource/);
+  assert.match(localServer, /manifest\.includeCorporateActions === true\s*\? store\.corporateActions\.getStatus\(\)\s*:\s*null/);
+});
+
 test("同日终态不再自动 claim，跨日才会再次 claim", () => {
   assert.equal(shouldClaimDataAutoUpdate(settings({ enabled: false }), today, now.getTime()), false);
   assert.equal(shouldClaimDataAutoUpdate(settings(), today, now.getTime()), false);
@@ -101,6 +116,24 @@ test("同日终态不再自动 claim，跨日才会再次 claim", () => {
   assert.equal(shouldClaimDataAutoUpdate(settings({ lastStatus: "partial" }), today, now.getTime()), false);
   assert.equal(shouldClaimDataAutoUpdate(settings({ lastCheckDate: "2026-08-22" }), today, now.getTime()), true);
   assert.equal(shouldClaimDataAutoUpdate(settings({ enabled: false, scheduledEnabled: true, scheduledTime: "09:00", lastCheckDate: "2026-08-22" }), today, new Date(2026, 7, 23, 10, 0).getTime()), true);
+  assert.equal(shouldClaimDataAutoUpdate(settings({ lastStatus: "deferred" }), today, now.getTime()), true);
+});
+
+test("收盘前未写入的自动更新标记为 deferred，并允许收盘后同日重试", async () => {
+  const store = createDb(settings({ lastStatus: "running", lastRunToken: "deferred-token" }));
+  try {
+    const completed = await completeDataAutoUpdate(store, {
+      runToken: "deferred-token",
+      status: "deferred",
+      message: "尚未收市，等待收盘后重试",
+      now,
+    });
+    assert.equal(completed.completed, true);
+    assert.equal(completed.settings.lastStatus, "deferred");
+    assert.equal(shouldClaimDataAutoUpdate(completed.settings, today, now.getTime()), true);
+  } finally {
+    store.close();
+  }
 });
 
 test("运行中的自动更新只有超过租约才允许接管", () => {

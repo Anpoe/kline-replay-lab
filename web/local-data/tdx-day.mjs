@@ -93,7 +93,12 @@ export function parseTdxDayBuffer(buffer, options = {}) {
       volume: buffer.readInt32LE(offset + 24),
     });
   }
-  return bars;
+  // Some vendor packages contain an exact duplicate record or a late-added
+  // record out of order. Keep one canonical bar per session so coverage,
+  // chart merges and rolling indicators do not count the same day twice.
+  const canonical = new Map();
+  for (const bar of bars) canonical.set(bar.timestamp, bar);
+  return [...canonical.values()].sort((left, right) => left.timestamp - right.timestamp);
 }
 
 function isoWeekKey(timestamp) {

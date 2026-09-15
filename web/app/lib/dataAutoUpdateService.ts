@@ -72,24 +72,37 @@ async function readLocalCnSummary() {
     instruments?: LocalInstrumentRow[];
   }>("/instruments", 12_000);
   const status = await readLocalDataJson<{
-    dataset?: { corporateActions?: { enabled?: boolean } | null } | null;
+    dataset?: {
+      initialSource?: string | null;
+      incrementalSource?: string | null;
+      includeCorporateActions?: boolean;
+      corporateActions?: { enabled?: boolean } | null;
+    } | null;
   }>("/tasks/current", 12_000);
   const instruments = (response?.instruments ?? []).filter((item) => (
     marketCode(item.market) === "CN" && Number(item.barCount ?? 0) > 0
   ));
+  const activeSource = String(response?.activeSource ?? "").toLowerCase();
+  const dataset = status?.dataset;
+  const incrementalSource = dataset?.incrementalSource
+    ?? (activeSource === "baostock" ? "baostock" : activeSource === "tdx" ? "tdx-realtime" : null);
   return {
     source: response?.activeSource,
-    corporateActionsEnabled: Boolean(status?.dataset?.corporateActions?.enabled),
+    initialSource: dataset?.initialSource ?? null,
+    incrementalSource,
+    corporateActionsEnabled: typeof dataset?.includeCorporateActions === "boolean"
+      ? dataset.includeCorporateActions
+      : Boolean(dataset?.corporateActions?.enabled),
     instrumentCount: instruments.length,
     barCount: instruments.reduce((sum, item) => sum + Math.max(0, Number(item.barCount ?? 0)), 0),
     lastTimestamp: maxTimestamp(...instruments.map((item) => finiteTimestamp(item.lastTimestamp))),
   };
 }
 
-async function latestClosedBaoStockDate() {
+async function latestClosedCnDate() {
   const result = await readLocalDataJson<{ latestClosedDate?: string; error?: string }>("/market/cn/status", 12_000);
   if (!result?.latestClosedDate) {
-    return { date: null, error: result?.error ?? "无法连接本机 BaoStock 交易日服务" };
+    return { date: null, error: result?.error ?? "无法连接本机 A 股交易日服务" };
   }
   return { date: result.latestClosedDate, error: null };
 }
@@ -112,7 +125,18 @@ async function inspectCnUpdate(
       reason: "A 股尚无可更新的本地历史数据",
     };
   }
-  if (String(local.source).toLowerCase() === "tdx") {
+  const incrementalSource = String(local.incrementalSource ?? "").trim().toLowerCase();
+  if (incrementalSource === "none") {
+    return {
+      existing: true,
+      configured: true,
+      needsUpdate: false,
+      latestDate: dateFromTimestamp(latestTimestamp),
+      expectedLatestDate: null,
+      reason: "初始化方案未设置日线增量来源，已跳过自动更新",
+    };
+  }
+  if (incrementalSource === "tdx-realtime") {
     return {
       existing: true,
       configured: true,
@@ -123,7 +147,7 @@ async function inspectCnUpdate(
     };
   }
   try {
-    const provider = await latestClosedBaoStockDate();
+    const provider = await latestClosedCnDate();
     if (!provider.date) {
       return {
         existing: true,
@@ -136,6 +160,11 @@ async function inspectCnUpdate(
     }
     const latestDate = dateFromTimestamp(latestTimestamp);
     const needsUpdate = !latestDate || latestDate < provider.date;
+    const sourceLabel = incrementalSource === "tushare"
+      ? "Tushare"
+      : incrementalSource === "baostock"
+        ? "BaoStock"
+        : "当前日线来源";
     return {
       existing: true,
       configured: true,
@@ -143,8 +172,8 @@ async function inspectCnUpdate(
       latestDate,
       expectedLatestDate: provider.date,
       reason: needsUpdate
-        ? `A 股数据截至 ${latestDate ?? "未知日期"}，最近完整交易日为 ${provider.date}`
-        : `A 股已覆盖最近完整交易日 ${provider.date}`,
+        ? `${sourceLabel} 增量数据截至 ${latestDate ?? "未知日期"}，最近完整交易日为 ${provider.date}`
+        : `${sourceLabel} 已覆盖最近完整交易日 ${provider.date}`,
     };
   } catch {
     return {

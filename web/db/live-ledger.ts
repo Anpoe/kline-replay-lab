@@ -82,7 +82,7 @@ export type NormalizedWatch = {
   instrumentId: string;
   symbol: string;
   name: string;
-  market: "CN" | "US";
+  market: "CN" | "US" | "FX" | "GOLD";
   latestTimestamp: number;
   latestClose: number;
   observationTimestamp: number | null;
@@ -311,7 +311,9 @@ export function normalizePortfolio(value: unknown, sortOrder = 0): NormalizedPor
 export function normalizeWatch(value: unknown, sortOrder = 0): NormalizedWatch | null {
   if (!isRecord(value)) return null;
   const instrumentId = stringValue(value.instrumentId);
-  const market = value.market === "CN" || value.market === "US" ? value.market : null;
+  const market = value.market === "CN" || value.market === "US" || value.market === "FX" || value.market === "GOLD"
+    ? value.market
+    : null;
   const symbol = stringValue(value.symbol, instrumentId);
   const name = stringValue(value.name, symbol);
   const updatedAt = stringValue(value.updatedAt, new Date(0).toISOString());

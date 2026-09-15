@@ -28,7 +28,7 @@ type ProviderSettingsResponse = {
     scheduledTime: string;
     lastCheckDate: string | null;
     lastFinishedAt: string | null;
-    lastStatus: "idle" | "running" | "completed" | "partial" | "failed";
+    lastStatus: "idle" | "running" | "completed" | "partial" | "failed" | "deferred";
     lastMessage: string;
   };
 };

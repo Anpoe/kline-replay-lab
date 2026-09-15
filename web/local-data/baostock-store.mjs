@@ -20,6 +20,7 @@ import {
 import { screenLatestCandles } from "./pattern-scan.mjs";
 import { writeJsonAtomic } from "./atomic-json.mjs";
 import { CN_ASSET_TYPES, DEFAULT_CN_ASSETS, filterCnInstruments, normalizeCnAssets } from "./cn-asset-scope.mjs";
+import { latestClosedCnDate } from "./cn-maintenance.mjs";
 
 const DAY_MS = 86_400_000;
 const TIMEFRAMES = ["1d", "1w", "1mo"];
@@ -78,9 +79,15 @@ function safePlan(input = {}) {
   const assets = Array.isArray(input.assets)
     ? input.assets.filter((value) => CN_ASSET_TYPES.has(value))
     : DEFAULT_CN_ASSETS;
+  const requestedIncremental = input.cnIncrementalSource;
+  if (requestedIncremental && !["baostock", "none"].includes(requestedIncremental)) {
+    throw new Error("BaoStock 初始化只能搭配 BaoStock 增量或关闭增量，不能混用其他来源");
+  }
   return {
     source: "baostock",
+    initialSource: "baostock",
     provider: "baostock",
+    incrementalSource: requestedIncremental === "none" ? "none" : "baostock",
     assets: assets.length ? [...new Set(assets)] : [...DEFAULT_CN_ASSETS],
     includeDelisted: input.includeDelisted !== false,
     historyRange: ["all", "20y", "10y"].includes(input.historyRange) ? input.historyRange : "all",
@@ -301,7 +308,22 @@ export class BaoStockLocalStore {
     if (this.manifestCache !== undefined) return this.manifestCache;
     if (!(await exists(this.manifestFile))) return null;
     try {
-      this.manifestCache = JSON.parse(await readFile(this.manifestFile, "utf8"));
+      const manifest = JSON.parse(await readFile(this.manifestFile, "utf8"));
+      let changed = false;
+      if (!manifest.initialSource) {
+        manifest.initialSource = "baostock";
+        changed = true;
+      }
+      if (!manifest.incrementalSource) {
+        manifest.incrementalSource = "baostock";
+        changed = true;
+      }
+      if (manifest.includeCorporateActions == null) {
+        manifest.includeCorporateActions = false;
+        changed = true;
+      }
+      if (changed) await writeJsonAtomic(this.manifestFile, manifest);
+      this.manifestCache = manifest;
       return this.manifestCache;
     } catch {
       this.manifestCache = null;
@@ -314,6 +336,9 @@ export class BaoStockLocalStore {
     if (!manifest) return null;
     return {
       source: "baostock",
+      initialSource: manifest.initialSource ?? "baostock",
+      incrementalSource: manifest.incrementalSource ?? "baostock",
+      includeCorporateActions: manifest.includeCorporateActions === true,
       adjustmentType: BAOSTOCK_ADJUSTMENT_TYPE,
       adjustmentStatus: manifest.adjustmentStatus ?? "ready",
       adjustmentSource: "baostock-adjustflag-2",
@@ -423,6 +448,9 @@ export class BaoStockLocalStore {
     return {
       schemaVersion: 1,
       source: "baostock",
+      initialSource: "baostock",
+      incrementalSource: plan.incrementalSource,
+      includeCorporateActions: false,
       sourceVersion: "query_history_k_data_plus",
       adjustmentType: BAOSTOCK_ADJUSTMENT_TYPE,
       adjustmentStatus: "building",
@@ -901,6 +929,13 @@ export class BaoStockLocalStore {
     if (!manifest || manifest.adjustmentStatus !== "ready") {
       throw new Error("请先完成 BaoStock A 股全市场前复权初始化");
     }
+    const incrementalSource = manifest.incrementalSource ?? "baostock";
+    if (incrementalSource === "none") {
+      throw new Error("当前初始化方案未设置日线增量来源，不能启动增量或缺口修复");
+    }
+    if (incrementalSource !== "baostock") {
+      throw new Error("当前初始化方案绑定的增量来源不是 BaoStock，已阻止混源维护");
+    }
     const days = Math.min(120, Math.max(7, Math.trunc(Number(repairDays) || 30)));
     const maintenanceAssets = normalizeCnAssets(manifest.assets);
     const instruments = filterCnInstruments(manifest.instruments, maintenanceAssets);
@@ -921,9 +956,10 @@ export class BaoStockLocalStore {
     this.maintenanceTask = {
       id: `baostock_maintenance_${randomUUID()}`,
       kind: "baostock-cn-daily-maintenance",
+      source: "baostock",
       mode,
       status: "queued",
-      message: mode === "repair" ? `准备使用 BaoStock 回查最近 ${days} 个自然日。` : "准备使用 BaoStock 检查 A 股前复权增量。",
+      message: `准备使用 BaoStock 回查最近 ${days} 个自然日，自动补齐缺失日线。`,
       error: null,
       repairDays: days,
       assets: maintenanceAssets,
@@ -968,7 +1004,9 @@ export class BaoStockLocalStore {
         manifest?.instruments,
         this.maintenanceTask.assets ?? manifest?.assets,
       );
-      const today = todayText(this.nowProvider);
+      const latestClosedDate = await this.getLatestClosedTradeDate();
+      const endDate = latestClosedDate ?? latestClosedCnDate(this.nowProvider);
+      const startDate = dateOffset(endDate, -(this.maintenanceTask.repairDays - 1));
       for (let index = Number(this.maintenanceTask.nextInstrumentIndex) || 0; index < instruments.length; index += 1) {
         if (this.maintenanceTask.status !== "running") {
           const error = new Error("BaoStock 维护任务已暂停");
@@ -976,16 +1014,13 @@ export class BaoStockLocalStore {
           throw error;
         }
         const instrument = instruments[index];
-        const startDate = this.maintenanceTask.mode === "repair"
-          ? dateOffset(today, -(this.maintenanceTask.repairDays - 1))
-          : dateOffset(dateText(Number(instrument.lastTimestamp) || Date.UTC(1990, 0, 1)), 1);
-        this.maintenanceTask.message = `正在读取 ${instrument.id} 的 BaoStock 前复权增量（${index + 1} / ${instruments.length}）。`;
+        this.maintenanceTask.message = `正在回查 ${instrument.id} 的 BaoStock 前复权日线（${index + 1} / ${instruments.length}）。`;
         await this.persistMaintenanceTask();
-        if (startDate <= today) {
+        if (startDate <= endDate) {
           const rows = await this.client.queryHistory({
             code: instrument.baostockCode ?? baoStockCodeFromInstrumentId(instrument.id),
             startDate,
-            endDate: today,
+            endDate,
             frequency: "d",
             adjustflag: BAOSTOCK_ADJUSTFLAG,
           });
@@ -1008,9 +1043,7 @@ export class BaoStockLocalStore {
         await this.persistMaintenanceTask();
       }
       this.maintenanceTask.status = "completed";
-      this.maintenanceTask.message = this.maintenanceTask.mode === "repair"
-        ? `BaoStock 缺口回查完成：补入 ${this.maintenanceTask.progress.insertedBars.toLocaleString()} 根，校正 ${this.maintenanceTask.progress.correctedBars.toLocaleString()} 根。`
-        : `BaoStock 增量检查完成：新增 ${this.maintenanceTask.progress.insertedBars.toLocaleString()} 根，校正 ${this.maintenanceTask.progress.correctedBars.toLocaleString()} 根。`;
+      this.maintenanceTask.message = `BaoStock 增量回查完成：补入 ${this.maintenanceTask.progress.insertedBars.toLocaleString()} 根，校正 ${this.maintenanceTask.progress.correctedBars.toLocaleString()} 根。`;
       await this.persistMaintenanceTask();
     } catch (error) {
       if (this.maintenanceTask?.status === "paused" || error?.name === "AbortError") {
@@ -1032,25 +1065,19 @@ export class BaoStockLocalStore {
   }
 
   async getLatestClosedTradeDate() {
-    const current = this.nowProvider();
-    const parts = new Intl.DateTimeFormat("en-CA", {
-      timeZone: "Asia/Shanghai",
-      year: "numeric",
-      month: "2-digit",
-      day: "2-digit",
-      hour: "2-digit",
-      minute: "2-digit",
-      hourCycle: "h23",
-    }).formatToParts(current);
-    const values = Object.fromEntries(parts.map((part) => [part.type, part.value]));
-    const today = `${values.year}-${values.month}-${values.day}`;
-    const cutoff = Number(values.hour) * 60 + Number(values.minute) >= 930 ? today : dateOffset(today, -1);
-    const dates = await this.client.queryTradeDates({ startDate: dateOffset(cutoff, -90), endDate: cutoff });
+    const cutoff = latestClosedCnDate(this.nowProvider);
+    if (typeof this.client.queryTradeDates !== "function") return cutoff;
+    let dates;
+    try {
+      dates = await this.client.queryTradeDates({ startDate: dateOffset(cutoff, -90), endDate: cutoff });
+    } catch {
+      return cutoff;
+    }
     const available = (Array.isArray(dates) ? dates : [])
       .filter((row) => String(row?.is_trading_day ?? row?.is_open ?? "") === "1")
       .map((row) => String(row?.calendar_date ?? row?.cal_date ?? "").slice(0, 10))
       .filter((value) => /^\d{4}-\d{2}-\d{2}$/.test(value) && value <= cutoff)
       .sort();
-    return available.at(-1) ?? null;
+    return available.at(-1) ?? cutoff;
   }
 }

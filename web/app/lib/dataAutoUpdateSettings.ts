@@ -1,4 +1,4 @@
-export type DataAutoUpdateStatus = "idle" | "running" | "completed" | "partial" | "failed";
+export type DataAutoUpdateStatus = "idle" | "running" | "completed" | "partial" | "failed" | "deferred";
 
 export type DataAutoUpdateSettings = {
   enabled: boolean;
@@ -62,7 +62,7 @@ export function isScheduledDataAutoUpdateDue(
 }
 
 function asStatus(value: unknown): DataAutoUpdateStatus {
-  return value === "running" || value === "completed" || value === "partial" || value === "failed"
+  return value === "running" || value === "completed" || value === "partial" || value === "failed" || value === "deferred"
     ? value
     : "idle";
 }
@@ -101,6 +101,7 @@ export function shouldClaimDataAutoUpdate(
     const startedAt = settings.lastStartedAt ? Date.parse(settings.lastStartedAt) : Number.NaN;
     return Number.isFinite(startedAt) && nowMs - startedAt > DATA_AUTO_UPDATE_LEASE_MS;
   }
+  if (settings.lastStatus === "deferred" && settings.lastCheckDate === date) return true;
   if (settings.lastCheckDate === date) return false;
   return true;
 }

@@ -57,6 +57,18 @@ test("TDX .day records decode and aggregate into calendar weeks", () => {
   );
 });
 
+test("TDX .day duplicate sessions are canonicalized before chart aggregation", () => {
+  const bars = parseTdxDayBuffer(dayBuffer([
+    { date: 20260721, open: 10, high: 11, low: 9, close: 10.5 },
+    { date: 20260720, open: 9, high: 10, low: 8.5, close: 9.5 },
+    { date: 20260721, open: 10, high: 11, low: 9, close: 10.5 },
+  ]));
+  assert.deepEqual(bars.map((bar) => bar.timestamp), [
+    Date.UTC(2026, 6, 20),
+    Date.UTC(2026, 6, 21),
+  ]);
+});
+
 test("TDX paths map to stable ids and common asset classes", () => {
   assert.equal(instrumentIdFromEntry("sh/lday/sh600519.day"), "600519.SH");
   assert.equal(instrumentIdFromEntry("sz\\lday\\sz399001.day"), "399001.SZ");
@@ -117,7 +129,7 @@ test("local store downloads, indexes and serves daily/weekly/monthly candles", a
     root,
     sourceUrl: `http://127.0.0.1:${address.port}/hsjday.zip`,
     tushareUrl: `http://127.0.0.1:${address.port}/`,
-    nowProvider: () => new Date("2026-07-28T12:00:00+08:00"),
+    nowProvider: () => new Date("2026-07-28T16:00:00+08:00"),
     tushareThrottleMs: 0,
   }).init();
   context.after(async () => {
@@ -147,7 +159,7 @@ test("local store downloads, indexes and serves daily/weekly/monthly candles", a
   assert.deepEqual(coverage.coverage.map((item) => item.timeframe), ["1w", "1mo"]);
   assert.match((await store.getManifest()).datasetVersion, /^tdx-[a-f0-9]{16}$/);
 
-  await store.startCnMaintenance({ mode: "repair", token: "test-token", repairDays: 8 });
+  await store.startCnMaintenance({ mode: "repair", repairDays: 8 });
   const maintenanceDeadline = Date.now() + 5000;
   while (
     !["completed", "failed"].includes(store.getCnMaintenanceTask()?.status)
@@ -160,15 +172,16 @@ test("local store downloads, indexes and serves daily/weekly/monthly candles", a
     "completed",
     store.getCnMaintenanceTask()?.error,
   );
-  assert.equal(store.getCnMaintenanceTask()?.progress.insertedBars, 1);
-  assert.equal(store.getCnMaintenanceTask()?.progress.correctedBars, 1);
+  assert.equal(store.getCnMaintenanceTask()?.kind, "tdx-native-gap-repair");
+  assert.equal(store.getCnMaintenanceTask()?.progress.insertedBars, 0);
+  assert.equal(store.getCnMaintenanceTask()?.progress.correctedBars, 0);
   const maintainedDaily = await store.getCandles("600519.SH", "1d");
-  assert.equal(maintainedDaily.candles.length, 4);
+  assert.equal(maintainedDaily.candles.length, 3);
   assert.equal(maintainedDaily.candles.find((item) =>
-    new Date(item.timestamp).toISOString().startsWith("2026-07-21"))?.close, 11.9);
-  assert.equal(maintainedDaily.candles.at(-1).close, 12.1);
+    new Date(item.timestamp).toISOString().startsWith("2026-07-21"))?.close, 11.8);
+  assert.equal(maintainedDaily.candles.at(-1).close, 11.2);
   assert.equal((await store.getCandles("600519.SH", "1w")).candles.length, 2);
-  assert.match((await store.getManifest()).datasetVersion, /-ts-\d+$/);
+  assert.match((await store.getManifest()).datasetVersion, /^tdx-[a-f0-9]{16}$/);
   const refreshed = await store.getLatestCandles(
     ["600519.SH"],
     { "600519.SH": Date.UTC(2026, 6, 21) },
@@ -180,5 +193,5 @@ test("local store downloads, indexes and serves daily/weekly/monthly candles", a
   assert.deepEqual(deletion, { deletedInstruments: 1, instrumentIds: ["600519.SH"] });
   assert.equal(await store.getCandles("600519.SH", "1d"), null);
   assert.equal((await store.getInstruments()).length, 1);
-  assert.match((await store.getManifest()).datasetVersion, /^tdx-[a-f0-9]{16}(?:-ts-\d+)?-edit-\d+$/);
+  assert.match((await store.getManifest()).datasetVersion, /^tdx-[a-f0-9]{16}-edit-\d+$/);
 });

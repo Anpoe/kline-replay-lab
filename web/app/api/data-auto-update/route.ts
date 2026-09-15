@@ -21,7 +21,7 @@ function validDate(value: unknown): value is string {
 }
 
 function validStatus(value: unknown): value is Exclude<DataAutoUpdateStatus, "idle" | "running"> {
-  return value === "completed" || value === "partial" || value === "failed";
+  return value === "completed" || value === "partial" || value === "failed" || value === "deferred";
 }
 
 export async function GET(request: Request) {

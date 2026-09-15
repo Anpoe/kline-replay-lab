@@ -41,6 +41,11 @@ export type LivePriceRefreshPayload = {
     timestamp: number;
     open: number;
     close: number;
+    realtime?: boolean;
+    dailyBarClosed?: boolean;
+    quoteTimestamp?: number;
+    volume?: number | null;
+    turnover?: number | null;
   }>;
 };
 

@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { TdxLocalStore } from '../local-data/legacy-tdx-store.mjs';
@@ -12,6 +12,21 @@ async function settled(store) {
     await new Promise(resolve => setTimeout(resolve, 5));
   }
   throw new Error('TDX 实时日线任务未完成');
+}
+
+function dayBuffer(rows) {
+  const buffer = Buffer.alloc(rows.length * 32);
+  rows.forEach((row, index) => {
+    const offset = index * 32;
+    buffer.writeInt32LE(row.date, offset);
+    buffer.writeInt32LE(Math.round(row.open * 100), offset + 4);
+    buffer.writeInt32LE(Math.round(row.high * 100), offset + 8);
+    buffer.writeInt32LE(Math.round(row.low * 100), offset + 12);
+    buffer.writeInt32LE(Math.round(row.close * 100), offset + 16);
+    buffer.writeFloatLE(row.turnover ?? 20000, offset + 20);
+    buffer.writeInt32LE(row.volume ?? 1000, offset + 24);
+  });
+  return buffer;
 }
 
 test('TDX daily incremental maintenance works without a token and updates the same day in place', async t => {
@@ -43,6 +58,7 @@ test('TDX daily incremental maintenance works without a token and updates the sa
   t.after(async () => { store.close(); await rm(root, { recursive: true, force: true }); });
   store.manifestCache = {
     datasetVersion: 'tdx-test',
+    incrementalSource: 'tdx-realtime',
     instruments: [{
       id: '000001.SZ',
       assetType: 'stock',
@@ -71,12 +87,311 @@ test('TDX daily incremental maintenance works without a token and updates the sa
   assert.equal(calls, 2);
 
   const row = store.ensureOverlayDb().prepare(`
-    SELECT COUNT(*) AS count, close, source FROM daily_overlay
+    SELECT COUNT(*) AS count, close, volume, source FROM daily_overlay
     WHERE instrument_id = '000001.SZ' AND timestamp = ?
   `).get(Date.UTC(2026, 8, 14));
   assert.equal(Number(row.count), 1);
   assert.equal(Number(row.close), 11);
+  assert.equal(Number(row.volume), 100000);
   assert.equal(row.source, 'tdx-realtime-daily');
+});
+
+test('Tushare incremental source keeps both incremental and gap repair on Tushare', async t => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'kline-tushare-maintenance-source-'));
+  const requestedDates = [];
+  const store = await new TdxLocalStore({
+    root,
+    nowProvider: () => new Date('2026-09-14T08:00:00Z'),
+    tushareThrottleMs: 0,
+    fetcher: async (_url, options) => {
+      const body = JSON.parse(options.body);
+      requestedDates.push(body.params.trade_date);
+      const fields = ['ts_code', 'trade_date', 'open', 'high', 'low', 'close', 'vol', 'amount'];
+      const items = body.params.trade_date === '20260914'
+        ? [['000001.SZ', '20260914', 9.5, 10.5, 9, 10, 1000, 20000]]
+        : [];
+      return new Response(JSON.stringify({ code: 0, data: { fields, items } }), { status: 200 });
+    },
+    corporateActionsClient: { close() {} },
+    dailyQuotesClient: {
+      async fetchDailyQuotes() {
+        throw new Error('Tushare 增量来源不应调用 TDX 实时接口');
+      },
+      close() {},
+    },
+  }).init();
+  t.after(async () => { store.close(); await rm(root, { recursive: true, force: true }); });
+  store.manifestCache = {
+    datasetVersion: 'tdx-test',
+    incrementalSource: 'tushare',
+    assets: ['stock'],
+    instruments: [{
+      id: '000001.SZ',
+      assetType: 'stock',
+      relativePath: 'tdx/day/sz/000001.day',
+      barCount: 1,
+      firstTimestamp: Date.UTC(2026, 8, 11),
+      lastTimestamp: Date.UTC(2026, 8, 11),
+    }],
+  };
+
+  const incremental = await store.startCnMaintenance({ mode: 'incremental', token: 'test-token' });
+  assert.equal(incremental.kind, 'tushare-cn-daily-maintenance');
+  assert.equal(incremental.source, 'tushare');
+  const incrementalDone = await settled(store);
+  assert.equal(incrementalDone.status, 'completed');
+
+  const repair = await store.startCnMaintenance({ mode: 'repair', repairDays: 7, token: 'test-token' });
+  assert.equal(repair.kind, 'tushare-cn-daily-maintenance');
+  assert.equal(repair.source, 'tushare');
+  const repairDone = await settled(store);
+  assert.equal(repairDone.status, 'completed');
+  assert.ok(requestedDates.includes('20260914'));
+
+  const row = store.ensureOverlayDb().prepare(
+    'SELECT volume, source FROM daily_overlay WHERE instrument_id = ? AND timestamp = ?',
+  ).get('000001.SZ', Date.UTC(2026, 8, 14));
+  assert.equal(Number(row.volume), 100000);
+  assert.equal(row.source, 'tushare-daily');
+});
+
+test('an initialization without an incremental source blocks daily maintenance', async t => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'kline-no-incremental-source-'));
+  const store = await new TdxLocalStore({
+    root,
+    nowProvider: () => new Date('2026-09-14T08:00:00Z'),
+    corporateActionsClient: { close() {} },
+    dailyQuotesClient: { close() {} },
+  }).init();
+  t.after(async () => { store.close(); await rm(root, { recursive: true, force: true }); });
+  store.manifestCache = {
+    datasetVersion: 'tdx-test',
+    incrementalSource: 'none',
+    instruments: [],
+  };
+
+  await assert.rejects(
+    () => store.startCnMaintenance({ mode: 'incremental' }),
+    /未设置日线增量来源/,
+  );
+  assert.equal(store.getCnMaintenanceTask(), null);
+});
+
+test('TDX daily incremental maintenance skips pre-close quotes instead of stamping an uncertain date', async t => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'kline-tdx-realtime-cross-day-'));
+  let now = new Date('2026-09-14T16:00:00+08:00');
+  let volume = 1000;
+  const store = await new TdxLocalStore({
+    root,
+    nowProvider: () => now,
+    corporateActionsClient: { close() {} },
+    dailyQuotesClient: {
+      async fetchDailyQuotes(instrumentIds) {
+        return instrumentIds.map(instrumentId => ({
+          instrumentId,
+          price: 10,
+          lastClose: 9,
+          open: 9.5,
+          high: 10.5,
+          low: 9,
+          volume,
+          turnover: 20000,
+        }));
+      },
+      close() {},
+    },
+  }).init();
+  t.after(async () => { store.close(); await rm(root, { recursive: true, force: true }); });
+  store.manifestCache = {
+    datasetVersion: 'tdx-test',
+    instruments: [{
+      id: '000001.SZ',
+      assetType: 'stock',
+      relativePath: 'tdx/day/sz/000001.day',
+      barCount: 1,
+      firstTimestamp: Date.UTC(2026, 8, 11),
+      lastTimestamp: Date.UTC(2026, 8, 11),
+    }],
+  };
+
+  await store.startCnMaintenance({ mode: 'incremental' });
+  await settled(store);
+  now = new Date('2026-09-15T10:00:00+08:00');
+  volume = 1200;
+  await store.startCnMaintenance({ mode: 'incremental' });
+  await settled(store);
+
+  const rows = store.ensureOverlayDb().prepare(`
+    SELECT timestamp, volume FROM daily_overlay
+    WHERE instrument_id = '000001.SZ' ORDER BY timestamp
+  `).all();
+  assert.deepEqual(rows.map(row => ({ timestamp: Number(row.timestamp), volume: Number(row.volume) })), [{
+    timestamp: Date.UTC(2026, 8, 14),
+    volume: 100000,
+  }]);
+  assert.equal(store.getCnMaintenanceTask().message, '当前尚未收市或今天不是交易日，暂不写入实时日线。');
+});
+
+test('TDX pre-close checks purge a stale current-day overlay and stay retryable', async t => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'kline-tdx-realtime-deferred-'));
+  let calls = 0;
+  const store = await new TdxLocalStore({
+    root,
+    nowProvider: () => new Date('2026-09-15T10:00:00+08:00'),
+    corporateActionsClient: { close() {} },
+    dailyQuotesClient: {
+      async fetchDailyQuotes() {
+        calls += 1;
+        return [];
+      },
+      close() {},
+    },
+  }).init();
+  t.after(async () => { store.close(); await rm(root, { recursive: true, force: true }); });
+  store.manifestCache = {
+    datasetVersion: 'tdx-test',
+    instruments: [{
+      id: '000001.SZ',
+      assetType: 'stock',
+      relativePath: 'tdx/day/sz/000001.day',
+      barCount: 1,
+      firstTimestamp: Date.UTC(2026, 8, 11),
+      lastTimestamp: Date.UTC(2026, 8, 11),
+    }],
+  };
+  store.ensureOverlayDb().prepare(`
+    INSERT INTO daily_overlay (
+      instrument_id, timestamp, open, high, low, close, volume, turnover, source, imported_at, is_new
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `).run(
+    '000001.SZ', Date.UTC(2026, 8, 15), 9.5, 10.5, 9, 10, 100000, 20000,
+    'tdx-realtime-daily', '2026-09-15T06:00:00.000Z', 1,
+  );
+
+  const task = await store.startCnMaintenance({ mode: 'incremental' });
+
+  assert.equal(task.deferred, true);
+  assert.equal(task.status, 'completed');
+  assert.equal(calls, 0);
+  assert.equal(Number(store.ensureOverlayDb().prepare(
+    'SELECT COUNT(*) AS count FROM daily_overlay WHERE timestamp = ?',
+  ).get(Date.UTC(2026, 8, 15)).count), 0);
+});
+
+test('TDX daily incremental maintenance keeps the native realtime path even when a repair token is present', async t => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'kline-tdx-incremental-native-'));
+  let calls = 0;
+  const store = await new TdxLocalStore({
+    root,
+    nowProvider: () => new Date('2026-09-15T16:00:00+08:00'),
+    fetcher: async () => {
+      throw new Error('增量路径不应调用 Tushare');
+    },
+    corporateActionsClient: { close() {} },
+    dailyQuotesClient: {
+      async fetchDailyQuotes(instrumentIds) {
+        calls += 1;
+        return instrumentIds.map(instrumentId => ({
+          instrumentId,
+          price: 10,
+          lastClose: 9,
+          open: 9.5,
+          high: 10.5,
+          low: 9,
+          volume: 1000,
+          turnover: 20000,
+        }));
+      },
+      close() {},
+    },
+  }).init();
+  t.after(async () => { store.close(); await rm(root, { recursive: true, force: true }); });
+  store.manifestCache = {
+    datasetVersion: 'tdx-test',
+    instruments: [{
+      id: '000001.SZ',
+      assetType: 'stock',
+      relativePath: 'tdx/day/sz/000001.day',
+      barCount: 1,
+      firstTimestamp: Date.UTC(2026, 8, 11),
+      lastTimestamp: Date.UTC(2026, 8, 11),
+    }],
+  };
+
+  await store.startCnMaintenance({ mode: 'incremental', token: 'test-token', repairDays: 7 });
+  const completed = await settled(store);
+
+  assert.equal(completed.kind, 'tdx-realtime-daily-maintenance');
+  assert.equal(completed.status, 'completed');
+  assert.equal(completed.progress.insertedBars, 1);
+  assert.equal(calls, 1);
+  const row = store.ensureOverlayDb().prepare(
+    'SELECT close, volume FROM daily_overlay WHERE instrument_id = ? AND timestamp = ?',
+  ).get('000001.SZ', Date.UTC(2026, 8, 15));
+  assert.equal(Number(row.close), 10);
+  assert.equal(Number(row.volume), 100000);
+});
+
+test('TDX daily incremental maintenance migrates legacy realtime volumes to shares once', async t => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'kline-tdx-realtime-volume-migration-'));
+  const store = await new TdxLocalStore({
+    root,
+    nowProvider: () => new Date('2026-09-14T16:00:00+08:00'),
+    corporateActionsClient: { close() {} },
+    dailyQuotesClient: {
+      async fetchDailyQuotes(instrumentIds) {
+        return instrumentIds.map(instrumentId => ({
+          instrumentId,
+          price: 10,
+          lastClose: 9,
+          open: 9.5,
+          high: 10.5,
+          low: 9,
+          volume: 1000,
+          turnover: 20000,
+        }));
+      },
+      close() {},
+    },
+  }).init();
+  t.after(async () => { store.close(); await rm(root, { recursive: true, force: true }); });
+  store.manifestCache = {
+    datasetVersion: 'tdx-test',
+    instruments: [{
+      id: '000001.SZ',
+      assetType: 'stock',
+      relativePath: 'tdx/day/sz/000001.day',
+      barCount: 1,
+      firstTimestamp: Date.UTC(2026, 8, 14),
+      lastTimestamp: Date.UTC(2026, 8, 14),
+    }],
+  };
+  store.ensureOverlayDb().prepare(`
+    INSERT INTO daily_overlay (
+      instrument_id, timestamp, open, high, low, close, volume, turnover, source, imported_at, is_new
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `).run(
+    '000001.SZ',
+    Date.UTC(2026, 8, 14),
+    9.5,
+    10.5,
+    9,
+    10,
+    1000,
+    1000000,
+    'tdx-realtime-daily',
+    new Date().toISOString(),
+    1,
+  );
+
+  await store.startCnMaintenance({ mode: 'incremental' });
+  await settled(store);
+
+  const row = store.ensureOverlayDb().prepare(`
+    SELECT volume FROM daily_overlay WHERE instrument_id = '000001.SZ' AND timestamp = ?
+  `).get(Date.UTC(2026, 8, 14));
+  assert.equal(Number(row.volume), 100000);
+  assert.equal(store.manifestCache.realtimeVolumeUnit, 'shares');
 });
 
 test('TDX daily incremental maintenance resumes the same date after a mid-batch failure', async t => {
@@ -191,32 +506,77 @@ test('TDX daily maintenance follows the asset categories saved in the manifest',
     '510300.SH',
     '110001.SH',
   ]]);
+  const rows = store.ensureOverlayDb().prepare(
+    'SELECT instrument_id, volume FROM daily_overlay ORDER BY instrument_id',
+  ).all();
+  assert.deepEqual(rows.map((row) => [row.instrument_id, Number(row.volume)]), [
+    ['000001.SH', 1000],
+    ['110001.SH', 100000],
+    ['510300.SH', 100000],
+    ['600000.SH', 100000],
+  ]);
+});
+
+test('TDX gap repair uses local dated .day data and does not call Tushare', async t => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'kline-tdx-native-gap-'));
+  const dayPath = path.join(root, 'tdx', 'day', 'sz', '000001.day');
+  await mkdir(path.dirname(dayPath), { recursive: true });
+  await writeFile(dayPath, dayBuffer([
+    { date: 20260910, open: 9.5, high: 10.5, low: 9, close: 10, volume: 1000 },
+  ]));
+  const store = await new TdxLocalStore({
+    root,
+    nowProvider: () => new Date('2026-09-15T16:00:00+08:00'),
+    fetcher: async () => { throw new Error('缺口修复不应调用 Tushare'); },
+    corporateActionsClient: { close() {} },
+    dailyQuotesClient: { close() {} },
+  }).init();
+  t.after(async () => { store.close(); await rm(root, { recursive: true, force: true }); });
+  store.manifestCache = {
+    datasetVersion: 'tdx-test',
+    instruments: [{
+      id: '000001.SZ',
+      assetType: 'stock',
+      relativePath: 'tdx/day/sz/000001.day',
+      barCount: 1,
+      firstTimestamp: Date.UTC(2026, 8, 10),
+      lastTimestamp: Date.UTC(2026, 8, 10),
+    }],
+  };
+  store.ensureOverlayDb().prepare(`
+    INSERT INTO daily_overlay (
+      instrument_id, timestamp, open, high, low, close, volume, turnover, source, imported_at, is_new
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `).run(
+    '000001.SZ', Date.UTC(2026, 8, 10), 9, 9.5, 8.5, 9, 900, 18000,
+    'tdx-realtime-daily', new Date().toISOString(), 0,
+  );
+
+  const task = await store.startCnMaintenance({ mode: 'repair', repairDays: 7 });
+  const completed = await settled(store);
+  const row = store.ensureOverlayDb().prepare(
+    'SELECT close, volume, source FROM daily_overlay WHERE instrument_id = ? AND timestamp = ?',
+  ).get('000001.SZ', Date.UTC(2026, 8, 10));
+
+  assert.equal(task.kind, 'tdx-native-gap-repair');
+  assert.equal(completed.status, 'completed');
+  assert.equal(Number(row.close), 10);
+  assert.equal(Number(row.volume), 1000);
+  assert.equal(row.source, 'tdx-official-gap-repair');
 });
 
 test('TDX gap maintenance accepts rows for the selected non-stock categories', async t => {
   const root = await mkdtemp(path.join(os.tmpdir(), 'kline-tdx-gap-assets-'));
-  const requestedDates = [];
+  const dayPath = path.join(root, 'tdx', 'day', 'sh', '000001.day');
+  await mkdir(path.dirname(dayPath), { recursive: true });
+  await writeFile(dayPath, dayBuffer([
+    { date: 20260914, open: 3800, high: 3900, low: 3790, close: 3880, volume: 1000 },
+  ]));
   const store = await new TdxLocalStore({
     root,
     nowProvider: () => new Date('2026-09-14T12:00:00Z'),
     tushareThrottleMs: 0,
-    fetcher: async (_url, options) => {
-      const body = JSON.parse(options.body);
-      requestedDates.push(body.params.trade_date);
-      const items = body.params.trade_date === '20260914'
-        ? [['000001.SH', '20260914', 3800, 3900, 3790, 3880, 100, 2000]]
-        : [];
-      return {
-        ok: true,
-        json: async () => ({
-          code: 0,
-          data: {
-            fields: ['ts_code', 'trade_date', 'open', 'high', 'low', 'close', 'vol', 'amount'],
-            items,
-          },
-        }),
-      };
-    },
+    fetcher: async () => { throw new Error('缺口修复不应调用 Tushare'); },
     corporateActionsClient: { close() {} },
     dailyQuotesClient: { close() {} },
   }).init();
@@ -234,16 +594,67 @@ test('TDX gap maintenance accepts rows for the selected non-stock categories', a
     }],
   };
 
-  await store.startCnMaintenance({ mode: 'repair', token: 'test-token', repairDays: 7 });
+  await store.startCnMaintenance({ mode: 'repair', repairDays: 7 });
   const completed = await settled(store);
 
   assert.equal(completed.status, 'completed');
   assert.equal(completed.assets[0], 'index');
   assert.equal(completed.progress.acceptedRows, 1);
-  assert.equal(completed.progress.insertedBars, 1);
-  assert.deepEqual(requestedDates, ['20260908', '20260909', '20260910', '20260911', '20260914']);
+  assert.equal(completed.progress.insertedBars, 0);
+  assert.equal(completed.progress.unchangedBars, 1);
   const row = store.ensureOverlayDb().prepare(
-    'SELECT close FROM daily_overlay WHERE instrument_id = ? AND timestamp = ?',
+    'SELECT close, source FROM daily_overlay WHERE instrument_id = ? AND timestamp = ?',
   ).get('000001.SH', Date.UTC(2026, 8, 14));
-  assert.equal(Number(row.close), 3880);
+  assert.equal(row, undefined);
+});
+
+test('TDX realtime quote reads do not write a daily bar or advance its date', async t => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'kline-tdx-realtime-quotes-'));
+  const dayPath = path.join(root, 'tdx', 'day', 'sz', '000001.day');
+  await mkdir(path.dirname(dayPath), { recursive: true });
+  await writeFile(dayPath, dayBuffer([
+    { date: 20260914, open: 9.5, high: 10.5, low: 9, close: 10, volume: 100000 },
+  ]));
+  const store = await new TdxLocalStore({
+    root,
+    nowProvider: () => new Date('2026-09-15T10:00:00+08:00'),
+    corporateActionsClient: { close() {} },
+    dailyQuotesClient: {
+      async fetchDailyQuotes(instrumentIds) {
+        return instrumentIds.map((instrumentId) => ({
+          instrumentId,
+          active: true,
+          price: 10.2,
+          lastClose: 10,
+          open: 10.1,
+          high: 10.3,
+          low: 9.9,
+          volume: 1234,
+          turnover: 1250000,
+        }));
+      },
+      close() {},
+    },
+  }).init();
+  t.after(async () => { store.close(); await rm(root, { recursive: true, force: true }); });
+  store.manifestCache = {
+    datasetVersion: 'tdx-test',
+    instruments: [{
+      id: '000001.SZ',
+      assetType: 'stock',
+      relativePath: 'tdx/day/sz/000001.day',
+      barCount: 1,
+      firstTimestamp: Date.UTC(2026, 8, 14),
+      lastTimestamp: Date.UTC(2026, 8, 14),
+    }],
+  };
+
+  const prices = await store.getRealtimeQuotes(['000001.SZ']);
+  assert.equal(prices.length, 1);
+  assert.equal(prices[0].realtime, true);
+  assert.equal(prices[0].timestamp, Date.UTC(2026, 8, 14));
+  assert.equal(prices[0].close, 10.2);
+  assert.equal(prices[0].volume, 123400);
+  assert.equal(prices[0].dailyBarClosed, false);
+  assert.equal(Number(store.ensureOverlayDb().prepare('SELECT COUNT(*) AS count FROM daily_overlay').get().count), 0);
 });

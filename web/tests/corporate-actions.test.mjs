@@ -233,12 +233,17 @@ test('existing TDX dataset can build without initialization task; daily upkeep r
     nowProvider: () => new Date('2026-03-11T12:00:00Z'),
   }).init();
   t.after(async () => { store.close(); await rm(root, { recursive: true, force: true }); });
-  store.manifestCache = { instruments: [{ id: '600000.SH', asset: 'stock', lastTimestamp: Date.UTC(2026, 2, 11) }] };
+  store.manifestCache = {
+    initialSource: 'tdx-zip',
+    incrementalSource: 'tdx-realtime',
+    includeCorporateActions: true,
+    instruments: [{ id: '600000.SH', asset: 'stock', lastTimestamp: Date.UTC(2026, 2, 11) }],
+  };
   assert.equal(store.getTask(), null);
   await store.startCorporateActions();
   await settled(store.corporateActions);
   assert.equal(requests, 1);
-  const maintenance = await store.startCnMaintenance({ token: 'test-only' });
+  const maintenance = await store.startCnMaintenance();
   assert.ok(['queued', 'running', 'completed'].includes(maintenance.status));
   await settled({
     getStatus: () => ({ task: store.getCnMaintenanceTask() }),
@@ -247,4 +252,25 @@ test('existing TDX dataset can build without initialization task; daily upkeep r
   assert.equal(store.getCnMaintenanceTask().status, 'completed');
   await settled(store.corporateActions);
   assert.equal(requests, 2);
+});
+
+test('disabled corporate-action configuration blocks sync at the local store', async t => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'kline-actions-disabled-'));
+  let requests = 0;
+  const store = await new TdxLocalStore({
+    root,
+    corporateActionsClient: { fetchEvents: async () => { requests += 1; return [raw]; }, close() {} },
+    dailyQuotesClient: { fetchDailyQuotes: async () => [], close() {} },
+  }).init();
+  t.after(async () => { store.close(); await rm(root, { recursive: true, force: true }); });
+  store.manifestCache = {
+    initialSource: 'tdx-zip',
+    incrementalSource: 'tdx-realtime',
+    includeCorporateActions: false,
+    instruments: [{ id: '600000.SH', assetType: 'stock', lastTimestamp: Date.UTC(2026, 2, 11) }],
+  };
+
+  await assert.rejects(() => store.startCorporateActions(), /未开启权息信息同步/);
+  await store.maintainCorporateActions();
+  assert.equal(requests, 0);
 });

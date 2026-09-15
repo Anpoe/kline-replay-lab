@@ -33,7 +33,7 @@ test("ships the K-line training workbench instead of the starter", async () => {
   assert.match(workbench, /const hideTaskInstrument = trainingTask\?\.status === "active" && trainingTask\.hideInstrument/);
   assert.match(workbench, /const hideTaskDate = trainingTask\?\.status === "active" && trainingTask\.hideDate/);
   assert.match(workbench, /const hideTaskPrice = trainingTask\?\.status === "active" && trainingTask\.hidePrice/);
-  assert.match(workbench, /REPLAY · \{trainingComplete \? "未来已揭示" : "未来已隐藏"\}/);
+  assert.match(workbench, /REPLAY · \$\{trainingComplete \? "未来已揭示" : "未来已隐藏"\}/);
   assert.match(workbench, /下一根开盘/);
   assert.match(workbench, /K 线数据库/);
   assert.match(workbench, /queueClosePosition/);
@@ -163,6 +163,8 @@ test("ships the K-line training workbench instead of the starter", async () => {
   assert.match(dataSourceManager, /锁定训练数据版本/);
   assert.match(dataSourceManager, /刷新 BaoStock 全量数据/);
   assert.match(dataSourceManager, /每日增量更新/);
+  assert.match(dataSourceManager, /本次未执行（尚未收市）/);
+  assert.match(dataSourceManager, /正在检查收盘状态并准备通达信日线更新/);
   assert.match(dataSourceManager, /扫描并修复缺口/);
   assert.match(dataSourceManager, /初始化美股市场库/);
   assert.doesNotMatch(dataSourceManager, /供应商代码/);
@@ -321,26 +323,25 @@ test("keeps large review history responsive while preserving full-list access", 
   assert.match(workbench, /buildReviewSessionSummariesInBatches/);
   assert.match(workbench, /sessionSummariesReadyRef/);
   assert.match(workbench, /sessionSummaryLoadRef/);
-  assert.match(workbench, /view !== "sop"/);
+  assert.match(workbench, /performanceSection !== "sop"/);
   assert.match(reviewController, /REVIEW_SESSION_SUMMARY_BATCH_SIZE/);
   assert.match(reviewHistory, /REVIEW_SESSION_PAGE_SIZE/);
   assert.match(reviewHistory, /加载更多历史/);
 });
 
-test("renders personal SOP recommendations only on the dedicated SOP page", async () => {
+test("renders personal SOP recommendations inside the performance panel", async () => {
   const workbench = await readFile(new URL("app/components/TrainingWorkbench.tsx", root), "utf8");
-  const sopStart = workbench.indexOf('{view === "sop"');
-  const performanceStart = workbench.indexOf('{view === "performance"', sopStart);
+  const performanceStart = workbench.indexOf('<section className="content-page performance-page">');
   const databaseStart = workbench.indexOf('{view === "database"', performanceStart);
-  const sopPage = sopStart >= 0 && performanceStart >= 0
-    ? workbench.slice(sopStart, performanceStart)
-    : "";
   const performancePage = performanceStart >= 0 && databaseStart >= 0
     ? workbench.slice(performanceStart, databaseStart)
     : "";
 
-  assert.match(sopPage, /<PersonalSopRecommendations/);
-  assert.doesNotMatch(performancePage, /<PersonalSopRecommendations/);
+  assert.match(workbench, /performanceSection === "sop"/);
+  assert.match(performancePage, /<PersonalSopRecommendations/);
+  assert.match(performancePage, /交易纪律设置/);
+  assert.doesNotMatch(workbench, /view === "sop"/);
+  assert.doesNotMatch(workbench, /<span>SOP<\/span>/);
 });
 
 test("generated sample candles satisfy OHLC invariants", async () => {

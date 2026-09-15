@@ -4,7 +4,7 @@
 
 当前版本支持 A 股、美股、外汇和现货黄金相关训练场景，并提供示例数据、逐根回放、模拟下单、仓位管理和训练记录功能。
 
-> 当前版本：`v0.1.3`<br>
+> 当前版本：`v0.1.4`<br>
 > [下载最新版本（GitHub Releases）](https://github.com/Anpoe/kline-replay-lab/releases/latest)
 
 ## 给普通用户：三分钟开始使用
@@ -13,7 +13,7 @@
 
 在 [Releases](https://github.com/Anpoe/kline-replay-lab/releases) 页面下载 Windows 便携版压缩包：
 
-`KLineTrainingCamp-Portable-v0.1.3.zip`
+`KLineTrainingCamp-Portable-v0.1.4.zip`
 
 请将压缩包完整解压到一个独立文件夹后再运行。建议使用你有读写权限的目录，例如：
 
@@ -159,7 +159,7 @@ npm run verify
 生成正式发布包时请传入语义化版本号，例如：
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File launcher\build-release.ps1 -ReleaseVersion 0.1.3
+powershell -ExecutionPolicy Bypass -File launcher\build-release.ps1 -ReleaseVersion 0.1.4
 ```
 
 开发时通常需要分别启动本地数据服务和 WebUI：

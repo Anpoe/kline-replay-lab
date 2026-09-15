@@ -219,7 +219,7 @@ export function createBackgroundAutoUpdateRunner({
     } catch (error) {
       if (!/正在运行/.test(errorMessage(error))) throw error;
     }
-    await waitFor(
+    const payload = await waitFor(
       () => requestJson("/api/cn-maintenance"),
       (payload) => {
         const task = payload?.maintenanceTask;
@@ -235,6 +235,10 @@ export function createBackgroundAutoUpdateRunner({
         timeoutMessage: "A 股自动更新等待超时，请到数据页查看任务状态",
       },
     );
+    return {
+      deferred: payload?.maintenanceTask?.deferred === true,
+      task: payload?.maintenanceTask ?? null,
+    };
   }
 
   async function runUsUpdate() {
@@ -377,6 +381,7 @@ export function createBackgroundAutoUpdateRunner({
     const token = runToken;
     const updated = [];
     const skipped = [];
+    const deferredMarkets = [];
     const failures = [];
     startLeaseHeartbeat(token);
     updateState({
@@ -399,8 +404,9 @@ export function createBackgroundAutoUpdateRunner({
       if (cn.needsUpdate) {
         try {
           setMarket("CN", "正在执行 A 股每日增量");
-          await startCnUpdate();
-          updated.push("A股");
+          const cnUpdate = await startCnUpdate();
+          if (cnUpdate.deferred) deferredMarkets.push("A股（尚未收市，等待收盘后重试）");
+          else updated.push("A股");
         } catch (error) {
           const message = `A股：${errorMessage(error)}`;
           failures.push(message);
@@ -456,10 +462,15 @@ export function createBackgroundAutoUpdateRunner({
       if (!dueGoldPairIds.length && gold.existing) skipped.push(`黄金（${gold.reason ?? "无需更新"}）`);
       if (!cn.existing && !us.existing && !fx.existing && !gold.existing) skipped.push("没有发现已有历史数据的市场");
 
-      const status = failures.length ? (updated.length ? "partial" : "failed") : "completed";
+      const status = failures.length
+        ? (updated.length ? "partial" : "failed")
+        : deferredMarkets.length
+          ? (updated.length ? "partial" : "deferred")
+          : "completed";
       const message = [
         updated.length ? `已更新：${updated.join("、")}` : "没有需要拉取的新数据",
         skipped.length ? `已跳过：${skipped.join("；")}` : "",
+        deferredMarkets.length ? `待收盘重试：${deferredMarkets.join("；")}` : "",
         failures.length ? `失败：${failures.join("；")}` : "",
       ].filter(Boolean).join("。 ");
       await complete(token, status, message);

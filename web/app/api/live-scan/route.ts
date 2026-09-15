@@ -59,10 +59,10 @@ export async function POST(request: Request) {
     );
     if (market === "CN") {
       try {
-        const response = await fetchLocalData("/prices/latest", {
+        const response = await fetchLocalData("/quotes/realtime", {
           method: "POST",
           headers: { "content-type": "application/json" },
-          body: JSON.stringify({ instrumentIds, entryAfter }),
+          body: JSON.stringify({ instrumentIds }),
         }, 30_000);
         const result = await response.json();
         return Response.json(result, { status: response.status });

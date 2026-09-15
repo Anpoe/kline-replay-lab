@@ -32,6 +32,7 @@ import {
   Search,
   Settings2,
   Shuffle,
+  Star,
   Square,
   Sparkles,
   Tag,
@@ -273,7 +274,11 @@ import { calculateRiskSizedQuantity, inferRiskSizingSide } from "../lib/riskSizi
  * fetch("/api/live-state") and fetch("/api/candles?instruments=1", { cache: "no-store" }) contracts.
  */
 
-type View = "replay" | "performance" | "sop" | "database" | "review";
+type View = "replay" | "performance" | "database" | "review";
+type WatchlistSource = "watchlist" | "recent" | "scan";
+
+const WATCHLIST_COLLAPSED_STORAGE_KEY = "kline-training:watchlist-collapsed";
+const WATCHLIST_RECENT_STORAGE_KEY = "kline-training:watchlist-recent";
 
 type Instrument = {
   id: string;
@@ -294,6 +299,7 @@ type AvailableInstrument = {
   assetType: InstrumentAssetType;
   timeframes: string[];
 };
+type LiveWatchMarket = LiveScanMarket | "FX" | "GOLD";
 
 function inferInstrumentAssetType(
   instrumentId: string,
@@ -624,7 +630,7 @@ type LiveWatchRecord = {
   instrumentId: string;
   symbol: string;
   name: string;
-  market: LiveScanMarket;
+  market: LiveWatchMarket;
   latestTimestamp: number;
   latestClose: number;
   /** Baseline price captured when the symbol was added (stored in the legacy observation_close field). */
@@ -664,7 +670,7 @@ function liveWatchResult(watch: LiveWatchRecord): LiveScanResult {
     instrumentId: watch.instrumentId,
     symbol: watch.symbol,
     name: watch.name,
-    market: watch.market,
+    market: watch.market as LiveScanMarket,
     timestamp: watch.latestTimestamp,
     close: watch.latestClose,
     changePct: 0,
@@ -821,6 +827,10 @@ type NewTaskRequest = {
   timeframe: string;
   draft: TrainingTaskDraft;
   snapshotId?: string;
+};
+type LatestWatchRequest = {
+  instrumentId: string;
+  timeframe: string;
 };
 type MistakeSource = {
   session: TrainingSession;
@@ -990,10 +1000,41 @@ function sanitizeLiveWatchlist(value: unknown): LiveWatchRecord[] {
     if (!item || typeof item !== "object") return [];
     const watch = item as LiveWatchRecord;
     if (!watch.instrumentId || typeof watch.instrumentId !== "string" || seen.has(watch.instrumentId)) return [];
-    if (watch.market !== "CN" && watch.market !== "US") return [];
+    if (watch.market !== "CN" && watch.market !== "US" && watch.market !== "FX" && watch.market !== "GOLD") return [];
     seen.add(watch.instrumentId);
     return [{ ...watch, id: `watch:${watch.instrumentId}` }];
   }).slice(0, 500);
+}
+
+function sanitizeRecentLiveResults(value: unknown): LiveScanResult[] {
+  if (!Array.isArray(value)) return [];
+  const seen = new Set<string>();
+  return value.flatMap((item) => {
+    if (!item || typeof item !== "object") return [];
+    const candidate = item as Partial<LiveScanResult>;
+    if (typeof candidate.instrumentId !== "string" || !candidate.instrumentId || seen.has(candidate.instrumentId)) return [];
+    const market = typeof candidate.market === "string" ? candidate.market : "";
+    if (!["CN", "US", "FX", "GOLD"].includes(market)) return [];
+    seen.add(candidate.instrumentId);
+    return [{
+      instrumentId: candidate.instrumentId,
+      symbol: typeof candidate.symbol === "string" && candidate.symbol ? candidate.symbol : candidate.instrumentId,
+      name: typeof candidate.name === "string" && candidate.name ? candidate.name : candidate.instrumentId,
+      // FX/GOLD entries are read-only latest-history views. The recent list
+      // shares the live result shape so it can render without a second list
+      // component; the click handler routes those markets back to history.
+      market: market as LiveScanMarket,
+      timestamp: Number.isFinite(candidate.timestamp) ? Number(candidate.timestamp) : 0,
+      close: Number.isFinite(candidate.close) ? Number(candidate.close) : 0,
+      changePct: Number.isFinite(candidate.changePct) ? Number(candidate.changePct) : 0,
+      volume: Number.isFinite(candidate.volume) ? Number(candidate.volume) : 0,
+      turnover: Number.isFinite(candidate.turnover) ? Number(candidate.turnover) : 0,
+      averageVolume: Number.isFinite(candidate.averageVolume) ? Number(candidate.averageVolume) : 0,
+      averageTurnover: Number.isFinite(candidate.averageTurnover) ? Number(candidate.averageTurnover) : 0,
+      presetIds: Array.isArray(candidate.presetIds) ? candidate.presetIds.filter((id): id is string => typeof id === "string") : [],
+      presetNames: Array.isArray(candidate.presetNames) ? candidate.presetNames.filter((name): name is string => typeof name === "string") : [],
+    } satisfies LiveScanResult];
+  }).slice(0, 50);
 }
 
 function MovingAverageEditor({
@@ -1705,6 +1746,10 @@ export function TrainingWorkbench() {
     [],
   );
   const [view, setView] = useState<View>("replay");
+  const [watchlistCollapsed, setWatchlistCollapsed] = useState(true);
+  const [watchlistSource, setWatchlistSource] = useState<WatchlistSource>("watchlist");
+  const [recentLiveResults, setRecentLiveResults] = useState<LiveScanResult[]>([]);
+  const [watchlistPreferencesReady, setWatchlistPreferencesReady] = useState(false);
   const [availableInstruments, setAvailableInstruments] = useState<AvailableInstrument[]>(defaultInstruments);
   const [instrumentId, setInstrumentId] = useState("600519.SH");
   const [timeframe, setTimeframe] = useState("1d");
@@ -1809,6 +1854,8 @@ export function TrainingWorkbench() {
   const [liveScanData, setLiveScanData] = useState<LiveScanResponse | null>(null);
   const [liveMode, setLiveMode] = useState(false);
   const [liveContext, setLiveContext] = useState<LiveScanResult | null>(null);
+  const [liveEntryFromCoverage, setLiveEntryFromCoverage] = useState(false);
+  const [latestWatchMode, setLatestWatchMode] = useState(false);
   const [livePortfolios, setLivePortfolios] = useState<LivePortfolioRecord[]>([]);
   const [liveWatchlist, setLiveWatchlist] = useState<LiveWatchRecord[]>([]);
   const [liveScanIndex, setLiveScanIndex] = useState(0);
@@ -1820,7 +1867,7 @@ export function TrainingWorkbench() {
   const [trainingNavigatorIndex, setTrainingNavigatorIndex] = useState(0);
   const [trainingNavigatorActive, setTrainingNavigatorActive] = useState(false);
   const [trainingNavigatorOffset, setTrainingNavigatorOffset] = useState({ x: 0, y: 0 });
-  const [performanceSection, setPerformanceSection] = useState<"training" | "live" | "watch">("training");
+  const [performanceSection, setPerformanceSection] = useState<"training" | "sop" | "live" | "watch">("training");
   const [taskSetupKind, setTaskSetupKind] = useState<TaskSetupKind>("configured");
   const [showRandomComplete, setShowRandomComplete] = useState(false);
   const [trashPreview, setTrashPreview] = useState(false);
@@ -1899,6 +1946,8 @@ export function TrainingWorkbench() {
   const sessionSummaryLoadRef = useRef<{ id: number; controller: AbortController | null }>({ id: 0, controller: null });
   const sessionSummariesReadyRef = useRef(false);
   const liveRequestRef = useRef<LiveScanResult | null>(null);
+  const liveRequestTimeframeRef = useRef<string | null>(null);
+  const latestWatchRequestRef = useRef<LatestWatchRequest | null>(null);
   const livePortfoliosRef = useRef<LivePortfolioRecord[]>([]);
   const liveWatchlistRef = useRef<LiveWatchRecord[]>([]);
   const livePriceRefreshRunningRef = useRef(false);
@@ -1942,6 +1991,52 @@ export function TrainingWorkbench() {
   useEffect(() => {
     liveWatchlistRef.current = liveWatchlist;
   }, [liveWatchlist]);
+
+  useEffect(() => {
+    let active = true;
+    try {
+      const storedCollapsed = window.localStorage.getItem(WATCHLIST_COLLAPSED_STORAGE_KEY);
+      const storedRecent = window.localStorage.getItem(WATCHLIST_RECENT_STORAGE_KEY);
+      const restoredRecent = storedRecent ? sanitizeRecentLiveResults(JSON.parse(storedRecent)) : [];
+      window.setTimeout(() => {
+        if (!active) return;
+        if (storedCollapsed === "expanded") setWatchlistCollapsed(false);
+        if (storedCollapsed === "collapsed") setWatchlistCollapsed(true);
+        if (restoredRecent.length) setRecentLiveResults(restoredRecent);
+        setWatchlistPreferencesReady(true);
+      }, 0);
+    } catch {
+      // Local preferences are optional; keep the default collapsed list.
+      window.setTimeout(() => {
+        if (active) setWatchlistPreferencesReady(true);
+      }, 0);
+    } finally {
+      // State restoration is deferred by one tick to avoid a synchronous
+      // effect update during hydration.
+    }
+    return () => { active = false; };
+  }, []);
+
+  useEffect(() => {
+    if (!watchlistPreferencesReady) return;
+    try {
+      window.localStorage.setItem(
+        WATCHLIST_COLLAPSED_STORAGE_KEY,
+        watchlistCollapsed ? "collapsed" : "expanded",
+      );
+    } catch {
+      // A private or restricted browser context may reject local storage.
+    }
+  }, [watchlistCollapsed, watchlistPreferencesReady]);
+
+  useEffect(() => {
+    if (!watchlistPreferencesReady) return;
+    try {
+      window.localStorage.setItem(WATCHLIST_RECENT_STORAGE_KEY, JSON.stringify(recentLiveResults));
+    } catch {
+      // Recent browsing is a convenience and does not block the chart.
+    }
+  }, [recentLiveResults, watchlistPreferencesReady]);
 
   const visibleBarStartIndex = trainingTask ? taskVisibleStartCursor(trainingTask) : 0;
   const chartDataIndexOffset = snapshotDataIndexOffset + visibleBarStartIndex;
@@ -3180,8 +3275,12 @@ export function TrainingWorkbench() {
   const queueRestore = useCallback((request: RestoreRequest) => {
     preemptStartupRandom();
     liveRequestRef.current = null;
+    liveRequestTimeframeRef.current = null;
+    latestWatchRequestRef.current = null;
     setLiveMode(false);
     setLiveContext(null);
+    setLiveEntryFromCoverage(false);
+    setLatestWatchMode(false);
     livePersistSignatureRef.current = "";
     setPositions([]);
     setPendingOrders([]);
@@ -3236,11 +3335,18 @@ export function TrainingWorkbench() {
     newTaskRequestRef.current = null;
     const liveRequest = liveRequestRef.current;
     liveRequestRef.current = null;
+    const latestWatchRequest = latestWatchRequestRef.current;
+    latestWatchRequestRef.current = null;
     // Keep the restore/new-task precedence explicit so a newer random round
     // still invalidates an older load, while live observation can override it.
-    let requestInstrumentId = restoreRequest?.instrumentId ?? newTaskRequest?.instrumentId ?? instrumentId;
+    let requestInstrumentId = latestWatchRequest?.instrumentId
+      ?? restoreRequest?.instrumentId
+      ?? newTaskRequest?.instrumentId
+      ?? instrumentId;
     if (liveRequest) requestInstrumentId = liveRequest.instrumentId;
-    const requestTimeframe = liveRequest ? "1d" : restoreRequest?.timeframe ?? newTaskRequest?.timeframe ?? timeframe;
+    const requestTimeframe = latestWatchRequest?.timeframe ?? (liveRequest
+      ? liveRequestTimeframeRef.current ?? "1d"
+      : restoreRequest?.timeframe ?? newTaskRequest?.timeframe ?? timeframe);
     setLoading(true);
     setChartLoadError("");
     setTrainingReady(false);
@@ -3284,7 +3390,7 @@ export function TrainingWorkbench() {
             instrumentId: requestInstrumentId,
             timeframe: requestTimeframe,
             adjustmentType: defaultAdjustmentTypeForInstrument(requestInstrumentId),
-            replayWindow: newTaskRequest ? {
+            replayWindow: newTaskRequest && !latestWatchRequest ? {
               mode: newTaskRequest.draft.mode,
               startMode: newTaskRequest.draft.startMode,
               startDate: newTaskRequest.draft.startDate,
@@ -3328,6 +3434,7 @@ export function TrainingWorkbench() {
         const liveCursor = data.candles.length - 1;
         setLiveMode(true);
         setLiveContext({ ...liveRequest, timestamp: data.candles[liveCursor]?.timestamp ?? liveRequest.timestamp, close: data.candles[liveCursor]?.close ?? liveRequest.close });
+        setLatestWatchMode(false);
         setCursor(Math.max(0, liveCursor));
         setTrainingTask(null);
         setPositions(savedPortfolio?.positions ?? []);
@@ -3370,6 +3477,51 @@ export function TrainingWorkbench() {
         eventSequenceRef.current = 0;
         setEvents([]);
         setSaveState("Live observation · not saved as training");
+      } else if (latestWatchRequest) {
+        setTrashPreview(false);
+        setLiveMode(false);
+        setLiveContext(null);
+        setLiveEntryFromCoverage(false);
+        setLatestWatchMode(true);
+        const latestCursor = Math.max(0, data.candles.length - 1);
+        setCursor(latestCursor);
+        setTrainingTask(null);
+        setPositions([]);
+        setPendingOrders([]);
+        setExecutions([]);
+        setOrderRejections([]);
+        setDecision(defaultDecision);
+        setDecisionSubmissions([]);
+        setSelectedDecisionId("");
+        setDecisionTarget(null);
+        setEditingDecisionId("");
+        setOrderQty(configuredDefaultOrderQuantity(
+          appSettingsRef.current,
+          data.instrument.market,
+          data.instrument.id,
+          loadedMarketRules,
+        ));
+        const nextTradingMode = tradingModeForInstrument(
+          appSettingsRef.current.tradingMode,
+          data.instrument.market,
+          data.instrument.id,
+        );
+        setTradingMode(nextTradingMode);
+        setInitialCapital(appSettingsRef.current.initialCapital);
+        setCashBalance(appSettingsRef.current.initialCapital);
+        setExecutionProfile(appSettingsRef.current.executionProfile);
+        setPositionSizeMode(appSettingsRef.current.positionSizeMode);
+        setRiskPercent(appSettingsRef.current.riskPercent);
+        setProtectionPriceSelection(null);
+        setDrawings([]);
+        setDrawingUndoStack([]);
+        setDrawingRedoStack([]);
+        setClearNonce(Date.now());
+        setSessionId(createUuid());
+        setRandomSeed(createUuid());
+        eventSequenceRef.current = 0;
+        setEvents([]);
+        setSaveState("最新行情 · 仅看盘");
       } else if (restoreRequest) {
         const isTrashPreview = Boolean(restoreRequest.preview);
         const previewSaveLabel = restoreRequest.previewKind === "duplicate"
@@ -3378,6 +3530,7 @@ export function TrainingWorkbench() {
         setTrashPreview(isTrashPreview);
         setLiveMode(false);
         setLiveContext(null);
+        setLatestWatchMode(false);
         const evidenceCursor = restoreRequest.evidenceTimestamp == null
           ? -1
           : data.candles.findIndex((bar) => bar.timestamp === restoreRequest.evidenceTimestamp);
@@ -3462,6 +3615,8 @@ export function TrainingWorkbench() {
         setTrashPreview(false);
         setLiveMode(false);
         setLiveContext(null);
+        setLatestWatchMode(false);
+        setLiveEntryFromCoverage(false);
         const nextSessionId = createUuid();
         const nextSeed = createUuid();
         const boundedDraft = newTaskRequest?.draft && data.selection && newTaskRequest.draft.mode !== "range"
@@ -3740,7 +3895,7 @@ export function TrainingWorkbench() {
   }, [persistTrainingState, trainingComplete, trainingMutationSignature, trainingReady, trainingState, trashPreview]);
 
   useEffect(() => {
-    if (trashPreview || liveMode || !trainingReady) {
+    if (trashPreview || liveMode || latestWatchMode || !trainingReady) {
       if (trainingAutosaveTimerRef.current !== null) {
         window.clearTimeout(trainingAutosaveTimerRef.current);
         trainingAutosaveTimerRef.current = null;
@@ -3774,7 +3929,7 @@ export function TrainingWorkbench() {
       window.clearTimeout(timer);
       if (trainingAutosaveTimerRef.current === timer) trainingAutosaveTimerRef.current = null;
     };
-  }, [liveMode, persistTrainingState, trainingMutationSignature, trainingReady, trainingState, trashPreview]);
+  }, [latestWatchMode, liveMode, persistTrainingState, trainingMutationSignature, trainingReady, trainingState, trashPreview]);
 
   const executeOrders = useCallback((
     orders: PendingOrder[],
@@ -4771,15 +4926,25 @@ export function TrainingWorkbench() {
     setSaveState("有未保存更改");
   };
 
-  const startFreshTraining = (nextInstrumentId: string, nextTimeframe: string) => {
+  const startFreshTraining = (
+    nextInstrumentId: string,
+    nextTimeframe: string,
+    options: { latestWatch?: boolean } = {},
+  ) => {
     preemptStartupRandom();
     const targetMarket = availableInstruments.find((item) => item.id === nextInstrumentId)?.market
       ?? (/\.FX$/i.test(nextInstrumentId) ? "FX" : undefined);
     setDuplicateTrainingPreview(null);
     liveRequestRef.current = null;
+    liveRequestTimeframeRef.current = null;
+    latestWatchRequestRef.current = options.latestWatch
+      ? { instrumentId: nextInstrumentId, timeframe: nextTimeframe }
+      : null;
     setTrainingNavigatorActive(false);
     setLiveMode(false);
     setLiveContext(null);
+    setLiveEntryFromCoverage(false);
+    setLatestWatchMode(Boolean(options.latestWatch));
     livePersistSignatureRef.current = "";
     setPositions([]);
     setPendingOrders([]);
@@ -4805,7 +4970,7 @@ export function TrainingWorkbench() {
     eventSequenceRef.current = 0;
     setEvents([]);
     restoreRequestRef.current = null;
-    newTaskRequestRef.current = {
+    newTaskRequestRef.current = options.latestWatch ? null : {
       instrumentId: nextInstrumentId,
       timeframe: nextTimeframe,
       draft: defaultTrainingTaskDraft,
@@ -4911,7 +5076,14 @@ export function TrainingWorkbench() {
     setLivePriceRefreshRunning(true);
     setLivePriceRefreshStatus("正在读取最新价…");
     try {
-      const pricesById = new Map<string, { timestamp: number; open: number; close: number }>();
+      const pricesById = new Map<string, {
+        timestamp: number;
+        open: number;
+        close: number;
+        realtime: boolean;
+        dailyBarClosed: boolean;
+        quoteTimestamp?: number;
+      }>();
       const errors: string[] = [];
       const usInstrumentIds = [...new Set(
         tracked.filter((item) => item.market === "US").map((item) => item.instrumentId),
@@ -4935,6 +5107,11 @@ export function TrainingWorkbench() {
                 timestamp: Number(price.timestamp),
                 open: Number(price.open),
                 close: Number(price.close),
+                realtime: price.realtime === true,
+                dailyBarClosed: price.dailyBarClosed === true,
+                ...(Number.isFinite(Number(price.quoteTimestamp))
+                  ? { quoteTimestamp: Number(price.quoteTimestamp) }
+                  : {}),
               });
             }
           }
@@ -4953,7 +5130,7 @@ export function TrainingWorkbench() {
         const price = pricesById.get(portfolio.instrumentId);
         if (!price) return portfolio;
         syncedInstrumentIds.add(portfolio.instrumentId);
-        const isNewBar = price.timestamp > portfolio.latestTimestamp;
+        const isNewBar = (!price.realtime || price.dailyBarClosed) && price.timestamp > portfolio.latestTimestamp;
         let nextPositions = portfolio.positions;
         let nextPendingOrders = portfolio.pendingOrders;
         let nextExecutions = portfolio.executions;
@@ -5026,7 +5203,8 @@ export function TrainingWorkbench() {
           nextExecutions.push(...fills);
           nextRejections.push(...rejections);
         }
-        const priceChanged = price.timestamp !== portfolio.latestTimestamp || price.close !== portfolio.latestClose;
+        const nextTimestamp = price.realtime && !price.dailyBarClosed ? portfolio.latestTimestamp : price.timestamp;
+        const priceChanged = nextTimestamp !== portfolio.latestTimestamp || price.close !== portfolio.latestClose;
         const tradeStateChanged = nextPositions !== portfolio.positions
           && (
             nextPendingOrders.length !== portfolio.pendingOrders.length
@@ -5036,7 +5214,7 @@ export function TrainingWorkbench() {
         if (!priceChanged && !tradeStateChanged) return portfolio;
         return {
           ...portfolio,
-          latestTimestamp: price.timestamp,
+          latestTimestamp: nextTimestamp,
           latestClose: price.close,
           positions: nextPositions,
           pendingOrders: nextPendingOrders,
@@ -5065,11 +5243,12 @@ export function TrainingWorkbench() {
           || observationClose !== watch.observationClose;
         if (!price) return observationChanged ? { ...migratedWatch, updatedAt: new Date().toISOString() } : watch;
         syncedInstrumentIds.add(watch.instrumentId);
-        const priceChanged = price.timestamp !== watch.latestTimestamp || price.close !== watch.latestClose;
+        const nextTimestamp = price.realtime && !price.dailyBarClosed ? watch.latestTimestamp : price.timestamp;
+        const priceChanged = nextTimestamp !== watch.latestTimestamp || price.close !== watch.latestClose;
         if (!observationChanged && !priceChanged) return watch;
         return {
           ...migratedWatch,
-          latestTimestamp: price.timestamp,
+          latestTimestamp: nextTimestamp,
           latestClose: price.close,
           updatedAt: new Date().toISOString(),
         };
@@ -5080,8 +5259,9 @@ export function TrainingWorkbench() {
       }
       if (liveMode && liveContext) {
         const price = pricesById.get(liveContext.instrumentId);
-        if (price && (price.timestamp !== liveContext.timestamp || price.close !== liveContext.close)) {
-          const updated = { ...liveContext, timestamp: price.timestamp, close: price.close };
+        const nextTimestamp = price?.realtime && !price.dailyBarClosed ? liveContext.timestamp : price?.timestamp;
+        if (price && (nextTimestamp !== liveContext.timestamp || price.close !== liveContext.close)) {
+          const updated = { ...liveContext, timestamp: nextTimestamp ?? liveContext.timestamp, close: price.close };
           setLiveContext(updated);
           liveRequestRef.current = updated;
           setLoadNonce((value) => value + 1);
@@ -5212,12 +5392,55 @@ export function TrainingWorkbench() {
     // briefly lag a state update, which makes an opened row look like index 0
     // even when it is not the first visible row.
     if (source === "portfolio") return livePortfolios.map(livePortfolioResult);
-    if (source === "watch") return liveWatchlist.map(liveWatchResult);
-    return liveScanData?.results ?? [];
+    if (source === "watch") return liveWatchlist
+      .filter((watch) => watch.market === "CN" || watch.market === "US")
+      .map(liveWatchResult);
+    const results = liveScanData?.results ?? [];
+    if (liveMode && liveContext && !results.some((result) => result.instrumentId === liveContext.instrumentId)) {
+      return [liveContext];
+    }
+    return results;
   };
 
-  const openLiveScanResult = (result: LiveScanResult, index?: number, source: LiveNavigatorSource = "scan") => {
+  const rememberRecentLiveResult = (result: LiveScanResult) => {
+    setRecentLiveResults((items) => [
+      result,
+      ...items.filter((item) => item.instrumentId !== result.instrumentId),
+    ].slice(0, 50));
+  };
+
+  const rememberRecentInstrument = (item: AvailableInstrument) => {
+    const market = performanceMarketCode(item.market, item.id);
+    rememberRecentLiveResult({
+      instrumentId: item.id,
+      symbol: item.short,
+      name: item.label,
+      market: market as LiveScanMarket,
+      timestamp: 0,
+      close: 0,
+      changePct: 0,
+      volume: 0,
+      turnover: 0,
+      averageVolume: 0,
+      averageTurnover: 0,
+      presetIds: [],
+      presetNames: [],
+    });
+  };
+
+  const openLiveScanResult = (
+    result: LiveScanResult,
+    index?: number,
+    source: LiveNavigatorSource = "scan",
+    targetTimeframe = "1d",
+    fromCoverage = false,
+  ) => {
     preemptStartupRandom();
+    rememberRecentLiveResult(result);
+    liveRequestTimeframeRef.current = targetTimeframe;
+    latestWatchRequestRef.current = null;
+    setLiveEntryFromCoverage(fromCoverage);
+    setLatestWatchMode(false);
     const switchingInstrument = !liveMode || liveContext?.instrumentId !== result.instrumentId;
     if (switchingInstrument) {
       // Do not let the previous replay/live symbol remain visible while its
@@ -5271,7 +5494,7 @@ export function TrainingWorkbench() {
     newTaskRequestRef.current = null;
     liveRequestRef.current = result;
     setInstrumentId(result.instrumentId);
-    setTimeframe("1d");
+    setTimeframe(targetTimeframe);
     setLiveMode(true);
     setLiveContext(result);
     setView("replay");
@@ -5326,6 +5549,115 @@ export function TrainingWorkbench() {
     setLiveWatchlist((items) => items.filter((item) => item.instrumentId !== instrumentId));
   };
 
+  const toggleLiveWatchFromNavigator = () => {
+    if (!liveMode || !liveContext || !currentBar) return;
+    if (liveWatchExists) {
+      removeLiveWatch(liveContext.instrumentId);
+      setRuleNotice("已从自选移除，不会计入训练或实盘交易表现");
+      setSaveState("自选已更新");
+      return;
+    }
+    addLiveWatch();
+  };
+
+  const toggleLiveWatchFromCoverage = (item: Coverage) => {
+    const marketCode = performanceMarketCode(item.market, item.id);
+    if (marketCode !== "CN" && marketCode !== "US" && marketCode !== "FX" && marketCode !== "GOLD") {
+      setImportStatus("当前市场暂不支持加入自选");
+      return;
+    }
+    const market = marketCode as LiveWatchMarket;
+    const existing = liveWatchlist.find((watch) => watch.instrumentId === item.id);
+    if (existing) {
+      removeLiveWatch(item.id);
+      setImportStatus(`已将 ${item.symbol} 移出自选`);
+      return;
+    }
+    const latest = liveScanData?.results.find((result) => result.instrumentId === item.id);
+    const currentPrice = item.id === instrument.id && currentBar ? currentBar.close : undefined;
+    const latestClose = latest?.close ?? currentPrice ?? 0;
+    const latestTimestamp = latest?.timestamp ?? item.lastTimestamp;
+    const nextRecord: LiveWatchRecord = {
+      id: `watch:${item.id}`,
+      instrumentId: item.id,
+      symbol: item.symbol,
+      name: item.name,
+      market,
+      latestTimestamp,
+      latestClose,
+      ...(latestClose > 0 ? { observationTimestamp: latestTimestamp, observationClose: latestClose } : {}),
+      scanTimestamp: latestTimestamp,
+      presetIds: latest?.presetIds ?? [],
+      presetNames: latest?.presetNames ?? [],
+      updatedAt: new Date().toISOString(),
+    };
+    setLiveWatchlist((items) => [nextRecord, ...items.filter((watch) => watch.instrumentId !== item.id)].slice(0, 500));
+    setImportStatus(`已将 ${item.symbol} 加入自选`);
+  };
+
+  const openCoverageWatch = (item: Coverage) => {
+    const marketCode = performanceMarketCode(item.market, item.id);
+    const targetTimeframe = TIMEFRAME_IDS.includes(item.timeframe as typeof TIMEFRAME_IDS[number])
+      ? item.timeframe
+      : "1d";
+    if (marketCode !== "CN" && marketCode !== "US") {
+      rememberRecentInstrument({ id: item.id, short: item.symbol, label: item.name, market: item.market, assetType: "other", timeframes: [targetTimeframe] });
+      startFreshTraining(item.id, targetTimeframe, { latestWatch: true });
+      return;
+    }
+    const latest = liveScanData?.results.find((result) => result.instrumentId === item.id);
+    const latestIndex = liveScanData?.results.findIndex((result) => result.instrumentId === item.id) ?? -1;
+    openLiveScanResult({
+      instrumentId: item.id,
+      symbol: item.symbol,
+      name: item.name,
+      market: marketCode as LiveScanMarket,
+      timestamp: latest?.timestamp ?? item.lastTimestamp,
+      close: latest?.close ?? 0,
+      changePct: latest?.changePct ?? 0,
+      volume: latest?.volume ?? 0,
+      turnover: latest?.turnover ?? 0,
+      averageVolume: latest?.averageVolume ?? 0,
+      averageTurnover: latest?.averageTurnover ?? 0,
+      presetIds: latest?.presetIds ?? [],
+      presetNames: latest?.presetNames ?? [],
+    }, latestIndex >= 0 ? latestIndex : 0, "scan", targetTimeframe, true);
+  };
+
+  const openInstrumentWatch = (nextInstrumentId: string) => {
+    const selected = availableInstruments.find((item) => item.id === nextInstrumentId);
+    if (!selected) return;
+    const nextAvailableTimeframes = availableTimeframesForInstrument(
+      availableInstruments,
+      nextInstrumentId,
+      timeframes,
+    );
+    const targetTimeframe = resolveAvailableTimeframe(nextAvailableTimeframes, "1d");
+    const marketCode = performanceMarketCode(selected.market, selected.id);
+    if (marketCode !== "CN" && marketCode !== "US") {
+      rememberRecentInstrument(selected);
+      startFreshTraining(nextInstrumentId, targetTimeframe, { latestWatch: true });
+      return;
+    }
+    const latest = liveScanData?.results.find((result) => result.instrumentId === nextInstrumentId);
+    const latestIndex = liveScanData?.results.findIndex((result) => result.instrumentId === nextInstrumentId) ?? -1;
+    openLiveScanResult({
+      instrumentId: selected.id,
+      symbol: selected.short,
+      name: selected.label,
+      market: marketCode as LiveScanMarket,
+      timestamp: latest?.timestamp ?? 0,
+      close: latest?.close ?? 0,
+      changePct: latest?.changePct ?? 0,
+      volume: latest?.volume ?? 0,
+      turnover: latest?.turnover ?? 0,
+      averageVolume: latest?.averageVolume ?? 0,
+      averageTurnover: latest?.averageTurnover ?? 0,
+      presetIds: latest?.presetIds ?? [],
+      presetNames: latest?.presetNames ?? [],
+    }, latestIndex >= 0 ? latestIndex : 0, "scan", targetTimeframe, true);
+  };
+
   const moveLiveScanResult = (direction: -1 | 1) => {
     const results = getLiveNavigatorResults(liveNavigatorSource);
     if (!results.length) return;
@@ -5352,7 +5684,7 @@ export function TrainingWorkbench() {
   };
 
   const resetTraining = () => {
-    if (rewindLocked) return;
+    if (rewindLocked || latestWatchMode) return;
     saveCompletedTrainingRef.current = false;
     setShowRandomComplete(false);
     setTrainingNavigatorActive(false);
@@ -5418,6 +5750,10 @@ export function TrainingWorkbench() {
   const saveSession = async () => {
     if (trashPreview) {
       setSaveState(duplicateTrainingPreview ? "重复训练预览不会保存训练" : "回收站查看模式不会保存训练");
+      return;
+    }
+    if (latestWatchMode) {
+      setSaveState("仅看盘模式不会保存训练");
       return;
     }
     if (liveMode) {
@@ -5725,6 +6061,10 @@ export function TrainingWorkbench() {
   };
 
   const submitDecision = () => {
+    if (latestWatchMode) {
+      setSaveState("仅看盘模式不会记录训练决策");
+      return;
+    }
     const editingSubmission = editingDecisionId
       ? decisionSubmissions.find((submission) => submission.id === editingDecisionId)
       : undefined;
@@ -6343,8 +6683,8 @@ export function TrainingWorkbench() {
     }
   }, [buildSessionSummary, reviewGateway]);
 
-  const needsSnapshotTradeContexts = view === "sop"
-    || (view === "performance" && performanceSection === "training");
+  const needsSnapshotTradeContexts = view === "performance"
+    && (performanceSection === "training" || performanceSection === "sop");
   useEffect(() => {
     if (!needsSnapshotTradeContexts || !sessionSummaries.length) return;
     const groupedEntries = new Map<string, number[]>();
@@ -6626,9 +6966,33 @@ export function TrainingWorkbench() {
 
   const liveNavigatorResults = useMemo(() => {
     if (liveNavigatorSource === "portfolio") return livePortfolios.map(livePortfolioResult);
-    if (liveNavigatorSource === "watch") return liveWatchlist.map(liveWatchResult);
-    return liveScanData?.results ?? [];
-  }, [liveNavigatorSource, livePortfolios, liveScanData, liveWatchlist]);
+    if (liveNavigatorSource === "watch") return liveWatchlist
+      .filter((watch) => watch.market === "CN" || watch.market === "US")
+      .map(liveWatchResult);
+    const results = liveScanData?.results ?? [];
+    // A symbol opened from the data coverage table may not belong to the
+    // latest scanner result. Keep a one-item navigator so the user can still
+    // see and exit the current watch view without inheriting another scan.
+    if (liveMode && liveContext && !results.some((result) => result.instrumentId === liveContext.instrumentId)) {
+      return [liveContext];
+    }
+    return results;
+  }, [liveContext, liveMode, liveNavigatorSource, livePortfolios, liveScanData, liveWatchlist]);
+
+  const watchlistDisplayResults = useMemo<LiveScanResult[]>(() => {
+    if (watchlistSource === "scan") return liveScanData?.results ?? [];
+    if (watchlistSource === "recent") return recentLiveResults;
+    return liveWatchlist.map((watch) => {
+      const baseline = liveWatchObservationPrice(watch);
+      const changePct = baseline > 0 && Number.isFinite(watch.latestClose)
+        ? (watch.latestClose - baseline) / baseline * 100
+        : 0;
+      return {
+        ...liveWatchResult(watch),
+        changePct,
+      };
+    });
+  }, [liveScanData, liveWatchlist, recentLiveResults, watchlistSource]);
 
   // Result ordering can change after a refresh.  Prefer the saved instrument
   // identity over the old numeric index so the floating navigator resumes on
@@ -6691,7 +7055,7 @@ export function TrainingWorkbench() {
     [performanceHabitTrades],
   );
   const personalSopTrades = useMemo<HabitTrade[]>(() => {
-    if (view !== "sop") return [];
+    if (view !== "performance" || performanceSection !== "sop") return [];
     return sessionSummaries.flatMap((summary) => (
       summary.habitTrades.map((trade) => {
         const snapshotId = summary.state.dataSnapshotId ?? summary.session.dataSnapshotId ?? "";
@@ -6720,7 +7084,7 @@ export function TrainingWorkbench() {
         };
       })
     ));
-  }, [sessionSummaries, snapshotTradeContexts, view]);
+  }, [performanceSection, sessionSummaries, snapshotTradeContexts, view]);
   const personalSopRecommendations = useMemo<PersonalSopRecommendation[]>(() => (
     personalSopTemplateScopes.flatMap((scope) => generatePersonalSopRecommendations(personalSopTrades, { scope, limit: 3 }))
   ), [personalSopTrades]);
@@ -7179,6 +7543,8 @@ export function TrainingWorkbench() {
     setChartLoadError("");
     setTrainingReady(false);
     setPlaying(false);
+    latestWatchRequestRef.current = null;
+    setLatestWatchMode(false);
     newTaskRequestRef.current = {
       instrumentId: requestInstrumentId,
       timeframe: requestTimeframe,
@@ -7521,7 +7887,7 @@ export function TrainingWorkbench() {
   useEffect(() => {
     const timer = window.setTimeout(() => {
       if (view === "database") loadCoverage();
-      if (view === "review" || view === "performance" || view === "sop") loadSessions(true);
+      if (view === "review" || view === "performance") loadSessions(true);
     }, 0);
     return () => {
       window.clearTimeout(timer);
@@ -7674,9 +8040,6 @@ export function TrainingWorkbench() {
           <button className={view === "performance" ? "active" : ""} onClick={() => setView("performance")}>
             <Activity size={20} /><span>表现</span>
           </button>
-          <button className={view === "sop" ? "active" : ""} onClick={() => setView("sop")}>
-            <ListChecks size={20} /><span>SOP</span>
-          </button>
           <button className={view === "database" ? "active" : ""} onClick={() => setView("database")}>
             <Database size={20} /><span>数据</span>
           </button>
@@ -7698,7 +8061,8 @@ export function TrainingWorkbench() {
       </aside>
 
       <main className="workspace">
-        <header className="topbar">
+        {view === "replay" && (
+          <header className="topbar">
           <div className="instrument-selectors">
             {hideTaskInstrument ? (
               <span className="blind-pill">品种已隐藏</span>
@@ -7708,22 +8072,12 @@ export function TrainingWorkbench() {
                   value={instrumentId}
                   instruments={availableInstruments}
                   ariaLabel="选择品种"
-                  onChange={(nextInstrumentId) => {
-                    const nextAvailableTimeframes = availableTimeframesForInstrument(
-                      availableInstruments,
-                      nextInstrumentId,
-                      timeframes,
-                    );
-                    startFreshTraining(
-                      nextInstrumentId,
-                      resolveAvailableTimeframe(nextAvailableTimeframes, timeframe),
-                    );
-                  }}
+                  onChange={openInstrumentWatch}
                 />
                 <span className="market-pill">{currentAssetLabel}</span>
               </>
             )}
-            <span className="rule-pill">{trainingTask ? trainingModeLabels[trainingTask.mode] : "自由训练"}</span>
+            <span className="rule-pill">{liveMode || latestWatchMode ? "仅看盘" : trainingTask ? trainingModeLabels[trainingTask.mode] : "自由训练"}</span>
             <span className="rule-pill">{tradingMode === "capital" ? "资金账户" : "收益率"}</span>
             {trashPreview && <span className="rule-pill read-only">{duplicateTrainingPreview ? "重复训练预览 · 未恢复" : "回收站查看 · 未恢复"}</span>}
             {!marketRules.tradingEnabled && <span className="rule-pill read-only">只看盘</span>}
@@ -7780,6 +8134,7 @@ export function TrainingWorkbench() {
             <span className={`save-state ${saveState.includes("已") ? "saved" : ""}`}>{saveState}</span>
             <button className="ghost-button live-scan-button" onClick={() => {
               setLiveScanError("");
+              setWatchlistSource("scan");
               setShowLiveScan(true);
             }}><Activity size={16} />实盘筛选</button>
             <button className="ghost-button" onClick={openRandomTraining}><Shuffle size={16} />随机训练</button>
@@ -7789,6 +8144,7 @@ export function TrainingWorkbench() {
           <div className="mobile-quick-actions" aria-label="训练快捷操作">
             <button type="button" aria-label="实盘筛选" title="实盘筛选" onClick={() => {
               setLiveScanError("");
+              setWatchlistSource("scan");
               setShowLiveScan(true);
             }}><Activity size={15} /></button>
             <button
@@ -7801,6 +8157,16 @@ export function TrainingWorkbench() {
             <button type="button" aria-label="新建 Replay 训练" title="新建 Replay 训练" onClick={openTaskSetup}><Play size={15} /></button>
             <button type="button" className="save" disabled={trashPreview} aria-label="保存训练" title="保存训练" onClick={saveSession}><Save size={15} /></button>
           </div>
+          {view === "replay" && (
+            <button
+              type="button"
+              className="mobile-watchlist-toggle"
+              aria-label={watchlistCollapsed ? "展开自选列表" : "收起自选列表"}
+              title={watchlistCollapsed ? "展开自选列表" : "收起自选列表"}
+              aria-expanded={!watchlistCollapsed}
+              onClick={() => setWatchlistCollapsed((collapsed) => !collapsed)}
+            ><List size={15} /></button>
+          )}
           <button
             className="mobile-toolbar-toggle"
             type="button"
@@ -7862,7 +8228,8 @@ export function TrainingWorkbench() {
               {quickRandomError && <div className="mobile-random-error">{quickRandomError}</div>}
             </div>
           )}
-        </header>
+          </header>
+        )}
 
         {showSettings && (
           <SettingsPanel
@@ -8466,15 +8833,96 @@ export function TrainingWorkbench() {
         )}
 
         {view === "replay" && (
-          <div className="replay-layout">
+          <div className={`replay-layout${watchlistCollapsed ? "" : " watchlist-open"}`}>
+            {!watchlistCollapsed && (
+              <aside className="watchlist-panel" aria-label="自选与最近浏览">
+                <div className="watchlist-panel-head">
+                  <div><span className="section-label">WATCHLIST</span><strong>自选</strong></div>
+                  <button type="button" aria-label="收起自选列表" title="收起列表" onClick={() => setWatchlistCollapsed(true)}><ChevronLeft size={16} /></button>
+                </div>
+                <div className="watchlist-source-row">
+                  <select
+                    aria-label="选择看盘列表"
+                    value={watchlistSource}
+                    onChange={(event) => setWatchlistSource(event.target.value as WatchlistSource)}
+                  >
+                    <option value="watchlist">自选</option>
+                    <option value="recent">最近浏览</option>
+                    <option value="scan">最近一次实盘筛选</option>
+                  </select>
+                  <button type="button" className="watchlist-scan-button" onClick={() => {
+                    setWatchlistSource("scan");
+                    setLiveScanError("");
+                    setShowLiveScan(true);
+                  }}><Activity size={13} />筛选</button>
+                </div>
+                {watchlistSource === "scan" && liveScanData && (
+                  <div className="watchlist-source-meta">
+                    最近筛选 · {liveScanData.market === "CN" ? "A 股" : "美股"} · {new Date(liveScanData.latestTimestamp).toLocaleDateString("zh-CN")}
+                  </div>
+                )}
+                <div className="watchlist-list" role="list" aria-live="polite">
+                  {watchlistDisplayResults.length ? watchlistDisplayResults.map((result, index) => {
+                    const watched = liveWatchlist.some((watch) => watch.instrumentId === result.instrumentId);
+                    const selected = (liveMode && liveContext?.instrumentId === result.instrumentId)
+                      || (latestWatchMode && instrument.id === result.instrumentId);
+                    const resultMarket = performanceMarketCode(result.market, result.instrumentId);
+                    const hasChange = Number.isFinite(result.changePct) && Number.isFinite(result.close) && result.close > 0;
+                    return (
+                      <button
+                        type="button"
+                        role="listitem"
+                        className={`watchlist-row${selected ? " active" : ""}`}
+                        key={`${watchlistSource}:${result.instrumentId}`}
+                        onClick={() => {
+                          rememberRecentLiveResult(result);
+                          if (resultMarket === "CN" || resultMarket === "US") {
+                            openLiveScanResult(result, index, watchlistSource === "watchlist" ? "watch" : "scan");
+                          } else {
+                            startFreshTraining(result.instrumentId, "1d", { latestWatch: true });
+                          }
+                        }}
+                      >
+                        <span className="watchlist-row-main"><strong>{result.symbol}</strong><small>{result.name} · {performanceMarketLabel(resultMarket)}</small></span>
+                        <span className={hasChange ? (result.changePct >= 0 ? "up" : "down") : undefined}>{hasChange ? `${result.changePct >= 0 ? "+" : ""}${result.changePct.toFixed(2)}%` : "--"}</span>
+                        {watched && <Star className="watchlist-row-star" size={13} fill="currentColor" aria-label="已加入自选" />}
+                      </button>
+                    );
+                  }) : (
+                    <div className="watchlist-empty">
+                      {watchlistSource === "watchlist" ? "还没有自选品种。打开实盘筛选或数据列表后，可以加入自选。" : watchlistSource === "recent" ? "还没有最近浏览记录。点击筛选结果即可记录。" : "还没有实盘筛选结果。点击“筛选”开始。"}
+                    </div>
+                  )}
+                </div>
+              </aside>
+            )}
             <section className="chart-stage">
               <div className="chart-heading">
                 <div>
+                  <button
+                    type="button"
+                    className="watchlist-toggle"
+                    aria-label={watchlistCollapsed ? "展开自选列表" : "收起自选列表"}
+                    title={watchlistCollapsed ? "展开自选列表" : "收起自选列表"}
+                    aria-expanded={!watchlistCollapsed}
+                    onClick={() => setWatchlistCollapsed((collapsed) => !collapsed)}
+                  ><List size={16} /></button>
                   <strong>{hideTaskInstrument ? "BLIND" : instrument.symbol}</strong>
                   <span>{hideTaskInstrument
                     ? `品种已隐藏 · ${timeframeLabel(chartTimeframe)}${showingCanonicalChart ? "" : ` · 训练基准 ${timeframeLabel(timeframe)}`}`
-                    : `${instrument.name} · ${timeframeLabel(chartTimeframe)}${showingCanonicalChart ? "" : ` · 训练基准 ${timeframeLabel(timeframe)}`} · 历史训练`}</span>
+                    : liveMode
+                      ? `${instrument.name} · ${timeframeLabel(chartTimeframe)} · 最新行情`
+                      : latestWatchMode
+                        ? `${instrument.name} · ${timeframeLabel(chartTimeframe)} · 最新行情 · 仅看盘`
+                      : `${instrument.name} · ${timeframeLabel(chartTimeframe)}${showingCanonicalChart ? "" : ` · 训练基准 ${timeframeLabel(timeframe)}`} · 历史训练`}</span>
                 </div>
+                {latestWatchMode && (
+                  <button
+                    type="button"
+                    className="watch-mode-exit"
+                    onClick={() => startFreshTraining(instrumentId, timeframe)}
+                  >返回训练</button>
+                )}
                 {currentBar && (
                   <div className="ohlc-line">
                     {hideTaskPrice ? <span><EyeOff size={13} />绝对价格已隐藏</span> : (
@@ -8786,7 +9234,7 @@ export function TrainingWorkbench() {
                       </div>
                     </div>
                   )}
-                  <div className="replay-watermark">REPLAY · {trainingComplete ? "未来已揭示" : "未来已隐藏"}</div>
+                  <div className="replay-watermark">{liveMode || latestWatchMode ? "WATCH · 最新行情" : `REPLAY · ${trainingComplete ? "未来已揭示" : "未来已隐藏"}`}</div>
                   <div className="chart-touch-hint">长按 K 线补写决策</div>
                 </div>
               </div>
@@ -9335,21 +9783,32 @@ export function TrainingWorkbench() {
           >
             <button type="button" aria-label="上一个筛选结果" title="上一个" onPointerDown={(event) => event.stopPropagation()} onClick={() => moveLiveScanResult(-1)}><ChevronLeft size={16} /></button>
             <div className="live-scan-navigator-label">
-              <span>{liveNavigatorSource === "portfolio" ? "实盘观察" : liveNavigatorSource === "watch" ? "实盘观望" : "实盘筛选"}</span>
+              <span>{liveEntryFromCoverage ? "看盘" : liveNavigatorSource === "portfolio" ? "实盘观察" : liveNavigatorSource === "watch" ? "实盘观望" : "实盘筛选"}</span>
               <strong>{liveContext?.symbol ?? "--"}</strong>
               <small>{liveNavigatorDisplayIndex + 1} / {liveNavigatorResults.length}</small>
             </div>
             <button type="button" aria-label="下一个筛选结果" title="下一个" onPointerDown={(event) => event.stopPropagation()} onClick={() => moveLiveScanResult(1)}><ChevronRight size={16} /></button>
             <button
               type="button"
+              className={`live-scan-navigator-watch${liveWatchExists ? " active" : ""}`}
+              aria-label={liveWatchExists ? "移除自选" : "加入自选"}
+              title={liveWatchExists ? "移除自选" : "加入自选"}
+              disabled={!liveContext || !currentBar}
+              onPointerDown={(event) => event.stopPropagation()}
+              onClick={toggleLiveWatchFromNavigator}
+            ><Star size={14} fill="currentColor" /></button>
+            <button
+              type="button"
               className="live-scan-navigator-exit"
-              aria-label="退出实盘观察"
-              title="退出实盘观察"
+              aria-label={liveEntryFromCoverage ? "退出看盘" : "退出实盘观察"}
+              title={liveEntryFromCoverage ? "退出看盘" : "退出实盘观察"}
               onPointerDown={(event) => event.stopPropagation()}
               onClick={() => {
                 liveRequestRef.current = null;
+                liveRequestTimeframeRef.current = null;
                 setLiveMode(false);
                 setLiveContext(null);
+                setLiveEntryFromCoverage(false);
                 startFreshTraining(instrumentId, timeframe);
               }}
             ><X size={14} /></button>
@@ -9398,34 +9857,6 @@ export function TrainingWorkbench() {
           </div>
         ) : null}
 
-        {view === "sop" && (
-          <section className="content-page sop-page">
-            <div className="page-heading">
-              <div>
-                <span>PERSONAL SOP</span>
-                <h1>个人交易 SOP</h1>
-                <p>系统从已平仓训练中寻找稳定的组合；至少 15 笔相似样本后，才允许采用为严格模式规则。</p>
-              </div>
-              <button type="button" className="ghost-button" onClick={() => openSettingsPanel("discipline")}><Settings2 size={15} />交易纪律设置</button>
-            </div>
-            <PersonalSopRecommendations
-              recommendations={personalSopRecommendations}
-              scopeSummaries={personalSopScopeSummaries}
-              activeRule={appSettings.activePersonalSopRule}
-              formatResult={(value) => percent(value)}
-              onApply={applyPersonalSopRule}
-            />
-            <section className="sop-logic-card">
-              <div><span className="section-label">RULE LOGIC</span><h2>它会管理什么</h2></div>
-              <div className="sop-logic-grid">
-            <div><strong>入场</strong><span>市场/周期（品种不限）、形态、市场状态、位置和理由。</span></div>
-                <div><strong>资料</strong><span>价格、日均成交量、成交额和市值；当前资料缺失时提示但不伪造通过。</span></div>
-                <div><strong>持仓</strong><span>使用真实揭示 K 线索引管理持仓范围；超限后提示，开启严格自动平仓才会排队。</span></div>
-              </div>
-            </section>
-          </section>
-        )}
-
         {view === "performance" && (
           <section className="content-page performance-page">
             <div className="page-heading">
@@ -9438,11 +9869,34 @@ export function TrainingWorkbench() {
 
             <div className="performance-view-tabs" role="tablist" aria-label="表现视图">
               <button type="button" role="tab" aria-selected={performanceSection === "training"} className={performanceSection === "training" ? "active" : ""} onClick={() => setPerformanceSection("training")}>训练表现</button>
+              <button type="button" role="tab" aria-selected={performanceSection === "sop"} className={performanceSection === "sop" ? "active" : ""} onClick={() => setPerformanceSection("sop")}>个人 SOP</button>
               <button type="button" role="tab" aria-selected={performanceSection === "live"} className={performanceSection === "live" ? "active" : ""} onClick={() => setPerformanceSection("live")}>实盘表现 <span>{filteredLivePerformanceRows.length}</span></button>
               <button type="button" role="tab" aria-selected={performanceSection === "watch"} className={performanceSection === "watch" ? "active" : ""} onClick={() => setPerformanceSection("watch")}>实盘观望 <span>{liveWatchlist.length}</span></button>
             </div>
 
-            {performanceSection === "live" ? (
+            {performanceSection === "sop" ? (
+              <section className="performance-sop-panel">
+                <div className="performance-section-head">
+                  <div><span className="section-label">PERSONAL SOP</span><h2>个人交易 SOP</h2></div>
+                  <button type="button" className="ghost-button" onClick={() => openSettingsPanel("discipline")}><Settings2 size={15} />交易纪律设置</button>
+                </div>
+                <PersonalSopRecommendations
+                  recommendations={personalSopRecommendations}
+                  scopeSummaries={personalSopScopeSummaries}
+                  activeRule={appSettings.activePersonalSopRule}
+                  formatResult={(value) => percent(value)}
+                  onApply={applyPersonalSopRule}
+                />
+                <section className="sop-logic-card">
+                  <div><span className="section-label">RULE LOGIC</span><h2>它会管理什么</h2></div>
+                  <div className="sop-logic-grid">
+                    <div><strong>入场</strong><span>市场/周期（品种不限）、形态、市场状态、位置和理由。</span></div>
+                    <div><strong>资料</strong><span>价格、日均成交量、成交额和市值；当前资料缺失时提示但不伪造通过。</span></div>
+                    <div><strong>持仓</strong><span>使用真实揭示 K 线索引管理持仓范围；超限后提示，开启严格自动平仓才会排队。</span></div>
+                  </div>
+                </section>
+              </section>
+            ) : performanceSection === "live" ? (
               <section className="live-performance-panel">
                 <div className="performance-section-head">
                   <div><span className="section-label">LIVE PERFORMANCE</span><h2>实盘表现</h2></div>
@@ -9554,10 +10008,18 @@ export function TrainingWorkbench() {
                         return (
                           <div className="live-performance-row live-watch-row" key={watch.id}>
                             <span className="live-performance-instrument"><strong>{watch.symbol}</strong><small>{watch.name}</small></span>
-                            <span><strong>{watch.market === "CN" ? "A股" : "美股"}</strong><small>{new Date(watch.latestTimestamp).toLocaleDateString("zh-CN")}</small></span>
+                            <span><strong>{performanceMarketLabel(watch.market)}</strong><small>{new Date(watch.latestTimestamp).toLocaleDateString("zh-CN")}</small></span>
                             <span><strong>{watch.latestClose.toFixed(4)}</strong><small>最新价 · 观望日开盘基准 {observationPrice.toFixed(4)} · {new Date(observationTimestamp).toLocaleDateString("zh-CN")}</small></span>
                             <span className="live-performance-result"><strong className={returnPct === null || returnPct >= 0 ? "up" : "down"}>{pending ? "待计算" : returnPct === null ? "--" : percent(returnPct)}</strong><small>{pending ? "观望日行情尚未产生后续价格" : change === null ? "观望基准价不可用" : `开盘基准 ${observationPrice.toFixed(4)} · 价格变动 ${priceDelta(change)} · ${watch.presetNames.length ? watch.presetNames.join(" · ") : "未设置形态"}`}</small></span>
-                            <span className="live-watch-row-actions"><button type="button" className="ghost-button" onClick={() => openLiveScanResult(result, index >= 0 ? index : undefined, "watch")}><BarChart3 size={14} />打开</button><button type="button" className="row-action danger" onClick={() => removeLiveWatch(watch.instrumentId)}>移除</button></span>
+                            <span className="live-watch-row-actions"><button
+                              type="button"
+                              className="ghost-button"
+                              onClick={() => {
+                                const market = performanceMarketCode(watch.market, watch.instrumentId);
+                                if (market === "CN" || market === "US") openLiveScanResult(result, index >= 0 ? index : undefined, "watch");
+                                else startFreshTraining(watch.instrumentId, "1d", { latestWatch: true });
+                              }}
+                            ><BarChart3 size={14} />打开</button><button type="button" className="row-action danger" onClick={() => removeLiveWatch(watch.instrumentId)}>移除</button></span>
                           </div>
                         );
                       })}
@@ -9900,28 +10362,68 @@ export function TrainingWorkbench() {
                       }}
                     />
                   </th>
-                  <th>品种</th><th>市场</th><th>周期</th><th>数量</th><th>覆盖范围</th><th>复权</th><th>来源</th><th>状态</th>
+                  <th>品种</th><th>市场</th><th>周期</th><th>数量</th><th>覆盖范围</th><th>复权</th><th>来源</th><th>状态</th><th className="coverage-watch-cell">自选</th>
                 </tr></thead>
                 <tbody>{coverage.map((item) => {
                   const key = coverageKey(item);
                   const selected = selectedCoverageKeys.includes(key);
+                  const watched = liveWatchlist.some((watch) => watch.instrumentId === item.id);
                   return (
-                  <tr className={selected ? "selected" : ""} key={key}>
+                  <tr
+                    className={`coverage-clickable-row${selected ? " selected" : ""}`}
+                    key={key}
+                    onClick={() => openCoverageWatch(item)}
+                    onKeyDown={(event) => {
+                      if (event.target !== event.currentTarget) return;
+                      if (event.key === "Enter" || event.key === " ") {
+                        event.preventDefault();
+                        openCoverageWatch(item);
+                      }
+                    }}
+                    role="button"
+                    tabIndex={0}
+                  >
                     <td className="coverage-select-cell" data-label="选择">
                       <input
                         type="checkbox"
                         aria-label={`选择 ${item.symbol} ${timeframeLabel(item.timeframe)} ${item.source}`}
                         checked={selected}
+                        onClick={(event) => event.stopPropagation()}
                         onChange={() => setSelectedCoverageKeys((current) => current.includes(key)
                           ? current.filter((value) => value !== key)
                           : [...current, key])}
                       />
                     </td>
-                    <td data-label="品种"><strong>{item.symbol}</strong><span>{item.name}</span></td>
+                    <td data-label="品种">
+                      <button
+                        type="button"
+                        className="coverage-instrument-link"
+                        title={`打开 ${item.symbol} 最新 K 线`}
+                        onClick={(event) => {
+                          event.stopPropagation();
+                          openCoverageWatch(item);
+                        }}
+                      >
+                        <strong>{item.symbol}</strong><span>{item.name}</span>
+                      </button>
+                    </td>
                     <td data-label="市场">{item.market}</td><td data-label="周期"><span className="tf-badge">{timeframeLabel(item.timeframe)}</span></td>
                     <td data-label="数量">{Number(item.barCount).toLocaleString()}</td>
                     <td data-label="覆盖范围">{new Date(item.firstTimestamp).toLocaleDateString("zh-CN")} — {new Date(item.lastTimestamp).toLocaleDateString("zh-CN")}</td>
-                    <td data-label="复权">{adjustmentLabel(item.adjustmentType)}</td><td data-label="来源">{item.source}</td><td data-label="状态"><span className="healthy-dot" />完整</td>
+                    <td data-label="复权">{adjustmentLabel(item.adjustmentType)}</td><td data-label="来源">{item.source}</td><td data-label="状态"><span className="coverage-status-actions"><span><span className="healthy-dot" />完整</span></span></td>
+                    <td className="coverage-watch-cell" data-label="自选">
+                      <button
+                        type="button"
+                        className="coverage-watch-toggle"
+                        aria-label={`${watched ? "移除" : "加入"} ${item.symbol} 自选`}
+                        onClick={(event) => {
+                          event.stopPropagation();
+                          toggleLiveWatchFromCoverage(item);
+                        }}
+                      >
+                        <Star size={13} fill={watched ? "currentColor" : "none"} />{watched ? "移除自选" : "加入自选"}
+                      </button>
+                    </td>
                   </tr>
                 );})}</tbody>
               </table>

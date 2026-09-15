@@ -26,15 +26,15 @@ export async function POST(request: Request) {
     : action === "resume"
       ? "/maintenance/cn/resume"
       : "/maintenance/cn/start";
-  const token = action === "pause" ? undefined : (await loadProviderSecrets()).secrets.tushareToken;
   try {
+    const { secrets } = await loadProviderSecrets();
     const response = await fetchLocalData(path, {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({
-        token,
         mode: payload.mode,
         repairDays: payload.repairDays,
+        token: secrets.tushareToken ?? null,
       }),
     }, 10_000);
     return Response.json(await response.json(), { status: response.status });
