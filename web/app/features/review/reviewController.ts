@@ -7,6 +7,42 @@ import type {
 export const REVIEW_SESSION_PAGE_SIZE = 50;
 export const REVIEW_SESSION_SUMMARY_BATCH_SIZE = 24;
 
+export type ReviewSessionActivityState = {
+  positions: readonly unknown[];
+  pendingOrders: readonly unknown[];
+  executions: readonly unknown[];
+  orderRejections: readonly unknown[];
+  drawings: readonly unknown[];
+  events: readonly ({ type?: unknown } | null)[];
+  hasDecisionContent: boolean;
+};
+
+const passiveTrainingEventTypes = new Set([
+  "session_created",
+  "session_restored",
+  "session_manually_saved",
+  "replay_advanced",
+  "replay_rewound",
+  "playback_toggled",
+  "playback_speed_changed",
+  "training_completed",
+  "training_revealed",
+]);
+
+export function hasMeaningfulTrainingActivity(state: ReviewSessionActivityState) {
+  return state.positions.length > 0
+    || state.pendingOrders.length > 0
+    || state.executions.length > 0
+    || state.orderRejections.length > 0
+    || state.drawings.length > 0
+    || state.hasDecisionContent
+    || state.events.some((event) => (
+      !event
+      || typeof event.type !== "string"
+      || !passiveTrainingEventTypes.has(event.type)
+    ));
+}
+
 type ReviewSessionSummaryBatchOptions = {
   batchSize?: number;
   shouldCancel?: () => boolean;

@@ -1,4 +1,5 @@
 import { ensureSchema, getRawDb } from "../../../db/runtime";
+import { marketDataWriteResponse, withMarketDataWrite } from "../../lib/marketDataWriteGuard";
 import {
   aggregateBars,
   generateDaily,
@@ -47,6 +48,8 @@ async function seedIfNeeded() {
     return;
   }
 
+  await withMarketDataWrite("*", async () => {
+  if (await db.prepare("SELECT value FROM app_metadata WHERE key = 'sample_data_seeded'").first()) return;
   for (const instrument of SAMPLE_INSTRUMENTS) {
     const adjustmentType = defaultAdjustmentTypeForMarket(instrument.market);
     await db
@@ -111,6 +114,7 @@ async function seedIfNeeded() {
     }
   }
   await db.prepare("INSERT OR REPLACE INTO app_metadata (key, value) VALUES ('sample_data_seeded', '1')").run();
+  });
 }
 
 function isValidBar(bar: ImportedBar) {
@@ -176,7 +180,8 @@ export async function GET(request: Request) {
         ]),
       });
     }
-    return Response.json({ instruments: [...merged.values()] });
+    const cleared = await db.prepare("SELECT key FROM app_metadata WHERE key LIKE 'market_data_cleared:%'").all<{ key: string }>();
+    return Response.json({ instruments: [...merged.values()], clearedMarkets: cleared.results.map((row) => row.key.slice("market_data_cleared:".length)) });
   }
 
   if (coverage === "1") {
@@ -270,10 +275,6 @@ export async function GET(request: Request) {
         datasetVersion: string;
       }>(`/candles?instrument=${encodeURIComponent(instrumentId)}&timeframe=${encodeURIComponent(timeframe)}&adjustmentType=${encodeURIComponent(adjustmentType)}`, 15000)
     : null;
-  if (local) return Response.json(local);
-  if (preferLocal) {
-    return Response.json({ instrument, timeframe, adjustmentType, candles: [] });
-  }
   const rows = await db
     .prepare(`SELECT timestamp, open, high, low, close, volume, turnover
       FROM candles
@@ -282,8 +283,19 @@ export async function GET(request: Request) {
     .bind(instrumentId, timeframe, adjustmentType)
     .all();
 
+  // A fresh install keeps a small CN sample in D1 while the optional local
+  // market-data service has no imported files yet. Keep that sample usable
+  // until local data actually contains bars; otherwise the default 600519
+  // screen opens successfully but every new training attempt is rejected.
+  if (local?.candles?.length || rows.results.length === 0) {
+    if (local) return Response.json(local);
+  }
+
   if (instrument && rows.results.length) {
     return Response.json({ instrument, timeframe, adjustmentType, candles: rows.results });
+  }
+  if (preferLocal) {
+    return Response.json({ instrument, timeframe, adjustmentType, candles: [] });
   }
   const fallbackLocal = await readLocalDataJson<{
     instrument: Record<string, unknown>;
@@ -298,6 +310,10 @@ export async function GET(request: Request) {
 }
 
 export async function POST(request: Request) {
+  return marketDataWriteResponse("*", () => importCandles(request));
+}
+
+async function importCandles(request: Request) {
   await ensureSchema();
   const payload = (await request.json()) as {
     instrument?: {

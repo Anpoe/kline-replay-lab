@@ -1,8 +1,9 @@
 export type ProtectionPriceKind = "stop-loss" | "take-profit";
+export type ProtectionLineKind = ProtectionPriceKind | "entry-trigger";
 
 export type ProtectionLine = {
   id: string;
-  kind: ProtectionPriceKind;
+  kind: ProtectionLineKind;
   price: number;
   timestamp: number;
   label: string;
@@ -23,6 +24,8 @@ type ProtectionPosition = {
 
 type DeriveProtectionLinesInput = {
   currentTimestamp: number;
+  draftTriggerPrice?: number;
+  draftTriggerOrderType?: "limit" | "stop";
   draftStopLoss?: number;
   draftTakeProfit?: number;
   positions: ProtectionPosition[];
@@ -72,6 +75,8 @@ function resetStopDraftMatchingPrices(
 
 export function deriveProtectionLines({
   currentTimestamp,
+  draftTriggerPrice,
+  draftTriggerOrderType,
   draftStopLoss,
   draftTakeProfit,
   positions,
@@ -79,9 +84,23 @@ export function deriveProtectionLines({
   movable,
 }: DeriveProtectionLinesInput): ProtectionLine[] {
   const lines: ProtectionLine[] = [];
+  const triggerPrice = positivePrice(draftTriggerPrice);
   const stopLoss = positivePrice(draftStopLoss);
   const takeProfit = positivePrice(draftTakeProfit);
 
+  if (triggerPrice != null) lines.push({
+    id: "draft-entry-trigger",
+    kind: "entry-trigger",
+    price: triggerPrice,
+    timestamp: currentTimestamp,
+    label: draftTriggerOrderType === "stop"
+      ? "突破单（Stop Order）"
+      : draftTriggerOrderType === "limit"
+        ? "限价单（Limit Order）"
+        : "计划触发",
+    movable,
+    source: "draft",
+  });
   if (stopLoss != null) lines.push({
     id: "draft-stop-loss",
     kind: "stop-loss",

@@ -1,4 +1,5 @@
 import { ensureSchema, getRawDb } from "../../../../db/runtime";
+import { marketDataWriteResponse } from "../../../lib/marketDataWriteGuard";
 import {
   fetchProviderChunk,
   resolveProviderSourceTimeframe,
@@ -45,6 +46,14 @@ function mergeQuality(previous: Partial<QualityReport>, current: QualityReport):
 }
 
 export async function POST(request: Request) {
+  await ensureSchema();
+  const payload = await request.clone().json().catch(() => ({})) as { id?: string };
+  const scope = payload.id ? await getRawDb().prepare("SELECT market FROM data_download_jobs WHERE id = ?")
+    .bind(payload.id).first<{ market: string }>() : null;
+  return marketDataWriteResponse(scope?.market ?? "*", () => runDownloadJob(request));
+}
+
+async function runDownloadJob(request: Request) {
   await ensureSchema();
   const payload = await request.json() as { id?: string };
   if (!payload.id) return Response.json({ error: "缺少下载任务 ID" }, { status: 400 });

@@ -4,6 +4,8 @@ import {
   REQUIRED_LOCAL_DATA_SERVICE_VERSION,
 } from "../../lib/localDataService";
 
+import { marketDataWriteResponse } from "../../lib/marketDataWriteGuard";
+
 type LocalTask = Record<string, unknown> | null;
 
 function staleServiceError(version?: number) {
@@ -43,6 +45,10 @@ export async function GET(request: Request) {
 }
 
 export async function POST(request: Request) {
+  return marketDataWriteResponse("CN", () => updateLocalData(request));
+}
+
+async function updateLocalData(request: Request) {
   const payload = (await request.json()) as {
     action?: "start" | "pause" | "resume" | "catalog-refresh" | "adjustment-start";
     plan?: Record<string, unknown>;

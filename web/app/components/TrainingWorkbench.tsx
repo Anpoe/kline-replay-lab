@@ -87,7 +87,12 @@ import { evaluateDisciplineGate } from "../features/sop/sopController";
 import { DataSourceManager } from "../features/market-data/components/DataSourceManager";
 import { createMarketDataGateway } from "../features/market-data/marketDataGateway";
 import type { CorporateActionEvent, CorporateActionMarker } from "../lib/corporateActions";
-import { corporateActionMarkersForBars } from "../lib/corporateActions";
+import {
+  CASH_DIVIDEND_INCOME_EVENT_TYPE,
+  cashDividendCreditsForBar,
+  cashDividendIncomeFromEvents,
+  corporateActionMarkersForBars,
+} from "../lib/corporateActions";
 import {
   adjustmentLabel,
   defaultAdjustmentTypeForInstrument,
@@ -96,6 +101,7 @@ import {
 import {
   buildReviewSessionSummariesInBatches,
   filterReviewSessions,
+  hasMeaningfulTrainingActivity,
   REVIEW_SESSION_SUMMARY_BATCH_SIZE,
 } from "../features/review/reviewController";
 import {
@@ -264,6 +270,12 @@ import {
   type DeterministicReviewMetrics,
 } from "../lib/reviewMetrics";
 import { calculateRiskSizedQuantity, inferRiskSizingSide } from "../lib/riskSizing";
+import {
+  evaluateOpeningGap,
+  nextOpeningGapMode,
+  type OpeningGapMode,
+  type OpeningGapUnit,
+} from "../lib/openingGapFilter";
 
 /*
  * Legacy compatibility contracts intentionally remain documented at the shell boundary while
@@ -864,9 +876,6 @@ type SyncedPreferences = {
   appSettings: AppSettings;
   patternPresets: PatternPreset[];
   movingAverageSettings: MovingAverageSettings;
-  quickRandomMode: "free" | "blind";
-  quickRandomPatternPresetId: string;
-  randomTrainingPatternPresetIds: string[];
   reasonTags?: string[];
   customReasonTags: string[];
   drawingPreferences: {
@@ -1353,8 +1362,8 @@ function profitFactorLabel(value: number | null, infinite = false) {
 }
 
 function orderTypeLabel(value: OrderType | undefined) {
-  if (value === "limit") return "限价";
-  if (value === "stop") return "止损触发";
+  if (value === "limit") return "限价单（Limit Order）";
+  if (value === "stop") return "突破单（Stop Order）";
   return "市价";
 }
 
@@ -1460,6 +1469,7 @@ type TrainingSessionHabitTrade = {
 type TrainingSessionSummary = {
   session: TrainingSession;
   state: TrainingState;
+  hasMeaningfulActivity: boolean;
   task?: TrainingTask;
   pnl: TrainingPnlStats["pnl"];
   returnPct: number;
@@ -1622,6 +1632,7 @@ function eventLabel(type: string) {
     order_queued_for_next_session: "预约次日开盘平仓",
     order_cancelled: "撤销委托",
     orders_filled: "订单成交",
+    [CASH_DIVIDEND_INCOME_EVENT_TYPE]: "分红收入计入模拟账户",
     drawings_changed: "更新图表标记",
     playback_toggled: "切换自动播放",
     playback_speed_changed: "调整播放速度",
@@ -1784,6 +1795,9 @@ export function TrainingWorkbench() {
   const [positionSizeMode, setPositionSizeMode] = useState<PositionSizeMode>(defaultAppSettings.positionSizeMode);
   const [riskPercent, setRiskPercent] = useState(defaultAppSettings.riskPercent);
   const [orderType, setOrderType] = useState<OrderType>(defaultAppSettings.orderType);
+  const [openingGapMode, setOpeningGapMode] = useState<OpeningGapMode>(defaultAppSettings.openingGapMode);
+  const [openingGapUnit, setOpeningGapUnit] = useState<OpeningGapUnit>(defaultAppSettings.openingGapUnit);
+  const [openingGapThreshold, setOpeningGapThreshold] = useState(defaultAppSettings.openingGapThreshold);
   const [orderTriggerPrice, setOrderTriggerPrice] = useState("");
   const [orderStopLoss, setOrderStopLoss] = useState("");
   const [orderTakeProfit, setOrderTakeProfit] = useState("");
@@ -1910,12 +1924,16 @@ export function TrainingWorkbench() {
   const [coverageLoading, setCoverageLoading] = useState(false);
   const [selectedCoverageKeys, setSelectedCoverageKeys] = useState<string[]>([]);
   const [dataMarket, setDataMarket] = useState<DataMarket>("CN");
+  const activeDataMarketRef = useRef(dataMarket);
+  const coverageLoadRef = useRef(0);
+  useEffect(() => { activeDataMarketRef.current = dataMarket; }, [dataMarket]);
   const [sessionSummaries, setSessionSummaries] = useState<TrainingSessionSummary[]>([]);
   const [trashSessions, setTrashSessions] = useState<TrainingSession[]>([]);
   const [showTrash, setShowTrash] = useState(false);
   const [trashLoading, setTrashLoading] = useState(false);
   const [trashActionId, setTrashActionId] = useState("");
   const [trashError, setTrashError] = useState("");
+  const [emptySessionCleanupRunning, setEmptySessionCleanupRunning] = useState(false);
   const [snapshotTradeContexts, setSnapshotTradeContexts] = useState<SnapshotTradeContextMap>({});
   const [performanceFilters, setPerformanceFilters] = useState<PerformanceFilters>(defaultPerformanceFilters);
   const [performanceHeroDisplayMode, setPerformanceHeroDisplayMode] = useState<"return" | "amount">("return");
@@ -1961,6 +1979,8 @@ export function TrainingWorkbench() {
   const syncedPreferencesLoadStartedRef = useRef(false);
   const syncedPreferencesHydratedRef = useRef(false);
   const syncedPreferencesRetryCountRef = useRef(0);
+  const patternPresetSaveRevisionRef = useRef(0);
+  const patternPresetsDirtyRef = useRef(false);
   const liveStateHydratedRef = useRef(false);
   const liveStateRetryCountRef = useRef(0);
   const liveStatePersistedRef = useRef({
@@ -1976,7 +1996,7 @@ export function TrainingWorkbench() {
     setStartupReady(true);
   }, []);
 
-  const rememberOrderEntryPreference = (update: Partial<Pick<AppSettings, "orderType" | "positionSizeMode" | "riskPercent">>) => {
+  const rememberOrderEntryPreference = (update: Partial<Pick<AppSettings, "orderType" | "positionSizeMode" | "riskPercent" | "openingGapMode" | "openingGapUnit" | "openingGapThreshold">>) => {
     const nextSettings = normalizeSettings({ ...appSettingsRef.current, ...update });
     appSettingsRef.current = nextSettings;
     setAppSettings(nextSettings);
@@ -2246,7 +2266,8 @@ export function TrainingWorkbench() {
     ), 0)
     : 0;
   const realizedPnl = closedPositions.reduce((sum, position) => sum + (position.realizedPnl ?? 0), 0);
-  const totalPnl = realizedPnl + openPnl;
+  const dividendIncome = cashDividendIncomeFromEvents(events);
+  const totalPnl = realizedPnl + openPnl + dividendIncome;
   const currentPrice = currentBar?.close ?? 0;
   const entryNotional = (position: PositionLot) => accountNotional(
     position.entryPrice,
@@ -2333,13 +2354,15 @@ export function TrainingWorkbench() {
     if (!currentBar || liveMode) return [];
     return deriveProtectionLines({
       currentTimestamp: currentBar.timestamp,
+      draftTriggerPrice: orderType === "market" ? undefined : Number(orderTriggerPrice),
+      draftTriggerOrderType: orderType === "market" ? undefined : orderType,
       draftStopLoss: effectiveOrderStop,
       draftTakeProfit: effectiveOrderTarget,
       positions,
       hoveredClosedPositionId,
       movable: trainingTask?.status !== "completed",
     });
-  }, [currentBar, effectiveOrderStop, effectiveOrderTarget, hoveredClosedPositionId, liveMode, positions, trainingTask?.status]);
+  }, [currentBar, effectiveOrderStop, effectiveOrderTarget, hoveredClosedPositionId, liveMode, orderTriggerPrice, orderType, positions, trainingTask?.status]);
   const currentTaskProgress = trainingTask
     ? taskProgress(trainingTask, cursor)
     : { revealed: 0, total: 0, percent: 0 };
@@ -2347,6 +2370,7 @@ export function TrainingWorkbench() {
     ? currentTaskProgress.percent
     : bars.length > 1 ? (cursor / (bars.length - 1)) * 100 : 0;
   const trainingComplete = trainingTask?.status === "completed";
+  const playbackDisabled = loading || trainingComplete;
   const rewindLocked = Boolean(trainingTask?.randomRun);
   const reviewLocked = Boolean(
     hideTaskInstrument || hideTaskDate || hideTaskPrice,
@@ -2463,8 +2487,9 @@ export function TrainingWorkbench() {
     tradingMode,
     initialCapital,
     cashBalance,
+    dividendIncome,
     executionProfile,
-  }), [cashBalance, decision, decisionSubmissions, drawings, executionProfile, executions, initialCapital, marketRules, orderQty, orderStopLoss, orderTakeProfit, orderTriggerPrice, orderType, orderRejections, pendingOrders, positionSizeMode, positions, riskPercent, tradingMode, trainingTask]);
+  }), [cashBalance, decision, decisionSubmissions, dividendIncome, drawings, executionProfile, executions, initialCapital, marketRules, orderQty, orderStopLoss, orderTakeProfit, orderTriggerPrice, orderType, orderRejections, pendingOrders, positionSizeMode, positions, riskPercent, tradingMode, trainingTask]);
 
   useEffect(() => {
     if (!liveStateHydratedRef.current) return;
@@ -2569,6 +2594,7 @@ export function TrainingWorkbench() {
   const reviewMetrics = reviewState.reviewMetrics;
   const reviewClosedPositions = reviewState.positions.filter((position) => position.status === "closed");
   const reviewRealizedPnl = reviewClosedPositions.reduce((sum, position) => sum + (position.realizedPnl ?? 0), 0);
+  const reviewDividendIncome = cashDividendIncomeFromEvents(reviewState.events);
   const reviewRealizedReturnPct = portfolioReturnPct(reviewClosedPositions, 0);
   const reviewWinningTrades = reviewClosedPositions.filter((position) => (position.realizedPnl ?? 0) > 0).length;
   const reviewLosingTrades = reviewClosedPositions.filter((position) => (position.realizedPnl ?? 0) < 0).length;
@@ -2737,14 +2763,11 @@ export function TrainingWorkbench() {
     };
   }, []);
 
-  const buildSyncedPreferences = useCallback((nextSettings: AppSettings): SyncedPreferences => ({
+  const buildSyncedPreferences = useCallback((nextSettings: AppSettings, patternPresetOverride?: PatternPreset[]): SyncedPreferences => ({
     version: 1,
     appSettings: nextSettings,
-    patternPresets,
+    patternPresets: patternPresetOverride ?? patternPresets,
     movingAverageSettings,
-    quickRandomMode,
-    quickRandomPatternPresetId,
-    randomTrainingPatternPresetIds,
     reasonTags,
     customReasonTags,
     drawingPreferences: {
@@ -2789,19 +2812,20 @@ export function TrainingWorkbench() {
     liveScanSort,
     movingAverageSettings,
     patternPresets,
-    quickRandomMode,
-    quickRandomPatternPresetId,
-    randomTrainingPatternPresetIds,
     reasonTags,
   ]);
 
   const applySyncedPreferences = useCallback((value: unknown) => {
     if (!value || typeof value !== "object" || Array.isArray(value)) return;
     const stored = value as Partial<SyncedPreferences>;
-    const syncedPatternPresets = Array.isArray(stored.patternPresets)
+    const preserveLocalPatternPresets = patternPresetsDirtyRef.current;
+    const syncedPatternPresets = preserveLocalPatternPresets
+      ? patternPresets
+      : Array.isArray(stored.patternPresets)
       ? normalizePatternPresets(stored.patternPresets)
       : patternPresets;
     const syncedAvailablePatternPresets = visiblePatternPresets(syncedPatternPresets);
+    const localRandomPreferences = settingsGateway.loadPatternPreferences();
     if (stored.appSettings && typeof stored.appSettings === "object") {
       const nextSettings = normalizeSettings(stored.appSettings);
       appSettingsRef.current = nextSettings;
@@ -2810,9 +2834,12 @@ export function TrainingWorkbench() {
       setSpeed(nextSettings.defaultSpeed);
       setOrderQty(configuredDefaultOrderQuantity(nextSettings, instrument.market, instrument.id, marketRules));
       setOrderType(nextSettings.orderType);
+      setOpeningGapMode(nextSettings.openingGapMode);
+      setOpeningGapUnit(nextSettings.openingGapUnit);
+      setOpeningGapThreshold(nextSettings.openingGapThreshold);
       settingsGateway.saveAppSettings(nextSettings);
     }
-    if (Array.isArray(stored.patternPresets)) {
+    if (preserveLocalPatternPresets || Array.isArray(stored.patternPresets)) {
       const nextPresets = syncedPatternPresets;
       const availablePatternPresets = syncedAvailablePatternPresets;
       setPatternPresets(nextPresets);
@@ -2820,30 +2847,22 @@ export function TrainingWorkbench() {
       setSelectedPatternPresetId((selected) => (
         availablePatternPresets.some((preset) => preset.id === selected) ? selected : availablePatternPresets[0]?.id ?? ""
       ));
-      settingsGateway.savePatternPresets(nextPresets);
-      const quickPattern = typeof stored.quickRandomPatternPresetId === "string"
-        && availablePatternPresets.some((preset) => preset.id === stored.quickRandomPatternPresetId)
-        ? stored.quickRandomPatternPresetId
+      const quickPattern = localRandomPreferences.quickRandomPatternPresetId
+        && availablePatternPresets.some((preset) => preset.id === localRandomPreferences.quickRandomPatternPresetId)
+        ? localRandomPreferences.quickRandomPatternPresetId
         : "";
       setQuickRandomPatternPresetId(quickPattern);
-      settingsGateway.saveQuickRandomPattern(quickPattern);
-      if (Array.isArray(stored.randomTrainingPatternPresetIds)) {
-        const randomPatternIds = stored.randomTrainingPatternPresetIds.filter((id): id is string => (
-          typeof id === "string" && availablePatternPresets.some((preset) => preset.id === id)
-        ));
-        setRandomTrainingPatternPresetIds(randomPatternIds);
-        settingsGateway.saveRandomTrainingPatternPresets(randomPatternIds);
-      }
+      const randomPatternIds = localRandomPreferences.randomTrainingPatternPresetIds.filter((id) => (
+        availablePatternPresets.some((preset) => preset.id === id)
+      ));
+      setRandomTrainingPatternPresetIds(randomPatternIds);
     }
     if (stored.movingAverageSettings && typeof stored.movingAverageSettings === "object") {
       const nextIndicators = normalizeMovingAverageSettings(stored.movingAverageSettings);
       setMovingAverageSettings(nextIndicators);
       settingsGateway.saveMovingAverageSettings(nextIndicators);
     }
-    if (stored.quickRandomMode === "free" || stored.quickRandomMode === "blind") {
-      setQuickRandomMode(stored.quickRandomMode);
-      settingsGateway.saveQuickRandomMode(stored.quickRandomMode);
-    }
+    setQuickRandomMode(localRandomPreferences.quickRandomMode);
     const syncedReasonTags = Array.isArray(stored.reasonTags)
       ? normalizeReasonTags(stored.reasonTags)
       : normalizeReasonTags([
@@ -2853,7 +2872,6 @@ export function TrainingWorkbench() {
     setReasonTags(syncedReasonTags);
     const syncedCustomReasonTags = syncedReasonTags.filter((tag) => !reasonOptions.includes(tag));
     setCustomReasonTags(syncedCustomReasonTags);
-    settingsGateway.saveReasonTagPreferences(syncedReasonTags);
     const drawingPreferences = stored.drawingPreferences;
     if (drawingPreferences && typeof drawingPreferences === "object") {
       if (["normal", "weak_magnet", "strong_magnet"].includes(drawingPreferences.magnetMode)) {
@@ -2925,6 +2943,9 @@ export function TrainingWorkbench() {
       setSettingsDraft(nextSettings);
       setSpeed(nextSettings.defaultSpeed);
       setOrderType(nextSettings.orderType);
+      setOpeningGapMode(nextSettings.openingGapMode);
+      setOpeningGapUnit(nextSettings.openingGapUnit);
+      setOpeningGapThreshold(nextSettings.openingGapThreshold);
       // The initial render is the CN seed screen; the market load below
       // replaces this with the selected instrument's configured quantity.
       setOrderQty(nextSettings.defaultOrderQtyByMarket.CN);
@@ -2936,9 +2957,10 @@ export function TrainingWorkbench() {
   useEffect(() => {
     const timer = window.setTimeout(() => {
       const stored = settingsGateway.loadPatternPreferences();
-      setPatternPresets(stored.patternPresets);
-      setPatternPresetDrafts(stored.patternPresets.map(clonePatternPresetValue));
-      setSelectedPatternPresetId(visiblePatternPresets(stored.patternPresets)[0]?.id ?? "");
+      const defaults = normalizePatternPresets(defaultPatternPresets);
+      setPatternPresets(defaults);
+      setPatternPresetDrafts(defaults.map(clonePatternPresetValue));
+      setSelectedPatternPresetId(visiblePatternPresets(defaults)[0]?.id ?? "");
       setQuickRandomPatternPresetId(stored.quickRandomPatternPresetId);
       setRandomTrainingPatternPresetIds(stored.randomTrainingPatternPresetIds);
       setQuickRandomMode(stored.quickRandomMode);
@@ -2949,20 +2971,13 @@ export function TrainingWorkbench() {
 
   useEffect(() => {
     const timer = window.setTimeout(() => {
-      const stored = settingsGateway.loadReasonTagPreferences();
-      setReasonTags(stored.reasonTags);
-      setCustomReasonTags(stored.customReasonTags);
+      setReasonTags([...reasonOptions]);
+      setCustomReasonTags([]);
       setReasonTagsReady(true);
       setCustomReasonTagsReady(true);
     }, 0);
     return () => window.clearTimeout(timer);
-  }, [settingsGateway]);
-
-  useEffect(() => {
-    if (!reasonTagsReady) return;
-    const nextTags = normalizeReasonTags(reasonTags);
-    settingsGateway.saveReasonTagPreferences(nextTags);
-  }, [reasonTags, reasonTagsReady, settingsGateway]);
+  }, []);
 
   useEffect(() => {
     const timer = window.setTimeout(() => {
@@ -2999,17 +3014,33 @@ export function TrainingWorkbench() {
     syncedPreferencesLoadStartedRef.current = true;
     syncedPreferencesHydratedRef.current = false;
     let cancelled = false;
-    let readyTimer: number | null = null;
     let retryTimer: number | null = null;
     void preferencesGateway.load()
       .then((preferences) => {
         if (cancelled) return;
-        if (preferences) applySyncedPreferences(preferences);
+        const stored = preferences && typeof preferences === "object" && !Array.isArray(preferences)
+          ? { ...(preferences as Record<string, unknown>) }
+          : {};
+        // Older builds kept these two preference groups in browser
+        // localStorage. Read them once when the local D1 record has no value,
+        // then the normal synced preference save writes the migrated result to
+        // the local database. Random-training controls are intentionally kept
+        // browser-local and are restored by the local settings effect.
+        const legacyPatterns = !Array.isArray(stored.patternPresets)
+          ? settingsGateway.loadPatternPreferences()
+          : null;
+        if (legacyPatterns) {
+          if (!Array.isArray(stored.patternPresets)) stored.patternPresets = legacyPatterns.patternPresets;
+        }
+        if (!Array.isArray(stored.reasonTags) && !Array.isArray(stored.customReasonTags)) {
+          const legacyReasons = settingsGateway.loadReasonTagPreferences();
+          stored.reasonTags = legacyReasons.reasonTags;
+          stored.customReasonTags = legacyReasons.customReasonTags;
+        }
+        applySyncedPreferences(stored);
         syncedPreferencesRetryCountRef.current = 0;
         syncedPreferencesHydratedRef.current = true;
-        readyTimer = window.setTimeout(() => {
-          if (!cancelled) setSyncedPreferencesReady(true);
-        }, 0);
+        setSyncedPreferencesReady(true);
       })
       .catch(() => {
         if (cancelled) return;
@@ -3029,22 +3060,33 @@ export function TrainingWorkbench() {
       });
     return () => {
       cancelled = true;
-      if (readyTimer !== null) window.clearTimeout(readyTimer);
       if (retryTimer !== null) window.clearTimeout(retryTimer);
+      if (!syncedPreferencesHydratedRef.current) syncedPreferencesLoadStartedRef.current = false;
     };
-  }, [applySyncedPreferences, customReasonTagsReady, movingAverageSettingsReady, patternPresetsReady, preferencesGateway, reasonTagsReady, settingsReady, syncedPreferencesRetryNonce]);
+  }, [applySyncedPreferences, customReasonTagsReady, movingAverageSettingsReady, patternPresetsReady, preferencesGateway, reasonTagsReady, settingsGateway, settingsReady, syncedPreferencesRetryNonce]);
 
   useEffect(() => {
     if (!syncedPreferencesReady || !syncedPreferencesHydratedRef.current) return;
     const timer = window.setTimeout(() => {
       const preferences = buildSyncedPreferences(appSettingsRef.current);
-      void preferencesGateway.save(preferences).catch(() => undefined);
+      const saveRevision = patternPresetSaveRevisionRef.current;
+      const trackingPatternSave = patternPresetsDirtyRef.current;
+      void preferencesGateway.save(preferences)
+        .then(() => {
+          if (trackingPatternSave && patternPresetSaveRevisionRef.current === saveRevision) {
+            patternPresetsDirtyRef.current = false;
+          }
+          settingsGateway.removeLegacyCustomPatternPresets();
+          settingsGateway.removeLegacyReasonTagPreferences();
+        })
+        .catch(() => undefined);
     }, 350);
     return () => window.clearTimeout(timer);
   }, [
     appSettings,
     buildSyncedPreferences,
     preferencesGateway,
+    settingsGateway,
     syncedPreferencesReady,
   ]);
 
@@ -3569,6 +3611,9 @@ export function TrainingWorkbench() {
         setEditingDecisionId("");
         setOrderQty(restoreRequest.state.orderQty);
         setOrderType(restoreRequest.state.orderType ?? appSettingsRef.current.orderType);
+        setOpeningGapMode(appSettingsRef.current.openingGapMode);
+        setOpeningGapUnit(appSettingsRef.current.openingGapUnit);
+        setOpeningGapThreshold(appSettingsRef.current.openingGapThreshold);
         setOrderTriggerPrice(restoreRequest.state.orderTriggerPrice ?? "");
         setOrderStopLoss(restoreRequest.state.orderStopLoss ?? "");
         setOrderTakeProfit(restoreRequest.state.orderTakeProfit ?? "");
@@ -3959,6 +4004,31 @@ export function TrainingWorkbench() {
           message: validation.message ?? "委托不符合当前市场规则",
         };
     };
+    const validateOpeningGap = (order: PendingOrder) => {
+      if (liveMode || openingGapMode === "off" || order.action !== "open" || order.side !== "buy") {
+        return { ok: true as const };
+      }
+      const previousClose = bars[barIndex - 1]?.close;
+      if (previousClose == null) return { ok: true as const };
+      const gap = evaluateOpeningGap(previousClose, bar.open, {
+        mode: openingGapMode,
+        unit: openingGapUnit,
+        threshold: openingGapThreshold,
+      });
+      if (!gap.blocked) return { ok: true as const };
+      const direction = openingGapMode === "high" ? "高开" : "低开";
+      const actualGap = openingGapUnit === "percent"
+        ? `${Math.abs(gap.gapPercent).toFixed(2)}%`
+        : Math.abs(gap.gapPrice).toFixed(instrument.pricePrecision);
+      const threshold = openingGapUnit === "percent"
+        ? `${openingGapThreshold}%`
+        : openingGapThreshold.toFixed(instrument.pricePrecision);
+      return {
+        ok: false as const,
+        code: "opening_gap_blocked",
+        message: `${direction}${actualGap}，达到不买阈值 ${threshold}，已跳过买入开仓`,
+      };
+    };
     const result = executeBarStep({
       orders,
       positions: basePositions,
@@ -3968,7 +4038,12 @@ export function TrainingWorkbench() {
       capitalMode: tradingMode === "capital",
       instrumentEconomics: liveMode ? undefined : marketRules.instrumentEconomics,
       skipProtectiveExits: orders.length > 0 && orders.every((order) => order.reason === "session_end"),
-      validateFill: (order, rawPrice) => validateEnginePrice(order.side, rawPrice, order.reason === "session_end"),
+      validateFill: (order, rawPrice) => {
+        const openingGapValidation = validateOpeningGap(order);
+        return openingGapValidation.ok
+          ? validateEnginePrice(order.side, rawPrice, order.reason === "session_end")
+          : openingGapValidation;
+      },
       validateProtectiveFill: (position, side, rawPrice) => {
         if (liveMode) return { ok: true };
         const closeValidation = validateCloseOrder(marketRules, position, bar.timestamp, instrument.timezone);
@@ -4069,7 +4144,7 @@ export function TrainingWorkbench() {
       }, bar.timestamp);
     }
     return { ...result, positions: nextPositions, fills, rejections };
-  }, [appendEvent, bars, cashBalance, decision.stop, executionProfile, instrument.timezone, liveMode, marketRules, orderStopLoss, positions, timeframe, tradingMode]);
+  }, [appendEvent, bars, cashBalance, decision.stop, executionProfile, instrument.pricePrecision, instrument.timezone, liveMode, marketRules, openingGapMode, openingGapThreshold, openingGapUnit, orderStopLoss, positions, timeframe, tradingMode]);
 
   const settleTrainingAtBar = useCallback((
     basePositions: PositionLot[],
@@ -4167,6 +4242,12 @@ export function TrainingWorkbench() {
     let simulatedCashBalance = cashBalance;
     let remainingOrders = pendingOrders;
     const consumedOrderIds: string[] = [];
+    const creditedDividendEventIds = new Set<string>();
+    events.forEach((event) => {
+      if (event.type !== CASH_DIVIDEND_INCOME_EVENT_TYPE) return;
+      const eventId = event.payload.eventId;
+      if (typeof eventId === "string" && eventId) creditedDividendEventIds.add(eventId);
+    });
     for (let barIndex = cursor + 1; barIndex <= nextCursor; barIndex += 1) {
       const executionBar = bars[barIndex];
       const isSkippedBar = isWithinReplaySession != null && !isWithinReplaySession(executionBar.timestamp);
@@ -4230,6 +4311,16 @@ export function TrainingWorkbench() {
           }
         }
       }
+      const dividendCredits = !liveMode
+        && !isWeekendSkippedBar
+        && corporateActionsForInstrumentId === instrument.id
+        ? cashDividendCreditsForBar(
+          corporateActions,
+          simulatedPositions,
+          executionBar.timestamp,
+          creditedDividendEventIds,
+        )
+        : [];
       const dueOrders = remainingOrders.filter((order) => isReplayOrderDueAtBar(order, executionBar.timestamp));
       const futureOrders = remainingOrders.filter((order) => !isReplayOrderDueAtBar(order, executionBar.timestamp));
       const executableOrders = isSkippedBar
@@ -4254,6 +4345,22 @@ export function TrainingWorkbench() {
         simulatedCashBalance = executionResult.cashBalance;
         remainingOrders = [...futureOrders, ...deferredOrders, ...executionResult.remainingOrders];
         consumedOrderIds.push(...executionResult.consumedOrderIds);
+      }
+      if (dividendCredits.length) {
+        const dividendAmount = dividendCredits.reduce((sum, credit) => sum + credit.amount, 0);
+        if (tradingMode === "capital") simulatedCashBalance += dividendAmount;
+        dividendCredits.forEach((credit) => {
+          creditedDividendEventIds.add(credit.eventId);
+          appendEvent(CASH_DIVIDEND_INCOME_EVENT_TYPE, {
+            eventId: credit.eventId,
+            instrumentId: credit.instrumentId,
+            exDate: credit.date,
+            cashPer10: credit.cashPer10,
+            eligibleQuantity: credit.quantity,
+            amount: credit.amount,
+            cashBalance: simulatedCashBalance,
+          }, executionBar.timestamp);
+        });
       }
 
       const activePersonalSopRule = appSettingsRef.current.personalSopCheckEnabled
@@ -4357,6 +4464,7 @@ export function TrainingWorkbench() {
           });
       }
     }
+    if (tradingMode === "capital") setCashBalance(simulatedCashBalance);
     setPendingOrders(remainingOrders);
     setCursor(nextCursor);
     appendEvent("replay_advanced", {
@@ -4376,6 +4484,10 @@ export function TrainingWorkbench() {
       );
       const completedTask = finishTask(trainingTask, nextCursor);
       setTrainingTask(completedTask);
+      // The completion banner is now the source of truth. Clear transient
+      // order notices such as a prior T+1 reservation so they cannot remain
+      // visible beside an empty pending-order list after settlement.
+      setRuleNotice("");
       setPlaying(false);
       if (completedTask.randomRun) setShowRandomComplete(true);
       saveCompletedTrainingRef.current = true;
@@ -4385,7 +4497,7 @@ export function TrainingWorkbench() {
         endCursor: completedTask.endCursor,
       }, bars[nextCursor]?.timestamp);
     }
-  }, [appendEvent, bars, cashBalance, cursor, executeOrders, executionProfile, instrument.timezone, liveMode, marketRules, pendingOrders, positions, settleTrainingAtBar, timeframe, tradingMode, trainingTask]);
+  }, [appendEvent, bars, cashBalance, corporateActions, corporateActionsForInstrumentId, cursor, events, executeOrders, executionProfile, instrument.id, instrument.timezone, liveMode, marketRules, pendingOrders, positions, settleTrainingAtBar, timeframe, tradingMode, trainingTask]);
 
   const revealNext = useCallback(() => revealMany(1), [revealMany]);
   const revealPrevious = () => {
@@ -4580,7 +4692,7 @@ export function TrainingWorkbench() {
       rejectOrderAttempt({
         ok: false,
         code: "invalid_trigger_price",
-        message: `${selectedOrderType === "limit" ? "限价" : "止损触发价"}必须大于 0`,
+        message: `${orderTypeLabel(selectedOrderType)}触发价必须大于 0`,
       }, { action: "open", side, qty, orderType: selectedOrderType });
       return;
     }
@@ -5892,6 +6004,50 @@ export function TrainingWorkbench() {
     }
   };
 
+  const deleteEmptyTrainingSessions = async (summaries: TrainingSessionSummary[]) => {
+    if (emptySessionCleanupRunning) return;
+    const candidates = summaries.filter((summary) => !summary.hasMeaningfulActivity);
+    if (!candidates.length) return;
+    if (!window.confirm(`确定将当前筛选中的 ${candidates.length} 场没有操作和决策的训练移入回收站吗？这些训练只看过 K 线，没有画图、填写决策、下单或其他训练操作；移入后仍可在回收站恢复。`)) return;
+
+    const candidateIds = new Set(candidates.map((summary) => summary.session.id));
+    setEmptySessionCleanupRunning(true);
+    setSessionSummaries((items) => items.filter((summary) => !candidateIds.has(summary.session.id)));
+    const deletedIds = new Set<string>();
+    const failedSummaries: TrainingSessionSummary[] = [];
+    for (let index = 0; index < candidates.length; index += 1) {
+      const candidate = candidates[index];
+      setSaveState(`正在清理无操作训练（${index + 1}/${candidates.length}）…`);
+      try {
+        await reviewGateway.deleteSession(candidate.session.id);
+        deletedIds.add(candidate.session.id);
+      } catch {
+        failedSummaries.push(candidate);
+      }
+    }
+
+    if (failedSummaries.length) {
+      setSessionSummaries((items) => (
+        [...items, ...failedSummaries].sort((left, right) => compareTrainingSessionSummariesByCreatedAt(left, right))
+      ));
+      setSaveState(`已清理 ${deletedIds.size} 场，另有 ${failedSummaries.length} 场未能移入回收站，请稍后重试。`);
+    } else {
+      setSaveState(`已将 ${deletedIds.size} 场没有操作和决策的训练移入回收站。`);
+    }
+
+    setTrainingNavigatorSessions((items) => items.filter((item) => !deletedIds.has(item.id)));
+    if (reviewedSession && deletedIds.has(reviewedSession.session.id)) setReviewedSession(null);
+    const localDraft = settingsGateway.loadLastDraft<{ id?: string }>();
+    if (localDraft?.id && deletedIds.has(localDraft.id)) settingsGateway.removeLastDraft();
+    if (deletedIds.has(sessionId)) {
+      resetTraining();
+      setSaveState(failedSummaries.length
+        ? `原训练已移入回收站；已清理 ${deletedIds.size} 场，另有 ${failedSummaries.length} 场失败。`
+        : "原训练已移入回收站，已开始一场新的空白训练");
+    }
+    setEmptySessionCleanupRunning(false);
+  };
+
   const updateDecision = (field: keyof Decision, value: string | string[]) => {
     const nextDecision = { ...decision, [field]: value } as Decision;
     setDecision(nextDecision);
@@ -6389,6 +6545,7 @@ export function TrainingWorkbench() {
   const selectedDrawingInputColor = /^#[0-9a-f]{6}$/i.test(selectedDrawingColor) ? selectedDrawingColor : drawingColor;
 
   const loadCoverage = useCallback(async () => {
+    const requestId = ++coverageLoadRef.current;
     setCoverageLoading(true);
     try {
       const data = await marketDataGateway.loadCoverage<{
@@ -6396,6 +6553,7 @@ export function TrainingWorkbench() {
         total: number;
         summary: { barCount: number; timeframeCount: number; hasNonSampleData?: boolean };
       }>(coveragePage, coveragePageSize, coverageQuery, dataMarket);
+      if (requestId !== coverageLoadRef.current || activeDataMarketRef.current !== dataMarket) return;
       setCoverage(data.coverage);
       setSelectedCoverageKeys([]);
       setCoverageTotal(data.total);
@@ -6407,7 +6565,7 @@ export function TrainingWorkbench() {
     } catch {
       // The database page keeps its current rows while the data service recovers.
     } finally {
-      setCoverageLoading(false);
+      if (requestId === coverageLoadRef.current && activeDataMarketRef.current === dataMarket) setCoverageLoading(false);
     }
   }, [coveragePage, coverageQuery, dataMarket, marketDataGateway]);
 
@@ -6443,13 +6601,16 @@ export function TrainingWorkbench() {
     }
   };
 
+  const instrumentCatalogLoadRef = useRef(0);
   const loadInstrumentCatalog = useCallback(async () => {
+    const requestId = ++instrumentCatalogLoadRef.current;
     // The local data service can answer before its full catalog has finished
     // indexing.  Do not replace the seed catalog with that transient subset;
     // retry until A-share data is visible, then only keep a seed market when a
     // complete response still does not contain that market.
     const retryDelays = [0, 500, 1000, 2000, 4000];
     let catalog: AvailableInstrument[] = [];
+    let clearedMarkets = new Set<string>();
     try {
       const readCatalogTaskStatus = async () => {
         try {
@@ -6464,26 +6625,27 @@ export function TrainingWorkbench() {
           await new Promise<void>((resolve) => window.setTimeout(resolve, retryDelays[attempt]));
         }
         try {
-          const data = await marketDataGateway.loadInstrumentCatalog<{ instruments?: Array<Instrument & { timeframes?: string[] }> }>();
+          const data = await marketDataGateway.loadInstrumentCatalog<{ instruments?: Array<Instrument & { timeframes?: string[] }>; clearedMarkets?: string[] }>();
           const instruments = (data.instruments ?? [])
             .map(normalizeAvailableInstrument)
             .filter((item): item is AvailableInstrument => item !== null);
-          if (instruments.length) catalog = instruments;
+          catalog = instruments;
+          clearedMarkets = new Set(data.clearedMarkets ?? []);
           const catalogTaskStatus = await readCatalogTaskStatus();
           const catalogIndexing = catalogTaskStatus != null
             && !["completed", "failed", "cancelled"].includes(catalogTaskStatus);
-          if (catalog.some((item) => marketRuleCode(item.market) === "CN") && !catalogIndexing) break;
+          if ((catalog.some((item) => marketRuleCode(item.market) === "CN") || clearedMarkets.size > 0) && !catalogIndexing) break;
         } catch {
           // The next attempt covers a data service that is still starting.
         }
       }
 
       const loadedMarkets = new Set(catalog.map((item) => marketRuleCode(item.market)));
-      const fallbackMarkets = defaultInstruments.filter((item) => !loadedMarkets.has(marketRuleCode(item.market)));
+      const fallbackMarkets = defaultInstruments.filter((item) => !loadedMarkets.has(marketRuleCode(item.market)) && !clearedMarkets.has(marketRuleCode(item.market)));
       const merged = [...fallbackMarkets, ...catalog];
-      if (merged.length) setAvailableInstruments(merged);
+      if (requestId === instrumentCatalogLoadRef.current) setAvailableInstruments(merged);
     } finally {
-      setInstrumentCatalogReady(true);
+      if (requestId === instrumentCatalogLoadRef.current) setInstrumentCatalogReady(true);
     }
   }, [marketDataGateway]);
 
@@ -6625,6 +6787,15 @@ export function TrainingWorkbench() {
       const summary: TrainingSessionSummary = {
         session,
         state,
+        hasMeaningfulActivity: hasMeaningfulTrainingActivity({
+          positions: state.positions,
+          pendingOrders: state.pendingOrders,
+          executions: state.executions,
+          orderRejections: state.orderRejections,
+          drawings: state.drawings,
+          events: state.events,
+          hasDecisionContent: hasDecisionContent(state.decision, state.decisionSubmissions),
+        }),
         task,
         pnl,
         returnPct,
@@ -7022,6 +7193,10 @@ export function TrainingWorkbench() {
       reviewSessionFilters,
     ).sort(compareTrainingSessionSummariesByCreatedAt);
   }, [reviewSessionFilters, sessionSummaries]);
+  const emptyReviewSessionSummaries = useMemo(
+    () => filteredReviewSessionSummaries.filter((summary) => !summary.hasMeaningfulActivity),
+    [filteredReviewSessionSummaries],
+  );
   const performanceHabitTrades = useMemo<HabitTrade[]>(() => filteredSessionSummaries.flatMap((summary) => (
     summary.habitTrades.map((trade) => {
       const snapshotId = summary.state.dataSnapshotId ?? summary.session.dataSnapshotId ?? "";
@@ -7151,7 +7326,7 @@ export function TrainingWorkbench() {
     heroLabel: reviewState.tradingMode === "capital" ? "本次已实现盈亏" : "本次已实现收益率",
     heroValue: reviewState.tradingMode === "capital" ? money(reviewRealizedPnl) : percent(reviewRealizedReturnPct),
     heroTone: reviewHeroTone,
-    heroMeta: `${reviewClosedPositions.length} 笔已平仓 · ${reviewState.executions.length} 笔成交 · 最近计划完整度 ${reviewPlanScore}%`,
+    heroMeta: `${reviewClosedPositions.length} 笔已平仓 · ${reviewState.executions.length} 笔成交 · 分红收入 ${money(reviewDividendIncome)} · 最近计划完整度 ${reviewPlanScore}%`,
     tradeWinRate: reviewTradeWinRate,
     tradeMeta: `${reviewWinningTrades} 胜 / ${reviewLosingTrades} 负 / ${reviewFlatTrades} 平 · 平局不计入胜率分母`,
     submittedPlans: reviewState.decisionSubmissions.length,
@@ -7210,6 +7385,8 @@ export function TrainingWorkbench() {
     }
     const nextSettings = result.settings;
     settingsGateway.saveAppSettings(nextSettings);
+    settingsGateway.removeLegacyCustomPatternPresets();
+    settingsGateway.removeLegacyReasonTagPreferences();
     appSettingsRef.current = nextSettings;
     setAppSettings(nextSettings);
     setSettingsDraft(nextSettings);
@@ -7241,7 +7418,9 @@ export function TrainingWorkbench() {
     }
     const nextPresets = normalizePatternPresets(patternPresetDrafts);
     const available = visiblePatternPresets(nextPresets);
-    settingsGateway.savePatternPresets(nextPresets);
+    const saveRevision = patternPresetSaveRevisionRef.current + 1;
+    patternPresetSaveRevisionRef.current = saveRevision;
+    patternPresetsDirtyRef.current = true;
     setPatternPresets(nextPresets);
     setPatternPresetDrafts(nextPresets.map(clonePatternPresetValue));
     setSelectedPatternPresetId((selected) => available.some((preset) => preset.id === selected) ? selected : available[0]?.id ?? "");
@@ -7255,6 +7434,17 @@ export function TrainingWorkbench() {
     setLiveScanPresetIds((selectedIds) => selectedIds.filter((id) => available.some((preset) => preset.id === id)));
     setPatternEditorError("");
     setShowPatternFilters(false);
+    if (syncedPreferencesReady && syncedPreferencesHydratedRef.current) {
+      void preferencesGateway.save(buildSyncedPreferences(appSettingsRef.current, nextPresets))
+        .then(() => {
+          if (patternPresetSaveRevisionRef.current === saveRevision) patternPresetsDirtyRef.current = false;
+          settingsGateway.removeLegacyCustomPatternPresets();
+          settingsGateway.removeLegacyReasonTagPreferences();
+        })
+        .catch(() => {
+          setSaveState("形态预设已更新，但同步保存失败，将自动重试");
+        });
+    }
   };
 
   const updatePatternPresetDraft = (id: string, update: (preset: PatternPreset) => PatternPreset) => {
@@ -9242,21 +9432,21 @@ export function TrainingWorkbench() {
               <div className="replay-controls">
                 <div className="progress-meta">
                   <span>{currentBar ? (hideTaskDate ? `训练第 ${currentTaskProgress.revealed} 根` : formatDate(currentBar.timestamp, timeframe)) : "--"}</span>
-                  <span>{trainingTask ? `${currentTaskProgress.revealed} / ${currentTaskProgress.total} 根` : `${cursor + 1} / ${bars.length} 根`}</span>
+                  <span>{loading ? "正在加载…" : trainingTask ? `${currentTaskProgress.revealed} / ${currentTaskProgress.total} 根` : `${cursor + 1} / ${bars.length} 根`}</span>
                 </div>
                 <div className="progress-track"><span style={{ width: `${progress}%` }} /></div>
                 <div className="transport">
-                  <button aria-label={rewindLocked ? "随机训练不可重置" : "重置"} title={rewindLocked ? "随机训练为单向揭示，不允许重置" : undefined} disabled={rewindLocked} onClick={resetTraining}><RotateCcw size={17} /></button>
+                  <button aria-label={rewindLocked ? "随机训练不可重置" : "重置"} title={rewindLocked ? "随机训练为单向揭示，不允许重置" : undefined} disabled={playbackDisabled || rewindLocked} onClick={resetTraining}><RotateCcw size={17} /></button>
                   <button aria-label={rewindLocked ? "随机训练不可回退" : "上一根"} title={rewindLocked ? "随机训练为单向揭示，不允许查看上一根" : undefined} disabled={rewindLocked || trainingComplete || cursor <= (trainingTask?.startCursor ?? 0)} onClick={revealPrevious}><ChevronLeft size={19} /></button>
-                  <button className="play-button" disabled={trainingComplete} aria-label={playing ? "暂停" : "播放"} onClick={() => {
+                  <button className="play-button" disabled={playbackDisabled} aria-label={playing ? "暂停" : "播放"} onClick={() => {
                     const nextPlaying = !playing;
                     setPlaying(nextPlaying);
                     appendEvent("playback_toggled", { playing: nextPlaying, speed });
                   }}>
                     {playing ? <Pause size={20} /> : <Play size={20} fill="currentColor" />}
                   </button>
-                  <button aria-label="下一根" disabled={trainingComplete} onClick={revealNext}><ChevronRight size={19} /></button>
-                  <button aria-label="前进五根" disabled={trainingComplete} onClick={() => revealMany(5)}><FastForward size={18} /></button>
+                  <button aria-label="下一根" disabled={playbackDisabled} onClick={revealNext}><ChevronRight size={19} /></button>
+                  <button aria-label="前进五根" disabled={playbackDisabled} onClick={() => revealMany(5)}><FastForward size={18} /></button>
                 </div>
                 <div className="speed-control">
                   {[0.5, 1, 2, 5].map((value) => <button key={value} className={speed === value ? "active" : ""} onClick={() => {
@@ -9288,6 +9478,7 @@ export function TrainingWorkbench() {
                       <span>已用保证金 <strong>{money(currentMarginAccount?.usedMargin ?? 0)}</strong></span>
                       <span>可用保证金 <strong>{money(availableBuyingPower)}</strong></span>
                       <span>保证金水平 <strong className={(currentMarginAccount?.marginLevelPct ?? 9999) <= Number(instrumentEconomics?.stopOutLevelPct ?? 50) ? "down" : ""}>{currentMarginAccount?.marginLevelPct == null ? "--" : `${currentMarginAccount.marginLevelPct.toFixed(1)}%`}</strong></span>
+                      <span>分红收入 <strong className={dividendIncome >= 0 ? "up" : "down"}>{money(dividendIncome)}</strong></span>
                       <span>总盈亏 <strong className={totalPnl >= 0 ? "up" : "down"}>{money(totalPnl)}</strong></span>
                     </>
                   ) : tradingMode === "capital" ? (
@@ -9295,11 +9486,13 @@ export function TrainingWorkbench() {
                       <span>账户权益 <strong className={equity >= initialCapital ? "up" : "down"}>{money(equity)}</strong></span>
                       <span>可用资金 <strong>{money(availableBuyingPower)}</strong></span>
                       <span>持仓市值 <strong>{money(marketValue)}</strong></span>
+                      <span>分红收入 <strong className={dividendIncome >= 0 ? "up" : "down"}>{money(dividendIncome)}</strong></span>
                       <span>总盈亏 <strong className={totalPnl >= 0 ? "up" : "down"}>{money(totalPnl)}</strong></span>
                     </>
                   ) : (
                     <>
                       <span>持仓笔数 <strong>{openPositions.length}</strong></span>
+                      <span>分红收入 <strong className={dividendIncome >= 0 ? "up" : "down"}>{money(dividendIncome)}</strong></span>
                       <span>总收益率 <strong className={totalReturnPct >= 0 ? "up" : "down"}>{percent(totalReturnPct)}</strong></span>
                       <span>浮动收益率 <strong className={floatingReturnPct >= 0 ? "up" : "down"}>{percent(floatingReturnPct)}</strong></span>
                       <span>已实现收益率 <strong className={realizedReturnPct >= 0 ? "up" : "down"}>{percent(realizedReturnPct)}</strong></span>
@@ -9331,14 +9524,56 @@ export function TrainingWorkbench() {
                       rememberOrderEntryPreference({ orderType: value });
                     }}>
                       <option value="market">市价 · 下一根开盘</option>
-                      <option value="limit">限价 · 触价或更优</option>
-                      <option value="stop">止损触发 · 突破后成交</option>
+                      <option value="limit">限价单（Limit Order）</option>
+                      <option value="stop">突破单（Stop Order）</option>
                     </select>
                   </label>
+                  {!liveMode && <label>跳空不买
+                    <button
+                      aria-label="跳空不买模式"
+                      className={`opening-gap-mode-button ${openingGapMode}`}
+                      type="button"
+                      title="按顺序点击：高开不买、低开不买、取消此功能"
+                      onClick={() => {
+                        const nextMode = nextOpeningGapMode(openingGapMode);
+                        setOpeningGapMode(nextMode);
+                        rememberOrderEntryPreference({ openingGapMode: nextMode });
+                      }}
+                    >{openingGapMode === "low" ? "低开不买" : "高开不买"}</button>
+                  </label>}
+                  {!liveMode && openingGapMode !== "off" && <label>不买阈值
+                    <span className="opening-gap-threshold-control">
+                      <input
+                        aria-label="跳空不买阈值"
+                        type="number"
+                        min="0.01"
+                        step={openingGapUnit === "percent" ? "0.1" : "any"}
+                        value={openingGapThreshold}
+                        onChange={(event) => {
+                          const value = Number(event.target.value);
+                          if (!Number.isFinite(value) || value <= 0) return;
+                          setOpeningGapThreshold(value);
+                          rememberOrderEntryPreference({ openingGapThreshold: value });
+                        }}
+                      />
+                      <select
+                        aria-label="跳空不买阈值单位"
+                        value={openingGapUnit}
+                        onChange={(event) => {
+                          const value = event.target.value as OpeningGapUnit;
+                          setOpeningGapUnit(value);
+                          rememberOrderEntryPreference({ openingGapUnit: value });
+                        }}
+                      >
+                        <option value="percent">百分比</option>
+                        <option value="price">价格</option>
+                      </select>
+                    </span>
+                  </label>}
                   {!liveMode && orderType !== "market" && (
                     <label>触发价
                       <span className="entry-trigger-control">
-                        <input aria-label="委托触发价" type="number" min="0" step="any" value={orderTriggerPrice} onChange={(event) => setOrderTriggerPrice(event.target.value)} placeholder={currentBar?.close.toFixed(instrument.pricePrecision)} />
+                        <input aria-label="委托触发价" type={hideTaskPrice ? "password" : "number"} inputMode="decimal" min="0" step="any" value={orderTriggerPrice} onChange={(event) => setOrderTriggerPrice(event.target.value)} placeholder={hideTaskPrice ? "•••" : currentBar?.close.toFixed(instrument.pricePrecision)} />
                         <button
                           aria-label="在图表选择委托触发价"
                           aria-pressed={protectionPriceSelection === "entry-trigger"}
@@ -9517,7 +9752,7 @@ export function TrainingWorkbench() {
                               >{closeQueued ? "已委托" : closeValidation.ok ? "平仓" : closeValidation.code === "t_plus_one_locked" ? "次日开盘平仓" : "不可平仓"}</button></td>
                             </tr>
                           );
-                        }) : <tr><td className="orders-empty" colSpan={9}>暂无持仓。市价单在下一根开盘成交，限价与止损触发单会等待价格触发。</td></tr>}</tbody>
+                        }) : <tr><td className="orders-empty" colSpan={9}>暂无持仓。市价单在下一根开盘成交，限价单（Limit Order）与突破单（Stop Order）会等待价格触发。</td></tr>}</tbody>
                       </table>
                     )}
 
@@ -10299,9 +10534,9 @@ export function TrainingWorkbench() {
               market={dataMarket}
               hasData={coverageSummary.hasNonSampleData}
               onOpenSettings={() => openSettingsPanel("data")}
-              onDataChanged={(changedMarket) => {
-                if (changedMarket !== dataMarket) return;
-                void Promise.all([loadCoverage(), loadInstrumentCatalog()]);
+              onDataChanged={async (changedMarket) => {
+                if (changedMarket !== activeDataMarketRef.current) return;
+                await Promise.all([loadCoverage(), loadInstrumentCatalog()]);
                 // Keep live-observation marks in sync when the database page
                 // finishes an import, incremental update, or repair.
                 void refreshLivePortfolioPrices();
@@ -10517,6 +10752,9 @@ export function TrainingWorkbench() {
                   : "这里还没有保存记录。点击“保存训练”，或完成一场有结束边界的训练后，才会出现在这里。"}
                 onFilterChange={(update) => setReviewSessionFilters((filters) => ({ ...filters, ...update }))}
                 onResetFilters={() => setReviewSessionFilters(defaultReviewSessionFilters)}
+                emptyActivityCount={emptyReviewSessionSummaries.length}
+                batchDeleteRunning={emptySessionCleanupRunning}
+                onDeleteEmpty={() => void deleteEmptyTrainingSessions(emptyReviewSessionSummaries)}
                 onReview={(id) => {
                   const summary = filteredReviewSessionSummaries.find((item) => item.session.id === id);
                   if (summary) inspectSession(summary.session);

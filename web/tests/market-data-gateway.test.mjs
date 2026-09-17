@@ -16,6 +16,21 @@ function response({ ok = true, payload = {} } = {}) {
   };
 }
 
+test("clear request contains the explicit market confirmation and preserves server errors", async () => {
+  const calls = [];
+  const gateway = createMarketDataGateway(async (url, init) => {
+    calls.push({ url, init });
+    return response({ payload: { cleared: true } });
+  });
+  for (const market of ["CN", "US", "FX", "GOLD"]) await gateway.clearMarketData(market);
+  assert.deepEqual(calls.map(call => JSON.parse(call.init.body)), ["CN", "US", "FX", "GOLD"].map(market => ({ market, confirmation: market })));
+  assert.ok(calls.every(call => call.url === "/api/market-data" && call.init.method === "DELETE"));
+  const failing = createMarketDataGateway(async () => response({ ok: false, payload: { error: "请先暂停任务" } }));
+  await assert.rejects(failing.clearMarketData("CN"), /请先暂停任务/);
+  await gateway.loadFxTask(undefined, undefined, "FX");
+  assert.equal(calls.at(-1).url, "/api/fx-data?market=FX");
+});
+
 function createMemoryStorage() {
   const values = new Map();
   return {

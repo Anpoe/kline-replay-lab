@@ -6,7 +6,7 @@
 - UI 通过 API 或父级适配器发起数据动作，不读取训练订单、回放游标或数据库 runtime。
 - `marketDataContracts.ts` 放统一数据状态和 shell 通知类型。
 - `marketDataController.ts` 放可纯函数化的动作/状态编排。
-- `marketDataGateway.ts` 收口 provider 状态、下载/市场同步、本机数据任务、FX 任务、覆盖范围、快照和 onboarding storage；轮询节奏仍由宿主控制。
+- `marketDataGateway.ts` 收口 provider 状态、下载/市场同步、本机数据任务、FX 任务、覆盖范围、快照和 onboarding storage；初始化向导方案仍由浏览器 localStorage 保存，轮询节奏仍由宿主控制。
 
 边界记录：
 

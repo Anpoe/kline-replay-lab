@@ -1,5 +1,6 @@
 import { fetchLocalData, readLocalDataJson } from "../../lib/localDataService";
 import { loadProviderSecrets } from "../../lib/providerCredentials";
+import { marketDataWriteResponse } from "../../lib/marketDataWriteGuard";
 
 type MaintenanceResponse = {
   maintenanceTask?: Record<string, unknown> | null;
@@ -15,6 +16,10 @@ export async function GET() {
 }
 
 export async function POST(request: Request) {
+  return marketDataWriteResponse("CN", () => updateMaintenance(request));
+}
+
+async function updateMaintenance(request: Request) {
   const payload = (await request.json()) as {
     action?: "start" | "pause" | "resume";
     mode?: "incremental" | "repair";

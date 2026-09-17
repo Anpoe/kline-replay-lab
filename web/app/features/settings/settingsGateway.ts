@@ -210,6 +210,18 @@ export function createSettingsStorageGateway(storage: SettingsStorage) {
     storage.setItem(settingsStorageKeys.customReasonTags, JSON.stringify(customReasonTags));
   };
 
+  // This key is retained only for one-time migration from older browser
+  // builds. Custom pattern presets now go through /api/preferences and the
+  // local D1 database; random-training controls remain browser-local.
+  const removeLegacyCustomPatternPresets = () => {
+    storage.removeItem(settingsStorageKeys.patternPresets);
+  };
+
+  const removeLegacyReasonTagPreferences = () => {
+    storage.removeItem(settingsStorageKeys.reasonTags);
+    storage.removeItem(settingsStorageKeys.customReasonTags);
+  };
+
   const loadMovingAverageSettings = (): MovingAverageSettings => {
     const stored = storage.getItem(settingsStorageKeys.movingAverageSettings);
     if (stored == null) return normalizeMovingAverageSettings(defaultMovingAverageSettings);
@@ -254,6 +266,8 @@ export function createSettingsStorageGateway(storage: SettingsStorage) {
     saveQuickRandomMode,
     loadReasonTagPreferences,
     saveReasonTagPreferences,
+    removeLegacyCustomPatternPresets,
+    removeLegacyReasonTagPreferences,
     loadMovingAverageSettings,
     saveMovingAverageSettings,
     saveLastDraft,
@@ -267,6 +281,9 @@ export function createPreferencesGateway(fetcher: SettingsFetch) {
   let saveTail: Promise<void> = Promise.resolve();
 
   const load = async (signal?: AbortSignal) => {
+    // A focus/visibility refresh must not read the old server value while a
+    // local edit is still queued behind an earlier preference write.
+    await saveTail.catch(() => undefined);
     const generationAtStart = mutationGeneration;
     const response = await fetcher("/api/preferences", {
       cache: "no-store",

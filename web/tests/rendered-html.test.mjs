@@ -122,6 +122,11 @@ test("ships the K-line training workbench instead of the starter", async () => {
   assert.match(workbench, /选择具体训练/);
   assert.match(workbench, /什么是盲测/);
   assert.match(workbench, /总盈亏/);
+  assert.match(workbench, /cashDividendCreditsForBar/);
+  assert.match(workbench, /CASH_DIVIDEND_INCOME_EVENT_TYPE/);
+  assert.match(workbench, /simulatedCashBalance \+= dividendAmount/);
+  assert.match(workbench, /const dividendIncome = cashDividendIncomeFromEvents\(events\)/);
+  assert.match(workbench, /分红收入/);
   assert.match(workbench, /observationClose/);
   assert.match(workbench, /scanTimestamp/);
   assert.match(workbench, /entryTimestamp/);

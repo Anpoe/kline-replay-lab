@@ -61,6 +61,49 @@ test("keeps a closed trade's stop hidden until its history row is hovered", () =
   });
 });
 
+test("derives one movable draft entry-trigger line alongside protection lines", () => {
+  const lines = deriveProtectionLines({
+    currentTimestamp: 3_000,
+    draftTriggerPrice: 103,
+    draftTriggerOrderType: "stop",
+    draftStopLoss: 91,
+    draftTakeProfit: 115,
+    positions: [],
+    hoveredClosedPositionId: null,
+    movable: true,
+  });
+
+  assert.deepEqual(lines.map((line) => line.id), [
+    "draft-entry-trigger",
+    "draft-stop-loss",
+    "draft-take-profit",
+  ]);
+  assert.deepEqual(lines[0], {
+    id: "draft-entry-trigger",
+    kind: "entry-trigger",
+    price: 103,
+    timestamp: 3_000,
+    label: "突破单（Stop Order）",
+    movable: true,
+    source: "draft",
+  });
+});
+
+test("uses a distinct limit-order label for the movable draft entry line", () => {
+  const lines = deriveProtectionLines({
+    currentTimestamp: 3_000,
+    draftTriggerPrice: 97,
+    draftTriggerOrderType: "limit",
+    draftStopLoss: undefined,
+    draftTakeProfit: undefined,
+    positions: [],
+    hoveredClosedPositionId: null,
+    movable: true,
+  });
+
+  assert.equal(lines[0].label, "限价单（Limit Order）");
+});
+
 test("clears a consumed stop draft when the account becomes flat", () => {
   assert.deepEqual(resetConsumedStopDraftAfterFlatten({
     previousPositions: [openPosition],

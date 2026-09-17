@@ -226,8 +226,8 @@ export function SettingsPanel({
                 <label>默认开仓委托
                   <select value={draft.orderType} onChange={(event) => onDraftChange((next) => ({ ...next, orderType: event.target.value as OrderType }))}>
                     <option value="market">市价 · 下一根开盘</option>
-                    <option value="limit">限价 · 触价或更优</option>
-                    <option value="stop">止损触发 · 突破后成交</option>
+                    <option value="limit">限价单（Limit Order）</option>
+                    <option value="stop">突破单（Stop Order）</option>
                   </select>
                 </label>
                 {draft.positionSizeMode === "risk-percent" && <label>默认单笔风险（余额%）

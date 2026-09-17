@@ -10,6 +10,7 @@ import {
   type FxTimeframe,
 } from "./fxDataContracts.ts";
 import { TIMEFRAME_IDS, timeframeLabel } from "./timeframeCatalog.ts";
+import { withMarketDataWrite } from "./marketDataWriteGuard.ts";
 import {
   aggregate5mToTimeframe,
   aggregateM1To5m,
@@ -213,7 +214,7 @@ export function getFxCatalog(market: "FX" | "GOLD" = "FX") {
   }));
 }
 
-export async function getFxTask(db: D1Database, taskId?: string, pairId?: string) {
+export async function getFxTask(db: D1Database, taskId?: string, pairId?: string, market?: "FX" | "GOLD") {
   const query = taskId
     ? `SELECT id, mode, instrument_id AS instrumentId, pair_label AS pairLabel,
         vendor_symbol AS vendorSymbol, dukascopy_symbol AS dukascopySymbol,
@@ -245,16 +246,22 @@ export async function getFxTask(db: D1Database, taskId?: string, pairId?: string
           quality_report_json AS qualityReportJson, inserted_count AS insertedCount,
           message, last_error AS lastError, created_at AS createdAt, updated_at AS updatedAt,
           started_at AS startedAt, finished_at AS finishedAt
-          FROM fx_data_tasks ORDER BY updated_at DESC LIMIT 1`;
+          FROM fx_data_tasks ${market ? "WHERE instrument_id LIKE ?" : ""} ORDER BY updated_at DESC LIMIT 1`;
   const statement = db.prepare(query);
   return taskId || pairId
     ? await statement.bind(taskId ?? pairId).first<FxTaskRow>()
-    : await statement.first<FxTaskRow>();
+    : market ? await statement.bind(`%.${market}`).first<FxTaskRow>() : await statement.first<FxTaskRow>();
 }
 
 export async function createFxTask(db: D1Database, mode: FxTaskMode, input: FxTaskCreateInput) {
   const instrument = getMarketInstrumentDefinition(input.pairId);
   if (!instrument) throw new Error("请选择受支持的外汇或黄金品种");
+  return withMarketDataWrite(instrument.market, async () => {
+  if (mode === "update") {
+    const coverage = await db.prepare("SELECT 1 AS found FROM candle_coverage WHERE instrument_id = ? AND bar_count > 0 AND source <> 'sample' LIMIT 1")
+      .bind(instrument.id).first();
+    if (!coverage) throw new Error("该品种还没有历史行情，请先初始化后再更新。");
+  }
   const startDate = dateOnly(input.startDate, mode === "update" ? daysAgoDate(7) : DEFAULT_DATE);
   const endDate = dateOnly(input.endDate, new Date().toISOString().slice(0, 10));
   if (mode === "initialize" && (startDate === DEFAULT_DATE || endDate < startDate)) {
@@ -290,6 +297,7 @@ export async function createFxTask(db: D1Database, mode: FxTaskMode, input: FxTa
     )
     .run();
   return getFxTask(db, id);
+  });
 }
 
 export async function patchFxTask(db: D1Database, taskId: string, action: "pause" | "resume" | "retry" | "cancel") {
@@ -903,6 +911,12 @@ async function runIncrementalTask(db: D1Database, task: FxTaskRow, instrument: M
 }
 
 export async function runFxTask(db: D1Database, taskId: string) {
+  const existing = await getFxTask(db, taskId);
+  const scope = getMarketInstrumentDefinition(existing?.instrumentId);
+  if (!scope) throw new Error("行情任务不存在或品种不受支持");
+  return withMarketDataWrite(scope.market, async () => {
+  // Re-read after acquiring the write lease: a clear may have removed the
+  // task while the first lookup was awaiting its database response.
   const task = await getFxTask(db, taskId);
   if (!task) throw new Error("行情任务不存在");
   if (["paused", "cancelled", "completed"].includes(task.status)) return task;
@@ -919,11 +933,12 @@ export async function runFxTask(db: D1Database, taskId: string) {
       startedAt,
       error: null,
     });
-    if (task.mode === "initialize") return runHistoricalTask(db, task, instrument);
-    return runIncrementalTask(db, task, instrument);
+    if (task.mode === "initialize") return await runHistoricalTask(db, task, instrument);
+    return await runIncrementalTask(db, task, instrument);
   } finally {
     activeFxTaskRuns.delete(taskId);
   }
+  });
 }
 
 export async function failFxTask(db: D1Database, taskId: string, error: unknown) {

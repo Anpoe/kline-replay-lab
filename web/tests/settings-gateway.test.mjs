@@ -88,6 +88,31 @@ test("loads pattern, reason-tag, and indicator preferences with legacy fallbacks
   assert.deepEqual(indicators, defaultMovingAverageSettings);
 });
 
+test("clears the legacy custom-preset and reason-tag copies after migration", () => {
+  const storage = createMemoryStorage({
+    [settingsStorageKeys.patternPresets]: JSON.stringify(defaultPatternPresets),
+    [settingsStorageKeys.quickRandomPattern]: defaultPatternPresets[0].id,
+    [settingsStorageKeys.randomTrainingPatternPresets]: JSON.stringify([defaultPatternPresets[0].id]),
+    [settingsStorageKeys.quickRandomMode]: "blind",
+    [settingsStorageKeys.reasonTags]: JSON.stringify(["顺势"]),
+    [settingsStorageKeys.customReasonTags]: JSON.stringify([]),
+  });
+  const gateway = createSettingsStorageGateway(storage);
+
+  gateway.removeLegacyCustomPatternPresets();
+  gateway.removeLegacyReasonTagPreferences();
+
+  for (const key of [
+    settingsStorageKeys.patternPresets,
+    settingsStorageKeys.reasonTags,
+    settingsStorageKeys.customReasonTags,
+  ]) {
+    assert.equal(storage.getItem(key), null);
+  }
+  assert.equal(storage.getItem(settingsStorageKeys.quickRandomPattern), defaultPatternPresets[0].id);
+  assert.equal(storage.getItem(settingsStorageKeys.quickRandomMode), "blind");
+});
+
 test("does not keep hidden built-ins in quick or random pattern selections", () => {
   const hiddenId = defaultPatternPresets[0].id;
   const storage = createMemoryStorage({
@@ -243,4 +268,35 @@ test("discards a preference read that became stale while newer settings were sav
   releaseLoad.resolve();
 
   assert.equal(await pendingLoad, undefined);
+});
+
+test("waits for a queued preference save before loading", async () => {
+  const saveStarted = createDeferred();
+  const releaseSave = createDeferred();
+  let persisted = { version: 1, patternPresets: [] };
+  const gateway = createPreferencesGateway(async (_input, init) => {
+    if (init?.method === "PUT") {
+      persisted = JSON.parse(init.body);
+      saveStarted.resolve();
+      await releaseSave.promise;
+      return { ok: true, async json() { return { saved: true }; } };
+    }
+    return { ok: true, async json() { return { preferences: persisted }; } };
+  });
+
+  const hidden = {
+    version: 1,
+    patternPresets: [{ id: "long-lower-wick", enabled: false }],
+  };
+  const pendingSave = gateway.save(hidden);
+  await saveStarted.promise;
+  const pendingLoad = gateway.load();
+  let loadFinished = false;
+  void pendingLoad.finally(() => { loadFinished = true; });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(loadFinished, false);
+
+  releaseSave.resolve();
+  await pendingSave;
+  assert.deepEqual(await pendingLoad, hidden);
 });

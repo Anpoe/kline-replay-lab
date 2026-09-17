@@ -11,7 +11,7 @@ export async function GET(request: Request) {
   await ensureSchema();
   const url = new URL(request.url);
   const market = url.searchParams.get("market")?.trim().toUpperCase() === "GOLD" ? "GOLD" : "FX";
-  const task = await getFxTask(getRawDb(), url.searchParams.get("taskId") ?? undefined, url.searchParams.get("pairId") ?? undefined);
+  const task = await getFxTask(getRawDb(), url.searchParams.get("taskId") ?? undefined, url.searchParams.get("pairId") ?? undefined, url.searchParams.has("market") ? market : undefined);
   return Response.json({ task: getFxTaskView(task), pairs: getFxCatalog(market), qualitySummary: task ? getFxTaskView(task)?.quality ?? null : null });
 }
 

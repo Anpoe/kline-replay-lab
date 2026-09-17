@@ -54,6 +54,9 @@ type SessionHistoryPanelProps = {
   onReview: (id: string) => void;
   onResume: (id: string) => void;
   onDelete: (id: string) => void;
+  emptyActivityCount: number;
+  batchDeleteRunning: boolean;
+  onDeleteEmpty: () => void;
 };
 
 export function SessionHistoryPanel({
@@ -69,6 +72,9 @@ export function SessionHistoryPanel({
   onReview,
   onResume,
   onDelete,
+  emptyActivityCount,
+  batchDeleteRunning,
+  onDeleteEmpty,
 }: SessionHistoryPanelProps) {
   const [visibleState, setVisibleState] = useState<{
     items: readonly SessionHistoryItem[];
@@ -89,7 +95,19 @@ export function SessionHistoryPanel({
             <div className="section-label">可恢复训练</div>
             <strong>{items.length} / {totalCount} 场</strong>
           </div>
-          <button className="history-filter-reset" onClick={onResetFilters} disabled={filtersAreDefault}>清除筛选</button>
+          <div className="history-card-head-actions">
+            <button
+              type="button"
+              className="delete-session history-batch-delete"
+              aria-label="批量移入没有操作和决策的训练"
+              title="只处理当前筛选中没有画图、决策、委托或成交的训练"
+              onClick={onDeleteEmpty}
+              disabled={batchDeleteRunning || emptyActivityCount === 0}
+            >
+              <Trash2 size={13} />{batchDeleteRunning ? "清理中…" : `清理无操作训练（${emptyActivityCount}）`}
+            </button>
+            <button type="button" className="history-filter-reset" onClick={onResetFilters} disabled={filtersAreDefault}>清除筛选</button>
+          </div>
         </div>
         <div className="review-session-filters">
           <label className="review-session-search">
@@ -174,8 +192,8 @@ export function SessionHistoryPanel({
                 onClick={(event) => event.stopPropagation()}
                 onKeyDown={(event) => event.stopPropagation()}
               >
-                <button className="resume-session" onClick={() => onResume(item.id)}><RotateCcw size={13} />继续训练</button>
-                <button className="delete-session" aria-label={`将 ${item.instrumentId} 训练移入回收站`} onClick={() => onDelete(item.id)}><Trash2 size={13} />移入回收站</button>
+                <button className="resume-session" disabled={batchDeleteRunning} onClick={() => onResume(item.id)}><RotateCcw size={13} />继续训练</button>
+                <button className="delete-session" disabled={batchDeleteRunning} aria-label={`将 ${item.instrumentId} 训练移入回收站`} onClick={() => onDelete(item.id)}><Trash2 size={13} />移入回收站</button>
               </div>
             </div>
           )) : <div className="empty-state">{emptyText}</div>}

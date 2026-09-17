@@ -5,6 +5,7 @@ import {
   buildReviewSessionSummariesInBatches,
   createReviewRestoreRequest,
   filterReviewSessions,
+  hasMeaningfulTrainingActivity,
   nextReviewSessionVisibleCount,
   normalizeReviewError,
   visibleReviewSessionItems,
@@ -99,4 +100,25 @@ test("复盘列表按页递增并保留当前选中的历史记录", () => {
     visibleReviewSessionItems(items, 50).map((item) => item.id),
     [...Array.from({ length: 50 }, (_, index) => `session-${index + 1}`), "session-100"],
   );
+});
+
+test("训练清理判定忽略只看K线，但保留真实操作和决策记录", () => {
+  const empty = {
+    positions: [],
+    pendingOrders: [],
+    executions: [],
+    orderRejections: [],
+    drawings: [],
+    hasDecisionContent: false,
+    events: [{ type: "session_created" }, { type: "replay_advanced" }, { type: "training_completed" }],
+  };
+
+  assert.equal(hasMeaningfulTrainingActivity(empty), false);
+  assert.equal(hasMeaningfulTrainingActivity({ ...empty, hasDecisionContent: true }), true);
+  assert.equal(hasMeaningfulTrainingActivity({ ...empty, drawings: [{ id: "drawing-1" }] }), true);
+  assert.equal(hasMeaningfulTrainingActivity({ ...empty, positions: [{ id: "position-1" }] }), true);
+  assert.equal(hasMeaningfulTrainingActivity({ ...empty, events: [{ type: "drawings_changed" }] }), true);
+  assert.equal(hasMeaningfulTrainingActivity({ ...empty, events: [{ type: "decision_deleted" }] }), true);
+  assert.equal(hasMeaningfulTrainingActivity({ ...empty, events: [{ type: "unknown_legacy_action" }] }), true);
+  assert.equal(hasMeaningfulTrainingActivity({ ...empty, events: [null] }), true);
 });

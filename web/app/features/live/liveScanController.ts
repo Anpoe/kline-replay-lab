@@ -52,7 +52,14 @@ export function buildLiveScanRequest(input: {
 }
 
 export function normalizeLiveScanError(error: unknown, fallback = "实盘筛选失败") {
-  if (error instanceof Error && error.message) return error.message;
-  if (typeof error === "string" && error.trim()) return error;
+  const message = error instanceof Error
+    ? error.message
+    : typeof error === "string"
+      ? error
+      : "";
+  if (/^(failed to fetch|network request failed|networkerror\b)/i.test(message.trim())) {
+    return "网络连接失败，请检查网络或本机数据服务后重试";
+  }
+  if (message.trim()) return message;
   return fallback;
 }

@@ -4,6 +4,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { BaoStockLocalStore } from "./baostock-store.mjs";
 import { TdxLocalStore } from "./legacy-tdx-store.mjs";
+import { clearLocalMarketData } from "./clear-market-data.mjs";
 
 const moduleDir = path.dirname(fileURLToPath(import.meta.url));
 const root = path.resolve(process.env.KLINE_DATA_DIR ?? path.join(moduleDir, "..", ".local-data"));
@@ -170,11 +171,23 @@ async function readJson(request) {
   return JSON.parse(Buffer.concat(chunks).toString("utf8"));
 }
 
+let clearingMarketData = false;
+let activeRequests = 0;
 const server = http.createServer(async (request, response) => {
   if (request.method === "OPTIONS") return send(response, 204, {});
   const url = new URL(request.url ?? "/", `http://${request.headers.host ?? `${host}:${port}`}`);
+  const clearRequest = request.method === "DELETE" && url.pathname === "/data/clear-market";
+  if (clearingMarketData) return send(response, 409, { error: "正在清空 A 股行情，请等待完成后重试。" });
+  if (clearRequest && activeRequests > 0) return send(response, 409, { error: "行情操作仍在处理中，请稍后重试清空。" });
+  if (clearRequest) clearingMarketData = true;
+  activeRequests += 1;
   const store = activeStore();
   try {
+    if (clearRequest) {
+      const payload = await readJson(request);
+      if (payload.market !== "CN" || payload.confirmation !== "CN") return send(response, 400, { error: "请确认要清空 A 股行情。" });
+      return send(response, 200, await clearLocalMarketData(stores));
+    }
     if (request.method === "GET" && url.pathname === "/health") {
       return send(response, 200, {
         ok: true,
@@ -358,7 +371,10 @@ const server = http.createServer(async (request, response) => {
     }
     return send(response, 404, { error: "接口不存在" });
   } catch (error) {
-    return send(response, 500, { error: error instanceof Error ? error.message : String(error) });
+    return send(response, error?.status === 409 ? 409 : 500, { error: error instanceof Error ? error.message : String(error) });
+  } finally {
+    activeRequests -= 1;
+    if (clearRequest) clearingMarketData = false;
   }
 });
 

@@ -849,7 +849,12 @@ export async function POST(request: Request) {
         15000,
       )
     : null;
-  const databaseWindowResult = !sourceViewRow && !preferLocal && instrument && payload.randomWindow
+  // A new install has D1 sample candles for the default CN instrument, while
+  // the optional local service may still have no imported files. Use local
+  // candles when they contain bars; otherwise let the database sample create
+  // the same bounded window as US and other database-backed markets.
+  const useLocalSource = Boolean(localSource?.candles?.length);
+  const databaseWindowResult = !sourceViewRow && !useLocalSource && instrument && payload.randomWindow
     ? await selectDatabaseRandomWindow(
         db,
         payload.instrumentId,
@@ -859,7 +864,7 @@ export async function POST(request: Request) {
         payload.randomWindow,
       )
     : null;
-  const databaseReplayWindowResult = !sourceViewRow && !preferLocal && instrument && payload.replayWindow
+  const databaseReplayWindowResult = !sourceViewRow && !useLocalSource && instrument && payload.replayWindow
     ? await selectDatabaseReplayWindow(
         db,
         payload.instrumentId,
@@ -882,7 +887,7 @@ export async function POST(request: Request) {
     return Response.json({ error: "没有足够的 K 线可创建 Replay 窗口" }, { status: 422 });
   }
   const boundedWindowRequested = Boolean(payload.randomWindow || payload.replayWindow);
-  const candlesResult = sourceViewRow || preferLocal || boundedWindowRequested ? null : await db
+  const candlesResult = sourceViewRow || useLocalSource || boundedWindowRequested ? null : await db
     .prepare(`SELECT timestamp, open, high, low, close, volume, turnover, source
       FROM candles WHERE instrument_id = ? AND timeframe = ? AND adjustment_type = ?
       ORDER BY timestamp ASC`)

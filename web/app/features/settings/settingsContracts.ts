@@ -11,6 +11,11 @@ import {
   type FxAccountConfig,
 } from "../../lib/fxTrading.ts";
 import {
+  normalizeOpeningGapFilter,
+  type OpeningGapMode,
+  type OpeningGapUnit,
+} from "../../lib/openingGapFilter.ts";
+import {
   normalizeBuyQuantity,
   resolveMarketRules,
   type MarketRuleProfile,
@@ -79,6 +84,9 @@ export type AppSettings = {
   defaultOrderQty: number;
   defaultOrderQtyByMarket: MarketOrderQtySettings;
   orderType: OrderType;
+  openingGapMode: OpeningGapMode;
+  openingGapUnit: OpeningGapUnit;
+  openingGapThreshold: number;
   positionSizeMode: PositionSizeMode;
   riskPercent: number;
   defaultSpeed: number;
@@ -116,6 +124,9 @@ export const defaultAppSettings: AppSettings = {
   defaultOrderQty: 100,
   defaultOrderQtyByMarket: { ...DEFAULT_MARKET_ORDER_QTYS },
   orderType: "market",
+  openingGapMode: "off",
+  openingGapUnit: "percent",
+  openingGapThreshold: 3,
   positionSizeMode: "fixed",
   riskPercent: 1,
   defaultSpeed: 1,
@@ -204,6 +215,11 @@ export function normalizeSettings(value: Partial<AppSettings>): AppSettings {
     value.defaultOrderQtyByMarket,
     value.defaultOrderQty,
   );
+  const openingGap = normalizeOpeningGapFilter({
+    mode: merged.openingGapMode,
+    unit: merged.openingGapUnit,
+    threshold: merged.openingGapThreshold,
+  });
   return {
     ...merged,
     defaultInstrumentId: typeof merged.defaultInstrumentId === "string" && merged.defaultInstrumentId
@@ -219,6 +235,9 @@ export function normalizeSettings(value: Partial<AppSettings>): AppSettings {
     orderType: ["market", "limit", "stop"].includes(merged.orderType)
       ? merged.orderType
       : defaultAppSettings.orderType,
+    openingGapMode: openingGap.mode,
+    openingGapUnit: openingGap.unit,
+    openingGapThreshold: openingGap.threshold,
     positionSizeMode: merged.positionSizeMode === "risk-percent" ? "risk-percent" : "fixed",
     riskPercent: Math.max(0.1, Math.min(100, Number(merged.riskPercent) || defaultAppSettings.riskPercent)),
     tradingMode: merged.tradingMode === "capital" ? "capital" : "return",

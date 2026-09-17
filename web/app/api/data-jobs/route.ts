@@ -1,4 +1,5 @@
 import { ensureSchema, getRawDb } from "../../../db/runtime";
+import { marketDataWriteResponse } from "../../lib/marketDataWriteGuard";
 import type { MarketDataProviderId, SupportedTimeframe } from "../../lib/marketDataProviders";
 import { defaultAdjustmentTypeForMarket } from "../../lib/marketAdjustments";
 import {
@@ -84,6 +85,11 @@ export async function GET(request: Request) {
 }
 
 export async function POST(request: Request) {
+  const payload = await request.clone().json().catch(() => ({})) as DownloadJobInput;
+  return marketDataWriteResponse(payload.market ?? "*", () => createDownloadJob(request));
+}
+
+async function createDownloadJob(request: Request) {
   await ensureSchema();
   const payload = await request.json() as DownloadJobInput;
   if (

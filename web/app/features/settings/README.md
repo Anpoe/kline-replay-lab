@@ -5,7 +5,7 @@
 - UI 只展示和提交设置，不直接访问数据库或修改训练热状态。
 - `settingsContracts.ts` 放稳定输入/输出类型。
 - `settingsController.ts` 放可纯函数化的规范化和持久化适配逻辑。
-- `settingsGateway.ts` 收口 legacy localStorage key、偏好清洗和 `/api/preferences` transport；不改变存储 key、JSON 结构或远端接口。
+- `settingsGateway.ts` 收口旧版 localStorage key、偏好清洗和 `/api/preferences` transport；交易理由和自定义形态预设以本地 D1 的同步偏好为唯一运行时来源，随机训练控制仍使用浏览器 localStorage，旧版交易理由/自定义预设键只用于一次性迁移。
 - `components/` 放设置界面；Provider/行情供应商行为归属 market-data。
 
 边界记录：

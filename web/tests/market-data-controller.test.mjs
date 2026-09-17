@@ -28,6 +28,7 @@ test("市场数据刷新通知只携带标准化的 feature 输出", () => {
 
 test("市场数据错误统一为用户可见文本", () => {
   assert.equal(normalizeMarketDataError(new Error("网络断开")), "网络断开");
+  assert.equal(normalizeMarketDataError(new Error("Failed to fetch")), "网络连接失败，请检查网络或本机数据服务后重试");
   assert.equal(normalizeMarketDataError("凭证无效"), "凭证无效");
   assert.equal(normalizeMarketDataError({}), "市场数据操作失败");
 });

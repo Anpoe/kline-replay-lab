@@ -93,6 +93,7 @@ function Copy-WebSource {
         (Join-Path $webSource 'coverage'),
         (Join-Path $webSource 'artifacts'),
         (Join-Path $webSource 'outputs'),
+        (Join-Path $webSource 'output'),
         (Join-Path $webSource 'work')
     )
     $robocopyArguments = @($webSource, $Destination, '/E', '/NFL', '/NDL', '/NJH', '/NJS', '/NP', '/XD') + $excludedDirectories

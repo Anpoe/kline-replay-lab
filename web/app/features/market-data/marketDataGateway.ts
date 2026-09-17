@@ -1,5 +1,6 @@
 import { marketSyncWorkerCoordinator } from "../../lib/marketSyncWorkerCoordinator.ts";
 import type { CorporateActionEvent } from "../../lib/corporateActions";
+import type { DataMarket } from "./marketDataContracts";
 
 export type { CorporateActionEvent } from "../../lib/corporateActions";
 
@@ -150,12 +151,12 @@ export function createMarketDataGateway(fetcher: MarketDataGatewayFetch) {
     "读取 A 股维护任务失败",
   );
 
-  const loadFxTask = <T = unknown>(pairIdOrSignal?: string | AbortSignal, signal?: AbortSignal) => {
+  const loadFxTask = <T = unknown>(pairIdOrSignal?: string | AbortSignal, signal?: AbortSignal, market?: "FX" | "GOLD") => {
     const pairId = typeof pairIdOrSignal === "string" ? pairIdOrSignal : undefined;
     const requestSignal = typeof pairIdOrSignal === "string" ? signal : pairIdOrSignal ?? signal;
     return requestJson<T>(
       fetcher,
-      `/api/fx-data${pairId ? `?pairId=${encodeURIComponent(pairId)}` : ""}`,
+      `/api/fx-data${pairId ? `?pairId=${encodeURIComponent(pairId)}` : market ? `?market=${market}` : ""}`,
       withSignal({ cache: "no-store" }, requestSignal),
       "读取行情数据任务失败",
     );
@@ -402,6 +403,17 @@ export function createMarketDataGateway(fetcher: MarketDataGatewayFetch) {
     "删除行情数据失败",
   );
 
+  const clearMarketData = (market: DataMarket) => requestJson<{ market: DataMarket; cleared: boolean; deletedRows: number }>(
+    fetcher,
+    "/api/market-data",
+    {
+      method: "DELETE",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ market, confirmation: market }),
+    },
+    "行情清空未完成，请重试。",
+  );
+
   const importCandles = <T = unknown>(payload: unknown, signal?: AbortSignal) => requestJson<T>(
     fetcher,
     "/api/candles",
@@ -461,6 +473,7 @@ export function createMarketDataGateway(fetcher: MarketDataGatewayFetch) {
     loadInstrumentCatalog,
     loadCoverage,
     deleteCoverage,
+    clearMarketData,
     importCandles,
     loadCandles,
     createSnapshot,

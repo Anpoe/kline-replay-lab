@@ -20,6 +20,7 @@ import {
   Trash2,
 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { MarketDataClearPanel } from "./MarketDataClearPanel";
 import {
   DEFAULT_FX_CURRENCY_PAIRS,
   DEFAULT_GOLD_INSTRUMENTS,
@@ -349,7 +350,7 @@ export function DataSourceManager({
 }: {
   market: DataMarket;
   hasData?: boolean;
-  onDataChanged?: (market: DataMarket) => void;
+  onDataChanged?: (market: DataMarket) => void | Promise<void>;
   onOpenSettings?: () => void;
 }) {
   const [providers, setProviders] = useState<Provider[]>([]);
@@ -410,6 +411,38 @@ export function DataSourceManager({
     ),
     [],
   );
+
+  const applySavedPlan = useCallback((stored: Record<string, unknown> | null) => {
+    if (!stored) {
+      setSavedPlan(null);
+      return;
+    }
+    setSavedPlan(stored);
+    if (stored.kind === "advanced") {
+      setAdvanced((current) => {
+        const restored = Object.fromEntries(Object.keys(defaultAdvancedSetup).map((key) => [
+          key,
+          stored[key] ?? current[key as keyof AdvancedSetup],
+        ])) as AdvancedSetup;
+        if (restored.cnInitialSource === "tdx-zip"
+          && !["none", "tushare", "tdx-realtime"].includes(restored.cnIncrementalSource)) {
+          restored.cnIncrementalSource = "tdx-realtime";
+        }
+        if (restored.cnInitialSource === "baostock"
+          && !["none", "baostock"].includes(restored.cnIncrementalSource)) {
+          restored.cnIncrementalSource = "baostock";
+        }
+        if (restored.cnInitialSource === "tushare") {
+          restored.cnIncrementalSource = "tushare";
+        }
+        if (restored.cnInitialSource === "tdxquant") {
+          restored.cnIncrementalSource = "tdxquant";
+        }
+        return { ...current, ...restored };
+      });
+    }
+    setSetupView("manager");
+  }, []);
 
   useEffect(() => {
     activeMarketRef.current = market;
@@ -553,7 +586,8 @@ export function DataSourceManager({
     if (market !== "FX" && market !== "GOLD") return null;
     try {
       const pairId = market === "GOLD" ? "XAUUSD.GOLD" : undefined;
-      const data = await marketDataGateway.loadFxTask<{ task?: FxDataTask | null; qualitySummary?: FxQualitySummary | null }>(pairId);
+      const data = await marketDataGateway.loadFxTask<{ task?: FxDataTask | null; qualitySummary?: FxQualitySummary | null }>(pairId, undefined, market);
+      if (activeMarketRef.current !== market) return null;
       const task = data.task ?? null;
       setFxTask(task);
       setFxQuality(data.qualitySummary ?? task?.quality ?? null);
@@ -567,33 +601,7 @@ export function DataSourceManager({
     aliveRef.current = true;
     const timer = window.setTimeout(() => {
       const stored = marketDataStorageGateway.loadOnboardingPlan<Record<string, unknown>>();
-      if (stored) {
-        setSavedPlan(stored);
-        if (stored.kind === "advanced") {
-          setAdvanced((current) => {
-            const restored = Object.fromEntries(Object.keys(defaultAdvancedSetup).map((key) => [
-              key,
-              stored[key] ?? current[key as keyof AdvancedSetup],
-            ])) as AdvancedSetup;
-            if (restored.cnInitialSource === "tdx-zip"
-              && !["none", "tushare", "tdx-realtime"].includes(restored.cnIncrementalSource)) {
-              restored.cnIncrementalSource = "tdx-realtime";
-            }
-            if (restored.cnInitialSource === "baostock"
-              && !["none", "baostock"].includes(restored.cnIncrementalSource)) {
-              restored.cnIncrementalSource = "baostock";
-            }
-            if (restored.cnInitialSource === "tushare") {
-              restored.cnIncrementalSource = "tushare";
-            }
-            if (restored.cnInitialSource === "tdxquant") {
-              restored.cnIncrementalSource = "tdxquant";
-            }
-            return { ...current, ...restored };
-          });
-        }
-        setSetupView("manager");
-      }
+      if (stored) applySavedPlan(stored);
       void Promise.all([
         loadProviders(),
         loadJobs(),
@@ -608,7 +616,7 @@ export function DataSourceManager({
       window.clearTimeout(timer);
       aliveRef.current = false;
     };
-  }, [loadCatalogTask, loadCnMaintenanceTask, loadFxTask, loadJobs, loadLocalTask, loadMarketSync, loadProviders, marketDataStorageGateway]);
+  }, [applySavedPlan, loadCatalogTask, loadCnMaintenanceTask, loadFxTask, loadJobs, loadLocalTask, loadMarketSync, loadProviders, marketDataStorageGateway]);
 
   useEffect(() => {
     if (market !== "CN" || !localTask || !["queued", "running"].includes(localTask.status)) return;
@@ -1120,6 +1128,36 @@ export function DataSourceManager({
     await loadJobs();
   };
 
+  const clearCurrentMarket = async () => {
+    const requestMarket = market;
+    const result = await marketDataGateway.clearMarketData(requestMarket);
+    if (!result.cleared || result.market !== requestMarket) throw new Error("未能确认行情清空结果，请刷新后重试。");
+    await onDataChanged?.(requestMarket);
+    if (activeMarketRef.current !== requestMarket) return;
+    setNotice("");
+    setJobs([]);
+    setJobSummary({ total: 0, queued: 0, running: 0, paused: 0, completed: 0, failed: 0, insertedCount: 0 });
+    if (requestMarket === "CN") {
+      setLocalTask(null);
+      setLocalDataset(null);
+      setCatalogTask(null);
+      setCnMaintenanceTask(null);
+      await Promise.all([loadLocalTask(), loadCatalogTask(), loadCnMaintenanceTask()]);
+    } else if (requestMarket === "US") {
+      marketSyncLoopRef.current = null;
+      setMarketSync(null);
+      setLegacyUsData(null);
+      await Promise.all([loadJobs(), loadMarketSync()]);
+    } else {
+      fxTaskLoopRef.current = null;
+      setFxTask(null);
+      setFxQuality(null);
+      await loadFxTask();
+    }
+  };
+  const clearPanel = <MarketDataClearPanel key={market} market={market} onClear={clearCurrentMarket}
+    onRebuild={market === "CN" ? () => { setSetupOpenedByUser(true); setSetupView("welcome"); } : undefined} />;
+
   if (effectiveSetupView === "welcome") {
     return (
       <section className="data-onboarding">
@@ -1180,6 +1218,7 @@ export function DataSourceManager({
         )}>
           已有数据，直接进入数据管理
         </button>
+        {clearPanel}
       </section>
     );
   }
@@ -1596,6 +1635,7 @@ export function DataSourceManager({
 
   return (
     <section className="data-source-manager">
+      {clearPanel}
       <div className="data-source-head">
         <div>
           <span className="section-label">{marketCopy.label} · 真实历史行情</span>

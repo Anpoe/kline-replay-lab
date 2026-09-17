@@ -1,4 +1,5 @@
 import { ensureSchema, getRawDb } from "../../db/runtime";
+import { withMarketDataWrite } from "./marketDataWriteGuard";
 import {
   fetchAlpacaMultiSymbolChunk,
   filterTradableUsAssets,
@@ -505,6 +506,7 @@ export async function createMarketSyncRun(input: {
   startDate?: string;
   endDate?: string;
 }) {
+  return withMarketDataWrite("US", async () => {
   await ensureSchema();
   const { secrets } = await loadProviderSecrets();
   if (!secrets.alpacaKeyId || !secrets.alpacaSecretKey) {
@@ -694,6 +696,7 @@ export async function createMarketSyncRun(input: {
     await releaseLock(db, runId);
     throw error;
   }
+  });
 }
 
 async function loadBatchInstruments(db: D1Database, symbols: string[]) {
@@ -1100,13 +1103,17 @@ async function processNextMarketSyncBatchInternal(runId: string) {
   const startedAt = nowIso();
   await db.prepare("UPDATE market_sync_runs SET status = 'running', started_at = COALESCE(started_at, ?), updated_at = ? WHERE id = ? AND status = 'queued'")
     .bind(startedAt, startedAt, runId).run();
-  await Promise.all(batches.results.map((batch) => processBatch(db, run, batch, secrets)));
+  // Keep the write lease until every batch has stopped, including when one
+  // batch fails before its siblings finish writing.
+  const settled = await Promise.allSettled(batches.results.map((batch) => processBatch(db, run, batch, secrets)));
+  const failed = settled.find((result) => result.status === "rejected");
+  if (failed?.status === "rejected") throw failed.reason;
   await updateRunProgress(db, runId);
   return await getMarketSyncStatus(runId);
 }
 
 export async function processNextMarketSyncBatch(runId: string) {
-  return await marketSyncWorkerGate.run(
+  return withMarketDataWrite("US", () => marketSyncWorkerGate.run(
     runId,
     () => processNextMarketSyncBatchInternal(runId),
     async () => {
@@ -1114,7 +1121,7 @@ export async function processNextMarketSyncBatch(runId: string) {
       if (!status) throw new MarketSyncError("同步任务不存在", 404);
       return status;
     },
-  );
+  ));
 }
 
 export async function controlMarketSync(

@@ -250,6 +250,7 @@ export class TdxLocalStore {
     this.overlayDb = null;
     this.running = false;
     this.maintenanceRunning = false;
+    this.catalogRunning = false;
     this.abortController = null;
     this.maintenanceAbortController = null;
     this.lastPersistAt = 0;
@@ -1209,6 +1210,7 @@ export class TdxLocalStore {
   }
 
   async runCatalogRefresh() {
+    this.catalogRunning = true;
     try {
       const manifest = await this.getManifest();
       if (!manifest) throw new Error("本机数据版本不存在");
@@ -1267,6 +1269,8 @@ export class TdxLocalStore {
       this.catalogTask.message = "名称目录更新失败，可稍后重试。";
       this.catalogTask.updatedAt = now();
       await writeJsonAtomic(this.catalogTaskFile, this.catalogTask);
+    } finally {
+      this.catalogRunning = false;
     }
   }
 

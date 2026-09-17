@@ -1,5 +1,6 @@
 import { fetchLocalData, readLocalDataJson } from "../../lib/localDataService";
 import type { CorporateActionEvent } from "../../lib/corporateActions";
+import { marketDataWriteResponse } from "../../lib/marketDataWriteGuard";
 
 type CorporateActionsResponse = {
   corporateActions?: Record<string, unknown> | null;
@@ -21,6 +22,10 @@ export async function GET(request: Request) {
 }
 
 export async function POST(request: Request) {
+  return marketDataWriteResponse("CN", () => updateCorporateActions(request));
+}
+
+async function updateCorporateActions(request: Request) {
   const payload = (await request.json().catch(() => ({}))) as { action?: "start" | "pause" | "resume" };
   const action = payload.action ?? "start";
   try {

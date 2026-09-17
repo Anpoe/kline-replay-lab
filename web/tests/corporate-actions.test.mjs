@@ -10,6 +10,10 @@ import {
   parseTdxSecurityQuotesResponse,
   TdxCorporateActionsClient,
 } from '../local-data/tdx-corporate-actions-client.mjs';
+import {
+  cashDividendCreditsForBar,
+  cashDividendIncomeFromEvents,
+} from '../app/lib/corporateActions.ts';
 import { TdxLocalStore } from '../local-data/legacy-tdx-store.mjs';
 
 const raw = { year: 2026, month: 3, day: 11, category: 1, fenhong: 2, songzhuangu: 3, peigu: 1, peigujia: 5 };
@@ -41,6 +45,53 @@ test('normalizes ex-date and per-ten-share terms; never mistakes capital changes
   assert.match(dividend.description, /每10股/);
   assert.throws(() => normalizeCorporateActions('600000.SH', null));
   assert.throws(() => normalizeCorporateActions('600000.SH', [{ ...raw, month: 2, day: 31 }]));
+});
+
+test('credits cash dividends only for long lots held before the ex-date', () => {
+  const event = {
+    id: '600000.SH:2026-03-11:1',
+    instrumentId: '600000.SH',
+    date: '2026-03-11',
+    timestamp: Date.parse('2026-03-11T00:00:00Z'),
+    category: 1,
+    label: 'D',
+    description: '每10股派2元（税前）',
+    cashPer10: 2,
+    bonusSharesPer10: 0,
+    rightsSharesPer10: 0,
+    rightsPrice: 0,
+  };
+  const credits = cashDividendCreditsForBar(
+    [event],
+    [
+      { id: 'held-before', side: 'long', qty: 100, status: 'open', entryTimestamp: Date.parse('2026-03-10T00:00:00Z') },
+      { id: 'bought-on-date', side: 'long', qty: 200, status: 'open', entryTimestamp: event.timestamp },
+      { id: 'short-lot', side: 'short', qty: 300, status: 'open', entryTimestamp: Date.parse('2026-03-10T00:00:00Z') },
+      { id: 'closed-before', side: 'long', qty: 400, status: 'closed', entryTimestamp: Date.parse('2026-03-10T00:00:00Z') },
+    ],
+    event.timestamp,
+  );
+
+  assert.deepEqual(credits, [{
+    eventId: event.id,
+    instrumentId: event.instrumentId,
+    date: event.date,
+    cashPer10: 2,
+    quantity: 100,
+    amount: 20,
+  }]);
+  assert.deepEqual(cashDividendCreditsForBar([event], [
+    { id: 'held-before', side: 'long', qty: 100, status: 'open', entryTimestamp: Date.parse('2026-03-10T00:00:00Z') },
+  ], event.timestamp, new Set([event.id])), []);
+});
+
+test('cash dividend income totals only durable dividend credit events', () => {
+  assert.equal(cashDividendIncomeFromEvents([
+    { type: 'cash_dividend_income_credited', payload: { amount: 20 } },
+    { type: 'orders_filled', payload: { amount: 999 } },
+    { type: 'cash_dividend_income_credited', payload: { amount: 1.25 } },
+    { type: 'cash_dividend_income_credited', payload: { amount: 'not-a-number' } },
+  ]), 21.25);
 });
 
 test('parses TDX corporate-action response without a Python dependency', () => {
