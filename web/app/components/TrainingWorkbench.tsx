@@ -218,6 +218,11 @@ import {
   type PatternPreset,
 } from "../lib/patternFilters";
 import {
+  applyHiddenBuiltInPatternPresetIds,
+  hiddenBuiltInPatternPresetIds,
+  PATTERN_PRESET_RESTORE_ACTION,
+} from "../lib/patternPresetPersistence";
+import {
   defaultMovingAverageSettings,
   MAX_MOVING_AVERAGE_LINES,
   MAX_MOVING_AVERAGE_PERIOD,
@@ -256,6 +261,7 @@ import {
   type ExecutionReason,
   type OrderType,
 } from "../lib/executionEngine";
+import { resolveLivePendingOrderPrice } from "../lib/liveOrderExecution";
 import {
   accountNotional,
   isMarginEconomics,
@@ -399,14 +405,15 @@ function InstrumentPicker({
 
   const matches = useMemo(() => {
     const normalized = query.trim().toLowerCase();
-    const filtered = normalized && normalized !== selectedText.toLowerCase()
-      ? instruments.filter((item) =>
-          item.short.toLowerCase().includes(normalized) ||
-          item.label.toLowerCase().includes(normalized))
-      : instruments;
+    const isDefaultQuery = !normalized || normalized === selectedText.toLowerCase();
+    const filtered = isDefaultQuery
+      ? instruments
+      : instruments.filter((item) => [item.id, item.short, item.label].some((value) => value.toLowerCase().includes(normalized)));
     const result = filtered.slice(0, 40);
-    if (selected && !result.some((item) => item.id === selected.id)) result.unshift(selected);
-    return result.slice(0, 40);
+    if (selected && isDefaultQuery) {
+      return [selected, ...result.filter((item) => item.id !== selected.id)].slice(0, 40);
+    }
+    return result;
   }, [instruments, query, selected, selectedText]);
 
   return (
@@ -659,6 +666,72 @@ type LiveWatchRecord = {
 
 type LiveNavigatorSource = "scan" | "portfolio" | "watch";
 
+// The live ledger predates conditional entry orders and its persisted table
+// cannot grow new columns during this phase. Keep the order fields in the
+// existing JSON price-band slot at the API boundary, then restore the normal
+// PendingOrder shape as soon as data returns to the workbench.
+const LIVE_ORDER_METADATA_KEY = "__klineOrderMetadata";
+type LiveOrderMetadata = Pick<PendingOrder, "orderType" | "triggerPrice" | "stopLoss" | "takeProfit">;
+
+function normalizeLiveOrderMetadata(value: unknown): LiveOrderMetadata | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const candidate = value as Partial<LiveOrderMetadata>;
+  const metadata: LiveOrderMetadata = {};
+  if (candidate.orderType === "market" || candidate.orderType === "limit" || candidate.orderType === "stop") {
+    metadata.orderType = candidate.orderType;
+  }
+  for (const key of ["triggerPrice", "stopLoss", "takeProfit"] as const) {
+    const numberValue = Number(candidate[key]);
+    if (Number.isFinite(numberValue) && numberValue > 0) metadata[key] = numberValue;
+  }
+  return Object.keys(metadata).length ? metadata : null;
+}
+
+function restoreLivePendingOrder(value: unknown) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return value;
+  const order = value as PendingOrder;
+  if (!order.priceBand || typeof order.priceBand !== "object") return order;
+  const storedBand = order.priceBand as PriceBand & Record<string, unknown>;
+  const metadata = normalizeLiveOrderMetadata(storedBand[LIVE_ORDER_METADATA_KEY]);
+  if (!metadata) return order;
+  const band = { ...storedBand };
+  delete band[LIVE_ORDER_METADATA_KEY];
+  const hasPriceBand = ["referenceClose", "lower", "upper", "ratio"]
+    .every((key) => Number.isFinite(Number(band[key])));
+  return {
+    ...order,
+    ...metadata,
+    priceBand: hasPriceBand ? band as PriceBand : null,
+  };
+}
+
+function serializeLivePendingOrder(order: PendingOrder): PendingOrder {
+  const metadata = normalizeLiveOrderMetadata({
+    orderType: order.orderType,
+    triggerPrice: order.triggerPrice,
+    stopLoss: order.stopLoss,
+    takeProfit: order.takeProfit,
+  });
+  if (!metadata) return order;
+  const currentBand = order.priceBand && typeof order.priceBand === "object"
+    ? order.priceBand as PriceBand & Record<string, unknown>
+    : {};
+  return {
+    ...order,
+    priceBand: {
+      ...currentBand,
+      [LIVE_ORDER_METADATA_KEY]: metadata,
+    } as unknown as PriceBand,
+  };
+}
+
+function serializeLivePortfolio(record: LivePortfolioRecord): LivePortfolioRecord {
+  return {
+    ...record,
+    pendingOrders: record.pendingOrders.map(serializeLivePendingOrder),
+  };
+}
+
 function livePortfolioResult(portfolio: LivePortfolioRecord): LiveScanResult {
   return {
     instrumentId: portfolio.instrumentId,
@@ -875,6 +948,7 @@ type SyncedPreferences = {
   version: 1;
   appSettings: AppSettings;
   patternPresets: PatternPreset[];
+  patternPresetAction?: "restore-defaults";
   movingAverageSettings: MovingAverageSettings;
   reasonTags?: string[];
   customReasonTags: string[];
@@ -954,7 +1028,9 @@ function sanitizeLivePortfolios(value: unknown): LivePortfolioRecord[] {
         && (position.status !== "closed" || (Number.isFinite(position.exitPrice) && Number.isFinite(position.exitTimestamp)));
     });
     const positionIds = new Set(positions.map((position) => position.id));
-    const pendingOrders = (Array.isArray(raw.pendingOrders) ? raw.pendingOrders : []).filter((item): item is PendingOrder => {
+    const pendingOrders = (Array.isArray(raw.pendingOrders) ? raw.pendingOrders : [])
+      .map(restoreLivePendingOrder)
+      .filter((item): item is PendingOrder => {
       const order = item as Partial<PendingOrder>;
       return typeof order.id === "string"
         && order.id.length > 0
@@ -966,7 +1042,7 @@ function sanitizeLivePortfolios(value: unknown): LivePortfolioRecord[] {
         && typeof order.positionId === "string" && order.positionId.length > 0
         // A close order without its open lot is an orphan from the old bug.
         && (order.action === "open" || positionIds.has(order.positionId));
-    });
+      });
     const executions = (Array.isArray(raw.executions) ? raw.executions : []).filter((item): item is Execution => {
       const execution = item as Partial<Execution>;
       return typeof execution.id === "string"
@@ -1891,6 +1967,7 @@ export function TrainingWorkbench() {
   const [patternConditionSearch, setPatternConditionSearch] = useState("");
   const [patternConditionGroup, setPatternConditionGroup] = useState("全部");
   const [patternEditorError, setPatternEditorError] = useState("");
+  const [patternDiscardPromptOpen, setPatternDiscardPromptOpen] = useState(false);
   const [settingsTab, setSettingsTab] = useState<SettingsTab>("basic");
   const [appSettings, setAppSettings] = useState<AppSettings>(defaultAppSettings);
   const [settingsDraft, setSettingsDraft] = useState<AppSettings>(defaultAppSettings);
@@ -1981,6 +2058,10 @@ export function TrainingWorkbench() {
   const syncedPreferencesRetryCountRef = useRef(0);
   const patternPresetSaveRevisionRef = useRef(0);
   const patternPresetsDirtyRef = useRef(false);
+  const patternPresetRestoreRequestedRef = useRef(false);
+  const patternFilterModalRef = useRef<HTMLElement | null>(null);
+  const patternPresetListRef = useRef<HTMLElement | null>(null);
+  const patternConditionPickerRef = useRef<HTMLDivElement | null>(null);
   const liveStateHydratedRef = useRef(false);
   const liveStateRetryCountRef = useRef(0);
   const liveStatePersistedRef = useRef({
@@ -2179,6 +2260,10 @@ export function TrainingWorkbench() {
   ]);
   const selectedPatternPresetDraft = patternPresetDrafts.find((preset) => preset.id === selectedPatternPresetId)
     ?? patternPresetDrafts[0];
+  const patternPresetDraftsDirty = useMemo(
+    () => JSON.stringify(patternPresetDrafts) !== JSON.stringify(patternPresets),
+    [patternPresetDrafts, patternPresets],
+  );
   const availablePatternPresets = useMemo(
     () => visiblePatternPresets(patternPresets),
     [patternPresets],
@@ -2194,6 +2279,36 @@ export function TrainingWorkbench() {
       && (!search || `${definition.label}${definition.description}`.toLowerCase().includes(search))
     ));
   }, [patternConditionGroup, patternConditionSearch]);
+
+  useEffect(() => {
+    if (!showPatternFilters) return;
+    patternPresetListRef.current?.scrollTo({ left: 0, behavior: "auto" });
+  }, [showPatternFilters]);
+
+  useEffect(() => {
+    if (!showPatternFilters || !selectedPatternPresetId) return undefined;
+    const frame = window.requestAnimationFrame(() => {
+      const list = patternPresetListRef.current;
+      const selected = list?.querySelector<HTMLElement>(
+        `[data-pattern-preset-id="${CSS.escape(selectedPatternPresetId)}"]`,
+      );
+      if (!list || !selected) return;
+      const listRect = list.getBoundingClientRect();
+      const selectedRect = selected.getBoundingClientRect();
+      if (selectedRect.left < listRect.left || selectedRect.right > listRect.right) {
+        selected.scrollIntoView({ behavior: "smooth", block: "nearest", inline: "center" });
+      }
+    });
+    return () => window.cancelAnimationFrame(frame);
+  }, [selectedPatternPresetId, showPatternFilters]);
+
+  useEffect(() => {
+    if (!patternConditionPickerOpen) return undefined;
+    const frame = window.requestAnimationFrame(() => {
+      patternConditionPickerRef.current?.scrollIntoView({ behavior: "smooth", block: "nearest" });
+    });
+    return () => window.cancelAnimationFrame(frame);
+  }, [patternConditionPickerOpen]);
   const hideTaskInstrument = trainingTask?.status === "active" && trainingTask.hideInstrument;
   const hideTaskDate = trainingTask?.status === "active" && trainingTask.hideDate;
   const hideTaskPrice = trainingTask?.status === "active" && trainingTask.hidePrice;
@@ -2354,6 +2469,10 @@ export function TrainingWorkbench() {
     if (!currentBar || liveMode) return [];
     return deriveProtectionLines({
       currentTimestamp: currentBar.timestamp,
+      openingGapPreviousClose: currentBar.close,
+      openingGapMode,
+      openingGapUnit,
+      openingGapThreshold,
       draftTriggerPrice: orderType === "market" ? undefined : Number(orderTriggerPrice),
       draftTriggerOrderType: orderType === "market" ? undefined : orderType,
       draftStopLoss: effectiveOrderStop,
@@ -2362,7 +2481,7 @@ export function TrainingWorkbench() {
       hoveredClosedPositionId,
       movable: trainingTask?.status !== "completed",
     });
-  }, [currentBar, effectiveOrderStop, effectiveOrderTarget, hoveredClosedPositionId, liveMode, orderTriggerPrice, orderType, positions, trainingTask?.status]);
+  }, [currentBar, effectiveOrderStop, effectiveOrderTarget, hoveredClosedPositionId, liveMode, openingGapMode, openingGapThreshold, openingGapUnit, orderTriggerPrice, orderType, positions, trainingTask?.status]);
   const currentTaskProgress = trainingTask
     ? taskProgress(trainingTask, cursor)
     : { revealed: 0, total: 0, percent: 0 };
@@ -2763,35 +2882,47 @@ export function TrainingWorkbench() {
     };
   }, []);
 
-  const buildSyncedPreferences = useCallback((nextSettings: AppSettings, patternPresetOverride?: PatternPreset[]): SyncedPreferences => ({
-    version: 1,
-    appSettings: nextSettings,
-    patternPresets: patternPresetOverride ?? patternPresets,
-    movingAverageSettings,
-    reasonTags,
-    customReasonTags,
-    drawingPreferences: {
-      magnetMode: drawingMagnetMode,
-      color: drawingColor,
-      lineWidth: drawingLineWidth,
-      groupTools: groupDrawingTools,
-    },
-    liveScanSettings: {
-      market: liveScanMarket,
-      presetIds: liveScanPresetIds,
-      minPrice: liveScanMinPrice,
-      maxPrice: liveScanMaxPrice,
-      minVolume: liveScanMinVolume,
-      minChangePct: liveScanMinChangePct,
-      maxChangePct: liveScanMaxChangePct,
-      excludeLimitUp: liveScanExcludeLimitUp,
-      sort: liveScanSort,
-      limit: liveScanLimit,
-    },
-    liveScanData,
-    liveNavigatorResume,
-    liveScanResume,
-  }), [
+  const buildSyncedPreferences = useCallback((
+    nextSettings: AppSettings,
+    patternPresetOverride?: PatternPreset[],
+    options?: { allowPatternPresetRestore?: boolean },
+  ): SyncedPreferences => {
+    const candidatePresets = patternPresetOverride ?? patternPresets;
+    const hiddenPresetIds = options?.allowPatternPresetRestore
+      ? []
+      : settingsGateway.loadHiddenPatternPresetIds();
+    const persistedPatternPresets = applyHiddenBuiltInPatternPresetIds(candidatePresets, hiddenPresetIds);
+    return {
+      version: 1,
+      appSettings: nextSettings,
+      patternPresets: persistedPatternPresets,
+      ...(options?.allowPatternPresetRestore ? { patternPresetAction: PATTERN_PRESET_RESTORE_ACTION } : {}),
+      movingAverageSettings,
+      reasonTags,
+      customReasonTags,
+      drawingPreferences: {
+        magnetMode: drawingMagnetMode,
+        color: drawingColor,
+        lineWidth: drawingLineWidth,
+        groupTools: groupDrawingTools,
+      },
+      liveScanSettings: {
+        market: liveScanMarket,
+        presetIds: liveScanPresetIds,
+        minPrice: liveScanMinPrice,
+        maxPrice: liveScanMaxPrice,
+        minVolume: liveScanMinVolume,
+        minChangePct: liveScanMinChangePct,
+        maxChangePct: liveScanMaxChangePct,
+        excludeLimitUp: liveScanExcludeLimitUp,
+        sort: liveScanSort,
+        limit: liveScanLimit,
+      },
+      liveScanData,
+      liveNavigatorResume,
+      liveScanResume,
+    };
+  }, [
     customReasonTags,
     drawingColor,
     drawingLineWidth,
@@ -2813,17 +2944,24 @@ export function TrainingWorkbench() {
     movingAverageSettings,
     patternPresets,
     reasonTags,
+    settingsGateway,
   ]);
 
   const applySyncedPreferences = useCallback((value: unknown) => {
     if (!value || typeof value !== "object" || Array.isArray(value)) return;
     const stored = value as Partial<SyncedPreferences>;
     const preserveLocalPatternPresets = patternPresetsDirtyRef.current;
-    const syncedPatternPresets = preserveLocalPatternPresets
+    const localHiddenPatternPresetIds = settingsGateway.loadHiddenPatternPresetIds();
+    const candidatePatternPresets = preserveLocalPatternPresets
       ? patternPresets
       : Array.isArray(stored.patternPresets)
       ? normalizePatternPresets(stored.patternPresets)
       : patternPresets;
+    const syncedPatternPresets = applyHiddenBuiltInPatternPresetIds(candidatePatternPresets, localHiddenPatternPresetIds);
+    const syncedHiddenPatternPresetIds = hiddenBuiltInPatternPresetIds(syncedPatternPresets);
+    if (syncedHiddenPatternPresetIds.length) {
+      settingsGateway.saveHiddenPatternPresetIds(syncedHiddenPatternPresetIds);
+    }
     const syncedAvailablePatternPresets = visiblePatternPresets(syncedPatternPresets);
     const localRandomPreferences = settingsGateway.loadPatternPreferences();
     if (stored.appSettings && typeof stored.appSettings === "object") {
@@ -2957,7 +3095,10 @@ export function TrainingWorkbench() {
   useEffect(() => {
     const timer = window.setTimeout(() => {
       const stored = settingsGateway.loadPatternPreferences();
-      const defaults = normalizePatternPresets(defaultPatternPresets);
+      const defaults = applyHiddenBuiltInPatternPresetIds(
+        normalizePatternPresets(defaultPatternPresets),
+        settingsGateway.loadHiddenPatternPresetIds(),
+      );
       setPatternPresets(defaults);
       setPatternPresetDrafts(defaults.map(clonePatternPresetValue));
       setSelectedPatternPresetId(visiblePatternPresets(defaults)[0]?.id ?? "");
@@ -3068,13 +3209,20 @@ export function TrainingWorkbench() {
   useEffect(() => {
     if (!syncedPreferencesReady || !syncedPreferencesHydratedRef.current) return;
     const timer = window.setTimeout(() => {
-      const preferences = buildSyncedPreferences(appSettingsRef.current);
       const saveRevision = patternPresetSaveRevisionRef.current;
       const trackingPatternSave = patternPresetsDirtyRef.current;
+      const allowPatternPresetRestore = trackingPatternSave && patternPresetRestoreRequestedRef.current;
+      const preferences = buildSyncedPreferences(
+        appSettingsRef.current,
+        undefined,
+        { allowPatternPresetRestore },
+      );
       void preferencesGateway.save(preferences)
         .then(() => {
           if (trackingPatternSave && patternPresetSaveRevisionRef.current === saveRevision) {
             patternPresetsDirtyRef.current = false;
+            settingsGateway.saveHiddenPatternPresetIds(hiddenBuiltInPatternPresetIds(preferences.patternPresets));
+            if (allowPatternPresetRestore) patternPresetRestoreRequestedRef.current = false;
           }
           settingsGateway.removeLegacyCustomPatternPresets();
           settingsGateway.removeLegacyReasonTagPreferences();
@@ -3164,7 +3312,7 @@ export function TrainingWorkbench() {
       if (previousRecord
         && previousRecord.index === index
         && JSON.stringify(previousRecord.record) === JSON.stringify(record)) return [];
-      return [{ ...record, sortOrder: index }];
+      return [{ ...serializeLivePortfolio(record), sortOrder: index }];
     });
     const watchlistUpserts = currentWatchlist.flatMap((record, index) => {
       const previousRecord = previousWatchMap.get(record.instrumentId);
@@ -3499,6 +3647,10 @@ export function TrainingWorkbench() {
           data.instrument.id,
           loadedMarketRules,
         ));
+        setOrderType(appSettingsRef.current.orderType);
+        setOrderTriggerPrice("");
+        setOrderStopLoss("");
+        setOrderTakeProfit("");
         setTradingMode(tradingModeForInstrument(
           savedPortfolio?.tradingMode ?? appSettingsRef.current.tradingMode,
           data.instrument.market,
@@ -4645,6 +4797,7 @@ export function TrainingWorkbench() {
   };
 
   const moveProtectionLine = (line: ProtectionLine, rawPrice: number) => {
+    if (line.kind === "opening-gap-threshold") return false;
     if (line.source === "draft") return applyDraftProtectionPrice(line.kind, rawPrice);
     if (!currentBar || !line.positionId || trainingComplete) return false;
     const position = openPositions.find((item) => item.id === line.positionId);
@@ -4686,7 +4839,7 @@ export function TrainingWorkbench() {
   const queueOpenOrder = (side: "buy" | "sell") => {
     let qty = orderQty;
     if (!currentBar || qty <= 0 || (!liveMode && (cursor >= (trainingTask?.endCursor ?? bars.length - 1) || trainingComplete))) return;
-    const selectedOrderType: OrderType = liveMode ? "market" : orderType;
+    const selectedOrderType: OrderType = orderType;
     const triggerPrice = selectedOrderType === "market" ? undefined : Number(orderTriggerPrice);
     if (selectedOrderType !== "market" && (!Number.isFinite(triggerPrice) || Number(triggerPrice) <= 0)) {
       rejectOrderAttempt({
@@ -4877,7 +5030,9 @@ export function TrainingWorkbench() {
         liveFillRule: "next_session_open",
       }, currentBar.timestamp);
       setOrderPanelTab("pending");
-      setSaveState("实盘委托已挂出，下一交易日开盘成交");
+      setSaveState(selectedOrderType === "market"
+        ? "实盘市价委托已挂出，下一交易日开盘成交"
+        : `实盘${orderTypeLabel(selectedOrderType)}已挂出，下一交易日开盘价满足条件时成交`);
       return;
     }
     setPendingOrders((items) => [...items, order]);
@@ -5256,12 +5411,13 @@ export function TrainingWorkbench() {
           nextExecutions = [...portfolio.executions];
           nextRejections = [...portfolio.orderRejections];
           for (const order of portfolio.pendingOrders) {
-            if (order.createdAt >= price.timestamp) {
+            const fillPrice = resolveLivePendingOrderPrice(order, price);
+            if (fillPrice == null) {
               nextPendingOrders.push(order);
               continue;
             }
             if (order.action === "open") {
-              const cashFlow = executionCashFlow(order.side, price.open, order.qty);
+              const cashFlow = executionCashFlow(order.side, fillPrice, order.qty);
               if (portfolio.tradingMode === "capital" && cashFlow < 0 && nextCashBalance + cashFlow < -0.000001) {
                 rejections.push(createOrderRejection({
                   ok: false,
@@ -5274,7 +5430,7 @@ export function TrainingWorkbench() {
                 id: order.positionId,
                 side: order.side === "buy" ? "long" : "short",
                 qty: order.qty,
-                entryPrice: price.open,
+                entryPrice: fillPrice,
                 entryTimestamp: price.timestamp,
                 entryOrderId: order.id,
                 decisionSubmissionId: order.decisionSubmissionId,
@@ -5282,7 +5438,7 @@ export function TrainingWorkbench() {
               });
               fills.push({
                 id: createUuid(), orderId: order.id, positionId: order.positionId,
-                action: "open", side: order.side, qty: order.qty, price: price.open,
+                action: "open", side: order.side, qty: order.qty, price: fillPrice,
                 timestamp: price.timestamp, decisionSubmissionId: order.decisionSubmissionId, realizedPnl: 0,
                 ruleId: order.ruleId ?? marketRules.id,
                 ruleVersion: order.ruleVersion ?? marketRules.version,
@@ -5293,24 +5449,24 @@ export function TrainingWorkbench() {
             const positionIndex = nextPositions.findIndex((position) => position.id === order.positionId && position.status === "open");
             if (positionIndex < 0) continue;
             const position = nextPositions[positionIndex];
-            const realized = (price.open - position.entryPrice) * position.qty * (position.side === "long" ? 1 : -1);
+            const realized = (fillPrice - position.entryPrice) * position.qty * (position.side === "long" ? 1 : -1);
             nextPositions[positionIndex] = {
               ...position,
               status: "closed",
-              exitPrice: price.open,
+              exitPrice: fillPrice,
               exitTimestamp: price.timestamp,
               exitOrderId: order.id,
               realizedPnl: realized,
             };
             fills.push({
               id: createUuid(), orderId: order.id, positionId: position.id,
-              action: "close", side: order.side, qty: position.qty, price: price.open,
+              action: "close", side: order.side, qty: position.qty, price: fillPrice,
               decisionSubmissionId: position.decisionSubmissionId,
               timestamp: price.timestamp, realizedPnl: realized,
               ruleId: order.ruleId ?? marketRules.id,
               ruleVersion: order.ruleVersion ?? marketRules.version,
             });
-            if (portfolio.tradingMode === "capital") nextCashBalance += executionCashFlow(order.side, price.open, position.qty);
+            if (portfolio.tradingMode === "capital") nextCashBalance += executionCashFlow(order.side, fillPrice, position.qty);
           }
           nextExecutions.push(...fills);
           nextRejections.push(...rejections);
@@ -7404,8 +7560,55 @@ export function TrainingWorkbench() {
     setPatternConditionSearch("");
     setPatternConditionGroup("全部");
     setPatternEditorError("");
+    setPatternDiscardPromptOpen(false);
     setShowPatternFilters(true);
   };
+
+  const finishClosePatternFilters = useCallback(() => {
+    setShowPatternFilters(false);
+    setPatternConditionPickerOpen(false);
+    setPatternConditionSearch("");
+    setPatternConditionGroup("全部");
+    setPatternEditorError("");
+    setPatternDiscardPromptOpen(false);
+  }, []);
+
+  const requestClosePatternFilters = useCallback(() => {
+    if (patternPresetDraftsDirty) {
+      setPatternDiscardPromptOpen(true);
+      window.requestAnimationFrame(() => patternFilterModalRef.current?.scrollTo({ top: 0, behavior: "smooth" }));
+      return;
+    }
+    finishClosePatternFilters();
+  }, [finishClosePatternFilters, patternPresetDraftsDirty]);
+
+  const discardPatternFilterDrafts = useCallback(() => {
+    patternPresetRestoreRequestedRef.current = false;
+    setPatternPresetDrafts(patternPresets.map(clonePatternPresetValue));
+    finishClosePatternFilters();
+  }, [finishClosePatternFilters, patternPresets]);
+
+  const selectPatternPreset = (presetId: string) => {
+    setSelectedPatternPresetId(presetId);
+    setPatternConditionPickerOpen(false);
+    setPatternConditionSearch("");
+    setPatternEditorError("");
+  };
+
+  useEffect(() => {
+    if (!showPatternFilters) return undefined;
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key !== "Escape") return;
+      event.preventDefault();
+      if (patternConditionPickerOpen) {
+        setPatternConditionPickerOpen(false);
+        return;
+      }
+      requestClosePatternFilters();
+    };
+    document.addEventListener("keydown", handleKeyDown);
+    return () => document.removeEventListener("keydown", handleKeyDown);
+  }, [patternConditionPickerOpen, patternPresetDraftsDirty, requestClosePatternFilters, showPatternFilters]);
 
   const savePatternFilters = () => {
     const invalidPreset = patternPresetDrafts.find((preset) => (
@@ -7418,9 +7621,14 @@ export function TrainingWorkbench() {
     }
     const nextPresets = normalizePatternPresets(patternPresetDrafts);
     const available = visiblePatternPresets(nextPresets);
+    const restorePatternPresetDefaults = patternPresetRestoreRequestedRef.current;
+    const nextHiddenPatternPresetIds = hiddenBuiltInPatternPresetIds(nextPresets);
     const saveRevision = patternPresetSaveRevisionRef.current + 1;
     patternPresetSaveRevisionRef.current = saveRevision;
     patternPresetsDirtyRef.current = true;
+    if (nextHiddenPatternPresetIds.length) {
+      settingsGateway.saveHiddenPatternPresetIds(nextHiddenPatternPresetIds);
+    }
     setPatternPresets(nextPresets);
     setPatternPresetDrafts(nextPresets.map(clonePatternPresetValue));
     setSelectedPatternPresetId((selected) => available.some((preset) => preset.id === selected) ? selected : available[0]?.id ?? "");
@@ -7433,11 +7641,21 @@ export function TrainingWorkbench() {
     ));
     setLiveScanPresetIds((selectedIds) => selectedIds.filter((id) => available.some((preset) => preset.id === id)));
     setPatternEditorError("");
+    setPatternDiscardPromptOpen(false);
     setShowPatternFilters(false);
     if (syncedPreferencesReady && syncedPreferencesHydratedRef.current) {
-      void preferencesGateway.save(buildSyncedPreferences(appSettingsRef.current, nextPresets))
+      const preferences = buildSyncedPreferences(
+        appSettingsRef.current,
+        nextPresets,
+        { allowPatternPresetRestore: restorePatternPresetDefaults },
+      );
+      void preferencesGateway.save(preferences)
         .then(() => {
-          if (patternPresetSaveRevisionRef.current === saveRevision) patternPresetsDirtyRef.current = false;
+          if (patternPresetSaveRevisionRef.current === saveRevision) {
+            patternPresetsDirtyRef.current = false;
+            settingsGateway.saveHiddenPatternPresetIds(hiddenBuiltInPatternPresetIds(preferences.patternPresets));
+            if (restorePatternPresetDefaults) patternPresetRestoreRequestedRef.current = false;
+          }
           settingsGateway.removeLegacyCustomPatternPresets();
           settingsGateway.removeLegacyReasonTagPreferences();
         })
@@ -7528,6 +7746,7 @@ export function TrainingWorkbench() {
 
   const resetPatternPresets = () => {
     const nextPresets = normalizePatternPresets(defaultPatternPresets);
+    patternPresetRestoreRequestedRef.current = true;
     setPatternPresetDrafts(nextPresets.map(clonePatternPresetValue));
     setSelectedPatternPresetId(nextPresets[0]?.id ?? "");
     setPatternConditionPickerOpen(false);
@@ -8535,20 +8754,33 @@ export function TrainingWorkbench() {
 
         {showPatternFilters && (
           <div className="task-modal-backdrop" role="presentation" onMouseDown={(event) => {
-            if (event.target === event.currentTarget) setShowPatternFilters(false);
+            if (event.target === event.currentTarget) requestClosePatternFilters();
           }}>
-            <section className="task-modal pattern-filter-modal" role="dialog" aria-modal="true" aria-labelledby="pattern-filter-title">
+            <section className="task-modal pattern-filter-modal" role="dialog" aria-modal="true" aria-labelledby="pattern-filter-title" ref={patternFilterModalRef}>
               <div className="task-modal-head">
                 <div>
                   <span>PATTERN FILTERS</span>
                   <h2 id="pattern-filter-title">形态筛选</h2>
                   <p>管理历史 K 线的布尔筛选预设；预设内部条件全部满足才算命中。</p>
                 </div>
-                <button aria-label="关闭形态筛选" onClick={() => setShowPatternFilters(false)}><X size={19} /></button>
+                <button aria-label="关闭形态筛选" onClick={requestClosePatternFilters}><X size={19} /></button>
               </div>
 
+              {patternDiscardPromptOpen && (
+                <div className="pattern-discard-banner" role="alert">
+                  <div>
+                    <strong>有未保存修改</strong>
+                    <span>关闭后这些形态编辑不会保留。</span>
+                  </div>
+                  <div>
+                    <button type="button" className="ghost-button" onClick={() => setPatternDiscardPromptOpen(false)}>继续编辑</button>
+                    <button type="button" className="danger-button" onClick={discardPatternFilterDrafts}>放弃更改</button>
+                  </div>
+                </div>
+              )}
+
               <div className="pattern-filter-layout">
-                <aside className="pattern-preset-list" aria-label="形态预设">
+                <aside className="pattern-preset-list" aria-label="形态预设" ref={patternPresetListRef}>
                   <div className="pattern-preset-list-head">
                     <span>形态预设</span>
                     <button type="button" onClick={createCustomPatternPreset}><Plus size={13} />新建</button>
@@ -8557,8 +8789,9 @@ export function TrainingWorkbench() {
                     <button
                       type="button"
                       key={preset.id}
-                      className={selectedPatternPresetDraft?.id === preset.id ? "active" : ""}
-                      onClick={() => setSelectedPatternPresetId(preset.id)}
+                      className={`pattern-preset-card${selectedPatternPresetDraft?.id === preset.id ? " active" : ""}`}
+                      data-pattern-preset-id={preset.id}
+                      onClick={() => selectPatternPreset(preset.id)}
                     >
                       <strong>{preset.name}</strong>
                       <span>{preset.builtIn ? "内置" : "自定义"}</span>
@@ -8574,31 +8807,29 @@ export function TrainingWorkbench() {
                   <div className="pattern-preset-editor">
                     <div className="pattern-editor-head">
                       <div>
+                        <small>{selectedPatternPresetDraft.builtIn ? "内置形态" : "自定义形态"}</small>
                         <strong>{selectedPatternPresetDraft.name}</strong>
-                        <span>{selectedPatternPresetDraft.description}</span>
+                        {selectedPatternPresetDraft.builtIn && <span>{selectedPatternPresetDraft.description}</span>}
                       </div>
                       <div className="pattern-editor-head-actions">
-                        {selectedPatternPresetDraft.kind === "custom" && (
-                          <button className="ghost-button" onClick={() => setPatternConditionPickerOpen(true)}><Plus size={14} />添加条件</button>
-                        )}
                         <button className="ghost-button" onClick={clonePatternPreset}>复制为自定义</button>
                       </div>
                     </div>
 
-                    <label>预设名称
-                      <input
-                        value={selectedPatternPresetDraft.name}
-                        disabled={selectedPatternPresetDraft.builtIn}
-                        onChange={(event) => updatePatternPresetDraft(selectedPatternPresetDraft.id, (preset) => ({ ...preset, name: event.target.value }))}
-                      />
-                    </label>
-                    <label>说明
-                      <textarea
-                        value={selectedPatternPresetDraft.description}
-                        disabled={selectedPatternPresetDraft.builtIn}
-                        onChange={(event) => updatePatternPresetDraft(selectedPatternPresetDraft.id, (preset) => ({ ...preset, description: event.target.value }))}
-                      />
-                    </label>
+                    {selectedPatternPresetDraft.kind === "custom" && <>
+                      <label>预设名称
+                        <input
+                          value={selectedPatternPresetDraft.name}
+                          onChange={(event) => updatePatternPresetDraft(selectedPatternPresetDraft.id, (preset) => ({ ...preset, name: event.target.value }))}
+                        />
+                      </label>
+                      <label>说明
+                        <textarea
+                          value={selectedPatternPresetDraft.description}
+                          onChange={(event) => updatePatternPresetDraft(selectedPatternPresetDraft.id, (preset) => ({ ...preset, description: event.target.value }))}
+                        />
+                      </label>
+                    </>}
 
                     {selectedPatternPresetDraft.kind === "custom" ? (
                       <div className="pattern-condition-section">
@@ -8686,7 +8917,7 @@ export function TrainingWorkbench() {
                     )}
 
                     {patternConditionPickerOpen && selectedPatternPresetDraft.kind === "custom" && (
-                      <div className="pattern-condition-picker">
+                      <div className="pattern-condition-picker" ref={patternConditionPickerRef}>
                         <div className="pattern-condition-picker-head">
                           <div>
                             <strong>选择条件</strong>
@@ -8748,7 +8979,7 @@ export function TrainingWorkbench() {
               <div className="task-modal-actions pattern-modal-actions">
                 <button className="ghost-button" onClick={resetPatternPresets}><RotateCcw size={15} />恢复内置默认值</button>
                 <span />
-                <button className="ghost-button" onClick={() => setShowPatternFilters(false)}>取消</button>
+                <button className="ghost-button" onClick={requestClosePatternFilters}>取消</button>
                 <button className="primary-button" onClick={savePatternFilters}><Save size={16} />保存形态预设</button>
               </div>
             </section>
@@ -9518,7 +9749,7 @@ export function TrainingWorkbench() {
                     }} />
                   </label>}
                   <label>开仓委托
-                    <select aria-label="开仓委托类型" value={liveMode ? "market" : orderType} disabled={liveMode} onChange={(event) => {
+                    <select aria-label="开仓委托类型" value={orderType} onChange={(event) => {
                       const value = event.target.value as OrderType;
                       setOrderType(value);
                       rememberOrderEntryPreference({ orderType: value });
@@ -9570,7 +9801,7 @@ export function TrainingWorkbench() {
                       </select>
                     </span>
                   </label>}
-                  {!liveMode && orderType !== "market" && (
+                  {orderType !== "market" && (
                     <label>触发价
                       <span className="entry-trigger-control">
                         <input aria-label="委托触发价" type={hideTaskPrice ? "password" : "number"} inputMode="decimal" min="0" step="any" value={orderTriggerPrice} onChange={(event) => setOrderTriggerPrice(event.target.value)} placeholder={hideTaskPrice ? "•••" : currentBar?.close.toFixed(instrument.pricePrecision)} />
@@ -9633,7 +9864,7 @@ export function TrainingWorkbench() {
                     </span>
                   </label>}
                   <small>{liveMode
-                    ? "实盘观察按下一交易日开盘成交，不计模拟费用。"
+                    ? "实盘观察按下一交易日开盘价处理；市价单直接成交，限价单和突破单不满足触发条件时继续挂单，不计模拟费用。"
                     : marginInstrument
                       ? `成交模型 ${EXECUTION_ENGINE_VERSION} · BID K线 · 买入/回补用 Ask，卖出/平多用 Bid · 1 手 ${Number(instrumentEconomics?.contractSize ?? 100000).toLocaleString()} ${marginContractUnit} · ${marginPipLabel} ${oneLotPipValue == null ? "待换算" : `${oneLotPipValue.toFixed(2)} ${instrumentEconomics?.accountCurrency ?? "USD"}`} · 杠杆 1:${instrumentEconomics?.leverage ?? 100} · 强平线 ${instrumentEconomics?.stopOutLevelPct ?? 50}%`
                       : `成交模型 ${EXECUTION_ENGINE_VERSION} · 佣金 ${executionProfile.commissionRateBps}bp · 滑点 ${executionProfile.slippageBps}bp · 价差 ${executionProfile.spreadBps}bp · 当根量参与 ${executionProfile.maxVolumeParticipationPct || "不限"}${executionProfile.maxVolumeParticipationPct ? "%" : ""}`}</small>
@@ -9691,7 +9922,7 @@ export function TrainingWorkbench() {
                   {ruleNotice || (!marketRules.tradingEnabled
                     ? tradingDisabledReason
                     : pendingOrders.length
-                    ? `${pendingOrders.length} 笔委托等待成交；触价后按当根成交量参与率部分成交，余量继续挂单${tradingMode === "capital" ? marginInstrument ? ` · 已预留保证金/费用 ${reservedMarginTotal.toFixed(2)}` : ` · 已预留 ${(cashBalance - availableBuyingPower).toFixed(2)}` : ""}`
+                     ? `${pendingOrders.length} 笔委托等待成交；${liveMode ? "市价单下一交易日开盘成交，限价/突破单按开盘价触发" : "触价后按当根成交量参与率部分成交，余量继续挂单"}${tradingMode === "capital" ? marginInstrument ? ` · 已预留保证金/费用 ${reservedMarginTotal.toFixed(2)}` : ` · 已预留 ${(cashBalance - availableBuyingPower).toFixed(2)}` : ""}`
                     : `${marketRules.name}：${describeBuyQuantity(marketRules)}${marginInstrument ? ` · ${instrumentEconomics?.accountCurrency ?? "USD"} 账户 · 1:${instrumentEconomics?.leverage ?? 100}` : ""}${marketRules.tPlusOne ? " · T+1" : ""}${marketRules.priceLimitRatio ? ` · 涨跌幅 ${(marketRules.priceLimitRatio * 100).toFixed(0)}%` : ""}`)}
                 </div>
 
@@ -10675,6 +10906,8 @@ export function TrainingWorkbench() {
               hasReviewedSession={Boolean(reviewedSession)}
               reviewMetrics={reviewMetrics}
               timeframe={reviewedSession?.session.timeframe ?? timeframe}
+              onOpenPatternFilters={openPatternFiltersPanel}
+              onOpenSettings={() => openSettingsPanel()}
               linkedDecisionLabel={(id) => {
                 const linked = id ? reviewDecisionById.get(id) : undefined;
                 return linked ? linked.decision.marketState || linked.decision.location || "已关联" : undefined;

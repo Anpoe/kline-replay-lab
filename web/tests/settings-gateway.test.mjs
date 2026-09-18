@@ -88,6 +88,34 @@ test("loads pattern, reason-tag, and indicator preferences with legacy fallbacks
   assert.deepEqual(indicators, defaultMovingAverageSettings);
 });
 
+test("keeps a local hidden-pattern shadow across legacy and synced preference reads", () => {
+  const hiddenId = defaultPatternPresets[0].id;
+  const storage = createMemoryStorage({
+    [settingsStorageKeys.hiddenPatternPresetIds]: JSON.stringify([hiddenId, hiddenId, "missing"]),
+  });
+  const gateway = createSettingsStorageGateway(storage);
+
+  assert.deepEqual(gateway.loadHiddenPatternPresetIds(), [hiddenId]);
+  assert.equal(gateway.loadPatternPreferences().patternPresets.find((preset) => preset.id === hiddenId)?.enabled, false);
+
+  gateway.saveHiddenPatternPresetIds([hiddenId, "missing", hiddenId]);
+  assert.deepEqual(JSON.parse(storage.getItem(settingsStorageKeys.hiddenPatternPresetIds)), [hiddenId]);
+  gateway.saveHiddenPatternPresetIds([]);
+  assert.equal(storage.getItem(settingsStorageKeys.hiddenPatternPresetIds), null);
+});
+
+test("cleans a malformed hidden-pattern shadow without clearing other preferences", () => {
+  const storage = createMemoryStorage({
+    [settingsStorageKeys.patternPresets]: JSON.stringify(defaultPatternPresets),
+    [settingsStorageKeys.hiddenPatternPresetIds]: "{not-json",
+  });
+  const gateway = createSettingsStorageGateway(storage);
+
+  assert.deepEqual(gateway.loadHiddenPatternPresetIds(), []);
+  assert.equal(storage.getItem(settingsStorageKeys.hiddenPatternPresetIds), null);
+  assert.notEqual(storage.getItem(settingsStorageKeys.patternPresets), null);
+});
+
 test("clears the legacy custom-preset and reason-tag copies after migration", () => {
   const storage = createMemoryStorage({
     [settingsStorageKeys.patternPresets]: JSON.stringify(defaultPatternPresets),

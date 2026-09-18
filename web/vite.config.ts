@@ -1,12 +1,11 @@
 import vinext from "vinext";
-import { defineConfig } from "vite";
+import { defineConfig, loadEnv } from "vite";
 
 const LOCAL_DATABASE_ID =
   "00000000-0000-4000-8000-000000000000";
 
 // macOS Seatbelt blocks FSEvents, so Codex previews need polling for HMR.
 const isCodexSeatbeltSandbox = process.env.CODEX_SANDBOX === "seatbelt";
-const configuredRemoteHost = process.env.KLINE_REMOTE_HOST?.trim();
 
 const localBindingConfig = {
   main: "./worker/index.ts",
@@ -20,7 +19,14 @@ const localBindingConfig = {
   ],
 };
 
-export default defineConfig(async () => {
+export default defineConfig(async ({ mode }) => {
+  // Vite does not copy .env* values into process.env before loading this
+  // config. Keep an explicit process value highest priority, then fall back
+  // to the project-local environment file used by the launcher.
+  const fileEnv = loadEnv(mode, process.cwd(), "");
+  const configuredRemoteHost = process.env.KLINE_REMOTE_HOST?.trim()
+    || fileEnv.KLINE_REMOTE_HOST?.trim();
+
   // Keep Wrangler and Miniflare state project-local. These are non-secret tool
   // settings; application environment belongs in ignored `.env*` files.
   process.env.WRANGLER_WRITE_LOGS ??= "false";

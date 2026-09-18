@@ -1,5 +1,6 @@
 import type { DeterministicReviewMetrics } from "../../../lib/reviewMetrics";
 import type { ExecutionReason } from "../../../lib/executionEngine";
+import { ListFilter, Settings2 } from "lucide-react";
 
 type ReviewSummary = {
   heroLabel: string;
@@ -20,6 +21,8 @@ type ReviewPanelProps = {
   hasReviewedSession: boolean;
   reviewMetrics?: DeterministicReviewMetrics;
   timeframe: string;
+  onOpenPatternFilters: () => void;
+  onOpenSettings: () => void;
   linkedDecisionLabel: (id: string | undefined) => string | undefined;
   onBack: () => void;
   onEvidence: (timestamp: number, label: string) => void;
@@ -36,6 +39,8 @@ export function ReviewPanel({
   hasReviewedSession,
   reviewMetrics,
   timeframe,
+  onOpenPatternFilters,
+  onOpenSettings,
   linkedDecisionLabel,
   onBack,
   onEvidence,
@@ -50,6 +55,17 @@ export function ReviewPanel({
       <div className="page-heading">
         <div><span>REVIEW</span><h1>训练复盘</h1><p>{title} · 先看事前计划，再判断执行质量。</p></div>
         {hasReviewedSession && <button className="ghost-button" onClick={onBack}>返回当前训练</button>}
+      </div>
+      <div className="review-utility-bar" aria-label="复盘工具">
+        <div className="review-utility-copy">
+          <span>REVIEW TOOLS</span>
+          <strong>复盘工具</strong>
+          <small>管理形态筛选与训练设置</small>
+        </div>
+        <div className="review-utility-actions">
+          <button type="button" className="ghost-button" onClick={onOpenPatternFilters}><ListFilter size={15} />形态筛选</button>
+          <button type="button" className="ghost-button" onClick={onOpenSettings}><Settings2 size={15} />设置</button>
+        </div>
       </div>
       <div className="review-grid">
         <div className="review-hero">

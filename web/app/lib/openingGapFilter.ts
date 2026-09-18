@@ -75,3 +75,30 @@ export function evaluateOpeningGap(
     thresholdPrice,
   };
 }
+
+/**
+ * Returns the price level where the next opening would reach the configured
+ * directional gap threshold. The level is only useful when it is a positive,
+ * finite market price; disabled filters and impossible low-side levels return
+ * undefined.
+ */
+export function openingGapThresholdPrice(
+  previousClose: number,
+  filter: Partial<OpeningGapFilter> | undefined,
+): number | undefined {
+  const normalized = normalizeOpeningGapFilter(filter);
+  if (normalized.mode === "off") return undefined;
+
+  const close = Number(previousClose);
+  if (!Number.isFinite(close) || close <= 0) return undefined;
+
+  const amount = normalized.unit === "price"
+    ? normalized.threshold
+    : close * normalized.threshold / 100;
+  const directionalPrice = normalized.mode === "high"
+    ? close + amount
+    : close - amount;
+  return Number.isFinite(directionalPrice) && directionalPrice > 0
+    ? directionalPrice
+    : undefined;
+}

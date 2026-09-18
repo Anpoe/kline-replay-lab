@@ -114,6 +114,13 @@ test("训练清理判定忽略只看K线，但保留真实操作和决策记录"
   };
 
   assert.equal(hasMeaningfulTrainingActivity(empty), false);
+  assert.equal(hasMeaningfulTrainingActivity({
+    ...empty,
+    events: [
+      { type: "positions_settled_at_training_end" },
+      { type: "positions_settled_at_replay_session_end" },
+    ],
+  }), false);
   assert.equal(hasMeaningfulTrainingActivity({ ...empty, hasDecisionContent: true }), true);
   assert.equal(hasMeaningfulTrainingActivity({ ...empty, drawings: [{ id: "drawing-1" }] }), true);
   assert.equal(hasMeaningfulTrainingActivity({ ...empty, positions: [{ id: "position-1" }] }), true);

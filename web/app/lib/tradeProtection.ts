@@ -1,5 +1,11 @@
+import {
+  openingGapThresholdPrice,
+  type OpeningGapMode,
+  type OpeningGapUnit,
+} from "./openingGapFilter.ts";
+
 export type ProtectionPriceKind = "stop-loss" | "take-profit";
-export type ProtectionLineKind = ProtectionPriceKind | "entry-trigger";
+export type ProtectionLineKind = ProtectionPriceKind | "entry-trigger" | "opening-gap-threshold";
 
 export type ProtectionLine = {
   id: string;
@@ -8,7 +14,7 @@ export type ProtectionLine = {
   timestamp: number;
   label: string;
   movable: boolean;
-  source: "draft" | "position";
+  source: "draft" | "position" | "rule";
   positionId?: string;
   side?: "long" | "short";
 };
@@ -24,6 +30,10 @@ type ProtectionPosition = {
 
 type DeriveProtectionLinesInput = {
   currentTimestamp: number;
+  openingGapPreviousClose?: number;
+  openingGapMode?: OpeningGapMode;
+  openingGapUnit?: OpeningGapUnit;
+  openingGapThreshold?: number;
   draftTriggerPrice?: number;
   draftTriggerOrderType?: "limit" | "stop";
   draftStopLoss?: number;
@@ -75,6 +85,10 @@ function resetStopDraftMatchingPrices(
 
 export function deriveProtectionLines({
   currentTimestamp,
+  openingGapPreviousClose,
+  openingGapMode,
+  openingGapUnit,
+  openingGapThreshold,
   draftTriggerPrice,
   draftTriggerOrderType,
   draftStopLoss,
@@ -84,10 +98,24 @@ export function deriveProtectionLines({
   movable,
 }: DeriveProtectionLinesInput): ProtectionLine[] {
   const lines: ProtectionLine[] = [];
+  const openingGapPrice = openingGapThresholdPrice(openingGapPreviousClose ?? Number.NaN, {
+    mode: openingGapMode,
+    unit: openingGapUnit,
+    threshold: openingGapThreshold,
+  });
   const triggerPrice = positivePrice(draftTriggerPrice);
   const stopLoss = positivePrice(draftStopLoss);
   const takeProfit = positivePrice(draftTakeProfit);
 
+  if (openingGapPrice != null) lines.push({
+    id: "opening-gap-threshold",
+    kind: "opening-gap-threshold",
+    price: openingGapPrice,
+    timestamp: currentTimestamp,
+    label: openingGapMode === "low" ? "低开不买阈值" : "高开不买阈值",
+    movable: false,
+    source: "rule",
+  });
   if (triggerPrice != null) lines.push({
     id: "draft-entry-trigger",
     kind: "entry-trigger",

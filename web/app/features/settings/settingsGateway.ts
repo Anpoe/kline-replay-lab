@@ -23,6 +23,7 @@ export const settingsStorageKeys = Object.freeze({
   reasonTags: "kline-replay-lab:reason-tags-v1",
   customReasonTags: "kline-replay-lab:custom-reason-tags",
   patternPresets: "kline-replay-lab:pattern-presets-v1",
+  hiddenPatternPresetIds: "kline-replay-lab:hidden-pattern-presets-v1",
   quickRandomPattern: "kline-replay-lab:quick-random-pattern-v1",
   randomTrainingPatternPresets: "kline-replay-lab:random-training-pattern-presets-v1",
   quickRandomMode: "kline-replay-lab:quick-random-mode-v1",
@@ -118,6 +119,12 @@ function readJson(storage: SettingsStorage, key: string) {
   return stored == null ? undefined : JSON.parse(stored) as unknown;
 }
 
+function normalizeHiddenPatternPresetIds(value: unknown) {
+  const builtInIds = new Set(defaultPatternPresets.map((preset) => preset.id));
+  if (!Array.isArray(value)) return [];
+  return [...new Set(value.filter((id): id is string => typeof id === "string" && builtInIds.has(id)))];
+}
+
 export function createSettingsStorageGateway(storage: SettingsStorage) {
   const loadAppSettings = (): LoadedAppSettings => {
     const stored = storage.getItem(settingsStorageKeys.appSettings);
@@ -137,10 +144,33 @@ export function createSettingsStorageGateway(storage: SettingsStorage) {
     storage.setItem(settingsStorageKeys.appSettings, JSON.stringify(normalizeSettings(settings)));
   };
 
+  const loadHiddenPatternPresetIds = (): string[] => {
+    try {
+      return normalizeHiddenPatternPresetIds(readJson(storage, settingsStorageKeys.hiddenPatternPresetIds));
+    } catch {
+      storage.removeItem(settingsStorageKeys.hiddenPatternPresetIds);
+      return [];
+    }
+  };
+
+  const saveHiddenPatternPresetIds = (presetIds: string[]) => {
+    const normalized = normalizeHiddenPatternPresetIds(presetIds);
+    if (normalized.length) {
+      storage.setItem(settingsStorageKeys.hiddenPatternPresetIds, JSON.stringify(normalized));
+    } else {
+      storage.removeItem(settingsStorageKeys.hiddenPatternPresetIds);
+    }
+  };
+
   const loadPatternPreferences = (): PatternPreferences => {
     try {
       const storedPresets = readJson(storage, settingsStorageKeys.patternPresets);
-      const patternPresets = normalizePatternPresets(storedPresets ?? defaultPatternPresets);
+      const hiddenPresetIds = new Set(loadHiddenPatternPresetIds());
+      const patternPresets = normalizePatternPresets(storedPresets ?? defaultPatternPresets).map((preset) => (
+        preset.builtIn && hiddenPresetIds.has(preset.id)
+          ? { ...preset, enabled: false }
+          : preset
+      ));
       const availablePatternPresets = visiblePatternPresets(patternPresets);
       const storedQuickPattern = storage.getItem(settingsStorageKeys.quickRandomPattern) ?? "";
       const storedRandomPatterns = readJson(storage, settingsStorageKeys.randomTrainingPatternPresets);
@@ -259,6 +289,8 @@ export function createSettingsStorageGateway(storage: SettingsStorage) {
   return {
     loadAppSettings,
     saveAppSettings,
+    loadHiddenPatternPresetIds,
+    saveHiddenPatternPresetIds,
     loadPatternPreferences,
     savePatternPresets,
     saveQuickRandomPattern,

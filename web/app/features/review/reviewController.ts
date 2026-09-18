@@ -27,6 +27,8 @@ const passiveTrainingEventTypes = new Set([
   "playback_speed_changed",
   "training_completed",
   "training_revealed",
+  "positions_settled_at_training_end",
+  "positions_settled_at_replay_session_end",
 ]);
 
 export function hasMeaningfulTrainingActivity(state: ReviewSessionActivityState) {

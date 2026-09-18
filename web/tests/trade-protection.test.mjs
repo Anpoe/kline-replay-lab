@@ -104,6 +104,29 @@ test("uses a distinct limit-order label for the movable draft entry line", () =>
   assert.equal(lines[0].label, "限价单（Limit Order）");
 });
 
+test("adds a locked opening-gap threshold guide without exposing a price label", () => {
+  const lines = deriveProtectionLines({
+    currentTimestamp: 3_000,
+    openingGapPreviousClose: 100,
+    openingGapMode: "high",
+    openingGapUnit: "percent",
+    openingGapThreshold: 3,
+    positions: [],
+    hoveredClosedPositionId: null,
+    movable: true,
+  });
+
+  assert.deepEqual(lines[0], {
+    id: "opening-gap-threshold",
+    kind: "opening-gap-threshold",
+    price: 103,
+    timestamp: 3_000,
+    label: "高开不买阈值",
+    movable: false,
+    source: "rule",
+  });
+});
+
 test("clears a consumed stop draft when the account becomes flat", () => {
   assert.deepEqual(resetConsumedStopDraftAfterFlatten({
     previousPositions: [openPosition],

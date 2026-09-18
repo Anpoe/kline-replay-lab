@@ -488,7 +488,9 @@ function ensureProtectionLineOverlay(registerOverlay: (template: OverlayTemplate
       const data = overlay.extendData as ProtectionLine | null;
       if (!point || !data) return [];
       const stop = data.kind === "stop-loss";
-      const color = data.kind === "entry-trigger" ? "#69c0ff" : stop ? "#ff6b68" : "#24d6a2";
+      const color = data.kind === "opening-gap-threshold"
+        ? "#e1c57f"
+        : data.kind === "entry-trigger" ? "#69c0ff" : stop ? "#ff6b68" : "#24d6a2";
       return [{
         type: "line",
         attrs: { coordinates: [{ x: 0, y: point.y }, { x: bounding.width, y: point.y }] },

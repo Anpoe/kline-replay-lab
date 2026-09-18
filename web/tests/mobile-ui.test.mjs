@@ -58,6 +58,8 @@ test("exposes the web UI on IPv4 and IPv6 while keeping remote access explicit",
 
   assert.match(viteConfig, /host:\s*"::"/);
   assert.match(viteConfig, /configuredRemoteHost/);
+  assert.match(viteConfig, /loadEnv/);
+  assert.match(viteConfig, /fileEnv\.KLINE_REMOTE_HOST/);
   assert.match(viteConfig, /allowedHosts:\s*configuredRemoteHost\s*\?/);
   assert.doesNotMatch(viteConfig, /kline42\.dynv6\.net/i);
   assert.match(packageJson, /vinext dev --hostname ::/);
@@ -223,6 +225,10 @@ test("wires chart protection picking, trailing stops and risk sizing into the wo
   assert.match(settingsPanel, /默认开仓委托/);
   assert.match(workbench, /<option value="limit">限价单（Limit Order）<\/option>/);
   assert.match(workbench, /<option value="stop">突破单（Stop Order）<\/option>/);
+  assert.match(workbench, /<select aria-label="开仓委托类型" value=\{orderType\} onChange=/);
+  assert.doesNotMatch(workbench, /<select aria-label="开仓委托类型" value=\{liveMode \? "market" : orderType\} disabled=\{liveMode\}/);
+  assert.match(workbench, /const selectedOrderType: OrderType = orderType/);
+  assert.match(workbench, /resolveLivePendingOrderPrice/);
   assert.match(settingsPanel, /<option value="limit">限价单（Limit Order）<\/option>/);
   assert.match(settingsPanel, /<option value="stop">突破单（Stop Order）<\/option>/);
   assert.match(workbench, /const riskBalance = tradingMode === "capital"/);
