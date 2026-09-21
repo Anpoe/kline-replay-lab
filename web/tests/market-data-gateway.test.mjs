@@ -129,6 +129,29 @@ test("preserves data task actions and provider setting payloads", async () => {
   assert.equal(requests[10].init.method, "DELETE");
 });
 
+test("缺口修复使用独立的 FX 任务接口", async () => {
+  const requests = [];
+  const gateway = createMarketDataGateway(async (input, init) => {
+    requests.push({ input, init });
+    return response({ payload: { task: { id: "repair-task" } } });
+  });
+
+  await gateway.fxDataAction({ type: "repair", payload: { pairId: "XAUUSD.GOLD" } });
+
+  assert.equal(requests[0].input, "/api/fx-data/repair");
+  assert.equal(requests[0].init.method, "POST");
+  assert.deepEqual(JSON.parse(requests[0].init.body), { pairId: "XAUUSD.GOLD" });
+});
+
+test("FX run preserves a failed task in a 502 response instead of triggering connection retries", async () => {
+  const payload = { task: { id: "fx-failed", status: "failed", error: "HTTP 429" }, error: "HTTP 429" };
+  const gateway = createMarketDataGateway(async () => response({ ok: false, payload }));
+  assert.deepEqual(await gateway.runFxTask("fx-failed"), payload);
+  await assert.rejects(() => gateway.runFxTask("another-task"), /HTTP 429/);
+  const unavailable = createMarketDataGateway(async () => response({ ok: false, payload: { error: "connection unavailable" } }));
+  await assert.rejects(() => unavailable.runFxTask("fx-failed"), /connection unavailable/);
+});
+
 test("deduplicates the same market sync worker across gateway instances", async () => {
   const requests = [];
   let release;

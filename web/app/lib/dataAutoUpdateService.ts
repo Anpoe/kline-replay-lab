@@ -1,8 +1,6 @@
 import { readLocalDataJson } from "./localDataService";
 import { inspectMarketSyncUpdate } from "./marketSyncService";
-import { loadProviderSecrets } from "./providerCredentials";
-import { FX_INSTRUMENT_CATALOG, getMarketInstrumentDefinition, GOLD_INSTRUMENT_CATALOG } from "./fxDataContracts";
-import { fetchTwelveDataOneMinuteChunk } from "./fx/twelveDataClient";
+import { FX_INSTRUMENT_CATALOG, GOLD_INSTRUMENT_CATALOG } from "./fxDataContracts";
 
 type DatabaseMarketRow = {
   market: string;
@@ -189,7 +187,6 @@ async function inspectCnUpdate(
 
 async function inspectFxUpdates(
   rows: Array<{ instrumentId: string; lastTimestamp: number | null }>,
-  twelveDataApiKey: string | undefined,
   marketLabel = "外汇",
 ) {
   const pairs = [] as Array<{
@@ -202,77 +199,37 @@ async function inspectFxUpdates(
   if (!rows.length) {
     return {
       existing: false,
-      configured: Boolean(twelveDataApiKey),
+      configured: true,
       needsUpdate: false,
       duePairIds: [] as string[],
       pairs,
       reason: `${marketLabel}尚无可更新的历史数据`,
     };
   }
-  if (!twelveDataApiKey) {
-    return {
-      existing: true,
-      configured: false,
-      needsUpdate: false,
-      duePairIds: [] as string[],
-      pairs: rows.map((row) => ({
-        pairId: row.instrumentId,
-        latestTimestamp: row.lastTimestamp,
-        providerLatestTimestamp: null,
-        needsUpdate: false,
-      })),
-      reason: `${marketLabel}已有数据，但尚未配置 Twelve Data 访问密钥`,
-    };
-  }
+  // Dukascopy publishes completed UTC days rather than a reliable latest
+  // quote endpoint. Let each task perform its own date-bounded no-op check;
+  // this keeps automatic updates independent of credential probes.
+  const duePairIds = rows.map((row) => row.instrumentId);
   for (const row of rows) {
-    const instrument = getMarketInstrumentDefinition(row.instrumentId);
-    if (!instrument) continue;
-    try {
-      const latest = await fetchTwelveDataOneMinuteChunk({
-        apiKey: twelveDataApiKey,
-        symbol: instrument.twelveDataSymbol,
-        outputsize: 1,
-      });
-      const providerLatestTimestamp = finiteTimestamp(
-        latest.latestCompletedTimestamp ?? latest.candles.at(-1)?.timestamp,
-      );
-      const needsUpdate = providerLatestTimestamp != null
-        && (row.lastTimestamp == null || providerLatestTimestamp > row.lastTimestamp);
-      pairs.push({
-        pairId: row.instrumentId,
-        latestTimestamp: row.lastTimestamp,
-        providerLatestTimestamp,
-        needsUpdate,
-      });
-    } catch (error) {
-      pairs.push({
-        pairId: row.instrumentId,
-        latestTimestamp: row.lastTimestamp,
-        providerLatestTimestamp: null,
-        needsUpdate: false,
-        error: error instanceof Error ? error.message : "Twelve Data 最新状态检查失败",
-      });
-    }
+    pairs.push({
+      pairId: row.instrumentId,
+      latestTimestamp: row.lastTimestamp,
+      providerLatestTimestamp: null,
+      needsUpdate: true,
+    });
   }
-  const duePairIds = pairs.filter((pair) => pair.needsUpdate).map((pair) => pair.pairId);
-  const errors = pairs.filter((pair) => pair.error).length;
   return {
     existing: true,
     configured: true,
     needsUpdate: duePairIds.length > 0,
     duePairIds,
     pairs,
-    reason: duePairIds.length
-      ? `${marketLabel}有 ${duePairIds.length} 个品种存在新收盘分钟数据`
-      : errors
-        ? `${errors} 个${marketLabel}品种无法完成最新状态检查，已跳过自动更新`
-        : `${marketLabel}已有数据已经是最新`,
+    reason: `${marketLabel}每日由 Dukascopy 检查最近完整交易日，任务会跳过未完成或无新数据的日期`,
   };
 }
 
 export async function inspectExistingMarkets(db: D1Database) {
-  const [{ secrets }, databaseRows, localCn] = await Promise.all([
-    loadProviderSecrets(),
+  const [databaseRows, localCn] = await Promise.all([
     readDatabaseMarketRows(db),
     readLocalCnSummary(),
   ]);
@@ -294,14 +251,12 @@ export async function inspectExistingMarkets(db: D1Database) {
         instrumentId: String(row.instrumentId),
         lastTimestamp: finiteTimestamp(row.lastTimestamp),
       })),
-      secrets.twelveDataApiKey,
     ),
     inspectFxUpdates(
       goldRows.map((row) => ({
         instrumentId: String(row.instrumentId),
         lastTimestamp: finiteTimestamp(row.lastTimestamp),
       })),
-      secrets.twelveDataApiKey,
       "黄金",
     ),
   ]);

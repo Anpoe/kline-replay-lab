@@ -116,6 +116,33 @@ export function buildTdxSecurityQuotesRequest(instrumentIds) {
   return packet;
 }
 
+export function buildTdxSecurityBarsRequest(instrumentId, {
+  category = 9,
+  start = 0,
+  count = 800,
+} = {}) {
+  const stock = normalizeSecurityQuoteInstrumentId(instrumentId);
+  const safeStart = Math.max(0, Math.min(65_535, Math.trunc(Number(start) || 0)));
+  const safeCount = Math.max(1, Math.min(800, Math.trunc(Number(count) || 800)));
+  const packet = Buffer.alloc(38);
+  let offset = 0;
+  packet.writeUInt16LE(0x10c, offset); offset += 2;
+  packet.writeUInt32LE(0x01016408, offset); offset += 4;
+  packet.writeUInt16LE(0x1c, offset); offset += 2;
+  packet.writeUInt16LE(0x1c, offset); offset += 2;
+  packet.writeUInt16LE(0x052d, offset); offset += 2;
+  packet.writeUInt16LE(stock.market, offset); offset += 2;
+  Buffer.from(stock.code, "ascii").copy(packet, offset); offset += 6;
+  packet.writeUInt16LE(Math.max(0, Math.min(65_535, Math.trunc(Number(category) || 9))), offset); offset += 2;
+  packet.writeUInt16LE(1, offset); offset += 2;
+  packet.writeUInt16LE(safeStart, offset); offset += 2;
+  packet.writeUInt16LE(safeCount, offset); offset += 2;
+  packet.writeUInt32LE(0, offset); offset += 4;
+  packet.writeUInt32LE(0, offset); offset += 4;
+  packet.writeUInt16LE(0, offset);
+  return packet;
+}
+
 function readTdxPrice(body, state) {
   if (state.offset >= body.length) throw new Error("实时行情响应不完整");
   let byte = body[state.offset++];
@@ -211,6 +238,54 @@ export function parseTdxSecurityQuotesResponse(input) {
       low: (price + lowDiff) / 100,
       volume,
       turnover,
+    });
+  }
+  return rows;
+}
+
+export function parseTdxSecurityBarsResponse(input, { assetType = "stock" } = {}) {
+  const body = Buffer.isBuffer(input) ? input : Buffer.from(input);
+  if (body.length < 2) throw new Error("历史日线响应不完整");
+  const count = body.readUInt16LE(0);
+  const state = { offset: 2 };
+  const rows = [];
+  let previousCloseBase = 0;
+  for (let index = 0; index < count; index += 1) {
+    if (state.offset + 4 > body.length) throw new Error("历史日线响应不完整");
+    const compactDate = body.readUInt32LE(state.offset);
+    state.offset += 4;
+    const openDiff = readTdxPrice(body, state);
+    const closeDiff = readTdxPrice(body, state);
+    const highDiff = readTdxPrice(body, state);
+    const lowDiff = readTdxPrice(body, state);
+    if (state.offset + 8 > body.length) throw new Error("历史日线响应不完整");
+    const volume = decodeTdxVolume(body.readUInt32LE(state.offset));
+    state.offset += 4;
+    const turnover = decodeTdxVolume(body.readUInt32LE(state.offset));
+    state.offset += 4;
+    // Index bars append rise/fall counts after amount; security bars do not.
+    if (assetType === "index") {
+      if (state.offset + 4 > body.length) throw new Error("历史指数日线响应不完整");
+      state.offset += 4;
+    }
+    const openBase = previousCloseBase + openDiff;
+    const closeBase = openBase + closeDiff;
+    const highBase = openBase + highDiff;
+    const lowBase = openBase + lowDiff;
+    previousCloseBase = closeBase;
+    const year = Math.trunc(compactDate / 10000);
+    const month = Math.trunc((compactDate % 10000) / 100);
+    const day = compactDate % 100;
+    const timestamp = Date.UTC(year, month - 1, day);
+    if (!Number.isFinite(timestamp) || year < 1990 || month < 1 || month > 12 || day < 1 || day > 31) continue;
+    rows.push({
+      timestamp,
+      open: openBase / 1000,
+      high: highBase / 1000,
+      low: lowBase / 1000,
+      close: closeBase / 1000,
+      volume: Number.isFinite(volume) ? Math.round(volume) : null,
+      turnover: Number.isFinite(turnover) ? Number(turnover.toFixed(2)) : null,
     });
   }
   return rows;
@@ -470,6 +545,30 @@ export class TdxCorporateActionsClient {
       }
     }
     throw new Error(`实时日线行情请求失败：${errorMessage(lastError ?? new Error("未返回可用实时数据"))}`);
+  }
+
+  async fetchDailyBars(instrumentId, { assetType = "stock", start = 0, count = 800 } = {}) {
+    const request = buildTdxSecurityBarsRequest(instrumentId, { start, count });
+    let lastError = null;
+    const hostAttempts = Math.min(
+      Math.max(1, this.hosts.length),
+      MAX_QUOTE_HOST_ATTEMPTS,
+    );
+    for (let attempt = 0; attempt < hostAttempts; attempt += 1) {
+      try {
+        await this.connect();
+        const rows = parseTdxSecurityBarsResponse(
+          await this.requestResponse(request),
+          { assetType },
+        );
+        return rows.map((row) => ({ instrumentId, ...row }));
+      } catch (error) {
+        lastError = error;
+        this.reset(error);
+        if (this.closed) break;
+      }
+    }
+    throw new Error(`历史日线请求失败：${errorMessage(lastError ?? new Error("未返回可用历史日线"))}`);
   }
 
   close() {

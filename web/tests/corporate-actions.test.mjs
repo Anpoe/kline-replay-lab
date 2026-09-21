@@ -5,8 +5,10 @@ import os from 'node:os';
 import path from 'node:path';
 import { CorporateActionsStore, normalizeCorporateActions } from '../local-data/corporate-actions-store.mjs';
 import {
+  buildTdxSecurityBarsRequest,
   buildTdxSecurityQuotesRequest,
   parseTdxCorporateActionsResponse,
+  parseTdxSecurityBarsResponse,
   parseTdxSecurityQuotesResponse,
   TdxCorporateActionsClient,
 } from '../local-data/tdx-corporate-actions-client.mjs';
@@ -45,6 +47,32 @@ test('normalizes ex-date and per-ten-share terms; never mistakes capital changes
   assert.match(dividend.description, /每10股/);
   assert.throws(() => normalizeCorporateActions('600000.SH', null));
   assert.throws(() => normalizeCorporateActions('600000.SH', [{ ...raw, month: 2, day: 31 }]));
+});
+
+test('builds and parses TDX daily bars for securities and indexes', () => {
+  const stockRequest = buildTdxSecurityBarsRequest('000001.SZ', { count: 1 });
+  assert.equal(stockRequest.length, 38);
+  assert.equal(stockRequest.readUInt16LE(20), 9);
+  const stock = parseTdxSecurityBarsResponse(
+    Buffer.from('010039283501b4b6015414e401a032004911e1114e', 'hex'),
+    { assetType: 'stock' },
+  );
+  assert.deepEqual(stock, [{
+    timestamp: Date.UTC(2026, 8, 21),
+    open: 11.7,
+    high: 11.72,
+    low: 11.6,
+    close: 11.68,
+    volume: 525098,
+    turnover: 611861568,
+  }]);
+  const index = parseTdxSecurityBarsResponse(
+    Buffer.from('01003928350191c6de03b7970181f401e121ccc3564ae93e205397066602', 'hex'),
+    { assetType: 'index' },
+  );
+  assert.equal(index.length, 1);
+  assert.equal(index[0].timestamp, Date.UTC(2026, 8, 21));
+  assert.ok(index[0].high >= index[0].close);
 });
 
 test('credits cash dividends only for long lots held before the ex-date', () => {

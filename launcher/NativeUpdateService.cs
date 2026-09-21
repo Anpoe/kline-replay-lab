@@ -31,6 +31,8 @@ namespace KLineTrainingCamp.Launcher
         public const string Repository = "Anpoe/kline-replay-lab";
         public const string LatestReleaseApiUrl = "https://api.github.com/repos/Anpoe/kline-replay-lab/releases/latest";
         private const string UserAgent = "KLineTrainingCamp-Updater";
+        private const SecurityProtocolType Tls12Protocol = (SecurityProtocolType)3072;
+        private const string PortableAssetFileName = "KLineTrainingCamp-Portable.zip";
         private const string PortableAssetPrefix = "KLineTrainingCamp-Portable-";
         private const int NetworkTimeoutMilliseconds = 30000;
         private const int CopyBufferSize = 64 * 1024;
@@ -268,9 +270,12 @@ namespace KLineTrainingCamp.Launcher
 
         private static bool IsPortableAsset(string name)
         {
-            return !string.IsNullOrWhiteSpace(name)
-                && name.StartsWith(PortableAssetPrefix, StringComparison.OrdinalIgnoreCase)
-                && name.EndsWith(".zip", StringComparison.OrdinalIgnoreCase);
+            if (string.IsNullOrWhiteSpace(name)) return false;
+            if (string.Equals(name, PortableAssetFileName, StringComparison.OrdinalIgnoreCase)) return true;
+            if (!name.StartsWith(PortableAssetPrefix, StringComparison.OrdinalIgnoreCase)
+                || !name.EndsWith(".zip", StringComparison.OrdinalIgnoreCase)) return false;
+            string version = name.Substring(PortableAssetPrefix.Length, name.Length - PortableAssetPrefix.Length - 4);
+            return NormalizeVersion(version) != null;
         }
 
         private static void ValidateDownloadUrl(string value)
@@ -330,6 +335,9 @@ namespace KLineTrainingCamp.Launcher
 
         private static HttpWebRequest SendRequest(string url, string accept)
         {
+            // .NET Framework 4.0 defaults to legacy TLS on some Windows installations;
+            // GitHub requires TLS 1.2. Use the numeric value so the v4.0 compiler can build it.
+            ServicePointManager.SecurityProtocol |= Tls12Protocol;
             var request = (HttpWebRequest)WebRequest.Create(url);
             request.Method = "GET";
             request.Accept = accept;

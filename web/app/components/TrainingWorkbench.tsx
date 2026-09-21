@@ -114,6 +114,7 @@ import { ReviewChartPreview } from "../features/review/components/ReviewChartPre
 import { SessionHistoryPanel, type AuditEventItem, type SessionHistoryItem } from "../features/review/components/SessionHistoryPanel";
 import {
   buildLiveScanRequest,
+  calculateDailyChangePct,
   normalizeLiveScanError,
   normalizeLiveScanLimit,
   selectLiveNavigatorIndex,
@@ -261,7 +262,7 @@ import {
   type ExecutionReason,
   type OrderType,
 } from "../lib/executionEngine";
-import { resolveLivePendingOrderPrice } from "../lib/liveOrderExecution";
+import { findLiveOrderFill } from "../lib/liveOrderExecution";
 import {
   accountNotional,
   isMarginEconomics,
@@ -1914,8 +1915,10 @@ export function TrainingWorkbench() {
   const [drawingTextOpen, setDrawingTextOpen] = useState(false);
   const [drawingText, setDrawingText] = useState("");
   const [saveState, setSaveState] = useState("未保存");
-  const [sessionId, setSessionId] = useState(createUuid);
-  const [randomSeed, setRandomSeed] = useState(createUuid);
+  // Keep the server render deterministic. Session identity and random training
+  // seeds are client-owned values and are filled after hydration.
+  const [sessionId, setSessionId] = useState("");
+  const [randomSeed, setRandomSeed] = useState("");
   const [dataSnapshotId, setDataSnapshotId] = useState("");
   const [snapshotHash, setSnapshotHash] = useState("");
   const [marketRules, setMarketRules] = useState<MarketRuleProfile>(CN_A_MAINBOARD_RULES_V1);
@@ -1941,6 +1944,7 @@ export function TrainingWorkbench() {
   const [liveScanRunning, setLiveScanRunning] = useState(false);
   const [livePriceRefreshRunning, setLivePriceRefreshRunning] = useState(false);
   const [, setLivePriceRefreshStatus] = useState("");
+  const [liveDailyChangePcts, setLiveDailyChangePcts] = useState<Record<string, number>>({});
   const [liveScanData, setLiveScanData] = useState<LiveScanResponse | null>(null);
   const [liveMode, setLiveMode] = useState(false);
   const [liveContext, setLiveContext] = useState<LiveScanResult | null>(null);
@@ -2045,8 +2049,9 @@ export function TrainingWorkbench() {
   const latestWatchRequestRef = useRef<LatestWatchRequest | null>(null);
   const livePortfoliosRef = useRef<LivePortfolioRecord[]>([]);
   const liveWatchlistRef = useRef<LiveWatchRecord[]>([]);
+  const recentLiveResultsRef = useRef<LiveScanResult[]>([]);
   const livePriceRefreshRunningRef = useRef(false);
-  const livePriceRefreshRef = useRef<((options?: { ensureMarketData?: boolean }) => Promise<void>) | null>(null);
+  const livePriceRefreshRef = useRef<((options?: { ensureMarketData?: boolean; includePortfolios?: boolean }) => Promise<void>) | null>(null);
   const liveAutoUpdateFinishedAtRef = useRef<string | null | undefined>(undefined);
   const livePersistSignatureRef = useRef("");
   const liveBarDragRef = useRef<{ pointerId: number; startX: number; startY: number; offsetX: number; offsetY: number } | null>(null);
@@ -2059,6 +2064,7 @@ export function TrainingWorkbench() {
   const patternPresetSaveRevisionRef = useRef(0);
   const patternPresetsDirtyRef = useRef(false);
   const patternPresetRestoreRequestedRef = useRef(false);
+  const patternFilterEditingRef = useRef(false);
   const patternFilterModalRef = useRef<HTMLElement | null>(null);
   const patternPresetListRef = useRef<HTMLElement | null>(null);
   const patternConditionPickerRef = useRef<HTMLDivElement | null>(null);
@@ -2070,6 +2076,16 @@ export function TrainingWorkbench() {
   });
   const trainingAutosaveGateRef = useRef<TrainingAutosaveGate>(resetTrainingAutosaveGate());
   const trainingAutosaveTimerRef = useRef<number | null>(null);
+
+  useEffect(() => {
+    const timer = window.setTimeout(() => {
+      const nextSessionId = createUuid();
+      const nextRandomSeed = createUuid();
+      setSessionId((current) => current || nextSessionId);
+      setRandomSeed((current) => current || nextRandomSeed);
+    }, 0);
+    return () => window.clearTimeout(timer);
+  }, []);
 
   const preemptStartupRandom = useCallback(() => {
     startupRandomStartedRef.current = true;
@@ -2092,6 +2108,10 @@ export function TrainingWorkbench() {
   useEffect(() => {
     liveWatchlistRef.current = liveWatchlist;
   }, [liveWatchlist]);
+
+  useEffect(() => {
+    recentLiveResultsRef.current = recentLiveResults;
+  }, [recentLiveResults]);
 
   useEffect(() => {
     let active = true;
@@ -2258,8 +2278,9 @@ export function TrainingWorkbench() {
     visibleBarStartIndex,
     visibleBars,
   ]);
-  const selectedPatternPresetDraft = patternPresetDrafts.find((preset) => preset.id === selectedPatternPresetId)
-    ?? patternPresetDrafts[0];
+  const selectedPatternPresetDraft = patternPresetDrafts.find((preset) => (
+    preset.id === selectedPatternPresetId && isPatternPresetAvailable(preset)
+  )) ?? patternPresetDrafts.find(isPatternPresetAvailable);
   const patternPresetDraftsDirty = useMemo(
     () => JSON.stringify(patternPresetDrafts) !== JSON.stringify(patternPresets),
     [patternPresetDrafts, patternPresets],
@@ -2981,10 +3002,14 @@ export function TrainingWorkbench() {
       const nextPresets = syncedPatternPresets;
       const availablePatternPresets = syncedAvailablePatternPresets;
       setPatternPresets(nextPresets);
-      setPatternPresetDrafts(nextPresets.map(clonePatternPresetValue));
-      setSelectedPatternPresetId((selected) => (
-        availablePatternPresets.some((preset) => preset.id === selected) ? selected : availablePatternPresets[0]?.id ?? ""
-      ));
+      // Focus refreshes may update saved preferences, but the open editor owns
+      // its drafts until the user saves or discards them.
+      if (!patternFilterEditingRef.current) {
+        setPatternPresetDrafts(nextPresets.map(clonePatternPresetValue));
+        setSelectedPatternPresetId((selected) => (
+          availablePatternPresets.some((preset) => preset.id === selected) ? selected : availablePatternPresets[0]?.id ?? ""
+        ));
+      }
       const quickPattern = localRandomPreferences.quickRandomPatternPresetId
         && availablePatternPresets.some((preset) => preset.id === localRandomPreferences.quickRandomPatternPresetId)
         ? localRandomPreferences.quickRandomPatternPresetId
@@ -3221,7 +3246,9 @@ export function TrainingWorkbench() {
         .then(() => {
           if (trackingPatternSave && patternPresetSaveRevisionRef.current === saveRevision) {
             patternPresetsDirtyRef.current = false;
-            settingsGateway.saveHiddenPatternPresetIds(hiddenBuiltInPatternPresetIds(preferences.patternPresets));
+            settingsGateway.saveHiddenPatternPresetIds(hiddenBuiltInPatternPresetIds(preferences.patternPresets), {
+              allowRestore: allowPatternPresetRestore,
+            });
             if (allowPatternPresetRestore) patternPresetRestoreRequestedRef.current = false;
           }
           settingsGateway.removeLegacyCustomPatternPresets();
@@ -4081,7 +4108,7 @@ export function TrainingWorkbench() {
   }, [dataSnapshotId, instrumentId, reviewGateway, sessionId, settingsGateway, timeframe]);
 
   useEffect(() => {
-    if (trashPreview || !trainingReady || !trainingComplete || !saveCompletedTrainingRef.current) return;
+    if (trashPreview || !sessionId || !randomSeed || !trainingReady || !trainingComplete || !saveCompletedTrainingRef.current) return;
     saveCompletedTrainingRef.current = false;
     trainingAutosaveGateRef.current = markTrainingAutosaveSaved(
       trainingAutosaveGateRef.current,
@@ -4089,10 +4116,10 @@ export function TrainingWorkbench() {
     );
     setSaveState("训练完成 · 正在保存…");
     void persistTrainingState(trainingState, "训练完成 · 已保存");
-  }, [persistTrainingState, trainingComplete, trainingMutationSignature, trainingReady, trainingState, trashPreview]);
+  }, [persistTrainingState, randomSeed, sessionId, trainingComplete, trainingMutationSignature, trainingReady, trainingState, trashPreview]);
 
   useEffect(() => {
-    if (trashPreview || liveMode || latestWatchMode || !trainingReady) {
+    if (trashPreview || liveMode || latestWatchMode || !sessionId || !randomSeed || !trainingReady) {
       if (trainingAutosaveTimerRef.current !== null) {
         window.clearTimeout(trainingAutosaveTimerRef.current);
         trainingAutosaveTimerRef.current = null;
@@ -4126,7 +4153,7 @@ export function TrainingWorkbench() {
       window.clearTimeout(timer);
       if (trainingAutosaveTimerRef.current === timer) trainingAutosaveTimerRef.current = null;
     };
-  }, [latestWatchMode, liveMode, persistTrainingState, trainingMutationSignature, trainingReady, trainingState, trashPreview]);
+  }, [latestWatchMode, liveMode, persistTrainingState, randomSeed, sessionId, trainingMutationSignature, trainingReady, trainingState, trashPreview]);
 
   const executeOrders = useCallback((
     orders: PendingOrder[],
@@ -5200,7 +5227,7 @@ export function TrainingWorkbench() {
   ) => {
     preemptStartupRandom();
     const targetMarket = availableInstruments.find((item) => item.id === nextInstrumentId)?.market
-      ?? (/\.FX$/i.test(nextInstrumentId) ? "FX" : undefined);
+      ?? (/\.FX$/i.test(nextInstrumentId) ? "FX" : /\.GOLD$/i.test(nextInstrumentId) ? "GOLD" : undefined);
     setDuplicateTrainingPreview(null);
     liveRequestRef.current = null;
     liveRequestTimeframeRef.current = null;
@@ -5244,6 +5271,7 @@ export function TrainingWorkbench() {
     };
     setInstrumentId(nextInstrumentId);
     setTimeframe(nextTimeframe);
+    setView("replay");
     setLoadNonce((value) => value + 1);
   };
 
@@ -5330,11 +5358,13 @@ export function TrainingWorkbench() {
     throw new Error("美股最新日线同步等待超时，请到数据页查看任务状态");
   };
 
-  const refreshLivePortfolioPrices = async (options: { ensureMarketData?: boolean } = {}) => {
+  const refreshLivePortfolioPrices = async (options: { ensureMarketData?: boolean; includePortfolios?: boolean } = {}) => {
     if (livePriceRefreshRunningRef.current) return;
-    const portfolios = livePortfoliosRef.current;
+    const portfolios = options.includePortfolios === false ? [] : livePortfoliosRef.current;
     const watchlist = liveWatchlistRef.current;
-    const tracked = [...portfolios, ...watchlist];
+    const recent = recentLiveResultsRef.current.filter((item) => item.market === "CN" || item.market === "US");
+    const scanResults = (liveScanData?.results ?? []).filter((item) => item.market === "CN" || item.market === "US");
+    const tracked = [...portfolios, ...watchlist, ...recent, ...scanResults];
     if (!tracked.length) {
       setLivePriceRefreshStatus("暂无可同步的实盘标的");
       return;
@@ -5347,9 +5377,11 @@ export function TrainingWorkbench() {
         timestamp: number;
         open: number;
         close: number;
+        previousClose?: number;
         realtime: boolean;
         dailyBarClosed: boolean;
         quoteTimestamp?: number;
+        entryBars?: Array<{ timestamp: number; open: number; close: number }>;
       }>();
       const errors: string[] = [];
       const usInstrumentIds = [...new Set(
@@ -5363,22 +5395,50 @@ export function TrainingWorkbench() {
           errors.push(error instanceof Error ? error.message : "缇庤偂鏈€鏂版棩绾挎洿鏂板け璐?");
         }
       }
+      const entryAfterByInstrument = new Map<string, number>();
+      for (const portfolio of portfolios) {
+        for (const order of portfolio.pendingOrders) {
+          if (!Number.isFinite(Number(order.createdAt))) continue;
+          const current = entryAfterByInstrument.get(portfolio.instrumentId);
+          const createdAt = Number(order.createdAt);
+          if (current === undefined || createdAt < current) entryAfterByInstrument.set(portfolio.instrumentId, createdAt);
+        }
+      }
       for (const market of ["CN", "US"] as LiveScanMarket[]) {
         const instrumentIds = [...new Set(tracked.filter((item) => item.market === market).map((item) => item.instrumentId))];
         if (!instrumentIds.length) continue;
         try {
-          const payload = await liveGateway.refreshPrices(market, instrumentIds);
+          const entryAfter: Record<string, number> = {};
+          for (const instrumentId of instrumentIds) {
+            const timestamp = entryAfterByInstrument.get(instrumentId);
+            if (Number.isFinite(timestamp)) entryAfter[instrumentId] = Number(timestamp);
+          }
+          const payload = await liveGateway.refreshPrices(market, instrumentIds, entryAfter);
           for (const price of payload.prices ?? []) {
             if (Number.isFinite(price.timestamp) && Number.isFinite(price.open) && Number.isFinite(price.close)) {
               pricesById.set(price.instrumentId, {
                 timestamp: Number(price.timestamp),
                 open: Number(price.open),
                 close: Number(price.close),
+                ...(Number.isFinite(Number(price.previousClose)) && Number(price.previousClose) > 0
+                  ? { previousClose: Number(price.previousClose) }
+                  : {}),
                 realtime: price.realtime === true,
                 dailyBarClosed: price.dailyBarClosed === true,
                 ...(Number.isFinite(Number(price.quoteTimestamp))
                   ? { quoteTimestamp: Number(price.quoteTimestamp) }
                   : {}),
+                ...(Array.isArray(price.entryBars) ? {
+                  entryBars: price.entryBars
+                    .filter((bar) => Number.isFinite(Number(bar.timestamp))
+                      && Number.isFinite(Number(bar.open))
+                      && Number.isFinite(Number(bar.close)))
+                    .map((bar) => ({
+                      timestamp: Number(bar.timestamp),
+                      open: Number(bar.open),
+                      close: Number(bar.close),
+                    })),
+                } : {}),
               });
             }
           }
@@ -5392,18 +5452,50 @@ export function TrainingWorkbench() {
         setLivePriceRefreshStatus(errors.length ? `同步失败：${errors.join("；")}` : "暂无可用的更新行情");
         return;
       }
+      const nextDailyChangePcts = new Map<string, number>();
+      for (const [instrumentId, price] of pricesById) {
+        const changePct = calculateDailyChangePct(price.close, price.previousClose);
+        if (changePct !== null) nextDailyChangePcts.set(instrumentId, changePct);
+      }
+      if (nextDailyChangePcts.size) {
+        setLiveDailyChangePcts((current) => {
+          let changed = false;
+          const next = { ...current };
+          for (const [instrumentId, changePct] of nextDailyChangePcts) {
+            if (next[instrumentId] === changePct) continue;
+            next[instrumentId] = changePct;
+            changed = true;
+          }
+          return changed ? next : current;
+        });
+        setLiveScanData((current) => {
+          if (!current) return current;
+          let changed = false;
+          const results = current.results.map((result) => {
+            const changePct = nextDailyChangePcts.get(result.instrumentId);
+            if (changePct === undefined || result.changePct === changePct) return result;
+            changed = true;
+            return { ...result, changePct };
+          });
+          return changed ? { ...current, results } : current;
+        });
+      }
       const syncedInstrumentIds = new Set<string>();
       const nextPortfolios = portfolios.map((portfolio) => {
         const price = pricesById.get(portfolio.instrumentId);
         if (!price) return portfolio;
         syncedInstrumentIds.add(portfolio.instrumentId);
-        const isNewBar = (!price.realtime || price.dailyBarClosed) && price.timestamp > portfolio.latestTimestamp;
+        const completeEntryBars = price.entryBars?.length
+          ? price.entryBars
+          : (!price.realtime || price.dailyBarClosed)
+            ? [{ timestamp: price.timestamp, open: price.open, close: price.close }]
+            : [];
         let nextPositions = portfolio.positions;
         let nextPendingOrders = portfolio.pendingOrders;
         let nextExecutions = portfolio.executions;
         let nextRejections = portfolio.orderRejections;
         let nextCashBalance = portfolio.cashBalance;
-        if (isNewBar && portfolio.pendingOrders.length) {
+        if (completeEntryBars.length && portfolio.pendingOrders.length) {
           const fills: Execution[] = [];
           const rejections: OrderRejection[] = [];
           nextPositions = [...portfolio.positions];
@@ -5411,11 +5503,14 @@ export function TrainingWorkbench() {
           nextExecutions = [...portfolio.executions];
           nextRejections = [...portfolio.orderRejections];
           for (const order of portfolio.pendingOrders) {
-            const fillPrice = resolveLivePendingOrderPrice(order, price);
-            if (fillPrice == null) {
+            // findLiveOrderFill applies resolveLivePendingOrderPrice to each
+            // complete candidate in chronological order.
+            const fill = findLiveOrderFill(order, completeEntryBars);
+            if (!fill) {
               nextPendingOrders.push(order);
               continue;
             }
+            const { bar: executionBar, fillPrice } = fill;
             if (order.action === "open") {
               const cashFlow = executionCashFlow(order.side, fillPrice, order.qty);
               if (portfolio.tradingMode === "capital" && cashFlow < 0 && nextCashBalance + cashFlow < -0.000001) {
@@ -5423,7 +5518,7 @@ export function TrainingWorkbench() {
                   ok: false,
                   code: "insufficient_cash_at_fill",
                   message: `下一交易日开盘需要 ${Math.abs(cashFlow).toFixed(2)}，可用资金仅 ${nextCashBalance.toFixed(2)}`,
-                }, marketRules, price.timestamp, order.id));
+                }, marketRules, executionBar.timestamp, order.id));
                 continue;
               }
               nextPositions.push({
@@ -5431,7 +5526,7 @@ export function TrainingWorkbench() {
                 side: order.side === "buy" ? "long" : "short",
                 qty: order.qty,
                 entryPrice: fillPrice,
-                entryTimestamp: price.timestamp,
+                entryTimestamp: executionBar.timestamp,
                 entryOrderId: order.id,
                 decisionSubmissionId: order.decisionSubmissionId,
                 status: "open",
@@ -5439,7 +5534,7 @@ export function TrainingWorkbench() {
               fills.push({
                 id: createUuid(), orderId: order.id, positionId: order.positionId,
                 action: "open", side: order.side, qty: order.qty, price: fillPrice,
-                timestamp: price.timestamp, decisionSubmissionId: order.decisionSubmissionId, realizedPnl: 0,
+                timestamp: executionBar.timestamp, decisionSubmissionId: order.decisionSubmissionId, realizedPnl: 0,
                 ruleId: order.ruleId ?? marketRules.id,
                 ruleVersion: order.ruleVersion ?? marketRules.version,
               });
@@ -5447,14 +5542,19 @@ export function TrainingWorkbench() {
               continue;
             }
             const positionIndex = nextPositions.findIndex((position) => position.id === order.positionId && position.status === "open");
-            if (positionIndex < 0) continue;
+            if (positionIndex < 0) {
+              // Keep an unmatched close order visible so a transient state
+              // hydration race cannot silently discard the user's order.
+              nextPendingOrders.push(order);
+              continue;
+            }
             const position = nextPositions[positionIndex];
             const realized = (fillPrice - position.entryPrice) * position.qty * (position.side === "long" ? 1 : -1);
             nextPositions[positionIndex] = {
               ...position,
               status: "closed",
               exitPrice: fillPrice,
-              exitTimestamp: price.timestamp,
+              exitTimestamp: executionBar.timestamp,
               exitOrderId: order.id,
               realizedPnl: realized,
             };
@@ -5462,7 +5562,7 @@ export function TrainingWorkbench() {
               id: createUuid(), orderId: order.id, positionId: position.id,
               action: "close", side: order.side, qty: position.qty, price: fillPrice,
               decisionSubmissionId: position.decisionSubmissionId,
-              timestamp: price.timestamp, realizedPnl: realized,
+              timestamp: executionBar.timestamp, realizedPnl: realized,
               ruleId: order.ruleId ?? marketRules.id,
               ruleVersion: order.ruleVersion ?? marketRules.version,
             });
@@ -5471,7 +5571,9 @@ export function TrainingWorkbench() {
           nextExecutions.push(...fills);
           nextRejections.push(...rejections);
         }
-        const nextTimestamp = price.realtime && !price.dailyBarClosed ? portfolio.latestTimestamp : price.timestamp;
+        const nextTimestamp = price.realtime && !price.dailyBarClosed
+          ? portfolio.latestTimestamp
+          : Math.max(portfolio.latestTimestamp, price.timestamp);
         const priceChanged = nextTimestamp !== portfolio.latestTimestamp || price.close !== portfolio.latestClose;
         const tradeStateChanged = nextPositions !== portfolio.positions
           && (
@@ -5525,11 +5627,39 @@ export function TrainingWorkbench() {
         liveWatchlistRef.current = nextWatchlist;
         setLiveWatchlist(nextWatchlist);
       }
+      const currentRecent = recentLiveResultsRef.current;
+      const nextRecent = currentRecent.map((result) => {
+        const price = pricesById.get(result.instrumentId);
+        if (!price) return result;
+        syncedInstrumentIds.add(result.instrumentId);
+        const nextTimestamp = price.realtime && !price.dailyBarClosed ? result.timestamp : price.timestamp;
+        const dailyChangePct = calculateDailyChangePct(price.close, price.previousClose);
+        const nextChangePct = dailyChangePct ?? result.changePct;
+        if (nextTimestamp === result.timestamp && price.close === result.close && nextChangePct === result.changePct) {
+          return result;
+        }
+        return {
+          ...result,
+          timestamp: nextTimestamp,
+          close: price.close,
+          changePct: nextChangePct,
+        };
+      });
+      if (nextRecent.some((result, index) => result !== currentRecent[index])) {
+        recentLiveResultsRef.current = nextRecent;
+        setRecentLiveResults(nextRecent);
+      }
       if (liveMode && liveContext) {
         const price = pricesById.get(liveContext.instrumentId);
         const nextTimestamp = price?.realtime && !price.dailyBarClosed ? liveContext.timestamp : price?.timestamp;
-        if (price && (nextTimestamp !== liveContext.timestamp || price.close !== liveContext.close)) {
-          const updated = { ...liveContext, timestamp: nextTimestamp ?? liveContext.timestamp, close: price.close };
+        const dailyChangePct = price ? calculateDailyChangePct(price.close, price.previousClose) : null;
+        if (price && (nextTimestamp !== liveContext.timestamp || price.close !== liveContext.close || (dailyChangePct !== null && dailyChangePct !== liveContext.changePct))) {
+          const updated = {
+            ...liveContext,
+            timestamp: nextTimestamp ?? liveContext.timestamp,
+            close: price.close,
+            ...(dailyChangePct === null ? {} : { changePct: dailyChangePct }),
+          };
           setLiveContext(updated);
           liveRequestRef.current = updated;
           setLoadNonce((value) => value + 1);
@@ -5549,15 +5679,18 @@ export function TrainingWorkbench() {
   });
 
   useEffect(() => {
-    const livePerformanceVisible = view === "performance"
-      && (performanceSection === "live" || performanceSection === "watch");
-    if (!livePerformanceVisible || !liveStateReady || !liveStateHydratedRef.current) return;
+    const liveMarketDataVisible = view === "replay"
+      || (view === "performance" && (performanceSection === "live" || performanceSection === "watch"));
+    if (!liveMarketDataVisible || !liveStateReady || !liveStateHydratedRef.current) return;
 
     let cancelled = false;
     let checking = false;
     const refreshFromStoredMarketData = () => {
       if (cancelled || document.visibilityState === "hidden") return;
-      void livePriceRefreshRef.current?.({ ensureMarketData: false });
+      void livePriceRefreshRef.current?.({
+        ensureMarketData: false,
+        includePortfolios: view !== "replay",
+      });
     };
     const checkAutoUpdate = async () => {
       if (cancelled || checking || document.visibilityState === "hidden") return;
@@ -5631,6 +5764,17 @@ export function TrainingWorkbench() {
       });
       const result = await liveGateway.scan(request);
       setLiveScanData(result);
+      setLiveDailyChangePcts((current) => {
+        let changed = false;
+        const next = { ...current };
+        for (const item of result.results) {
+          if (!Number.isFinite(item.changePct) || !Number.isFinite(item.close) || item.close <= 0) continue;
+          if (next[item.instrumentId] === item.changePct) continue;
+          next[item.instrumentId] = item.changePct;
+          changed = true;
+        }
+        return changed ? next : current;
+      });
       await refreshLivePortfolioPrices();
       setLivePortfolios((items) => items.map((portfolio) => {
         const updated = result.results.find((item) => item.instrumentId === portfolio.instrumentId);
@@ -5671,6 +5815,11 @@ export function TrainingWorkbench() {
   };
 
   const rememberRecentLiveResult = (result: LiveScanResult) => {
+    if (Number.isFinite(result.changePct) && Number.isFinite(result.close) && result.close > 0) {
+      setLiveDailyChangePcts((current) => current[result.instrumentId] === result.changePct
+        ? current
+        : { ...current, [result.instrumentId]: result.changePct });
+    }
     setRecentLiveResults((items) => [
       result,
       ...items.filter((item) => item.instrumentId !== result.instrumentId),
@@ -7307,19 +7456,34 @@ export function TrainingWorkbench() {
   }, [liveContext, liveMode, liveNavigatorSource, livePortfolios, liveScanData, liveWatchlist]);
 
   const watchlistDisplayResults = useMemo<LiveScanResult[]>(() => {
-    if (watchlistSource === "scan") return liveScanData?.results ?? [];
-    if (watchlistSource === "recent") return recentLiveResults;
+    const withLatestDailyChange = (result: LiveScanResult) => {
+      const dailyChangePct = liveDailyChangePcts[result.instrumentId];
+      return typeof dailyChangePct === "number" && Number.isFinite(dailyChangePct)
+        ? { ...result, changePct: dailyChangePct }
+        : result;
+    };
+    if (watchlistSource === "scan") return (liveScanData?.results ?? []).map(withLatestDailyChange);
+    if (watchlistSource === "recent") return recentLiveResults.map(withLatestDailyChange);
     return liveWatchlist.map((watch) => {
-      const baseline = liveWatchObservationPrice(watch);
-      const changePct = baseline > 0 && Number.isFinite(watch.latestClose)
-        ? (watch.latestClose - baseline) / baseline * 100
-        : 0;
+      if (watch.market !== "CN" && watch.market !== "US") {
+        const baseline = liveWatchObservationPrice(watch);
+        return {
+          ...liveWatchResult(watch),
+          changePct: baseline > 0 && Number.isFinite(watch.latestClose)
+            ? (watch.latestClose - baseline) / baseline * 100
+            : Number.NaN,
+        };
+      }
+      const dailyChangePct = liveDailyChangePcts[watch.instrumentId];
+      const changePct = typeof dailyChangePct === "number" && Number.isFinite(dailyChangePct)
+        ? dailyChangePct
+        : Number.NaN;
       return {
         ...liveWatchResult(watch),
         changePct,
       };
     });
-  }, [liveScanData, liveWatchlist, recentLiveResults, watchlistSource]);
+  }, [liveDailyChangePcts, liveScanData, liveWatchlist, recentLiveResults, watchlistSource]);
 
   // Result ordering can change after a refresh.  Prefer the saved instrument
   // identity over the old numeric index so the floating navigator resumes on
@@ -7552,6 +7716,7 @@ export function TrainingWorkbench() {
   };
 
   const openPatternFiltersPanel = () => {
+    patternFilterEditingRef.current = true;
     const drafts = patternPresets.map(clonePatternPresetValue);
     const available = visiblePatternPresets(drafts);
     setPatternPresetDrafts(drafts);
@@ -7565,6 +7730,7 @@ export function TrainingWorkbench() {
   };
 
   const finishClosePatternFilters = useCallback(() => {
+    patternFilterEditingRef.current = false;
     setShowPatternFilters(false);
     setPatternConditionPickerOpen(false);
     setPatternConditionSearch("");
@@ -7642,6 +7808,7 @@ export function TrainingWorkbench() {
     setLiveScanPresetIds((selectedIds) => selectedIds.filter((id) => available.some((preset) => preset.id === id)));
     setPatternEditorError("");
     setPatternDiscardPromptOpen(false);
+    patternFilterEditingRef.current = false;
     setShowPatternFilters(false);
     if (syncedPreferencesReady && syncedPreferencesHydratedRef.current) {
       const preferences = buildSyncedPreferences(
@@ -7653,7 +7820,9 @@ export function TrainingWorkbench() {
         .then(() => {
           if (patternPresetSaveRevisionRef.current === saveRevision) {
             patternPresetsDirtyRef.current = false;
-            settingsGateway.saveHiddenPatternPresetIds(hiddenBuiltInPatternPresetIds(preferences.patternPresets));
+            settingsGateway.saveHiddenPatternPresetIds(hiddenBuiltInPatternPresetIds(preferences.patternPresets), {
+              allowRestore: restorePatternPresetDefaults,
+            });
             if (restorePatternPresetDefaults) patternPresetRestoreRequestedRef.current = false;
           }
           settingsGateway.removeLegacyCustomPatternPresets();
@@ -9305,7 +9474,11 @@ export function TrainingWorkbench() {
                         }}
                       >
                         <span className="watchlist-row-main"><strong>{result.symbol}</strong><small>{result.name} · {performanceMarketLabel(resultMarket)}</small></span>
-                        <span className={hasChange ? (result.changePct >= 0 ? "up" : "down") : undefined}>{hasChange ? `${result.changePct >= 0 ? "+" : ""}${result.changePct.toFixed(2)}%` : "--"}</span>
+                        <span
+                          className={hasChange ? (result.changePct >= 0 ? "up" : "down") : undefined}
+                          title="最新交易日涨跌幅"
+                          aria-label={hasChange ? `最新交易日涨跌幅 ${result.changePct >= 0 ? "+" : ""}${result.changePct.toFixed(2)}%` : "最新交易日涨跌幅暂无数据"}
+                        >{hasChange ? `${result.changePct >= 0 ? "+" : ""}${result.changePct.toFixed(2)}%` : "--"}</span>
                         {watched && <Star className="watchlist-row-star" size={13} fill="currentColor" aria-label="已加入自选" />}
                       </button>
                     );

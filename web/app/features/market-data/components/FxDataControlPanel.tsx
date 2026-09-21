@@ -19,30 +19,30 @@ export type FxCurrencyPair = {
   id: string;
   label: string;
   dukascopySymbol?: string;
-  twelveDataSymbol?: string;
   pricePrecision?: number;
 };
 
 export const DEFAULT_FX_CURRENCY_PAIRS = [
-  { id: "EURUSD.FX", label: "EUR/USD", dukascopySymbol: "EURUSD", twelveDataSymbol: "EUR/USD", pricePrecision: 5 },
-  { id: "GBPUSD.FX", label: "GBP/USD", dukascopySymbol: "GBPUSD", twelveDataSymbol: "GBP/USD", pricePrecision: 5 },
-  { id: "USDJPY.FX", label: "USD/JPY", dukascopySymbol: "USDJPY", twelveDataSymbol: "USD/JPY", pricePrecision: 3 },
-  { id: "AUDUSD.FX", label: "AUD/USD", dukascopySymbol: "AUDUSD", twelveDataSymbol: "AUD/USD", pricePrecision: 5 },
-  { id: "USDCAD.FX", label: "USD/CAD", dukascopySymbol: "USDCAD", twelveDataSymbol: "USD/CAD", pricePrecision: 5 },
-  { id: "USDCHF.FX", label: "USD/CHF", dukascopySymbol: "USDCHF", twelveDataSymbol: "USD/CHF", pricePrecision: 5 },
+  { id: "EURUSD.FX", label: "EUR/USD", dukascopySymbol: "EURUSD", pricePrecision: 5 },
+  { id: "GBPUSD.FX", label: "GBP/USD", dukascopySymbol: "GBPUSD", pricePrecision: 5 },
+  { id: "USDJPY.FX", label: "USD/JPY", dukascopySymbol: "USDJPY", pricePrecision: 3 },
+  { id: "AUDUSD.FX", label: "AUD/USD", dukascopySymbol: "AUDUSD", pricePrecision: 5 },
+  { id: "USDCAD.FX", label: "USD/CAD", dukascopySymbol: "USDCAD", pricePrecision: 5 },
+  { id: "USDCHF.FX", label: "USD/CHF", dukascopySymbol: "USDCHF", pricePrecision: 5 },
 ] as const satisfies readonly FxCurrencyPair[];
 
 export const DEFAULT_GOLD_INSTRUMENTS = [
-  { id: "XAUUSD.GOLD", label: "XAU/USD", dukascopySymbol: "XAUUSD", twelveDataSymbol: "XAU/USD", pricePrecision: 2 },
+  { id: "XAUUSD.GOLD", label: "XAU/USD", dukascopySymbol: "XAUUSD", pricePrecision: 2 },
 ] as const satisfies readonly FxCurrencyPair[];
 
 export type FxDataControlApiPaths = {
   initialize: string;
   update: string;
+  repair: string;
   task: string;
 };
 
-export type FxTaskMode = "initialize" | "update";
+export type FxTaskMode = "initialize" | "update" | "repair";
 export type FxTaskStatus = "queued" | "running" | "paused" | "completed" | "failed" | "cancelled";
 export type FxTaskStage = "queued" | "download" | "parse" | "aggregate" | "validate" | "persist" | "completed";
 export type FxTaskAction = "pause" | "resume" | "retry" | "cancel";
@@ -54,6 +54,7 @@ export type FxQualitySummary = {
   invalidRows?: number;
   duplicateRows?: number;
   missingIntervals?: number;
+  expectedClosures?: number;
   abnormalJumps?: number;
   earliestTimestamp?: string | null;
   latestTimestamp?: string | null;
@@ -97,6 +98,10 @@ export type FxIncrementalUpdateRequest = {
   endDate?: string;
 };
 
+export type FxGapRepairRequest = {
+  pairId: string;
+};
+
 export type FxDataControlAction =
   | {
       type: "initialize";
@@ -107,6 +112,11 @@ export type FxDataControlAction =
       type: "update";
       apiPath: string;
       payload: FxIncrementalUpdateRequest;
+    }
+  | {
+      type: "repair";
+      apiPath: string;
+      payload: FxGapRepairRequest;
     }
   | {
       type: "task";
@@ -164,7 +174,7 @@ const ACTION_LABELS: Record<FxTaskAction, string> = {
   cancel: "取消",
 };
 
-type BusyAction = "initialize" | "update" | "refresh" | FxTaskAction;
+type BusyAction = "initialize" | "update" | "repair" | "refresh" | FxTaskAction;
 
 function asError(value: unknown) {
   return value instanceof Error ? value : new Error(typeof value === "string" ? value : "行情数据任务操作失败");
@@ -217,7 +227,7 @@ export function FxDataControlPanel({
   datasetLabel = "外汇",
   instrumentNoun = "货币对",
   historicalSourceLabel = "Dukascopy CSV",
-  incrementalSourceLabel = "Twelve Data REST",
+  incrementalSourceLabel = "Dukascopy Official CSV",
   disabled = false,
   onAction,
   onActionSettled,
@@ -303,7 +313,19 @@ export function FxDataControlPanel({
         ...(startDate ? { startDate } : {}),
         ...(endDate ? { endDate } : {}),
       },
-    }, "update", `${incrementalSourceLabel} 增量更新任务已提交。`);
+    }, "update", `${incrementalSourceLabel} 每日增量更新任务已提交。`);
+  };
+
+  const repair = () => {
+    if (!effectivePairId) {
+      setNotice(`请先传入至少一个可用${instrumentNoun}。`);
+      return;
+    }
+    void dispatch({
+      type: "repair",
+      apiPath: apiPaths.repair,
+      payload: { pairId: effectivePairId },
+    }, "repair", `${incrementalSourceLabel} 缺口修复任务已提交。`);
   };
 
   const taskAction = (action: FxTaskAction) => {
@@ -330,6 +352,7 @@ export function FxDataControlPanel({
   const canStart = !disabled && !busy && !taskIsActive;
   const canInitialize = canStart && Boolean(effectivePairId) && rangeIsValid;
   const canUpdate = canStart && Boolean(effectivePairId);
+  const canRepair = canStart && Boolean(effectivePairId);
   const taskActionDisabled = disabled || busy;
   const taskClassName = currentTask?.status === "completed"
     ? "ready"
@@ -343,7 +366,7 @@ export function FxDataControlPanel({
     <section className="settings-section provider-settings-section" aria-labelledby={titleId} aria-busy={busy}>
       <div className="settings-section-head">
         <strong id={titleId}>{datasetLabel}数据维护</strong>
-        <span>{historicalSourceLabel} 建立历史基准，{incrementalSourceLabel} 负责后续增量；组件只提交动作，不直接实现数据层。</span>
+        <span>{historicalSourceLabel} 建立历史基准，{incrementalSourceLabel} 负责每日增量和缺口修复；两类任务分开执行。</span>
       </div>
 
       <div className="provider-setting-card">
@@ -396,7 +419,10 @@ export function FxDataControlPanel({
             <CloudDownload size={14} />初始化历史数据
           </button>
           <button type="button" disabled={!canUpdate} onClick={update}>
-            <RefreshCw size={14} />增量更新
+            <RefreshCw size={14} />每日增量更新
+          </button>
+          <button type="button" disabled={!canRepair} onClick={repair}>
+            <RefreshCw size={14} />修复缺口
           </button>
           {onRefreshStatus && (
             <button type="button" disabled={disabled || busy} onClick={refreshStatus}>
@@ -406,17 +432,18 @@ export function FxDataControlPanel({
         </div>
 
         {!pairs.length && <div className="setup-warning">当前没有可用{instrumentNoun}，请由主组件传入 currencyPairs。</div>}
-        {!rangeIsValid && <small className="provider-setting-help">历史初始化需要有效的日期范围；增量更新日期可留空，留空时由服务端从最后一根完整 M1 K 线继续。</small>}
+        <small className="provider-setting-help">每日增量只从最后一根完整 M1 K 线继续到 Dukascopy 当前可用的完整交易日；需要扫描历史断档时请单独使用“修复缺口”。</small>
+        {!rangeIsValid && <small className="provider-setting-help">历史初始化需要有效的日期范围。</small>}
       </div>
 
       <div className={`market-maintenance-card ${taskClassName}`}>
         <div className="market-maintenance-icon"><Database size={22} /></div>
         <div>
-          <span>FX DATA TASK · {currentTask?.mode === "update" ? "INCREMENTAL" : "HISTORY"}</span>
+          <span>FX DATA TASK · {currentTask?.mode === "update" ? "INCREMENTAL" : currentTask?.mode === "repair" ? "GAP REPAIR" : "HISTORY"}</span>
           <strong>{currentTask
             ? `${currentTask.pairLabel ?? selectedPair?.label ?? currentTask.pairId} · ${getTaskStatusLabel(currentTask)}`
             : `尚未启动${datasetLabel}任务`}</strong>
-          <small>{currentTask?.error || currentTask?.message || `选择${instrumentNoun}和日期后，可以创建 ${historicalSourceLabel} 历史初始化或 ${incrementalSourceLabel} 增量任务。`}</small>
+          <small>{currentTask?.error || currentTask?.message || `选择${instrumentNoun}和日期后，可以创建 ${historicalSourceLabel} 历史初始化、${incrementalSourceLabel} 每日增量或缺口修复任务。`}</small>
 
           {currentTask && (
             <>
@@ -485,7 +512,8 @@ export function FxDataControlPanel({
             <span><strong>{formatCount(quality?.insertedBars)}</strong><small>写入 K 线</small></span>
             <span><strong>{formatCount(quality?.invalidRows)}</strong><small>非法行</small></span>
             <span><strong>{formatCount(quality?.duplicateRows)}</strong><small>重复行</small></span>
-            <span><strong>{formatCount(quality?.missingIntervals)}</strong><small>缺口</small></span>
+            <span><strong>{formatCount(quality?.missingIntervals)}</strong><small>可修复缺口</small></span>
+            <span><strong>{formatCount(quality?.expectedClosures)}</strong><small>正常闭市</small></span>
           </div>
           <small className="maintenance-task-summary">
             来源：{quality?.source ?? "—"}

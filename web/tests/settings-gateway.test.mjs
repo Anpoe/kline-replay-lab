@@ -100,8 +100,21 @@ test("keeps a local hidden-pattern shadow across legacy and synced preference re
 
   gateway.saveHiddenPatternPresetIds([hiddenId, "missing", hiddenId]);
   assert.deepEqual(JSON.parse(storage.getItem(settingsStorageKeys.hiddenPatternPresetIds)), [hiddenId]);
-  gateway.saveHiddenPatternPresetIds([]);
+  gateway.saveHiddenPatternPresetIds([], { allowRestore: true });
   assert.equal(storage.getItem(settingsStorageKeys.hiddenPatternPresetIds), null);
+});
+
+test("a stale window cannot clear another window's local hidden choices", () => {
+  const storage = createMemoryStorage();
+  const first = createSettingsStorageGateway(storage);
+  const second = createSettingsStorageGateway(storage);
+  const ids = defaultPatternPresets.slice(0, 2).map((preset) => preset.id);
+  first.saveHiddenPatternPresetIds([ids[0]]);
+  second.saveHiddenPatternPresetIds([ids[1]]);
+  first.saveHiddenPatternPresetIds([]);
+  assert.deepEqual(first.loadHiddenPatternPresetIds().sort(), ids.sort());
+  second.saveHiddenPatternPresetIds([ids[1]], { allowRestore: true });
+  assert.deepEqual(first.loadHiddenPatternPresetIds(), [ids[1]]);
 });
 
 test("cleans a malformed hidden-pattern shadow without clearing other preferences", () => {

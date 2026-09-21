@@ -7,12 +7,11 @@ import {
 import { loadProviderSecrets } from "../../lib/providerCredentials";
 
 type ProviderSettingsInput = {
-  provider?: "baostock" | "tushare" | "alpaca" | "tdxquant" | "twelvedata" | "dukascopy";
+  provider?: "baostock" | "tushare" | "alpaca" | "tdxquant" | "dukascopy";
   tushareToken?: string;
   alpacaKeyId?: string;
   alpacaSecretKey?: string;
   tdxQuantEndpoint?: string;
-  twelveDataApiKey?: string;
   dukascopyEndpoint?: string;
   autoUpdateEnabled?: unknown;
   autoUpdateScheduledEnabled?: unknown;
@@ -57,11 +56,6 @@ export async function GET() {
         configured: Boolean(tdxQuantEndpoint),
         source: sources.tdxquant,
         endpoint: tdxQuantEndpoint,
-      },
-      twelvedata: {
-        configured: Boolean(secrets.twelveDataApiKey),
-        source: sources.twelvedata,
-        hint: hint(secrets.twelveDataApiKey),
       },
       dukascopy: {
         configured: true,
@@ -138,10 +132,6 @@ export async function PUT(request: Request) {
       return Response.json({ error: "TdxQuant 只能连接本机行情服务" }, { status: 400 });
     }
     credentials = { tdxQuantEndpoint: endpoint };
-  } else if (payload.provider === "twelvedata") {
-    const apiKey = payload.twelveDataApiKey?.trim();
-    if (!apiKey) return Response.json({ error: "请填写 Twelve Data 访问密钥" }, { status: 400 });
-    credentials = { twelveDataApiKey: apiKey };
   } else if (payload.provider === "dukascopy") {
     const endpoint = payload.dukascopyEndpoint?.trim();
     if (!endpoint) return Response.json({ error: "请填写 Dukascopy CSV 服务地址" }, { status: 400 });
@@ -181,7 +171,7 @@ export async function PUT(request: Request) {
 export async function DELETE(request: Request) {
   await ensureSchema();
   const provider = new URL(request.url).searchParams.get("provider");
-  if (provider !== "tushare" && provider !== "alpaca" && provider !== "tdxquant" && provider !== "twelvedata" && provider !== "dukascopy") {
+  if (provider !== "tushare" && provider !== "alpaca" && provider !== "tdxquant" && provider !== "dukascopy") {
     return Response.json({ error: "不支持的数据源" }, { status: 400 });
   }
   await getRawDb()
@@ -195,8 +185,6 @@ export async function DELETE(request: Request) {
     ? Boolean(secrets.alpacaKeyId && secrets.alpacaSecretKey)
       : provider === "tdxquant"
         ? Boolean(tdxQuantEndpoint)
-        : provider === "twelvedata"
-          ? Boolean(secrets.twelveDataApiKey)
-          : true;
+        : true;
   return Response.json({ provider, configured, source: sources[provider] });
 }

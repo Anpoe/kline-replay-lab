@@ -12,8 +12,7 @@ test("黄金目录解析结果可供数据任务使用", () => {
   assert.match(serviceSource, /market === \"GOLD\"/);
 });
 
-test("创建任务使用跨市场 resolver 并保存两个黄金供应商代码", () => {
+test("创建任务使用跨市场 resolver 并保存 Dukascopy 品种代码", () => {
   assert.match(serviceSource, /getMarketInstrumentDefinition\(input\.pairId\)/);
   assert.match(serviceSource, /instrument\.dukascopySymbol/);
-  assert.match(serviceSource, /instrument\.twelveDataSymbol/);
 });

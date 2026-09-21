@@ -840,9 +840,15 @@ export class BaoStockLocalStore {
     const requested = new Set(instrumentIds.map((value) => String(value)).filter(Boolean));
     const output = [];
     for (const instrument of manifest.instruments.filter((item) => requested.has(item.id))) {
-      const latest = this.ensureDb().prepare(`SELECT timestamp, open, close
-        FROM candles WHERE instrument_id = ? AND adjustment_type = ?
-        ORDER BY timestamp DESC LIMIT 1`).get(instrument.id, BAOSTOCK_ADJUSTMENT_TYPE);
+      const latest = this.ensureDb().prepare(`SELECT latest.timestamp, latest.open, latest.close,
+          (SELECT previous.close FROM candles previous
+            WHERE previous.instrument_id = latest.instrument_id
+              AND previous.adjustment_type = latest.adjustment_type
+              AND previous.timestamp < latest.timestamp
+            ORDER BY previous.timestamp DESC LIMIT 1) AS previousClose
+        FROM candles latest
+        WHERE latest.instrument_id = ? AND latest.adjustment_type = ?
+        ORDER BY latest.timestamp DESC LIMIT 1`).get(instrument.id, BAOSTOCK_ADJUSTMENT_TYPE);
       if (!latest) continue;
       const after = Number(entryAfter?.[instrument.id]);
       const entry = Number.isFinite(after)
@@ -850,12 +856,27 @@ export class BaoStockLocalStore {
             WHERE instrument_id = ? AND adjustment_type = ? AND timestamp > ?
             ORDER BY timestamp ASC LIMIT 1`).get(instrument.id, BAOSTOCK_ADJUSTMENT_TYPE, after)
         : null;
+      const entryBars = Number.isFinite(after)
+        ? this.ensureDb().prepare(`SELECT timestamp, open, close FROM candles
+            WHERE instrument_id = ? AND adjustment_type = ? AND timestamp > ?
+            ORDER BY timestamp ASC LIMIT 64`).all(instrument.id, BAOSTOCK_ADJUSTMENT_TYPE, after)
+        : [];
       output.push({
         instrumentId: instrument.id,
         timestamp: Number(latest.timestamp),
         open: Number(latest.open),
         close: Number(latest.close),
+        ...(Number.isFinite(Number(latest.previousClose)) && Number(latest.previousClose) > 0
+          ? { previousClose: Number(latest.previousClose) }
+          : {}),
         ...(entry ? { entryTimestamp: Number(entry.timestamp), entryOpen: Number(entry.open) } : {}),
+        ...(entryBars.length ? {
+          entryBars: entryBars.map((bar) => ({
+            timestamp: Number(bar.timestamp),
+            open: Number(bar.open),
+            close: Number(bar.close),
+          })),
+        } : {}),
       });
     }
     return output;

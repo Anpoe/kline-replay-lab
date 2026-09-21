@@ -12,6 +12,8 @@ import {
  */
 export type LiveOrderPrice = Pick<ExecutionBar, "timestamp" | "open" | "close">;
 
+export type LiveEntryBar = LiveOrderPrice;
+
 export function resolveLivePendingOrderPrice(
   order: Pick<EngineOrder, "action" | "side" | "qty" | "createdAt" | "positionId" | "orderType" | "triggerPrice" | "executeAtTimestamp">,
   price: LiveOrderPrice,
@@ -24,4 +26,33 @@ export function resolveLivePendingOrderPrice(
     low: price.open,
     close: price.close,
   });
+}
+
+/**
+ * Find the first complete historical bar after an order was created that
+ * satisfies the shared market/limit/stop rules.  Historical refreshes may
+ * return bars newest-first, so ordering is normalized before evaluation.
+ */
+export function findLiveOrderFill(
+  order: Parameters<typeof resolveLivePendingOrderPrice>[0],
+  bars: LiveEntryBar[],
+) {
+  const candidates = bars
+    .filter((bar) => (
+      Number.isFinite(Number(bar.timestamp))
+      && Number.isFinite(Number(bar.open))
+      && Number.isFinite(Number(bar.close))
+      && Number(bar.timestamp) > Number(order.createdAt)
+    ))
+    .map((bar) => ({
+      timestamp: Number(bar.timestamp),
+      open: Number(bar.open),
+      close: Number(bar.close),
+    }))
+    .sort((left, right) => left.timestamp - right.timestamp);
+  for (const bar of candidates) {
+    const fillPrice = resolveLivePendingOrderPrice(order, bar);
+    if (fillPrice != null) return { bar, fillPrice };
+  }
+  return null;
 }

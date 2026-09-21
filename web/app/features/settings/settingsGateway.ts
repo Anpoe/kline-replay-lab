@@ -153,8 +153,11 @@ export function createSettingsStorageGateway(storage: SettingsStorage) {
     }
   };
 
-  const saveHiddenPatternPresetIds = (presetIds: string[]) => {
-    const normalized = normalizeHiddenPatternPresetIds(presetIds);
+  const saveHiddenPatternPresetIds = (presetIds: string[], options?: { allowRestore?: boolean }) => {
+    const normalized = normalizeHiddenPatternPresetIds([
+      ...(options?.allowRestore ? [] : loadHiddenPatternPresetIds()),
+      ...presetIds,
+    ]);
     if (normalized.length) {
       storage.setItem(settingsStorageKeys.hiddenPatternPresetIds, JSON.stringify(normalized));
     } else {

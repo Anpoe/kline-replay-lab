@@ -12,7 +12,7 @@ import {
   resolveFxInstrument,
 } from "../app/lib/fxDataContracts.ts";
 
-test("标准化 FX 内部品种并保留供应商映射", () => {
+test("标准化 FX 内部品种并保留 Dukascopy 映射", () => {
   assert.equal(normalizeFxInstrument("eur/usd"), "EURUSD.FX");
   assert.equal(normalizeFxInstrument("USDJPY.FX"), "USDJPY.FX");
   assert.equal(normalizeFxInstrument("not-a-forex-symbol"), null);
@@ -20,7 +20,6 @@ test("标准化 FX 内部品种并保留供应商映射", () => {
   const instrument = resolveFxInstrument("GBP/USD");
   assert.equal(instrument?.id, "GBPUSD.FX");
   assert.equal(instrument?.dukascopySymbol, "GBPUSD");
-  assert.equal(instrument?.twelveDataSymbol, "GBP/USD");
   assert.equal(instrument?.pricePrecision, 5);
 });
 
@@ -79,7 +78,7 @@ test("历史边界包含 Dukascopy 最后一根，增量起点排他且不回退
   assert.equal(calculateFxIncrementStart(boundary, {
     instrumentId: "EURUSD.FX",
     timeframe: "1m",
-    source: "twelvedata",
+    source: "dukascopy",
     lastCompleteTimestamp: first,
     nextStartTimestamp: first,
     cursor: null,

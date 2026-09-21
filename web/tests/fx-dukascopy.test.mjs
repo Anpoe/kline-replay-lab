@@ -9,6 +9,7 @@ import {
   aggregateCandleChunks,
   aggregateM1To5m,
   findFxCandleGaps,
+  isExpectedDukascopyClosureGap,
 } from "../app/lib/fx/dukascopyAggregation.ts";
 import { parseDukascopyCsv } from "../app/lib/fx/dukascopyCsv.ts";
 
@@ -174,4 +175,55 @@ test("周末闭市被标记为 weekend，工作日断档才是普通 missing", (
   const workdayGaps = findFxCandleGaps([candle(mondayStart, 10), candle(mondayStart + 10 * 60_000, 11)], "5m");
   assert.equal(workdayGaps[0].kind, "missing");
   assert.equal(workdayGaps[0].missingBuckets, 1);
+});
+
+test("Dukascopy 日常维护和提前收市不作为可修复缺口", () => {
+  assert.equal(
+    isExpectedDukascopyClosureGap(
+      Date.parse("2026-08-25T20:59:00Z"),
+      Date.parse("2026-08-25T22:00:00Z"),
+      "1m",
+    ),
+    true,
+  );
+  assert.equal(
+    isExpectedDukascopyClosureGap(
+      Date.parse("2026-09-07T18:28:00Z"),
+      Date.parse("2026-09-07T22:00:00Z"),
+      "1m",
+    ),
+    true,
+  );
+  assert.equal(
+    isExpectedDukascopyClosureGap(
+      Date.parse("2026-09-08T10:00:00Z"),
+      Date.parse("2026-09-08T12:00:00Z"),
+      "1m",
+    ),
+    false,
+  );
+  assert.equal(
+    isExpectedDukascopyClosureGap(
+      Date.parse("2026-08-25T20:55:00Z"),
+      Date.parse("2026-08-25T22:00:00Z"),
+      "5m",
+    ),
+    true,
+  );
+  assert.equal(
+    isExpectedDukascopyClosureGap(
+      Date.parse("2026-08-21T20:55:00Z"),
+      Date.parse("2026-08-23T22:00:00Z"),
+      "5m",
+    ),
+    true,
+  );
+  assert.equal(
+    isExpectedDukascopyClosureGap(
+      Date.parse("2026-08-25T23:55:00Z"),
+      Date.parse("2026-09-13T22:00:00Z"),
+      "5m",
+    ),
+    false,
+  );
 });

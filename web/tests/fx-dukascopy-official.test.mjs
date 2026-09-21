@@ -42,9 +42,15 @@ function candlePayload() {
 
 test("official client resolves Jetta config, decodes delta candles, and reuses the CSV parser", async () => {
   const requested = [];
-  const fetcher = async (url) => {
+  const dataOrigins = [];
+  const dataCaches = [];
+  const fetcher = async (url, init) => {
     const parsed = new URL(url);
     requested.push(parsed.toString());
+    if (parsed.pathname.startsWith("/v1/")) {
+      dataOrigins.push(new Headers(init?.headers).get("origin"));
+      dataCaches.push(init?.cache);
+    }
     if (parsed.pathname === "/en/config.json") {
       return jsonResponse({ JETTA_SERVER_URL: "https://jetta.test.dukascopy.com" });
     }
@@ -71,6 +77,26 @@ test("official client resolves Jetta config, decodes delta candles, and reuses t
   ]);
   assert.equal(result.candles[1].open, 1.1001);
   assert.equal(result.candles[0].volume, 1_000_000);
+  assert.ok(dataOrigins.length >= 2);
+  assert.ok(dataOrigins.every((origin) => origin === "https://widgets.dukascopy.com"));
+  assert.ok(dataCaches.every((cache) => cache === "no-store"));
+});
+
+test("official client negotiates gzip explicitly when the runtime does not add Accept-Encoding", async () => {
+  const client = new DukascopyOfficialClient({
+    serverUrl: "https://jetta.dukascopy.com",
+    maxAttempts: 1,
+    fetcher: async (url, init) => {
+      if (new URL(url).pathname.includes("/instruments/")) return jsonResponse(instrumentPayload());
+      if (new Headers(init?.headers).get("accept-encoding") !== "gzip") {
+        return jsonResponse({ error: "Too Many Requests" }, 429);
+      }
+      return jsonResponse(candlePayload());
+    },
+  });
+
+  const result = await client.downloadAndParseCsv({ instrument: "EURUSD", start: "2026-01-05", end: "2026-01-05" });
+  assert.equal(result.candles.length, 3);
 });
 
 test("official client uses the XAU-USD instrument path for gold", async () => {
@@ -100,6 +126,31 @@ test("official client uses the XAU-USD instrument path for gold", async () => {
   assert.equal(result.report.accepted, 3);
   assert.ok(requested.includes("/v1/instruments/XAU-USD"));
   assert.ok(requested.includes("/v1/candles/minute/XAU-USD/BID/2026/1/5"));
+});
+
+test("official client prefers the canonical hyphenated FX path over a compact metadata code", async () => {
+  const requested = [];
+  const client = new DukascopyOfficialClient({
+    serverUrl: "https://jetta.dukascopy.com",
+    fetcher: async (url) => {
+      const parsed = new URL(url);
+      requested.push(parsed.pathname);
+      if (parsed.pathname === "/v1/instruments/EUR-USD") {
+        return jsonResponse({ code: "EURUSD", histories: [{ period: "MINUTE", from: firstMinute }] });
+      }
+      if (parsed.pathname === "/v1/candles/minute/EUR-USD/BID/2026/1/5") return jsonResponse(candlePayload());
+      return jsonResponse({ error: "not found" }, 404);
+    },
+  });
+
+  const result = await client.downloadAndParseCsv({
+    instrument: "EURUSD",
+    start: "2026-01-05",
+    end: "2026-01-05",
+  });
+
+  assert.equal(result.report.accepted, 3);
+  assert.equal(requested.filter((path) => path.includes("/candles/"))[0], "/v1/candles/minute/EUR-USD/BID/2026/1/5");
 });
 
 test("official client reports an empty range instead of treating pre-history as a provider failure", async () => {
@@ -153,6 +204,47 @@ test("official client treats a too-late final day as an empty range", async () =
   assert.equal(result.candles.length, 3);
 });
 
+test("official client skips the Saturday closure for FX without skipping Sunday open", async () => {
+  const requested = [];
+  const completed = [];
+  const client = new DukascopyOfficialClient({
+    serverUrl: "https://jetta.dukascopy.com",
+    dailyConcurrency: 1,
+    fetcher: async (url) => {
+      const parsed = new URL(url);
+      if (parsed.pathname === "/v1/instruments/EUR-USD") return jsonResponse(instrumentPayload());
+      if (parsed.pathname.startsWith("/v1/candles/minute/EUR-USD/BID/2026/1/")) {
+        requested.push(parsed.pathname);
+        const day = Number(parsed.pathname.split("/").at(-1));
+        return jsonResponse({
+          data: [{
+            timestamp: Date.UTC(2026, 0, day),
+            open: 1.1,
+            high: 1.2,
+            low: 1,
+            close: 1.15,
+            volume: 1,
+          }],
+        });
+      }
+      return jsonResponse({ error: "not found" }, 404);
+    },
+  });
+
+  const result = await client.downloadAndParseCsv({
+    instrument: "EURUSD",
+    start: "2026-01-09",
+    end: "2026-01-11",
+    onDayComplete: (done, total) => completed.push([done, total]),
+  });
+
+  assert.equal(result.candles.length, 2);
+  assert.ok(requested.some((path) => path.endsWith("/9")));
+  assert.ok(!requested.some((path) => path.endsWith("/10")));
+  assert.ok(requested.some((path) => path.endsWith("/11")));
+  assert.deepEqual(completed, [[1, 3], [2, 3], [3, 3]]);
+});
+
 test("formats the built-in adapter result as a normal CSV response", () => {
   const csv = formatDukascopyCsv([{
     timestamp: firstMinute,
@@ -197,16 +289,18 @@ test("official client prefers production when widget config advertises a test ho
 
 test("official client automatically retries a transient daily download failure", async () => {
   let candleAttempts = 0;
+  const candleOrigins = [];
   const client = new DukascopyOfficialClient({
     serverUrl: "https://jetta.dukascopy.com",
     maxAttempts: 2,
     retryBaseDelayMs: 0,
     dailyConcurrency: 1,
-    fetcher: async (url) => {
+    fetcher: async (url, init) => {
       const parsed = new URL(url);
       if (parsed.pathname === "/v1/instruments/EUR-USD") return jsonResponse(instrumentPayload());
       if (parsed.pathname === "/v1/candles/minute/EUR-USD/BID/2026/1/5") {
         candleAttempts += 1;
+        candleOrigins.push(new Headers(init?.headers).get("origin"));
         if (candleAttempts === 1) throw new Error("Network connection lost.");
         return jsonResponse(candlePayload());
       }
@@ -221,6 +315,10 @@ test("official client automatically retries a transient daily download failure",
   });
 
   assert.equal(candleAttempts, 2);
+  assert.deepEqual(candleOrigins, [
+    "https://widgets.dukascopy.com",
+    "https://widgets.dukascopy.com",
+  ]);
   assert.equal(result.report.accepted, 3);
 });
 

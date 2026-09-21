@@ -4,7 +4,7 @@
 
 当前版本支持 A 股、美股、外汇和现货黄金相关训练场景，并提供示例数据、逐根回放、模拟下单、仓位管理和训练记录功能。
 
-> 当前版本：`v0.1.6`<br>
+> 当前版本：`v0.1.7`<br>
 > [下载最新版本（GitHub Releases）](https://github.com/Anpoe/kline-replay-lab/releases/latest)
 
 ## 给普通用户：三分钟开始使用
@@ -13,7 +13,7 @@
 
 在 [Releases](https://github.com/Anpoe/kline-replay-lab/releases) 页面下载 Windows 便携版压缩包：
 
-`KLineTrainingCamp-Portable-v0.1.6.zip`
+`KLineTrainingCamp-Portable.zip`
 
 请将压缩包完整解压到一个独立文件夹后再运行。建议使用你有读写权限的目录，例如：
 
@@ -136,7 +136,7 @@
 
 - A 股：BaoStock（默认前复权）、通达信官方不复权日线（支持实时日线更新与权息标记）、TdxQuant（可复权服务）
 - 美股：Alpaca 等
-- 外汇和现货黄金：Twelve Data、Dukascopy 等
+- 外汇和现货黄金：Dukascopy
 
 不同服务商的权限、频率限制和数据覆盖范围不同，请以服务商的官方说明为准。接口密钥只应填写在自己的本地环境中，不要写进代码、截图、Issue 或仓库。
 

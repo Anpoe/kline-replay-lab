@@ -53,16 +53,22 @@ export function latestClosedCnDate(nowProvider = () => new Date(), format = "iso
 }
 
 /**
- * Return a date only when a TDX real-time quote is safe to treat as a closed
- * daily bar. Before the close, the quote may belong to the current session or
- * may still be yesterday's snapshot, so it must not be stamped as a date.
+ * Return the latest date for which a TDX real-time quote is safe to treat as a
+ * closed daily bar. Before a weekday close, the quote may belong to the
+ * current session or may still be yesterday's snapshot, so it must not be
+ * stamped as a date. On weekends, the latest completed weekday remains safe.
  */
 export function latestClosedRealtimeDate(nowProvider = () => new Date(), format = "iso") {
   const values = cnNowParts(nowProvider);
-  const timestamp = Date.UTC(Number(values.year), Number(values.month) - 1, Number(values.day));
+  let timestamp = Date.UTC(Number(values.year), Number(values.month) - 1, Number(values.day));
   const weekday = new Date(timestamp).getUTCDay();
   const minutes = Number(values.hour) * 60 + Number(values.minute);
-  if (weekday === 0 || weekday === 6 || minutes < CN_MARKET_CLOSE_MINUTES) return null;
+  if (weekday === 0 || weekday === 6) {
+    timestamp -= (weekday === 0 ? 2 : 1) * DAY_MS;
+    while ([0, 6].includes(new Date(timestamp).getUTCDay())) timestamp -= DAY_MS;
+    return formatDate(timestamp, format);
+  }
+  if (minutes < CN_MARKET_CLOSE_MINUTES) return null;
   return formatDate(timestamp, format);
 }
 

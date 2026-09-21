@@ -41,11 +41,17 @@ export type LivePriceRefreshPayload = {
     timestamp: number;
     open: number;
     close: number;
+    previousClose?: number;
     realtime?: boolean;
     dailyBarClosed?: boolean;
     quoteTimestamp?: number;
     volume?: number | null;
     turnover?: number | null;
+    entryBars?: Array<{
+      timestamp: number;
+      open: number;
+      close: number;
+    }>;
   }>;
 };
 
@@ -114,17 +120,36 @@ export function createLiveGateway(fetcher: LiveGatewayFetch) {
     true,
   );
 
-  const refreshPrices = (market: LiveScanMarket, instrumentIds: string[], signal?: AbortSignal) => requestJson<LivePriceRefreshPayload>(
-    fetcher,
-    "/api/live-scan",
-    withSignal({
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ action: "refresh", market, instrumentIds }),
-    }, signal),
-    `${market === "CN" ? "A 股" : "美股"}最新价同步失败`,
-    true,
-  );
+  const refreshPrices = (
+    market: LiveScanMarket,
+    instrumentIds: string[],
+    entryAfterOrSignal: Record<string, number> | AbortSignal = {},
+    signal?: AbortSignal,
+  ) => {
+    // Preserve the old third-argument AbortSignal contract for callers that
+    // do not need historical entry bars.
+    const legacySignal: AbortSignal | undefined = "aborted" in entryAfterOrSignal
+      ? entryAfterOrSignal as AbortSignal
+      : undefined;
+    const entryAfter = legacySignal ? {} : entryAfterOrSignal;
+    const requestSignal = signal ?? legacySignal;
+    return requestJson<LivePriceRefreshPayload>(
+      fetcher,
+      "/api/live-scan",
+      withSignal({
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          action: "refresh",
+          market,
+          instrumentIds,
+          ...(Object.keys(entryAfter).length ? { entryAfter } : {}),
+        }),
+      }, requestSignal),
+      `${market === "CN" ? "A 股" : "美股"}最新价同步失败`,
+      true,
+    );
+  };
 
   return { loadState, saveState, scan, refreshPrices };
 }

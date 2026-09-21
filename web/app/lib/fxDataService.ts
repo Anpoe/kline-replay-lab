@@ -16,6 +16,7 @@ import {
   aggregateM1To5m,
   bucketStartTimestamp,
   findFxCandleGaps,
+  isExpectedDukascopyClosureGap,
   type FxCandle,
 } from "./fx/dukascopyAggregation.ts";
 import {
@@ -27,13 +28,9 @@ import {
   type DukascopyOfficialParseResult,
 } from "./fx/dukascopyOfficialClient.ts";
 import type { DukascopyQualityReport } from "./fx/dukascopyCsv.ts";
-import {
-  fetchTwelveDataOneMinuteChunk,
-  type TwelveDataCursor,
-} from "./fx/twelveDataClient.ts";
 import { loadProviderSecrets } from "./providerCredentials.ts";
 
-export type FxTaskMode = "initialize" | "update";
+export type FxTaskMode = "initialize" | "update" | "repair";
 export type FxTaskStatus = "queued" | "running" | "paused" | "completed" | "failed" | "cancelled";
 export type FxTaskStage = "queued" | "download" | "parse" | "aggregate" | "validate" | "persist" | "snapshot" | "completed";
 
@@ -44,7 +41,6 @@ export type FxTaskRow = {
   pairLabel: string;
   vendorSymbol: string;
   dukascopySymbol: string;
-  twelveDataSymbol: string;
   startDate: string;
   endDate: string;
   rawTimeframe: string;
@@ -90,9 +86,10 @@ type FxTaskCreateInput = {
 };
 
 type FxTaskCursor = {
-  twelveData?: TwelveDataCursor;
-  twelveDataInterval?: "1min";
   historyNextStartDate?: string;
+  /** Stable plan and first uncommitted UTC day, independent of the last bar. */
+  incrementalStartTimestamp?: number;
+  incrementalNextStartDate?: string;
   officialMinuteFrom?: number | null;
   historyBoundary?: number | null;
   lastCompleteTimestamp?: number | null;
@@ -106,6 +103,7 @@ type QualitySummary = {
   invalidRows: number;
   duplicateRows: number;
   missingIntervals: number;
+  expectedClosures: number;
   abnormalJumps: number;
   earliestTimestamp: string | null;
   latestTimestamp: string | null;
@@ -121,15 +119,35 @@ const FX_DERIVED_TIMEFRAME_LABELS = TIMEFRAME_IDS
   .map((timeframe) => timeframeLabel(timeframe))
   .join("、");
 const FX_SOURCE_DUKASCOPY = "dukascopy";
-const FX_SOURCE_TWELVE_DATA = "twelvedata";
 const DEFAULT_DATE = "1970-01-01";
 // Keep each browser-driven request small enough that local D1 can release its
 // page cache between chunks. Large M1 ranges can otherwise make the UI and
 // status endpoint appear offline while a multi-gigabyte database is writing.
 const HISTORICAL_CHUNK_DAYS = 7;
 const HIGHER_TIMEFRAME_LOOKBACK_DAYS = 42;
+const DUKASCOPY_INCREMENTAL_OVERLAP_MINUTES = 3;
+// Commit one complete UTC day at a time. A provider 429 must not discard
+// earlier days in the same request; the next retry should resume at the
+// first uncommitted date instead of downloading the old dates again.
+const DUKASCOPY_INCREMENTAL_CHUNK_DAYS = 1;
+// The explicit gap-repair action scans a bounded recent window so it can repair
+// an internal source or derived-range gap without replaying the entire history.
+const DUKASCOPY_GAP_LOOKBACK_DAYS = 30;
 const activeFxTaskRuns = new Set<string>();
-const sharedDukascopyOfficialClient = new DukascopyOfficialClient();
+// FX and GOLD share the same official adapter and conservative request policy.
+// Historical initialization, daily updates, and gap repair all use this
+// client so currency pairs follow the same 429-safe Dukascopy workflow as gold.
+const sharedDukascopyOfficialClient = new DukascopyOfficialClient({
+  dailyConcurrency: 1,
+  // Jetta starts returning 429 after roughly ten daily files per minute.
+  // Keep a small safety margin instead of consuming the retry budget in a
+  // burst and making the whole update appear stuck.
+  dailyRequestIntervalMs: 6_500,
+  maxAttempts: 4,
+  // A 429 from Jetta has no Retry-After header and can outlive a short
+  // exponential retry window. Give the edge cache time to release the limit.
+  retryBaseDelayMs: 15_000,
+});
 
 function nowIso() {
   return new Date().toISOString();
@@ -209,7 +227,6 @@ export function getFxCatalog(market: "FX" | "GOLD" = "FX") {
     id: instrument.id,
     label: instrument.displayName,
     dukascopySymbol: instrument.dukascopySymbol,
-    twelveDataSymbol: instrument.twelveDataSymbol,
     pricePrecision: instrument.pricePrecision,
   }));
 }
@@ -218,7 +235,7 @@ export async function getFxTask(db: D1Database, taskId?: string, pairId?: string
   const query = taskId
     ? `SELECT id, mode, instrument_id AS instrumentId, pair_label AS pairLabel,
         vendor_symbol AS vendorSymbol, dukascopy_symbol AS dukascopySymbol,
-        twelve_data_symbol AS twelveDataSymbol, start_date AS startDate, end_date AS endDate,
+        start_date AS startDate, end_date AS endDate,
         raw_timeframe AS rawTimeframe, target_timeframes_json AS targetTimeframesJson,
         keep_raw_csv AS keepRawCsv, status, stage, stage_progress AS stageProgress,
         progress_json AS progressJson, cursor_json AS cursorJson,
@@ -229,7 +246,7 @@ export async function getFxTask(db: D1Database, taskId?: string, pairId?: string
     : pairId
       ? `SELECT id, mode, instrument_id AS instrumentId, pair_label AS pairLabel,
           vendor_symbol AS vendorSymbol, dukascopy_symbol AS dukascopySymbol,
-          twelve_data_symbol AS twelveDataSymbol, start_date AS startDate, end_date AS endDate,
+          start_date AS startDate, end_date AS endDate,
           raw_timeframe AS rawTimeframe, target_timeframes_json AS targetTimeframesJson,
           keep_raw_csv AS keepRawCsv, status, stage, stage_progress AS stageProgress,
           progress_json AS progressJson, cursor_json AS cursorJson,
@@ -239,7 +256,7 @@ export async function getFxTask(db: D1Database, taskId?: string, pairId?: string
           FROM fx_data_tasks WHERE instrument_id = ? ORDER BY updated_at DESC LIMIT 1`
       : `SELECT id, mode, instrument_id AS instrumentId, pair_label AS pairLabel,
           vendor_symbol AS vendorSymbol, dukascopy_symbol AS dukascopySymbol,
-          twelve_data_symbol AS twelveDataSymbol, start_date AS startDate, end_date AS endDate,
+          start_date AS startDate, end_date AS endDate,
           raw_timeframe AS rawTimeframe, target_timeframes_json AS targetTimeframesJson,
           keep_raw_csv AS keepRawCsv, status, stage, stage_progress AS stageProgress,
           progress_json AS progressJson, cursor_json AS cursorJson,
@@ -257,12 +274,13 @@ export async function createFxTask(db: D1Database, mode: FxTaskMode, input: FxTa
   const instrument = getMarketInstrumentDefinition(input.pairId);
   if (!instrument) throw new Error("请选择受支持的外汇或黄金品种");
   return withMarketDataWrite(instrument.market, async () => {
-  if (mode === "update") {
+  const isIncrementalMode = mode === "update" || mode === "repair";
+  if (isIncrementalMode) {
     const coverage = await db.prepare("SELECT 1 AS found FROM candle_coverage WHERE instrument_id = ? AND bar_count > 0 AND source <> 'sample' LIMIT 1")
       .bind(instrument.id).first();
     if (!coverage) throw new Error("该品种还没有历史行情，请先初始化后再更新。");
   }
-  const startDate = dateOnly(input.startDate, mode === "update" ? daysAgoDate(7) : DEFAULT_DATE);
+  const startDate = dateOnly(input.startDate, isIncrementalMode ? daysAgoDate(7) : DEFAULT_DATE);
   const endDate = dateOnly(input.endDate, new Date().toISOString().slice(0, 10));
   if (mode === "initialize" && (startDate === DEFAULT_DATE || endDate < startDate)) {
     throw new Error("历史初始化需要有效的起止日期");
@@ -286,12 +304,18 @@ export async function createFxTask(db: D1Database, mode: FxTaskMode, input: FxTa
       instrument.displayName,
       instrument.id,
       instrument.dukascopySymbol,
-      instrument.twelveDataSymbol,
+      // Kept only for the pre-existing NOT NULL database column. No active
+      // provider code reads this legacy value.
+      instrument.dukascopySymbol,
       startDate,
       endDate,
       JSON.stringify(targetTimeframes),
       input.keepRawCsv === true ? 1 : 0,
-      mode === "initialize" ? "等待 Dukascopy CSV 下载" : "等待 Twelve Data 增量更新",
+      mode === "initialize"
+        ? "等待 Dukascopy CSV 下载"
+        : mode === "repair"
+          ? "等待 Dukascopy 缺口修复"
+          : "等待 Dukascopy 每日增量更新",
       now,
       now,
     )
@@ -315,9 +339,13 @@ export async function patchFxTask(db: D1Database, taskId: string, action: "pause
     stage = CASE WHEN ? = 'retry' THEN 'queued' ELSE stage END,
     stage_progress = CASE WHEN ? = 'retry' THEN 0 ELSE stage_progress END,
     last_error = CASE WHEN ? IN ('retry', 'resume') THEN NULL ELSE last_error END,
+    started_at = CASE WHEN ? IN ('retry', 'resume') THEN NULL ELSE started_at END,
+    finished_at = CASE WHEN ? IN ('retry', 'resume') THEN NULL ELSE finished_at END,
     message = ?, updated_at = ? WHERE id = ?`)
     .bind(
       status,
+      action,
+      action,
       action,
       action,
       action,
@@ -525,7 +553,13 @@ function isoTimestamp(timestamp: number | null | undefined) {
 }
 
 function qualityFromDukascopy(report: DukascopyQualityReport, base: FxCandle[], insertedBars: number, historyBoundary: number | null): QualitySummary {
-  const gaps = findFxCandleGaps(base, "5m").filter((gap) => !gap.ignored).length;
+  const allGaps = findFxCandleGaps(base, "5m");
+  const expectedClosures = allGaps.filter((gap) => (
+    !gap.ignored && isExpectedDukascopyClosureGap(gap.fromTimestamp, gap.toTimestamp, "5m")
+  )).length;
+  const gaps = allGaps.filter((gap) => (
+    !gap.ignored && !isExpectedDukascopyClosureGap(gap.fromTimestamp, gap.toTimestamp, "5m")
+  )).length;
   return {
     acceptedRows: report.accepted,
     insertedBars,
@@ -533,6 +567,7 @@ function qualityFromDukascopy(report: DukascopyQualityReport, base: FxCandle[], 
     invalidRows: report.invalid + report.abnormalOhlc,
     duplicateRows: report.duplicates,
     missingIntervals: gaps,
+    expectedClosures,
     abnormalJumps: 0,
     earliestTimestamp: isoTimestamp(base[0]?.timestamp),
     latestTimestamp: isoTimestamp(base.at(-1)?.timestamp),
@@ -542,21 +577,16 @@ function qualityFromDukascopy(report: DukascopyQualityReport, base: FxCandle[], 
   };
 }
 
-function qualityFromTwelveData(report: { received: number; accepted: number; invalid: number; duplicates: number; firstTimestamp?: number; lastTimestamp?: number }, candles: FxCandle[], insertedBars: number, historyBoundary: number | null): QualitySummary {
-  const gaps = findFxCandleGaps(candles, "1m").filter((gap) => !gap.ignored).length;
+function emptyDukascopyQualityReport(): DukascopyQualityReport {
   return {
-    acceptedRows: report.accepted,
-    insertedBars,
-    correctedBars: 0,
-    invalidRows: report.invalid,
-    duplicateRows: report.duplicates,
-    missingIntervals: gaps,
-    abnormalJumps: 0,
-    earliestTimestamp: isoTimestamp(report.firstTimestamp ?? candles[0]?.timestamp),
-    latestTimestamp: isoTimestamp(report.lastTimestamp ?? candles.at(-1)?.timestamp),
-    historyBoundary: isoTimestamp(historyBoundary),
-    source: FX_SOURCE_TWELVE_DATA,
-    checkedAt: nowIso(),
+    received: 0,
+    accepted: 0,
+    invalid: 0,
+    duplicates: 0,
+    outOfOrder: 0,
+    abnormalOhlc: 0,
+    issues: [],
+    suppressedIssueCount: 0,
   };
 }
 
@@ -575,6 +605,7 @@ function mergeQuality(previous: Partial<QualitySummary>, current: QualitySummary
     invalidRows: Number(previous.invalidRows ?? 0) + current.invalidRows,
     duplicateRows: Number(previous.duplicateRows ?? 0) + current.duplicateRows,
     missingIntervals: Number(previous.missingIntervals ?? 0) + current.missingIntervals,
+    expectedClosures: Number(previous.expectedClosures ?? 0) + current.expectedClosures,
     abnormalJumps: Number(previous.abnormalJumps ?? 0) + current.abnormalJumps,
     earliestTimestamp: first,
     latestTimestamp: last,
@@ -609,6 +640,7 @@ async function runHistoricalTask(db: D1Database, task: FxTaskRow, instrument: Ma
       invalidRows: Number(previousQuality.invalidRows ?? 0),
       duplicateRows: Number(previousQuality.duplicateRows ?? 0),
       missingIntervals: Number(previousQuality.missingIntervals ?? 0),
+      expectedClosures: Number(previousQuality.expectedClosures ?? 0),
       abnormalJumps: Number(previousQuality.abnormalJumps ?? 0),
       earliestTimestamp: previousQuality.earliestTimestamp ?? null,
       latestTimestamp: previousQuality.latestTimestamp ?? null,
@@ -781,13 +813,88 @@ async function readRecentMinuteCandles(
 }
 
 function rowTimestamp(row: { lastTimestamp: number | null } | null) {
-  return Number.isFinite(Number(row?.lastTimestamp)) ? Number(row?.lastTimestamp) : null;
+  return row?.lastTimestamp != null && Number.isFinite(Number(row.lastTimestamp)) ? Number(row.lastTimestamp) : null;
 }
 
-async function runIncrementalTask(db: D1Database, task: FxTaskRow, instrument: MarketInstrumentDefinition) {
+async function findRecentDukascopyGapStartTimestamp(
+  db: D1Database,
+  instrumentId: string,
+  latestDate: string,
+  lastTimestamp: number | null,
+) {
+  if (lastTimestamp == null) return null;
+  const latestTimestamp = Date.parse(`${latestDate}T00:00:00Z`);
+  const scanStartTimestamp = latestTimestamp - DUKASCOPY_GAP_LOOKBACK_DAYS * 24 * 60 * 60 * 1_000;
+  const queryStartTimestamp = scanStartTimestamp - 7 * 24 * 60 * 60 * 1_000;
+  const queryEndTimestamp = Date.parse(`${addUtcDays(latestDate, 1)}T00:00:00Z`);
+  const gapStarts: number[] = [];
+
+  // M5 is the persisted base for every chart timeframe above M1. Scanning it
+  // as well as M1 is necessary because a previous run may have stored all
+  // source minutes but skipped the derived M5/M15 materialization.
+  for (const timeframe of ["1m", "5m"] as const) {
+    const interval = FX_TIMEFRAME_MS[timeframe];
+    const rows = await db.prepare(`SELECT timestamp, previousTimestamp FROM (
+        SELECT timestamp,
+          LAG(timestamp) OVER (ORDER BY timestamp) AS previousTimestamp
+        FROM candles
+        WHERE instrument_id = ? AND timeframe = ? AND adjustment_type = 'none'
+          AND source = ? AND timestamp >= ? AND timestamp < ?
+      )
+      WHERE previousTimestamp IS NOT NULL
+        AND timestamp - previousTimestamp > ?
+      ORDER BY timestamp`)
+      .bind(
+        instrumentId,
+        timeframe,
+        FX_SOURCE_DUKASCOPY,
+        queryStartTimestamp,
+        queryEndTimestamp,
+        interval,
+      )
+      .all<{ timestamp: number; previousTimestamp: number | null }>();
+
+    for (const row of rows.results) {
+      const timestamp = Number(row.timestamp);
+      const previousTimestamp = Number(row.previousTimestamp);
+      if (!Number.isFinite(timestamp) || !Number.isFinite(previousTimestamp)) continue;
+      if (timestamp < scanStartTimestamp) continue;
+      if (isExpectedDukascopyClosureGap(previousTimestamp, timestamp, timeframe)) continue;
+      gapStarts.push(previousTimestamp + interval);
+    }
+  }
+  return gapStarts.length ? Math.min(...gapStarts) : null;
+}
+
+function formatCandleRange(candles: readonly FxCandle[]) {
+  const first = candles[0]?.timestamp;
+  const last = candles.at(-1)?.timestamp;
+  if (!Number.isFinite(first) || !Number.isFinite(last)) return null;
+  return `${isoTimestamp(first)} 至 ${isoTimestamp(last)}`;
+}
+
+function latestCompletedDukascopyDate() {
+  const value = new Date();
+  value.setUTCHours(0, 0, 0, 0);
+  value.setUTCDate(value.getUTCDate() - 1);
+  return value.toISOString().slice(0, 10);
+}
+
+async function runDukascopyIncrementalTask(
+  db: D1Database,
+  task: FxTaskRow,
+  instrument: MarketInstrumentDefinition,
+  repairGaps = false,
+) {
   const { secrets } = await loadProviderSecrets();
-  if (!secrets.twelveDataApiKey) throw new Error("尚未配置 Twelve Data 访问密钥，请在“设置 → 数据源设置”中保存凭证");
-  const [historyMinuteRow, historyFiveMinuteRow, latestIncrementalRow] = await Promise.all([
+  const marketName = instrument.market === "GOLD" ? "黄金" : "外汇";
+  const cursor = parseJson<FxTaskCursor>(task.cursorJson, {});
+  const hasIncrementalCursor = typeof cursor.incrementalStartTimestamp === "number"
+    && Number.isFinite(cursor.incrementalStartTimestamp)
+    && typeof cursor.incrementalNextStartDate === "string"
+    && /^\d{4}-\d{2}-\d{2}$/.test(cursor.incrementalNextStartDate)
+    && Number.isFinite(Date.parse(`${cursor.incrementalNextStartDate}T00:00:00Z`));
+  const [historyMinuteRow, historyFiveMinuteRow] = await Promise.all([
     db.prepare(`SELECT MAX(timestamp) AS lastTimestamp FROM candles
       WHERE instrument_id = ? AND timeframe = '1m' AND adjustment_type = 'none' AND source = ?`)
       .bind(task.instrumentId, FX_SOURCE_DUKASCOPY)
@@ -796,118 +903,282 @@ async function runIncrementalTask(db: D1Database, task: FxTaskRow, instrument: M
       WHERE instrument_id = ? AND timeframe = '5m' AND adjustment_type = 'none' AND source = ?`)
       .bind(task.instrumentId, FX_SOURCE_DUKASCOPY)
       .first<{ lastTimestamp: number | null }>(),
-    db.prepare(`SELECT MAX(timestamp) AS lastTimestamp FROM candles
-      WHERE instrument_id = ? AND timeframe = '1m' AND adjustment_type = 'none' AND source = ?`)
-      .bind(task.instrumentId, FX_SOURCE_TWELVE_DATA)
-      .first<{ lastTimestamp: number | null }>(),
   ]);
   const historyMinuteTimestamp = rowTimestamp(historyMinuteRow);
   const historyFiveMinuteTimestamp = rowTimestamp(historyFiveMinuteRow);
-  // Old databases may only have the historical 5m baseline. In that case the
-  // first safe M1 timestamp is the minute immediately after that 5m bucket.
-  const historyBoundary = historyMinuteTimestamp
+  const historyBoundary = cursor.historyBoundary ?? historyMinuteTimestamp
     ?? (historyFiveMinuteTimestamp == null ? null : historyFiveMinuteTimestamp + 4 * FX_TIMEFRAME_MS["1m"]);
-  const lastTimestamp = rowTimestamp(latestIncrementalRow);
-  const cursor = parseJson<FxTaskCursor>(task.cursorJson, {});
-  await updateTask(db, task.id, { stage: "download", stageProgress: 10, message: "正在从 Twelve Data 请求 1m 增量" });
-  const chunk = await fetchTwelveDataOneMinuteChunk({
-    apiKey: secrets.twelveDataApiKey,
-    symbol: task.twelveDataSymbol,
-    startDate: lastTimestamp == null && historyBoundary == null ? task.startDate : undefined,
-    endDate: task.endDate === DEFAULT_DATE ? undefined : task.endDate,
-    cursor: cursor.twelveDataInterval === "1min" ? cursor.twelveData : undefined,
-    lastCompletedTimestamp: lastTimestamp,
-    historyBoundary,
-    overlapBars: 3,
+  const lastTimestamp = historyMinuteTimestamp ?? historyFiveMinuteTimestamp;
+  const latestDate = minDate(task.endDate, latestCompletedDukascopyDate());
+  const taskStartTimestamp = Date.parse(`${task.startDate}T00:00:00Z`);
+  const recentGapStartTimestamp = repairGaps && !hasIncrementalCursor
+    ? await findRecentDukascopyGapStartTimestamp(db, task.instrumentId, latestDate, lastTimestamp)
+    : null;
+
+  // Daily updates only continue from the latest stored source bar. Gap
+  // scanning is deliberately opt-in so a routine update never replays an old
+  // range. The repair action scans the bounded recent window and starts at its
+  // earliest repairable gap when one exists.
+  if (repairGaps && !hasIncrementalCursor && recentGapStartTimestamp == null && lastTimestamp != null) {
+    const quality = qualityFromDukascopy(
+      emptyDukascopyQualityReport(),
+      [],
+      0,
+      historyBoundary,
+    );
+    const cumulative = Number(task.insertedCount ?? 0);
+    return updateTask(db, task.id, {
+      status: "completed",
+      stage: "completed",
+      stageProgress: 100,
+      progress: { completed: cumulative, total: cumulative, unit: "candles", percent: 100 },
+      cursor: {
+        ...parseJson<FxTaskCursor>(task.cursorJson, {}),
+        historyBoundary,
+        lastCompleteTimestamp: lastTimestamp,
+        nextStartTimestamp: lastTimestamp + FX_TIMEFRAME_MS["1m"],
+      },
+      quality: { ...quality, insertedBars: cumulative },
+      insertedCount: cumulative,
+      message: `Dukascopy ${marketName}未发现可修复缺口（已检查至 ${isoTimestamp(lastTimestamp)}）`,
+      error: null,
+      finishedAt: nowIso(),
+    });
+  }
+
+  const initialStartTimestamp = lastTimestamp == null
+    ? taskStartTimestamp
+    : Math.min(
+      lastTimestamp - DUKASCOPY_INCREMENTAL_OVERLAP_MINUTES * FX_TIMEFRAME_MS["1m"],
+      !repairGaps || recentGapStartTimestamp == null
+        ? Number.POSITIVE_INFINITY
+        : recentGapStartTimestamp - DUKASCOPY_INCREMENTAL_OVERLAP_MINUTES * FX_TIMEFRAME_MS["1m"],
+    );
+  // The overlap applies only when planning a task. Recomputing it from MAX
+  // on every one-day chunk re-downloads the same day's 23:56-23:59 forever.
+  // Persist the current day before any writes, and advance it only after all
+  // periods are committed, so an interrupted aggregation retries that day.
+  const requestedStartTimestamp = hasIncrementalCursor
+    ? Math.max(cursor.incrementalStartTimestamp!, Date.parse(`${cursor.incrementalNextStartDate}T00:00:00Z`))
+    : initialStartTimestamp;
+  const requestedStartDate = Number.isFinite(requestedStartTimestamp)
+    ? new Date(requestedStartTimestamp).toISOString().slice(0, 10)
+    : task.startDate;
+  const requestedEndDate = minDate(
+    latestDate,
+    addUtcDays(requestedStartDate, DUKASCOPY_INCREMENTAL_CHUNK_DAYS - 1),
+  );
+  const hasRemainingChunks = requestedEndDate < latestDate;
+
+  if (!Number.isFinite(requestedStartTimestamp) || requestedStartDate > latestDate) {
+    const quality = qualityFromDukascopy(
+      emptyDukascopyQualityReport(),
+      [],
+      0,
+      historyBoundary,
+    );
+    const cumulative = Number(task.insertedCount ?? 0);
+    return updateTask(db, task.id, {
+      status: "completed",
+      stage: "completed",
+      stageProgress: 100,
+      progress: { completed: cumulative, total: cumulative, unit: "candles", percent: 100 },
+      cursor: {
+        ...parseJson<FxTaskCursor>(task.cursorJson, {}),
+        historyBoundary,
+        lastCompleteTimestamp: lastTimestamp,
+        nextStartTimestamp: lastTimestamp == null ? null : lastTimestamp + FX_TIMEFRAME_MS["1m"],
+      },
+      quality: { ...quality, insertedBars: cumulative },
+      insertedCount: cumulative,
+      message: `Dukascopy ${marketName}暂无新的完整 1m K 线（已检查至 ${isoTimestamp(lastTimestamp)}）`,
+      error: null,
+      finishedAt: nowIso(),
+    });
+  }
+
+  const incrementalStartTimestamp = hasIncrementalCursor ? cursor.incrementalStartTimestamp! : requestedStartTimestamp;
+  const planStartDate = new Date(incrementalStartTimestamp).toISOString().slice(0, 10);
+  const totalDays = Math.floor((Date.parse(`${latestDate}T00:00:00Z`) - Date.parse(`${planStartDate}T00:00:00Z`)) / 86_400_000) + 1;
+  const completedDaysBefore = Math.floor((Date.parse(`${requestedStartDate}T00:00:00Z`) - Date.parse(`${planStartDate}T00:00:00Z`)) / 86_400_000);
+  const dayProgress = (fraction: number) => ({
+    completed: completedDaysBefore + (fraction === 1 ? 1 : 0),
+    total: totalDays,
+    unit: "days",
+    percent: ((completedDaysBefore + fraction) / totalDays) * 100,
   });
+  const activeCursor: FxTaskCursor = {
+    ...cursor,
+    historyBoundary,
+    incrementalStartTimestamp,
+    incrementalNextStartDate: requestedStartDate,
+  };
+  const nextDayCursor: FxTaskCursor = {
+    ...activeCursor,
+    incrementalNextStartDate: addUtcDays(requestedEndDate, 1),
+  };
+  await updateTask(db, task.id, {
+    stage: "download",
+    stageProgress: 10,
+    progress: dayProgress(0),
+    cursor: activeCursor,
+    message: repairGaps
+      ? `正在修复${marketName}缺口：请求 M1 ${requestedStartDate} 至 ${requestedEndDate}`
+      : `正在从 Dukascopy 请求${marketName} M1：${requestedStartDate} 至 ${requestedEndDate}`,
+  });
+
+  let parsed: DukascopyOfficialParseResult | Awaited<ReturnType<DukascopyHistoricalClient["downloadAndParseCsv"]>>;
+  if (secrets.dukascopyEndpoint) {
+    const client = new DukascopyHistoricalClient({
+      urlBuilder: makeUrlBuilder(secrets.dukascopyEndpoint),
+    });
+    parsed = await client.downloadAndParseCsv({
+      instrument: task.dukascopySymbol,
+      start: requestedStartDate,
+      end: requestedEndDate,
+      timeframe: "1m",
+    }, { timestampTimeZone: "UTC" });
+  } else {
+    parsed = await sharedDukascopyOfficialClient.downloadAndParseCsv({
+      instrument: task.dukascopySymbol,
+      start: requestedStartDate,
+      end: requestedEndDate,
+      timeframe: "1m",
+      onDayComplete: async (completedDays, totalDays) => {
+        if (await isTaskStopped(db, task.id)) return;
+        const percent = totalDays > 0 ? 10 + (completedDays / totalDays) * 20 : 30;
+        await updateTask(db, task.id, {
+          stage: "download",
+          stageProgress: percent,
+          progress: dayProgress(percent / 100),
+          message: `正在从 Dukascopy 请求${marketName} M1：${requestedStartDate} 至 ${requestedEndDate}（已完成 ${completedDays}/${totalDays} 天）`,
+        });
+      },
+    });
+  }
   if (await isTaskStopped(db, task.id)) return getFxTask(db, task.id);
+
+  const writeCandles = parsed.candles.filter((candle) => candle.timestamp >= requestedStartTimestamp);
   await updateTask(db, task.id, {
     stage: "parse",
     stageProgress: 35,
-    progress: { completed: chunk.quality.accepted, total: chunk.quality.received, unit: "rows", percent: 35 },
-    message: `Twelve Data 返回 ${chunk.quality.accepted.toLocaleString()} 根已收盘 M1 K 线`,
+    progress: dayProgress(0.35),
+    message: `Dukascopy 返回 ${writeCandles.length.toLocaleString()} 根${marketName}已完成 M1 K 线`,
   });
-  await ensureInstrument(db, instrument);
-  await updateTask(db, task.id, { stage: "validate", stageProgress: 60, message: "正在校验历史边界与未收盘过滤结果" });
-  const writeCandles = chunk.candles.map((candle) => ({ ...candle, turnover: null }));
-  let inserted = 0;
-  if (writeCandles.length) inserted += await persistCandles(db, task, "1m", FX_SOURCE_TWELVE_DATA, writeCandles);
-  if (await isTaskStopped(db, task.id)) return getFxTask(db, task.id);
-  if (writeCandles.length) {
-    await updateTask(db, task.id, { stage: "aggregate", stageProgress: 75, message: `正在由 M1 刷新 M5，并重算 ${FX_DERIVED_TIMEFRAME_LABELS}` });
-    const incrementalStart = historyBoundary == null
-      ? Date.parse(`${task.startDate}T00:00:00Z`)
-      : historyBoundary + FX_TIMEFRAME_MS["1m"];
-    const fiveMinuteWriteStart = Math.ceil(incrementalStart / FX_TIMEFRAME_MS["5m"]) * FX_TIMEFRAME_MS["5m"];
-    const fiveMinuteRefreshStart = Math.max(
-      fiveMinuteWriteStart,
-      bucketStartTimestamp(writeCandles[0].timestamp, "5m"),
-    );
-    const completeThroughExclusive = (chunk.latestCompletedTimestamp ?? writeCandles.at(-1)?.timestamp ?? 0)
-      + FX_TIMEFRAME_MS["1m"];
-    const recentMinutes = await readRecentMinuteCandles(
-      db,
-      task,
-      writeCandles[0].timestamp,
-      writeCandles.at(-1)?.timestamp ?? writeCandles[0].timestamp,
-    );
-    const fiveMinuteCandles = aggregateM1To5m(recentMinutes).filter((candle) => (
-      candle.timestamp >= fiveMinuteRefreshStart
-      && candle.timestamp + FX_TIMEFRAME_MS["5m"] <= completeThroughExclusive
-    ));
-    if (fiveMinuteCandles.length) {
-      inserted += await persistCandles(db, task, "5m", FX_SOURCE_TWELVE_DATA, fiveMinuteCandles);
-    }
-    const recent = fiveMinuteCandles.length
-      ? await readRecentBaseCandles(
-          db,
-          task,
-          fiveMinuteCandles[0].timestamp,
-          fiveMinuteCandles.at(-1)?.timestamp ?? fiveMinuteCandles[0].timestamp,
-        )
-      : [];
-    const targetTimeframes = getTargetTimeframes(parseJson<unknown>(task.targetTimeframesJson, [...DEFAULT_TARGET_TIMEFRAMES]), true);
-    const higher: Array<[FxTimeframe, FxCandle[]]> = [];
-    for (const timeframe of targetTimeframes) {
-      if (timeframe === "1m" || timeframe === "5m") continue;
-      higher.push([timeframe, aggregate5mToTimeframe(recent, timeframe)]);
-    }
-    for (const [timeframe, candles] of higher) {
-      const refreshStart = Math.max(
-        fiveMinuteWriteStart,
-        bucketStartTimestamp(writeCandles[0].timestamp, timeframe),
-      );
-      const completed = candles.filter((candle) => (
-        candle.timestamp >= refreshStart
-        && getFxCandleEndTimestamp(candle.timestamp, timeframe) <= completeThroughExclusive
-      ));
-      inserted += await persistCandles(db, task, timeframe, FX_SOURCE_TWELVE_DATA, completed);
-    }
+  const cumulativeBefore = Number(task.insertedCount ?? 0);
+  if (!writeCandles.length) {
+    const quality = qualityFromDukascopy(parsed.report ?? emptyDukascopyQualityReport(), [], 0, historyBoundary);
+    return updateTask(db, task.id, {
+      status: hasRemainingChunks ? "queued" : "completed",
+      stage: hasRemainingChunks ? "persist" : "completed",
+      stageProgress: hasRemainingChunks ? 90 : 100,
+      progress: dayProgress(1),
+      cursor: {
+        ...nextDayCursor,
+        historyBoundary,
+        lastCompleteTimestamp: lastTimestamp,
+        nextStartTimestamp: lastTimestamp == null ? null : lastTimestamp + FX_TIMEFRAME_MS["1m"],
+      },
+      quality: { ...quality, insertedBars: cumulativeBefore },
+      insertedCount: cumulativeBefore,
+      message: hasRemainingChunks
+        ? `${marketName}已检查 ${requestedStartDate}，当日没有可写入的 M1 K 线，继续下一日`
+        : repairGaps
+        ? `Dukascopy ${marketName}缺口修复未返回新的完整 1m K 线`
+        : `当前没有新的完整${marketName} 1m K 线`,
+      error: null,
+      finishedAt: hasRemainingChunks ? null : nowIso(),
+    });
   }
-  const nextLastTimestamp = writeCandles.at(-1)?.timestamp ?? lastTimestamp;
-  const quality = qualityFromTwelveData(chunk.writeQuality, writeCandles, inserted, historyBoundary);
-  const nextCursor: FxTaskCursor = {
-    ...cursor,
-    twelveData: chunk.complete ? undefined : chunk.cursor,
-    twelveDataInterval: "1min",
-    historyBoundary,
-    lastCompleteTimestamp: nextLastTimestamp,
-    nextStartTimestamp: nextLastTimestamp == null ? null : nextLastTimestamp + FX_TIMEFRAME_MS["1m"],
-  };
-  const complete = chunk.complete;
-  const cumulative = Number(task.insertedCount ?? 0) + inserted;
+
+  await ensureInstrument(db, instrument);
+  await updateTask(db, task.id, {
+    stage: "persist",
+    stageProgress: 55,
+    progress: dayProgress(0.55),
+    message: repairGaps
+      ? `正在写入 Dukascopy ${marketName} 缺口，并刷新 M5 与高周期`
+      : `正在写入 Dukascopy ${marketName} M1，并刷新 M5 与高周期`,
+  });
+  let inserted = await persistCandles(db, task, "1m", FX_SOURCE_DUKASCOPY, writeCandles);
+  // The request can begin at an internal M1/M5 gap while newer M1 candles are
+  // already present. Use that repair start for derived materialization too;
+  // using historyBoundary here only refreshed the newest tail and left old
+  // M5/M15 holes visible in charts.
+  const incrementalStart = requestedStartTimestamp;
+  const fiveMinuteWriteStart = Math.ceil(incrementalStart / FX_TIMEFRAME_MS["5m"]) * FX_TIMEFRAME_MS["5m"];
+  const fiveMinuteRefreshStart = Math.max(
+    fiveMinuteWriteStart,
+    bucketStartTimestamp(writeCandles[0].timestamp, "5m"),
+  );
+  const completeThroughExclusive = writeCandles.at(-1)!.timestamp + FX_TIMEFRAME_MS["1m"];
+  const recentMinutes = await readRecentMinuteCandles(
+    db,
+    task,
+    writeCandles[0].timestamp,
+    writeCandles.at(-1)!.timestamp,
+  );
+  const fiveMinuteCandles = aggregateM1To5m(recentMinutes).filter((candle) => (
+    candle.timestamp >= fiveMinuteRefreshStart
+    && candle.timestamp + FX_TIMEFRAME_MS["5m"] <= completeThroughExclusive
+  ));
+  if (fiveMinuteCandles.length) {
+    inserted += await persistCandles(db, task, "5m", FX_SOURCE_DUKASCOPY, fiveMinuteCandles);
+  }
+  const recent = fiveMinuteCandles.length
+    ? await readRecentBaseCandles(
+        db,
+        task,
+        fiveMinuteCandles[0].timestamp,
+        fiveMinuteCandles.at(-1)!.timestamp,
+      )
+    : [];
+  const targetTimeframes = getTargetTimeframes(parseJson<unknown>(task.targetTimeframesJson, [...DEFAULT_TARGET_TIMEFRAMES]), true);
+  const higher: Array<[FxTimeframe, FxCandle[]]> = [];
+  for (const timeframe of targetTimeframes) {
+    if (timeframe === "1m" || timeframe === "5m") continue;
+    higher.push([timeframe, aggregate5mToTimeframe(recent, timeframe)]);
+  }
+  for (const [timeframe, candles] of higher) {
+    // A higher-period bucket may begin before the first repaired M1/M5 bar
+    // (for example an H4 or daily bucket), so rewrite that containing bucket
+    // as well. Completion filtering below still excludes unfinished tails.
+    const refreshStart = bucketStartTimestamp(writeCandles[0].timestamp, timeframe);
+    const completed = candles.filter((candle) => (
+      candle.timestamp >= refreshStart
+      && getFxCandleEndTimestamp(candle.timestamp, timeframe) <= completeThroughExclusive
+    ));
+    inserted += await persistCandles(db, task, timeframe, FX_SOURCE_DUKASCOPY, completed);
+  }
+
+  const nextLastTimestamp = Math.max(writeCandles.at(-1)!.timestamp, lastTimestamp ?? 0);
+  const cumulative = cumulativeBefore + inserted;
+  const quality = qualityFromDukascopy(parsed.report, writeCandles, inserted, historyBoundary);
   return updateTask(db, task.id, {
-    status: complete ? "completed" : "queued",
-    stage: complete ? "completed" : "persist",
-    stageProgress: complete ? 100 : 90,
-    progress: { completed: cumulative, total: cumulative, unit: "candles", percent: complete ? 100 : 90 },
-    cursor: nextCursor,
+    status: hasRemainingChunks ? "queued" : "completed",
+    stage: hasRemainingChunks ? "persist" : "completed",
+    stageProgress: hasRemainingChunks ? 90 : 100,
+    progress: dayProgress(1),
+    cursor: {
+      ...nextDayCursor,
+      historyBoundary,
+      lastCompleteTimestamp: nextLastTimestamp,
+      nextStartTimestamp: nextLastTimestamp == null ? null : nextLastTimestamp + FX_TIMEFRAME_MS["1m"],
+    },
     quality: { ...quality, insertedBars: cumulative },
     insertedCount: cumulative,
-    message: complete ? (inserted ? `增量更新完成，写入 ${inserted.toLocaleString()} 根 K 线` : "当前没有新的完整 1m K 线") : "本次达到分页上限，等待继续处理",
+    message: hasRemainingChunks
+      ? `Dukascopy ${marketName}${repairGaps ? "缺口修复" : "每日增量更新"}已完成分片：处理 ${writeCandles.length.toLocaleString()} 根 M1（${formatCandleRange(writeCandles) ?? "范围未知"}），写入 ${inserted.toLocaleString()} 根 K 线，等待下一分片`
+      : repairGaps
+        ? `Dukascopy ${marketName}缺口修复完成：处理 ${writeCandles.length.toLocaleString()} 根 M1（${formatCandleRange(writeCandles) ?? "范围未知"}），写入 ${inserted.toLocaleString()} 根 K 线`
+        : `Dukascopy ${marketName}每日增量更新完成：处理 ${writeCandles.length.toLocaleString()} 根 M1（${formatCandleRange(writeCandles) ?? "范围未知"}），写入 ${inserted.toLocaleString()} 根 K 线`,
     error: null,
-    finishedAt: complete ? nowIso() : null,
+    finishedAt: hasRemainingChunks ? null : nowIso(),
   });
+}
+
+async function runIncrementalTask(db: D1Database, task: FxTaskRow, instrument: MarketInstrumentDefinition) {
+  return runDukascopyIncrementalTask(db, task, instrument, task.mode === "repair");
 }
 
 export async function runFxTask(db: D1Database, taskId: string) {
@@ -915,29 +1186,47 @@ export async function runFxTask(db: D1Database, taskId: string) {
   const scope = getMarketInstrumentDefinition(existing?.instrumentId);
   if (!scope) throw new Error("行情任务不存在或品种不受支持");
   return withMarketDataWrite(scope.market, async () => {
-  // Re-read after acquiring the write lease: a clear may have removed the
-  // task while the first lookup was awaiting its database response.
-  const task = await getFxTask(db, taskId);
-  if (!task) throw new Error("行情任务不存在");
-  if (["paused", "cancelled", "completed"].includes(task.status)) return task;
-  if (activeFxTaskRuns.has(taskId)) return task;
-  activeFxTaskRuns.add(taskId);
-  try {
+    // Re-read after acquiring the write lease: a clear may have removed the
+    // task while the first lookup was awaiting its database response.
+    const task = await getFxTask(db, taskId);
+    if (!task) throw new Error("行情任务不存在");
+    if (["paused", "cancelled", "completed"].includes(task.status)) return task;
+
+    // The browser and the background updater can submit the same task at the
+    // same time. The in-memory set protects requests in one runtime, while
+    // this persisted status check protects requests crossing runtime/process
+    // boundaries. A running task is already owned by its first caller; later
+    // callers only read its progress and must never start another download.
+    if (task.status === "running" || activeFxTaskRuns.has(taskId)) return task;
+
     const instrument = getMarketInstrumentDefinition(task.instrumentId);
     if (!instrument) throw new Error("任务中的品种已不再受支持");
     const startedAt = task.startedAt ?? nowIso();
-    await updateTask(db, task.id, {
-      status: "running",
-      stage: task.stage === "queued" ? "download" : task.stage,
-      message: task.mode === "initialize" ? "历史行情任务正在处理" : "增量行情任务正在处理",
-      startedAt,
-      error: null,
-    });
-    if (task.mode === "initialize") return await runHistoricalTask(db, task, instrument);
-    return await runIncrementalTask(db, task, instrument);
-  } finally {
-    activeFxTaskRuns.delete(taskId);
-  }
+    const runningMessage = task.mode === "initialize"
+      ? "历史行情任务正在处理"
+      : task.mode === "repair"
+        ? "行情缺口修复任务正在处理"
+        : "行情每日增量任务正在处理";
+
+    // Claim queued work atomically. If another request won the race, return
+    // its current snapshot instead of executing the same task twice.
+    const claim = await db.prepare(`UPDATE fx_data_tasks SET status = 'running',
+      stage = CASE WHEN stage = 'queued' THEN 'download' ELSE stage END,
+      message = ?, last_error = NULL, started_at = ?, updated_at = ?
+      WHERE id = ? AND status = 'queued'`)
+      .bind(runningMessage, startedAt, nowIso(), taskId)
+      .run();
+    if (Number(claim.meta?.changes ?? 0) === 0) return getFxTask(db, taskId);
+
+    const claimedTask = await getFxTask(db, taskId);
+    if (!claimedTask) throw new Error("行情任务不存在");
+    activeFxTaskRuns.add(taskId);
+    try {
+      if (claimedTask.mode === "initialize") return await runHistoricalTask(db, claimedTask, instrument);
+      return await runIncrementalTask(db, claimedTask, instrument);
+    } finally {
+      activeFxTaskRuns.delete(taskId);
+    }
   });
 }
 

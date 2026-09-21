@@ -204,7 +204,9 @@ export const fxDataTasks = sqliteTable(
     pairLabel: text("pair_label").notNull(),
     vendorSymbol: text("vendor_symbol").notNull(),
     dukascopySymbol: text("dukascopy_symbol").notNull(),
-    twelveDataSymbol: text("twelve_data_symbol").notNull(),
+    // Kept for compatibility with the original task-table shape. New tasks
+    // store the Dukascopy symbol here; no provider-specific API exposes it.
+    legacyVendorSymbol: text("twelve_data_symbol").notNull(),
     startDate: text("start_date").notNull(),
     endDate: text("end_date").notNull(),
     rawTimeframe: text("raw_timeframe").notNull().default("1m"),

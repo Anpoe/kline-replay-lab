@@ -3,6 +3,7 @@ import test from "node:test";
 
 import {
   buildLiveScanRequest,
+  calculateDailyChangePct,
   normalizeLiveScanError,
   normalizeLiveScanLimit,
   selectLiveNavigatorIndex,
@@ -90,6 +91,13 @@ test("扫描请求支持当日涨幅区间和无限制输出", () => {
   });
   assert.deepEqual(request.filters, { minChangePct: -2.5, maxChangePct: 8 });
   assert.equal(request.limit, 0);
+});
+
+test("最新交易日涨跌幅使用收盘价和前收计算，并拒绝无效前收", () => {
+  assert.ok(Math.abs(calculateDailyChangePct(10.5, 10) - 5) < 1e-9);
+  assert.ok(Math.abs(calculateDailyChangePct(9.5, 10) + 5) < 1e-9);
+  assert.equal(calculateDailyChangePct(10, 0), null);
+  assert.equal(calculateDailyChangePct("bad", 10), null);
 });
 
 test("实时扫描错误统一为用户可见文本", () => {

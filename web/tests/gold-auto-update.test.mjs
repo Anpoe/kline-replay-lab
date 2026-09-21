@@ -8,9 +8,11 @@ const [service, runner] = await Promise.all([
   readFile(new URL("local-data/background-auto-update.mjs", root), "utf8"),
 ]);
 
-test("自动更新检查 GOLD 的已有覆盖和 Twelve Data M1 状态", () => {
+test("自动更新检查 GOLD 的已有覆盖并交给 Dukascopy 日期边界", () => {
   assert.match(service, /goldRows/);
   assert.match(service, /inspectFxUpdates\([\s\S]*goldRows/);
+  assert.match(service, /marketLabel = "外汇"/);
+  assert.match(service, /Dukascopy 检查最近完整交易日/);
   assert.match(service, /GOLD:[\s\S]*gold/);
 });
 

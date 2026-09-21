@@ -69,6 +69,31 @@ test("preserves scan and latest-price refresh payloads", async () => {
   });
 });
 
+test("sends pending-order dates when requesting historical entry bars", async () => {
+  const requests = [];
+  const gateway = createLiveGateway(async (_input, init) => {
+    requests.push(JSON.parse(init.body));
+    return response({ payload: {
+      prices: [{
+        instrumentId: "600519.SH",
+        timestamp: 4,
+        open: 104,
+        close: 105,
+        entryBars: [{ timestamp: 3, open: 103, close: 104 }],
+      }],
+    } });
+  });
+
+  const payload = await gateway.refreshPrices("CN", ["600519.SH"], { "600519.SH": 2 });
+  assert.equal(payload.prices[0].entryBars[0].timestamp, 3);
+  assert.deepEqual(requests[0], {
+    action: "refresh",
+    market: "CN",
+    instrumentIds: ["600519.SH"],
+    entryAfter: { "600519.SH": 2 },
+  });
+});
+
 test("normalizes live gateway errors", async () => {
   const gateway = createLiveGateway(async () => response({ ok: false, payload: { error: "offline" } }));
 

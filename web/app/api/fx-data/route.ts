@@ -18,7 +18,7 @@ export async function GET(request: Request) {
 export async function POST(request: Request) {
   await ensureSchema();
   const body = await request.json() as { mode?: FxTaskMode; pairId?: unknown; startDate?: unknown; endDate?: unknown; rawTimeframe?: unknown; targetTimeframes?: unknown; keepRawCsv?: unknown };
-  if (body.mode !== "initialize" && body.mode !== "update") return Response.json({ error: "缺少行情任务模式" }, { status: 400 });
+  if (body.mode !== "initialize" && body.mode !== "update" && body.mode !== "repair") return Response.json({ error: "缺少行情任务模式" }, { status: 400 });
   try {
     const task = await createFxTask(getRawDb(), body.mode, body);
     return Response.json({ task: getFxTaskView(task) }, { status: 201 });

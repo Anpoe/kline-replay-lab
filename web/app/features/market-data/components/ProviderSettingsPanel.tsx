@@ -19,7 +19,6 @@ type ProviderSettingsResponse = {
     tushare: ProviderState;
     alpaca: ProviderState;
     tdxquant: ProviderState;
-    twelvedata: ProviderState;
     dukascopy: ProviderState;
   };
   autoUpdate?: {
@@ -38,7 +37,6 @@ const emptyStatus: ProviderSettingsResponse["providers"] = {
   tushare: { configured: false, source: null },
   alpaca: { configured: false, source: null },
   tdxquant: { configured: false, source: null },
-  twelvedata: { configured: false, source: null },
   dukascopy: { configured: false, source: null },
 };
 
@@ -55,10 +53,9 @@ export function ProviderSettingsPanel() {
   const [alpacaKeyId, setAlpacaKeyId] = useState("");
   const [alpacaSecretKey, setAlpacaSecretKey] = useState("");
   const [tdxQuantEndpoint, setTdxQuantEndpoint] = useState("http://127.0.0.1:17709");
-  const [twelveDataApiKey, setTwelveDataApiKey] = useState("");
   const [dukascopyEndpoint, setDukascopyEndpoint] = useState("");
   const [notice, setNotice] = useState("");
-  const [saving, setSaving] = useState<"" | "tushare" | "alpaca" | "tdxquant" | "twelvedata" | "dukascopy">("");
+  const [saving, setSaving] = useState<"" | "tushare" | "alpaca" | "tdxquant" | "dukascopy">("");
   const [autoUpdateEnabled, setAutoUpdateEnabled] = useState(false);
   const [autoUpdateScheduledEnabled, setAutoUpdateScheduledEnabled] = useState(false);
   const [autoUpdateScheduleTime, setAutoUpdateScheduleTime] = useState(DEFAULT_DATA_AUTO_UPDATE_SCHEDULE_TIME);
@@ -159,7 +156,7 @@ export function ProviderSettingsPanel() {
     }
   };
 
-  const saveProvider = async (provider: "tushare" | "alpaca" | "tdxquant" | "twelvedata" | "dukascopy") => {
+  const saveProvider = async (provider: "tushare" | "alpaca" | "tdxquant" | "dukascopy") => {
     setSaving(provider);
     setNotice("");
     try {
@@ -169,22 +166,17 @@ export function ProviderSettingsPanel() {
           ? { provider, alpacaKeyId, alpacaSecretKey }
           : provider === "tdxquant"
           ? { provider, tdxQuantEndpoint }
-          : provider === "twelvedata"
-            ? { provider, twelveDataApiKey }
-            : { provider, dukascopyEndpoint });
+          : { provider, dukascopyEndpoint });
       setAlpacaKeyId("");
       setAlpacaSecretKey("");
       setTushareToken("");
-      setTwelveDataApiKey("");
       await loadStatus();
       window.dispatchEvent(new Event("provider-settings-updated"));
       setNotice(provider === "tushare"
         ? "Tushare 服务密钥已保存在本机；日线价格保持不复权。"
         : provider === "tdxquant"
         ? "TdxQuant 服务地址已保存；可按服务地址选择复权口径，使用分钟数据前请完成行情终端连接。"
-        : provider === "twelvedata"
-          ? "Twelve Data 访问密钥已保存在本机。"
-          : provider === "dukascopy"
+        : provider === "dukascopy"
             ? "Dukascopy 自定义 CSV 地址已保存在本机。"
             : "Alpaca 凭证已保存在本机。");
     } catch (error) {
@@ -194,8 +186,8 @@ export function ProviderSettingsPanel() {
     }
   };
 
-  const clearProvider = async (provider: "tushare" | "alpaca" | "tdxquant" | "twelvedata" | "dukascopy") => {
-    const label = provider === "tushare" ? "Tushare" : provider === "alpaca" ? "Alpaca" : provider === "tdxquant" ? "TdxQuant" : provider === "twelvedata" ? "Twelve Data" : "Dukascopy";
+  const clearProvider = async (provider: "tushare" | "alpaca" | "tdxquant" | "dukascopy") => {
+    const label = provider === "tushare" ? "Tushare" : provider === "alpaca" ? "Alpaca" : provider === "tdxquant" ? "TdxQuant" : "Dukascopy";
     if (!window.confirm(`清除本机保存的 ${label} 配置？`)) return;
     try {
       const result = await marketDataGateway.deleteProviderSettings<{ error?: string }>(provider);
@@ -353,27 +345,7 @@ export function ProviderSettingsPanel() {
 
       <article className="provider-setting-card">
         <div className="provider-setting-title">
-          <div><KeyRound size={17} /><span><strong>Twelve Data REST</strong><small>外汇 1m 增量更新</small></span></div>
-          <span className={status.twelvedata.configured ? "configured" : ""}>
-            {statusLoaded ? sourceLabel(status.twelvedata.source) : "正在读取本机凭证状态…"}
-            {statusLoaded && status.twelvedata.hint ? ` · ${status.twelvedata.hint}` : ""}
-          </span>
-        </div>
-        <div className="provider-secret-fields single">
-          <label>访问密钥
-            <input type="password" autoComplete="new-password" value={twelveDataApiKey} onChange={(event) => setTwelveDataApiKey(event.target.value)} placeholder={status.twelvedata.configured ? "输入新值可替换现有凭证" : "填写 Twelve Data 访问密钥"} />
-          </label>
-        </div>
-        <p className="provider-setting-help">密钥只在服务端请求 Twelve Data，前端不会把完整密钥回显。增量更新写入已经收盘的 M1，并在本机聚合 M5 / M15 / M30 / H1 / H4 / D1 / W1 / MN。</p>
-        <div className="provider-setting-actions">
-          {status.twelvedata.source === "settings" && <button className="delete-session" onClick={() => clearProvider("twelvedata")}><Trash2 size={13} />清除本机凭证</button>}
-          <button className="primary-button" disabled={saving === "twelvedata"} onClick={() => saveProvider("twelvedata")}><Save size={14} />保存 Twelve Data</button>
-        </div>
-      </article>
-
-      <article className="provider-setting-card">
-        <div className="provider-setting-title">
-          <div><Link2 size={17} /><span><strong>Dukascopy CSV</strong><small>外汇历史基准导入</small></span></div>
+          <div><Link2 size={17} /><span><strong>Dukascopy CSV</strong><small>外汇与黄金历史基准导入</small></span></div>
           <span className={status.dukascopy.configured ? "configured" : ""}>
             {statusLoaded ? sourceLabel(status.dukascopy.source) : "正在读取本机配置…"}
           </span>
@@ -383,7 +355,7 @@ export function ProviderSettingsPanel() {
             <input value={dukascopyEndpoint} onChange={(event) => setDukascopyEndpoint(event.target.value)} placeholder="留空即可使用官方内置适配器" />
           </label>
         </div>
-        <p className="provider-setting-help">默认即可使用；如需指定其他来源，再填写自定义服务地址。地址需要返回对应周期的 CSV 行情。</p>
+        <p className="provider-setting-help">默认即可使用；外汇和黄金的历史、每日增量、缺口修复都走 Dukascopy。需要指定代理时，再填写自定义服务地址。</p>
         <div className="provider-setting-actions">
           {status.dukascopy.source === "settings" && <button className="delete-session" onClick={() => clearProvider("dukascopy")}><Trash2 size={13} />清除本机配置</button>}
           {dukascopyEndpoint.trim() && <button className="primary-button" disabled={saving === "dukascopy"} onClick={() => saveProvider("dukascopy")}><Save size={14} />保存自定义地址</button>}

@@ -26,6 +26,7 @@ test("FX 数据维护面板包含历史初始化、增量更新和任务控制�
     "结束日期",
     "初始化历史数据",
     "增量更新",
+    "修复缺口",
     "暂停",
     "恢复",
     "重试",
@@ -36,11 +37,15 @@ test("FX 数据维护面板包含历史初始化、增量更新和任务控制�
   }
 
   assert.match(source, /Dukascopy CSV/);
-  assert.match(source, /Twelve Data REST/);
+  assert.match(source, /Dukascopy Official CSV/);
+  assert.match(source, /repair: string/);
+  assert.match(source, /type: "repair"/);
   assert.match(source, /setup-pipeline/);
   assert.match(source, /local-task-progress/);
   assert.match(source, /task-error/);
   assert.match(source, /invalidRows/);
   assert.match(source, /missingIntervals/);
+  assert.match(source, /expectedClosures/);
+  assert.match(source, /正常闭市/);
 });
 

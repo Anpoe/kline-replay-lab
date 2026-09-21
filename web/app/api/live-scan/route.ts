@@ -62,22 +62,50 @@ export async function POST(request: Request) {
         const response = await fetchLocalData("/quotes/realtime", {
           method: "POST",
           headers: { "content-type": "application/json" },
-          body: JSON.stringify({ instrumentIds }),
+          body: JSON.stringify({
+            instrumentIds,
+            ...(Object.keys(entryAfter).length ? { entryAfter } : {}),
+          }),
         }, 30_000);
-        const result = await response.json();
-        return Response.json(result, { status: response.status });
+        const result = await response.json() as Record<string, unknown>;
+        const prices = Array.isArray(result.prices)
+          ? result.prices.map((value) => {
+              if (!value || typeof value !== "object" || Array.isArray(value)) return value;
+              const price = value as Record<string, unknown>;
+              const previousClose = Number(price.previousClose ?? price.lastClose);
+              return Number.isFinite(previousClose) && previousClose > 0
+                ? { ...price, previousClose }
+                : price;
+            })
+          : result.prices;
+        return Response.json({ ...result, prices }, { status: response.status });
       } catch (error) {
         return Response.json({ error: error instanceof Error ? error.message : "A 股实盘价格同步失败" }, { status: 502 });
       }
     }
     await ensureSchema();
     const db = getRawDb();
-    const prices: Array<{ instrumentId: string; timestamp: number; open: number; close: number; entryTimestamp?: number; entryOpen?: number }> = [];
+    const prices: Array<{
+      instrumentId: string;
+      timestamp: number;
+      open: number;
+      close: number;
+      previousClose?: number;
+      entryTimestamp?: number;
+      entryOpen?: number;
+      entryBars?: Array<{ timestamp: number; open: number; close: number }>;
+    }> = [];
     for (let offset = 0; offset < instrumentIds.length; offset += 80) {
       const batch = instrumentIds.slice(offset, offset + 80);
       const placeholders = batch.map(() => "?").join(",");
       const rows = await db.prepare(`
-        SELECT c.instrument_id AS instrumentId, c.timestamp, c.open, c.close
+        SELECT c.instrument_id AS instrumentId, c.timestamp, c.open, c.close,
+          (SELECT previous.close FROM candles previous
+            WHERE previous.instrument_id = c.instrument_id
+              AND previous.timeframe = '1d'
+              AND previous.adjustment_type = 'all'
+              AND previous.timestamp < c.timestamp
+            ORDER BY previous.timestamp DESC LIMIT 1) AS previousClose
         FROM candles c
         JOIN (
           SELECT instrument_id, MAX(timestamp) AS timestamp
@@ -86,33 +114,61 @@ export async function POST(request: Request) {
           GROUP BY instrument_id
         ) latest ON latest.instrument_id = c.instrument_id AND latest.timestamp = c.timestamp
         WHERE c.timeframe = '1d' AND c.adjustment_type = 'all'
-      `).bind(...batch).all<{ instrumentId: string; timestamp: number; open: number; close: number }>();
+      `).bind(...batch).all<{
+        instrumentId: string;
+        timestamp: number;
+        open: number;
+        close: number;
+        previousClose: number | null;
+      }>();
       const entryByInstrument = new Map<string, { entryTimestamp: number; entryOpen: number }>();
+      const entryBarsByInstrument = new Map<string, Array<{ timestamp: number; open: number; close: number }>>();
       for (const instrumentId of batch) {
         const after = entryAfter[instrumentId];
         if (!Number.isFinite(after)) continue;
-        const entry = await db.prepare(`
-          SELECT timestamp AS entryTimestamp, open AS entryOpen
+        const entries = await db.prepare(`
+          SELECT timestamp, open, close
           FROM candles
           WHERE instrument_id = ? AND timeframe = '1d' AND adjustment_type = 'all' AND timestamp > ?
           ORDER BY timestamp ASC
-          LIMIT 1
-        `).bind(instrumentId, after).first<{ entryTimestamp: number; entryOpen: number }>();
-        if (entry && Number.isFinite(Number(entry.entryTimestamp)) && Number.isFinite(Number(entry.entryOpen))) {
+          LIMIT 64
+        `).bind(instrumentId, after).all<{ timestamp: number; open: number; close: number }>();
+        const entryBars = (entries.results ?? [])
+          .filter((entry) => Number.isFinite(Number(entry.timestamp))
+            && Number.isFinite(Number(entry.open))
+            && Number.isFinite(Number(entry.close)))
+          .map((entry) => ({
+            timestamp: Number(entry.timestamp),
+            open: Number(entry.open),
+            close: Number(entry.close),
+          }));
+        if (entryBars.length) {
+          entryBarsByInstrument.set(instrumentId, entryBars);
           entryByInstrument.set(instrumentId, {
-            entryTimestamp: Number(entry.entryTimestamp),
-            entryOpen: Number(entry.entryOpen),
+            entryTimestamp: entryBars[0].timestamp,
+            entryOpen: entryBars[0].open,
           });
         }
       }
-      prices.push(...(rows.results as Array<{ instrumentId: string; timestamp: number; open: number; close: number }>).map((row) => {
+      prices.push(...(rows.results as Array<{
+        instrumentId: string;
+        timestamp: number;
+        open: number;
+        close: number;
+        previousClose: number | null;
+      }>).map((row) => {
         const entry = entryByInstrument.get(row.instrumentId);
+        const entryBars = entryBarsByInstrument.get(row.instrumentId);
         return {
           instrumentId: row.instrumentId,
           timestamp: Number(row.timestamp),
           open: Number(row.open),
           close: Number(row.close),
+          ...(Number.isFinite(Number(row.previousClose)) && Number(row.previousClose) > 0
+            ? { previousClose: Number(row.previousClose) }
+            : {}),
           ...(entry ?? {}),
+          ...(entryBars?.length ? { entryBars } : {}),
         };
       }));
     }

@@ -131,6 +131,8 @@ test("local store downloads, indexes and serves daily/weekly/monthly candles", a
     tushareUrl: `http://127.0.0.1:${address.port}/`,
     nowProvider: () => new Date("2026-07-28T16:00:00+08:00"),
     tushareThrottleMs: 0,
+    // This fixture explicitly covers the legacy local-file fallback.
+    dailyQuotesClient: { close() {} },
   }).init();
   context.after(async () => {
     store.close();
@@ -188,6 +190,7 @@ test("local store downloads, indexes and serves daily/weekly/monthly candles", a
   );
   assert.equal(refreshed[0].entryTimestamp, Date.UTC(2026, 6, 27));
   assert.equal(refreshed[0].entryOpen, 11.8);
+  assert.deepEqual(refreshed[0].entryBars.map((bar) => bar.timestamp), [Date.UTC(2026, 6, 27)]);
 
   const deletion = await store.deleteInstruments(["600519.SH"]);
   assert.deepEqual(deletion, { deletedInstruments: 1, instrumentIds: ["600519.SH"] });

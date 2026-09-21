@@ -353,16 +353,20 @@ const server = http.createServer(async (request, response) => {
     if (request.method === "POST" && url.pathname === "/quotes/realtime") {
       const payload = await readJson(request);
       const instrumentIds = Array.isArray(payload.instrumentIds) ? payload.instrumentIds : [];
+      const entryAfter = payload.entryAfter && typeof payload.entryAfter === "object"
+        ? payload.entryAfter
+        : {};
       if (activeSource !== "tdx") {
         return send(response, 200, {
           activeSource,
-          prices: await store.getLatestCandles(instrumentIds),
+          prices: await store.getLatestCandles(instrumentIds, entryAfter),
         });
       }
       return send(response, 200, {
         activeSource,
         prices: await stores.tdx.getRealtimeQuotes(
           instrumentIds,
+          entryAfter,
         ),
       });
     }

@@ -311,6 +311,7 @@ test("已有黄金数据且有新 M1 时会调度 XAUUSD.GOLD 增量任务", asy
   assert.equal(result.status, "completed");
   assert.deepEqual(result.updated, ["XAUUSD.GOLD"]);
   assert.ok(calls.some((call) => call.key === "POST /api/fx-data/update" && call.body.pairId === "XAUUSD.GOLD"));
+  assert.ok(!calls.some((call) => call.key === "POST /api/fx-data/repair"), "自动更新必须继续使用每日增量接口");
 });
 
 test("长任务会用 claim token 续租", async () => {

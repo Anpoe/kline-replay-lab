@@ -29,6 +29,8 @@ test("ships the K-line training workbench instead of the starter", async () => {
   assert.match(layout, /K线训练营 2\.0/);
   assert.match(layout, /ResizeObserver loop completed with undelivered notifications/);
   assert.match(layout, /stopImmediatePropagation/);
+  assert.doesNotMatch(workbench, /useState\(\s*createUuid\s*\)/);
+  assert.match(workbench, /const nextSessionId = createUuid\(\);[\s\S]*const nextRandomSeed = createUuid\(\);[\s\S]*setSessionId\(\(current\) => current \|\| nextSessionId\)/);
   assert.match(workbench, /未来已隐藏/);
   assert.match(workbench, /const hideTaskInstrument = trainingTask\?\.status === "active" && trainingTask\.hideInstrument/);
   assert.match(workbench, /const hideTaskDate = trainingTask\?\.status === "active" && trainingTask\.hideDate/);
@@ -42,6 +44,7 @@ test("ships the K-line training workbench instead of the starter", async () => {
   assert.match(workbench, /trainingNavigatorSessions/);
   assert.match(workbench, /moveTrainingSession/);
   assert.match(workbench, /训练切换/);
+  assert.match(workbench, /const startFreshTraining = \([\s\S]*?setView\("replay"\);[\s\S]*?setLoadNonce\(\(value\) => value \+ 1\);/);
   assert.match(workbench, /RECYCLE BIN/);
   assert.match(workbench, /loadTrashSessions/);
   assert.match(workbench, /inspectTrashedSession/);
@@ -169,7 +172,7 @@ test("ships the K-line training workbench instead of the starter", async () => {
   assert.match(dataSourceManager, /刷新 BaoStock 全量数据/);
   assert.match(dataSourceManager, /每日增量更新/);
   assert.match(dataSourceManager, /本次未执行（尚未收市）/);
-  assert.match(dataSourceManager, /正在检查收盘状态并准备通达信日线更新/);
+  assert.match(dataSourceManager, /正在准备通达信完整日线增量任务/);
   assert.match(dataSourceManager, /扫描并修复缺口/);
   assert.match(dataSourceManager, /初始化美股市场库/);
   assert.doesNotMatch(dataSourceManager, /供应商代码/);

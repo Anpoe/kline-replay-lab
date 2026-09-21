@@ -328,3 +328,64 @@ export function findFxCandleGaps(candles: Iterable<FxCandle>, timeframe: FxTimef
   return gaps;
 }
 
+/**
+ * Dukascopy's FX and precious-metal minute feed has a daily maintenance break
+ * and can close early on a market holiday. Those intervals are absent from
+ * the feed by design and must not be treated as repairable data gaps.
+ */
+export function isExpectedDukascopyClosureGap(
+  fromTimestamp: number,
+  toTimestamp: number,
+  timeframe: FxTimeframe,
+  inputSession: FxSessionOptions = {},
+) {
+  const session = resolveSession(inputSession);
+  const duration = timeframeDurationMs(timeframe);
+  if (duration == null || !Number.isFinite(fromTimestamp) || !Number.isFinite(toTimestamp)) return false;
+  if (toTimestamp - fromTimestamp <= duration) return false;
+
+  const probe = [
+    { timestamp: fromTimestamp, open: 0, high: 0, low: 0, close: 0, volume: null, turnover: null },
+    { timestamp: toTimestamp, open: 0, high: 0, low: 0, close: 0, volume: null, turnover: null },
+  ] satisfies FxCandle[];
+  const gap = findFxCandleGaps(probe, timeframe, session)[0];
+  if (gap?.ignored) return true;
+
+  const fromLocal = localDateTimeParts(fromTimestamp, session.timeZone);
+  const toLocal = localDateTimeParts(toTimestamp, session.timeZone);
+  const fromMinute = fromLocal.hour * 60 + fromLocal.minute;
+  const toMinute = toLocal.hour * 60 + toLocal.minute;
+  const gapDuration = toTimestamp - fromTimestamp;
+  // Dukascopy reopens the Sunday session at 18:00 New York time. The
+  // existing session calendar starts a trading day at 17:00, so its generic
+  // weekend classifier misses the one-hour DST boundary in the raw feed (and
+  // older winter fixtures may use the 17:00 endpoint). Recognize the
+  // Friday-close/Sunday-open span directly before applying the weekday-only
+  // probe result.
+  const fromWeekday = dayOfWeek(fromLocal);
+  const toWeekday = dayOfWeek(toLocal);
+  if (
+    fromWeekday === 5
+    && toWeekday === 0
+    && fromMinute >= 14 * 60
+    && fromMinute < 18 * 60
+    && toMinute >= 17 * 60
+    && toMinute <= 18 * 60
+    && gapDuration >= 36 * 60 * 60 * 1_000
+    && gapDuration <= 60 * 60 * 60 * 1_000
+  ) return true;
+
+  const sameLocalDate = fromLocal.year === toLocal.year
+    && fromLocal.month === toLocal.month
+    && fromLocal.day === toLocal.day;
+  // Normal daily maintenance is 17:00–18:00 New York time. On holidays the
+  // same reopen boundary can follow an earlier close, so accept up to six
+  // hours while keeping the same-day 18:00 reopen anchor.
+  return sameLocalDate
+    && toMinute === 18 * 60
+    && fromMinute >= 14 * 60
+    && fromMinute < 18 * 60
+    && gapDuration >= 30 * 60 * 1_000
+    && gapDuration <= 6 * 60 * 60 * 1_000;
+}
+

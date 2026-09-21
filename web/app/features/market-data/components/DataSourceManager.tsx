@@ -45,7 +45,7 @@ import { TIMEFRAME_IDS, timeframeLabel as catalogTimeframeLabel, type TimeframeI
 // The worker route remains the polling transport behind marketDataGateway: /api/data-jobs/market/sync/worker.
 
 type DownloadProviderId = "tushare" | "alpaca";
-type ProviderId = DownloadProviderId | "baostock" | "tdxquant" | "twelvedata" | "dukascopy";
+type ProviderId = DownloadProviderId | "baostock" | "tdxquant" | "dukascopy";
 type Provider = {
   id: ProviderId;
   name: string;
@@ -291,6 +291,10 @@ function statusLabel(status: DownloadJob["status"]) {
   }[status];
 }
 
+function isDukascopyRateLimited(message: string) {
+  return /HTTP\s*429|Too Many Requests/i.test(message);
+}
+
 function timeframeLabel(value: AdvancedSetup["minimumTimeframe"]) {
   if (value === "5m") return `${catalogTimeframeLabel(value)}（自动生成 M15、M30、H1、H4、D1、W1、MN）`;
   if (value === "1h") return `${catalogTimeframeLabel(value)}（自动生成 H4、D1、W1、MN）`;
@@ -310,7 +314,7 @@ function incrementalSourceLabel(value: string | null | undefined) {
   if (value === "tushare") return "Tushare daily 不复权";
   if (value === "tdxquant") return "TdxQuant";
   if (value === "none") return "未设置增量";
-  return "通达信实时日线不复权";
+  return "通达信历史日线不复权";
 }
 
 function cnAssetScopeLabel(assets?: string[]) {
@@ -764,8 +768,8 @@ export function DataSourceManager({
             ? "系统将使用初始化方案绑定的 Tushare daily 更新最近一个已收盘交易日；缺口修复也只使用 Tushare。确定开始吗？"
             : "系统将使用初始化方案绑定的 Tushare daily 回查最近 30 个自然日并修复缺口，不会混入通达信或 BaoStock。确定开始吗？"
         : mode === "incremental"
-          ? "系统将在收盘后使用通达信写入最新日线快照；如果之前漏过交易日，可用本地通达信日线文件扫描并修复。确定开始吗？"
-          : "系统将回查最近 30 个自然日，使用本地通达信日线文件修复 A 股不复权日线缺口；本地文件未覆盖的日期会明确标记，不会混入其他数据源。确定开始吗？";
+          ? "系统将从每个品种最后一根完整通达信日线之后继续，拉取到当前可用的完整交易日；未收盘的当日行情不会写入。确定开始吗？"
+          : "系统将回查最近 30 个自然日，使用通达信历史日线补齐和校正 A 股不复权日线缺口；周末、节假日和停牌不会造数据。确定开始吗？";
       if (!window.confirm(prompt)) return;
     }
     setMaintenanceBusy(true);
@@ -777,7 +781,7 @@ export function DataSourceManager({
           ? "正在建立 BaoStock 每日增量任务……"
           : localIncrementalSource === "tushare"
             ? "正在建立 Tushare 每日增量任务……"
-            : "正在检查收盘状态并准备通达信日线更新……");
+            : "正在准备通达信完整日线增量任务……");
     try {
       const result = await marketDataGateway.cnMaintenanceAction<{
         maintenanceTask?: CnMaintenanceTask | null;
@@ -1069,6 +1073,7 @@ export function DataSourceManager({
             setFxQuality(data.task.quality ?? null);
           }
           if (data.task && ["completed", "failed", "cancelled", "paused"].includes(data.task.status)) {
+            setNotice(data.task.status === "failed" ? "行情更新未完成，请稍后点击“重试”。" : "");
             if (data.task.status === "completed") notifyDataChanged();
             break;
           }
@@ -1082,9 +1087,13 @@ export function DataSourceManager({
             retryDelayMs = 250;
           }
         } catch (error) {
+          const message = error instanceof Error ? error.message : `${market === "GOLD" ? "黄金" : "外汇"}任务网络请求失败`;
+          if (isDukascopyRateLimited(message)) {
+            setNotice(`${message}，已暂停自动重试，请稍后点击“重试”。`);
+            break;
+          }
           failures += 1;
           retryDelayMs = Math.min(30_000, 1_000 * 2 ** Math.min(failures - 1, 5));
-          const message = error instanceof Error ? error.message : `${market === "GOLD" ? "黄金" : "外汇"}任务网络请求失败`;
           setNotice(`${message}，${Math.ceil(retryDelayMs / 1_000)} 秒后自动重试（第 ${failures} 次）`);
         }
         await new Promise((resolve) => window.setTimeout(resolve, retryDelayMs));
@@ -1100,9 +1109,24 @@ export function DataSourceManager({
     if (fxTaskLoopRef.current !== fxTask.id) void runFxTask(fxTask.id);
   }, [fxTask, market, runFxTask]);
 
+  // The /run request can stay open while Dukascopy downloads many daily
+  // files. Read the persisted task separately so the UI reflects the claim,
+  // stage, errors, and completion instead of remaining on the initial queued
+  // snapshot until the long request returns.
+  useEffect(() => {
+    if ((market !== "FX" && market !== "GOLD") || !fxTask || !["queued", "running"].includes(fxTask.status)) return;
+    const timer = window.setInterval(() => {
+      void loadFxTask().then((task) => {
+        if (task?.status === "completed") notifyDataChanged();
+      });
+    }, 1_000);
+    return () => window.clearInterval(timer);
+  }, [fxTask, loadFxTask, market, notifyDataChanged]);
+
   const handleFxAction = async (action: FxDataControlAction) => {
     const data = await marketDataGateway.fxDataAction<{ task?: FxDataTask | null; error?: string }>(action);
     if (!data.task) throw new Error(data.error ?? "行情任务操作失败");
+    setNotice("");
     setFxTask(data.task);
     setFxQuality(data.task.quality ?? null);
     if (action.type !== "task" || action.action === "resume" || action.action === "retry") void runFxTask(data.task.id);
@@ -1429,7 +1453,7 @@ export function DataSourceManager({
                         <>
                           <option value="baostock">BaoStock 前复权增量（默认）</option>
                           <option value="tushare">Tushare daily 增量（不复权）</option>
-                          <option value="tdx-realtime">通达信实时日线增量（不复权）</option>
+                          <option value="tdx-realtime">通达信历史日线增量（不复权）</option>
                           <option value="tdxquant">TdxQuant 增量（可复权）</option>
                         </>
                       )}
@@ -1503,7 +1527,7 @@ export function DataSourceManager({
                 <div><span>历史范围</span><strong>{{ all: "全部历史", "20y": "最近20年", "10y": "最近10年" }[advanced.historyRange]}</strong></div>
                 <div><span>A股数据来源</span><strong>{!advanced.cnMarket ? "不下载 A 股" : advanced.cnInitialSource === "baostock" ? "BaoStock 前复权日线" : advanced.cnInitialSource === "tdxquant" ? (advanced.minimumTimeframe === "1d" ? "TdxQuant 前复权日线（本机服务地址）" : `TdxQuant ${catalogTimeframeLabel(advanced.minimumTimeframe)}（可复权，本机服务地址）`) : advanced.cnInitialSource === "tushare" ? "Tushare daily（不复权）" : "通达信日线包（不复权）"}</strong></div>
                 <div><span>复权口径</span><strong>{!advanced.cnMarket ? "—" : advanced.cnInitialSource === "baostock" || advanced.cnInitialSource === "tdxquant" ? (advanced.usMarket ? "A 股前复权 · 美股全复权" : "A 股前复权") : advanced.cnInitialSource === "tushare" || advanced.cnInitialSource === "tdx-zip" ? "A 股不复权" : "A 股按所选服务地址"}</strong></div>
-                <div><span>增量方案</span><strong>{!advanced.cnMarket ? "—" : advanced.cnIncrementalSource === "baostock" ? "BaoStock 前复权" : advanced.cnIncrementalSource === "tdxquant" ? `TdxQuant ${intradaySetup ? catalogTimeframeLabel(advanced.minimumTimeframe) : "日线"} 可复权` : advanced.cnIncrementalSource === "tushare" ? "Tushare 不复权" : advanced.cnIncrementalSource === "tdx-realtime" ? "通达信实时日线（不复权）" : "不设置"}</strong></div>
+                <div><span>增量方案</span><strong>{!advanced.cnMarket ? "—" : advanced.cnIncrementalSource === "baostock" ? "BaoStock 前复权" : advanced.cnIncrementalSource === "tdxquant" ? `TdxQuant ${intradaySetup ? catalogTimeframeLabel(advanced.minimumTimeframe) : "日线"} 可复权` : advanced.cnIncrementalSource === "tushare" ? "Tushare 不复权" : advanced.cnIncrementalSource === "tdx-realtime" ? "通达信历史日线（不复权）" : "不设置"}</strong></div>
                 <div><span>权息信息</span><strong>{supportsCorporateActions && advanced.includeCorporateActions ? "同步并在图表中标记" : "不建立"}</strong></div>
                 <div><span>版本锁定</span><strong>开启 · 仅保存差异和被引用版本</strong></div>
               </div>
@@ -1766,7 +1790,7 @@ export function DataSourceManager({
                 ? "每日更新会回查最近 30 个自然日，自动补齐漏日并校正已有前复权日线；周线和月线继续由本地日线生成。"
                 : localIncrementalSource === "tushare"
                   ? "日线价格保持不复权；每日增量和缺口修复都只使用初始化时绑定的 Tushare daily 接口。"
-                  : "日线价格保持不复权；每日增量只在收盘后写入通达信最新快照，缺口修复只读取本地通达信日线文件。"
+                  : "日线价格保持不复权；每日增量从最后一根完整日线续传，缺口修复会回查通达信历史日线。"
               : localServiceError || "请检查本机数据服务状态后重试。")}</small>
             {cnMaintenanceTask && (
               <>
@@ -1862,7 +1886,7 @@ export function DataSourceManager({
 
       {(market === "FX" || market === "GOLD") && (
         <FxDataControlPanel
-          apiPaths={{ initialize: "/api/fx-data/initialize", update: "/api/fx-data/update", task: "/api/fx-data/task" }}
+          apiPaths={{ initialize: "/api/fx-data/initialize", update: "/api/fx-data/update", repair: "/api/fx-data/repair", task: "/api/fx-data/task" }}
           currentTask={fxTask}
           qualitySummary={fxQuality}
           currencyPairs={market === "GOLD" ? DEFAULT_GOLD_INSTRUMENTS : DEFAULT_FX_CURRENCY_PAIRS}

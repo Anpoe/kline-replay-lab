@@ -42,17 +42,9 @@ export async function GET() {
         credentialNames: [],
       },
       {
-        id: "twelvedata",
-        name: "Twelve Data REST",
-        market: "外汇",
-        configured: Boolean(secrets.twelveDataApiKey),
-        supportedTimeframes: ["1m"],
-        credentialNames: ["TWELVE_DATA_API_KEY"],
-      },
-      {
         id: "dukascopy",
         name: "Dukascopy Official CSV Adapter",
-        market: "外汇",
+        market: "外汇与黄金",
         configured: true,
         supportedTimeframes: ["1m"],
         credentialNames: [],

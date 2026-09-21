@@ -31,6 +31,7 @@ export type MarketDataStorage = {
 export type MarketDataFxAction =
   | { type: "initialize"; payload: unknown }
   | { type: "update"; payload: unknown }
+  | { type: "repair"; payload: unknown }
   | { type: "task"; taskId: string; action: "pause" | "resume" | "retry" | "cancel" };
 
 export const marketDataStorageKeys = Object.freeze({
@@ -297,23 +298,32 @@ export function createMarketDataGateway(fetcher: MarketDataGatewayFetch) {
     "市场同步任务操作失败",
   );
 
-  const runFxTask = <T = unknown>(taskId: string, signal?: AbortSignal) => requestJson<T>(
-    fetcher,
-    "/api/fx-data/run",
-    withSignal({
+  const runFxTask = async <T = unknown>(taskId: string, signal?: AbortSignal): Promise<T> => {
+    const response = await fetcher("/api/fx-data/run", withSignal({
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ taskId }),
-    }, signal),
-      "行情任务请求失败",
-  );
+    }, signal));
+    const payload = await response.json() as {
+      task?: { id?: string; status?: string };
+      error?: string;
+    } | null;
+    // A 502 can include the durably failed task. Keep that terminal snapshot
+    // so the UI stops polling instead of treating it as a dropped connection.
+    if (!response.ok && !(payload?.task?.id === taskId && payload.task.status === "failed")) {
+      throw new Error(payload?.error || "行情任务请求失败");
+    }
+    return payload as T;
+  };
 
   const fxDataAction = <T = unknown>(action: MarketDataFxAction, signal?: AbortSignal) => {
     const input = action.type === "initialize"
       ? "/api/fx-data/initialize"
       : action.type === "update"
         ? "/api/fx-data/update"
-        : "/api/fx-data/task";
+        : action.type === "repair"
+          ? "/api/fx-data/repair"
+          : "/api/fx-data/task";
     const body = action.type === "task"
       ? { taskId: action.taskId, action: action.action }
       : action.payload;

@@ -4,6 +4,13 @@ import type {
   LiveScanSort,
 } from "./liveScanContracts.ts";
 
+export function calculateDailyChangePct(close: unknown, previousClose: unknown) {
+  const current = Number(close);
+  const previous = Number(previousClose);
+  if (!Number.isFinite(current) || current <= 0 || !Number.isFinite(previous) || previous <= 0) return null;
+  return (current / previous - 1) * 100;
+}
+
 export function normalizeLiveScanLimit(value: unknown) {
   const limit = Number(value);
   if (value === 0 || value === "0") return 0;

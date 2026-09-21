@@ -6,13 +6,34 @@ import {
 
 /** The official widget publishes the current Jetta service location here. */
 export const DUKASCOPY_WIDGET_CONFIG_URL = "https://widgets.dukascopy.com/en/config.json";
+/**
+ * Jetta varies its CloudFront response by Origin.  Supplying the official
+ * widget origin selects the same cache variant used by the public widget;
+ * the origin-less variant can retain a stale 429 at one edge location.
+ */
+const DUKASCOPY_REQUEST_ORIGINS = [
+  "https://widgets.dukascopy.com",
+] as const;
 /** Stable official fallback used when the widget config points at a test host. */
 export const DUKASCOPY_PRODUCTION_SERVER_URL = "https://jetta.dukascopy.com";
 const DEFAULT_TIMEOUT_MS = 20_000;
 const DEFAULT_MAX_ATTEMPTS = 3;
 const DEFAULT_RETRY_BASE_DELAY_MS = 750;
 const DEFAULT_DAILY_CONCURRENCY = 4;
-const MAX_RETRY_DELAY_MS = 8_000;
+// Dukascopy's public Jetta endpoint does not return Retry-After for 429s.
+// Allow callers to use a meaningful backoff instead of retrying inside the
+// same short rate-limit window.
+const MAX_RETRY_DELAY_MS = 60_000;
+const RATE_LIMIT_COOLDOWN_MS = 60_000;
+const SATURDAY_CLOSED_INSTRUMENTS = new Set([
+  "EURUSD",
+  "GBPUSD",
+  "USDJPY",
+  "AUDUSD",
+  "USDCAD",
+  "USDCHF",
+  "XAUUSD",
+]);
 
 type JsonObject = Record<string, unknown>;
 
@@ -58,6 +79,8 @@ export type DukascopyOfficialClientOptions = {
   retryBaseDelayMs?: number;
   /** Number of daily candle files downloaded at the same time. */
   dailyConcurrency?: number;
+  /** Minimum delay between daily candle requests for the public feed. */
+  dailyRequestIntervalMs?: number;
 };
 
 export type DukascopyOfficialDownloadRequest = {
@@ -67,6 +90,8 @@ export type DukascopyOfficialDownloadRequest = {
   timeframe?: string;
   offerSide?: "BID" | "ASK";
   signal?: AbortSignal;
+  /** Called after one daily file has been read (or confirmed unavailable). */
+  onDayComplete?: (completedDays: number, totalDays: number) => void | Promise<void>;
 };
 
 export type DukascopyOfficialParseResult = DukascopyParseResult & {
@@ -168,6 +193,14 @@ function normalizeDate(value: string, label: string) {
   const timestamp = Date.parse(`${value}T00:00:00Z`);
   if (!Number.isFinite(timestamp)) throw new Error(`${label} 不是有效日期`);
   return timestamp;
+}
+
+function isKnownClosedUtcDay(instrument: string, day: number) {
+  // FX and precious-metal minute feeds have no Saturday UTC session. Sunday
+  // is deliberately kept in the request because the weekly open can produce
+  // bars after the rollover, depending on the instrument and DST.
+  const compact = instrument.trim().toUpperCase().replace(/[\/_-]/g, "");
+  return SATURDAY_CLOSED_INSTRUMENTS.has(compact) && new Date(day).getUTCDay() === 6;
 }
 
 function normalizeServerUrl(value: string) {
@@ -326,6 +359,9 @@ export class DukascopyOfficialClient {
   private readonly maxAttempts: number;
   private readonly retryBaseDelayMs: number;
   private readonly dailyConcurrency: number;
+  private readonly dailyRequestIntervalMs: number;
+  private nextDailyRequestAt = 0;
+  private dailyRequestQueue: Promise<void> = Promise.resolve();
   private serverUrlsPromise?: Promise<string[]>;
   private readonly instrumentCache = new Map<string, Promise<OfficialInstrumentInfo>>();
 
@@ -341,6 +377,28 @@ export class DukascopyOfficialClient {
       ? Number(options.retryBaseDelayMs)
       : DEFAULT_RETRY_BASE_DELAY_MS;
     this.dailyConcurrency = positiveInteger(options.dailyConcurrency, DEFAULT_DAILY_CONCURRENCY, 6);
+    this.dailyRequestIntervalMs = Number.isFinite(options.dailyRequestIntervalMs) && Number(options.dailyRequestIntervalMs) > 0
+      ? Number(options.dailyRequestIntervalMs)
+      : 0;
+  }
+
+  private async waitForDailyRequest(signal?: AbortSignal) {
+    if (this.dailyRequestIntervalMs <= 0 && this.nextDailyRequestAt <= Date.now()) return;
+    const previous = this.dailyRequestQueue;
+    let release!: () => void;
+    this.dailyRequestQueue = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    await previous;
+    try {
+      const delay = Math.max(0, this.nextDailyRequestAt - Date.now());
+      if (delay > 0) await waitForRetry(delay, signal);
+      if (this.dailyRequestIntervalMs > 0) {
+        this.nextDailyRequestAt = Date.now() + this.dailyRequestIntervalMs;
+      }
+    } finally {
+      release();
+    }
   }
 
   private async serverUrls() {
@@ -362,7 +420,13 @@ export class DukascopyOfficialClient {
     init.signal?.addEventListener("abort", onAbort, { once: true });
     const timer = setTimeout(() => controller.abort(), this.timeoutMs);
     try {
-      return await this.fetcher(input, { ...init, signal: controller.signal });
+      // Next's server fetch can otherwise reuse a cached 429 for the same
+      // daily URL, even after the upstream edge has recovered.
+      return await this.fetcher(input, {
+        ...init,
+        cache: "no-store",
+        signal: controller.signal,
+      });
     } catch (error) {
       if (error instanceof DukascopyOfficialClientError) throw error;
       const url = String(input);
@@ -411,10 +475,21 @@ export class DukascopyOfficialClient {
     return [...new Set(candidates)];
   }
 
-  private async requestJsonOnce(url: string, signal: AbortSignal | undefined, allowMissing: boolean) {
+  private async requestJsonOnce(
+    url: string,
+    signal: AbortSignal | undefined,
+    allowMissing: boolean,
+    origin: string,
+  ) {
     const response = await this.fetchWithTimeout(url, {
       method: "GET",
-      headers: { accept: "application/json" },
+      headers: {
+        accept: "application/json",
+        // Workers does not add this automatically. The official edge varies
+        // by Accept-Encoding; its uncompressed daily response can stay at 429.
+        "accept-encoding": "gzip",
+        origin,
+      },
       signal,
     });
     const body = await response.text();
@@ -439,8 +514,10 @@ export class DukascopyOfficialClient {
 
   private async requestJsonWithRetry(url: string, signal: AbortSignal | undefined, allowMissing: boolean) {
     for (let attempt = 1; attempt <= this.maxAttempts; attempt += 1) {
+      if (attempt > 1) await this.waitForDailyRequest(signal);
       try {
-        return await this.requestJsonOnce(url, signal, allowMissing);
+        const origin = DUKASCOPY_REQUEST_ORIGINS[(attempt - 1) % DUKASCOPY_REQUEST_ORIGINS.length];
+        return await this.requestJsonOnce(url, signal, allowMissing, origin);
       } catch (error) {
         if (signal?.aborted || !isRetryableError(error) || attempt >= this.maxAttempts) {
           if (isRetryableError(error) && attempt > 1 && error instanceof DukascopyOfficialClientError) {
@@ -452,6 +529,15 @@ export class DukascopyOfficialClient {
             );
           }
           throw error;
+        }
+        if (error instanceof DukascopyOfficialClientError && error.status === 429) {
+          // The public feed often omits Retry-After. Reserve a full rate-limit
+          // window so the next retry does not immediately hit the same edge
+          // cache bucket again.
+          this.nextDailyRequestAt = Math.max(
+            this.nextDailyRequestAt,
+            Date.now() + RATE_LIMIT_COOLDOWN_MS,
+          );
         }
         const retryDelay = Math.max(
           Math.min(MAX_RETRY_DELAY_MS, this.retryBaseDelayMs * (2 ** (attempt - 1))),
@@ -510,9 +596,9 @@ export class DukascopyOfficialClient {
             code,
             serverUrl: base,
             pathCodes: [...new Set([
+              ...normalizeInstrumentCandidates(symbol),
               code.replaceAll("/", "-"),
               code,
-              ...normalizeInstrumentCandidates(symbol),
             ])],
             minuteFrom,
           };
@@ -554,9 +640,18 @@ export class DukascopyOfficialClient {
     firstDay.setUTCHours(0, 0, 0, 0);
     const days: number[] = [];
     for (let day = firstDay.getTime(); day < end; day += 86_400_000) days.push(day);
+    let completedDays = 0;
+    const markDayComplete = async () => {
+      completedDays += 1;
+      await request.onDayComplete?.(completedDays, days.length);
+    };
     const dailyCandles = await mapWithConcurrency(days, this.dailyConcurrency, async (day) => {
       try {
         const date = new Date(day);
+        if (isKnownClosedUtcDay(request.instrument, day)) {
+          await markDayComplete();
+          return [];
+        }
         let payload: unknown = null;
         let requestedPath = "";
         for (const pathCode of instrument.pathCodes) {
@@ -569,12 +664,18 @@ export class DukascopyOfficialClient {
             String(date.getUTCMonth() + 1),
             String(date.getUTCDate()),
           ]);
+          await this.waitForDailyRequest(request.signal);
           payload = await this.requestJsonAllowMissing(requestedPath, request.signal);
           if (payload !== null) break;
         }
-        if (payload === null) return [];
+        if (payload === null) {
+          await markDayComplete();
+          return [];
+        }
         try {
-          return decodeCandlePayload(payload, start, end);
+          const candles = decodeCandlePayload(payload, start, end);
+          await markDayComplete();
+          return candles;
         } catch (error) {
           throw new DukascopyOfficialClientError(
             error instanceof Error ? error.message : "Dukascopy 官方分钟数据无法解码",
@@ -585,7 +686,10 @@ export class DukascopyOfficialClient {
         // The official feed uses HTTP 400 when a requested day is newer than
         // its current minute-data horizon. Treat that day as empty so a range
         // ending near the present can finish without discarding prior days.
-        if (isTooLateForOfficialRange(error)) return [];
+        if (isTooLateForOfficialRange(error)) {
+          await markDayComplete();
+          return [];
+        }
         throw error;
       }
     });

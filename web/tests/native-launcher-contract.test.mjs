@@ -239,6 +239,9 @@ test("原生控制面板通过 main Release 安全更新并保留本地数据", 
   assert.match(updateService, /\.wrangler/);
   assert.match(updateService, /\.local-data/);
   assert.match(updateService, /KLineTrainingCamp-Portable-/);
+  assert.match(updateService, /KLineTrainingCamp-Portable\.zip/);
+  assert.match(updateService, /ServicePointManager\.SecurityProtocol/);
+  assert.match(updateService, /SecurityProtocolType\)\s*3072/);
   assert.match(updateService, /WaitForExit/);
   assert.match(panel, /BeginUpdateCheck/);
   assert.match(panel, /RunUpdateCheckAsync/);

@@ -43,9 +43,9 @@ export const FX_TIMEFRAME_MS: Readonly<Record<Exclude<FxTimeframe, "1mo">, numbe
 });
 
 /** 逻辑数据集中的可追溯来源；不得用 canonical 别名覆盖真实来源。 */
-export type FxDataSource = "dukascopy" | "twelvedata" | "manual-csv";
+export type FxDataSource = "dukascopy" | "manual-csv";
 export type FxHistoricalSource = Extract<FxDataSource, "dukascopy" | "manual-csv">;
-export type FxIncrementSource = Extract<FxDataSource, "twelvedata">;
+export type FxIncrementSource = Extract<FxDataSource, "dukascopy">;
 
 export type FxVolumeType = "none" | "tick";
 export type FxTimestampUnit = "ms" | "s";
@@ -71,8 +71,6 @@ export type FxInstrumentDefinition = Readonly<{
   quoteCurrency: string;
   /** Dukascopy 的无分隔符品种代码。 */
   dukascopySymbol: string;
-  /** Twelve Data 的斜杠品种代码。 */
-  twelveDataSymbol: string;
   /** 报价价格应保留的小数位数，不等于标准 pip 位数。 */
   pricePrecision: number;
   /** 标准 pip 大小；JPY 交叉盘与非 JPY 交叉盘不同。 */
@@ -87,8 +85,6 @@ export type GoldInstrumentDefinition = Readonly<{
   quoteCurrency: "USD";
   /** Dukascopy 的无分隔符品种代码。 */
   dukascopySymbol: "XAUUSD";
-  /** Twelve Data 的斜杠品种代码。 */
-  twelveDataSymbol: "XAU/USD";
   /** 黄金现货报价精度；成交规则不在本阶段由该字段推导。 */
   pricePrecision: number;
   pipSize: number;
@@ -104,7 +100,6 @@ export const FX_INSTRUMENT_CATALOG: readonly FxInstrumentDefinition[] = Object.f
     baseCurrency: "EUR",
     quoteCurrency: "USD",
     dukascopySymbol: "EURUSD",
-    twelveDataSymbol: "EUR/USD",
     pricePrecision: 5,
     pipSize: 0.0001,
   },
@@ -115,7 +110,6 @@ export const FX_INSTRUMENT_CATALOG: readonly FxInstrumentDefinition[] = Object.f
     baseCurrency: "GBP",
     quoteCurrency: "USD",
     dukascopySymbol: "GBPUSD",
-    twelveDataSymbol: "GBP/USD",
     pricePrecision: 5,
     pipSize: 0.0001,
   },
@@ -126,7 +120,6 @@ export const FX_INSTRUMENT_CATALOG: readonly FxInstrumentDefinition[] = Object.f
     baseCurrency: "USD",
     quoteCurrency: "JPY",
     dukascopySymbol: "USDJPY",
-    twelveDataSymbol: "USD/JPY",
     pricePrecision: 3,
     pipSize: 0.01,
   },
@@ -137,7 +130,6 @@ export const FX_INSTRUMENT_CATALOG: readonly FxInstrumentDefinition[] = Object.f
     baseCurrency: "AUD",
     quoteCurrency: "USD",
     dukascopySymbol: "AUDUSD",
-    twelveDataSymbol: "AUD/USD",
     pricePrecision: 5,
     pipSize: 0.0001,
   },
@@ -148,7 +140,6 @@ export const FX_INSTRUMENT_CATALOG: readonly FxInstrumentDefinition[] = Object.f
     baseCurrency: "USD",
     quoteCurrency: "CAD",
     dukascopySymbol: "USDCAD",
-    twelveDataSymbol: "USD/CAD",
     pricePrecision: 5,
     pipSize: 0.0001,
   },
@@ -159,7 +150,6 @@ export const FX_INSTRUMENT_CATALOG: readonly FxInstrumentDefinition[] = Object.f
     baseCurrency: "USD",
     quoteCurrency: "CHF",
     dukascopySymbol: "USDCHF",
-    twelveDataSymbol: "USD/CHF",
     pricePrecision: 5,
     pipSize: 0.0001,
   },
@@ -173,7 +163,6 @@ export const GOLD_INSTRUMENT_CATALOG: readonly GoldInstrumentDefinition[] = Obje
     baseCurrency: "XAU",
     quoteCurrency: "USD",
     dukascopySymbol: "XAUUSD",
-    twelveDataSymbol: "XAU/USD",
     pricePrecision: 2,
     pipSize: 0.01,
   },
@@ -402,7 +391,7 @@ export function isFxCandleComplete(
   return asOfTimestamp >= getFxCandleEndTimestamp(timestamp, timeframe);
 }
 
-/** 同一判定的语义别名，供 Twelve Data 增量过滤器使用。 */
+/** 同一判定的语义别名，供增量过滤器使用。 */
 export const isFxCandleClosed = isFxCandleComplete;
 
 /**
@@ -558,7 +547,7 @@ export type FxIncrementCheckpoint = Readonly<{
   instrumentId: FxInstrumentId;
   timeframe: "1m";
   source: FxIncrementSource;
-  /** Twelve Data 已成功写入的最后一根完整 M1 K 线，包含该时间戳。 */
+  /** Dukascopy 已成功写入的最后一根完整 M1 K 线，包含该时间戳。 */
   lastCompleteTimestamp: number | null;
   /** API 查询起点，排他且必须 1m 对齐；可由 lastCompleteTimestamp 推导。 */
   nextStartTimestamp: number | null;
@@ -569,8 +558,8 @@ export type FxIncrementCheckpoint = Readonly<{
 }>;
 
 /**
- * 计算 Twelve Data 下一次请求的排他起点。
- * historyBoundary 是 Dukascopy 段的包含边界；checkpoint 只能把起点向后推进，
+ * 计算 Dukascopy 下一次请求的排他起点。
+ * historyBoundary 是历史段的包含边界；checkpoint 只能把起点向后推进，
  * 不能让增量请求回写边界之前的历史。
  */
 export function calculateFxIncrementStart(
@@ -591,7 +580,7 @@ export function calculateFxIncrementStart(
 export type FxDatasetLineage = Readonly<{
   /** 行级/分区级真实来源；不要写成 fx-canonical，否则无法审计跨来源切换。 */
   source: FxDataSource;
-  /** Dukascopy 历史段的边界；Twelve Data 增量段仍保留同一份边界元数据。 */
+  /** Dukascopy 历史段与增量段共用的边界元数据。 */
   historyBoundary: FxHistoryBoundary | null;
 }>;
 
