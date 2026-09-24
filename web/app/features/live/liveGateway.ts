@@ -19,11 +19,14 @@ export type LiveGatewayFetch = (
 ) => Promise<LiveGatewayResponse>;
 
 export type LiveStatePayload = {
+  accounts?: unknown;
   portfolios?: unknown;
   watchlist?: unknown;
 };
 
 export type LiveStateDelta = {
+  atomic?: boolean;
+  accountUpserts?: unknown[];
   portfolioUpserts: unknown[];
   portfolioDeletes: unknown[];
   watchlistUpserts: unknown[];
@@ -31,8 +34,13 @@ export type LiveStateDelta = {
 };
 
 export type LiveStateSaveResult = {
+  accountSkipped?: number;
   portfolioSkipped?: number;
   watchSkipped?: number;
+};
+
+export type TradingCommandGateway = {
+  postCommand(command: unknown, signal?: AbortSignal): Promise<unknown>;
 };
 
 export type LivePriceRefreshPayload = {
@@ -40,6 +48,8 @@ export type LivePriceRefreshPayload = {
     instrumentId: string;
     timestamp: number;
     open: number;
+    high?: number;
+    low?: number;
     close: number;
     previousClose?: number;
     realtime?: boolean;
@@ -47,11 +57,26 @@ export type LivePriceRefreshPayload = {
     quoteTimestamp?: number;
     volume?: number | null;
     turnover?: number | null;
+    closed?: boolean;
+    source?: string;
+    qualityFlags?: string[];
+    revision?: string | null;
+    priceBasis?: "raw" | "adjusted" | "unknown";
     entryBars?: Array<{
       timestamp: number;
       open: number;
+      high: number;
+      low: number;
       close: number;
+      volume?: number | null;
+      turnover?: number | null;
+      closed?: boolean;
+      source?: string;
+      qualityFlags?: string[];
+      revision?: string | null;
+      priceBasis?: "raw" | "adjusted" | "unknown";
     }>;
+    hasMoreEntryBars?: boolean;
   }>;
 };
 
@@ -94,7 +119,7 @@ export function createLiveGateway(fetcher: LiveGatewayFetch) {
     fetcher,
     "/api/live-state",
     withSignal({ cache: "no-store" }, signal),
-    "读取实盘数据失败",
+    "读取实时模拟数据失败",
   );
 
   const saveState = (delta: LiveStateDelta, signal?: AbortSignal) => requestJson<LiveStateSaveResult>(
@@ -105,7 +130,19 @@ export function createLiveGateway(fetcher: LiveGatewayFetch) {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(delta),
     }, signal),
-    "保存实盘数据失败",
+    "保存实时模拟数据失败",
+  );
+
+  const postCommand = (command: unknown, signal?: AbortSignal) => requestJson<unknown>(
+    fetcher,
+    "/api/trading-command",
+    withSignal({
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(command),
+    }, signal),
+    "交易命令执行失败",
+    true,
   );
 
   const scan = (request: unknown, signal?: AbortSignal) => requestJson<LiveScanResponse>(
@@ -116,7 +153,7 @@ export function createLiveGateway(fetcher: LiveGatewayFetch) {
       headers: { "content-type": "application/json" },
       body: JSON.stringify(request),
     }, signal),
-    "实盘筛选失败",
+    "实时筛选失败",
     true,
   );
 
@@ -151,5 +188,5 @@ export function createLiveGateway(fetcher: LiveGatewayFetch) {
     );
   };
 
-  return { loadState, saveState, scan, refreshPrices };
+  return { loadState, saveState, postCommand, scan, refreshPrices };
 }

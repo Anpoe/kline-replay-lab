@@ -30,7 +30,7 @@ import { CorporateActionsStore } from "./corporate-actions-store.mjs";
 import { TdxCorporateActionsClient } from "./tdx-corporate-actions-client.mjs";
 import { writeJsonAtomic } from "./atomic-json.mjs";
 import { CN_ASSET_TYPES, DEFAULT_CN_ASSETS, filterCnInstruments, normalizeCnAssets } from "./cn-asset-scope.mjs";
-import { closedCnDateWindow, latestClosedCnDate, latestClosedRealtimeDate } from "./cn-maintenance.mjs";
+import { closedCnDateWindow, closedCnDatesAfter, latestClosedCnDate, latestClosedRealtimeDate } from "./cn-maintenance.mjs";
 
 const moduleDir = path.dirname(fileURLToPath(import.meta.url));
 const DEFAULT_SOURCE_URL = "https://data.tdx.com.cn/vipdoc/hsjday.zip";
@@ -469,7 +469,7 @@ export class TdxLocalStore {
     const dates = nativeRealtime
       ? realtimeDate ? [realtimeDate] : []
       : mode === "incremental" && tushareMaintenance
-        ? [latestClosedCnDate(this.nowProvider, "compact")]
+        ? closedCnDatesAfter(this.effectiveLastTimestamp(manifest), this.nowProvider, "compact")
         : historicalWindow.dates;
     const maintenanceAssets = normalizeCnAssets(manifest.assets);
     const selectedInstruments = filterCnInstruments(manifest.instruments, maintenanceAssets);
@@ -486,13 +486,13 @@ export class TdxLocalStore {
       writeCompleted: false,
       message: dates.length
         ? tushareMaintenance
-          ? mode === "incremental" ? "准备使用 Tushare daily 更新最近一个已收盘交易日。" : `准备使用 Tushare daily 回查最近 ${days} 个自然日并修复缺口。`
+          ? mode === "incremental" ? "准备从本地最新日线继续更新至最近一个已收盘交易日。" : `准备使用 Tushare daily 回查最近 ${days} 个自然日并修复缺口。`
           : nativeRealtime
             ? supportsHistoricalBars
-              ? "准备从最后一根完整日线继续到当前可用的完整交易日。"
+              ? `准备续传至最近一个已收盘交易日，并核对近 ${days} 天的缺失日线。`
               : "准备在收盘后拉取通达信最新交易日日线快照。"
             : `准备回查最近 ${days} 个自然日并修复缺口。`
-        : nativeRealtime ? "当前尚未收市或今天不是交易日，暂不写入实时日线。" : "正在从本地通达信日线文件核对缺口。",
+        : nativeRealtime ? "当前尚未收市或今天不是交易日，暂不写入实时日线。" : tushareMaintenance ? "本地日线已更新至最近一个已收盘交易日。" : "正在从本地通达信日线文件核对缺口。",
       error: null,
       repairDays: days,
       assets: maintenanceAssets,
@@ -727,26 +727,45 @@ export class TdxLocalStore {
           }
           lastKnownTimestamp = correctedTimestamp;
         }
-        this.maintenanceTask.message = `正在从 ${displayDate(String(this.maintenanceTask.dates.at(-1)))} 反查 ${instrument.id} 的完整日线（${index + 1} / ${instruments.length}）。`;
+        const recentDays = Math.min(120, Math.max(7, Math.trunc(Number(this.maintenanceTask.repairDays) || 30)));
+        const recentStartTimestamp = Math.max(
+          Date.UTC(1990, 0, 1),
+          targetTimestamp - (recentDays - 1) * DAY_MS,
+        );
+        const scanStartTimestamp = Math.min(
+          Math.max(Date.UTC(1990, 0, 1), lastKnownTimestamp + DAY_MS),
+          recentStartTimestamp,
+        );
+        this.maintenanceTask.message = `正在核对 ${instrument.id} 的完整日线并补齐缺失日期（${index + 1} / ${instruments.length}）。`;
         await this.persistMaintenanceTask();
         const rows = [];
         let pageStart = 0;
-        while (lastKnownTimestamp < targetTimestamp) {
+        let previousOldestTimestamp = Number.POSITIVE_INFINITY;
+        let reachedScanStart = false;
+        for (let pageIndex = 0; pageIndex < 128; pageIndex += 1) {
+          const pageCount = pageStart ? 800 : 64;
           const page = await this.dailyQuotesClient.fetchDailyBars(instrument.id, {
             assetType: instrument.assetType,
-            count: 800,
+            count: pageCount,
             ...(pageStart ? { start: pageStart } : {}),
           });
           rows.push(...page);
           this.maintenanceTask.progress.receivedRows += page.length;
-          if (page.length < 800 || page.some((row) => Number(row?.timestamp) <= lastKnownTimestamp)) break;
+          if (page.length < pageCount || page.some((row) => Number(row?.timestamp) < scanStartTimestamp)) {
+            reachedScanStart = true;
+            break;
+          }
+          const oldestTimestamp = Math.min(...page.map(row => Number(row?.timestamp)));
+          if (!Number.isFinite(oldestTimestamp) || oldestTimestamp >= previousOldestTimestamp) {
+            throw new Error(`通达信历史日线分页未推进：${instrument.id}，请稍后重试`);
+          }
+          previousOldestTimestamp = oldestTimestamp;
           pageStart += page.length;
         }
-        if (!base) {
-          base = rows.length && lastKnownTimestamp > 0
-            ? await this.readRecentBaseCandles(instrument, lastKnownTimestamp)
-            : new Map();
-        }
+        if (!reachedScanStart) throw new Error(`通达信历史日线分页超过安全范围：${instrument.id}，请稍后重试`);
+        base = rows.length
+          ? await this.readRecentBaseCandles(instrument, scanStartTimestamp)
+          : new Map();
         if (this.maintenanceTask.status !== "running") {
           const error = new Error("维护任务已暂停");
           error.name = "AbortError";
@@ -756,7 +775,7 @@ export class TdxLocalStore {
         try {
           for (const row of rows) {
             const timestamp = Number(row?.timestamp);
-            if (!Number.isFinite(timestamp) || timestamp <= lastKnownTimestamp || timestamp > targetTimestamp) continue;
+            if (!Number.isFinite(timestamp) || timestamp < scanStartTimestamp || timestamp > targetTimestamp) continue;
             const normalized = normalizeTdxDailyQuote(instrument.id, {
               active: true,
               open: row.open,
@@ -804,10 +823,11 @@ export class TdxLocalStore {
               instrument.id,
               Math.max(latestOverlayByInstrument.get(instrument.id) ?? 0, timestamp),
             );
-            if (timestamp > Number(instrument.lastTimestamp ?? 0)) {
-              instrument.lastTimestamp = timestamp;
+            if (!current) {
               instrument.barCount = Number(instrument.barCount ?? 0) + 1;
+              instrument.firstTimestamp = Math.min(Number(instrument.firstTimestamp) || timestamp, timestamp);
             }
+            if (timestamp > Number(instrument.lastTimestamp ?? 0)) instrument.lastTimestamp = timestamp;
             changed = true;
           }
           overlayDb.exec("COMMIT");
@@ -822,6 +842,8 @@ export class TdxLocalStore {
         await this.persistMaintenanceTask();
       }
       if (instruments.length > 0 && Number(this.maintenanceTask.progress.receivedRows ?? 0) === 0) {
+        this.maintenanceTask.nextInstrumentIndex = 0;
+        this.maintenanceTask.progress.processedInstruments = 0;
         throw new Error("通达信历史日线未返回任何数据");
       }
       this.maintenanceTask.nextDateIndex = this.maintenanceTask.dates.length;
@@ -849,6 +871,8 @@ export class TdxLocalStore {
         this.maintenanceTask.error = error instanceof Error ? error.message : String(error);
         this.maintenanceTask.message = String(this.maintenanceTask.error).includes("未返回任何数据")
           ? "通达信暂未返回历史日线，本次没有写入；请检查网络后重试。"
+          : String(this.maintenanceTask.error).includes("分页")
+            ? "通达信日线读取未继续前进，任务已安全停止；请检查行情连接后继续维护。"
           : "A 股完整日线更新失败；已完成的品种和写入内容均已保留。";
         await this.persistMaintenanceTask();
       }
@@ -2275,26 +2299,39 @@ export class TdxLocalStore {
       const latest = sorted.at(-1);
       const previous = sorted.at(-2);
       if (latest) {
-        const entryBars = Number.isFinite(afterTimestamp)
-          ? sorted
-            .filter((bar) => bar.timestamp > afterTimestamp)
+        const allEntryBars = Number.isFinite(afterTimestamp)
+          ? sorted.filter((bar) => bar.timestamp > afterTimestamp)
+          : [];
+        const entryBars = allEntryBars.length
+          ? allEntryBars
             .slice(0, 64)
             .map((bar) => ({
               timestamp: Number(bar.timestamp),
               open: Number(bar.open),
+              high: Number(bar.high),
+              low: Number(bar.low),
               close: Number(bar.close),
+              volume: bar.volume == null ? null : Number(bar.volume),
+              turnover: bar.turnover == null ? null : Number(bar.turnover),
+              closed: true,
             }))
           : [];
         output.push({
           instrumentId: instrument.id,
           timestamp: latest.timestamp,
           open: latest.open,
+          high: latest.high,
+          low: latest.low,
           close: latest.close,
+          volume: latest.volume == null ? null : Number(latest.volume),
+          turnover: latest.turnover == null ? null : Number(latest.turnover),
+          closed: true,
           ...(previous && Number.isFinite(Number(previous.close)) && Number(previous.close) > 0
             ? { previousClose: Number(previous.close) }
             : {}),
           ...(entry ? { entryTimestamp: entry.timestamp, entryOpen: entry.open } : {}),
           ...(entryBars.length ? { entryBars } : {}),
+          ...(allEntryBars.length > 64 ? { hasMoreEntryBars: true } : {}),
         });
       }
     }
@@ -2334,6 +2371,8 @@ export class TdxLocalStore {
           instrumentId,
           timestamp: Number(last.timestamp),
           open: Number(quote.open),
+          high: Number(quote.high ?? quote.price ?? quote.close),
+          low: Number(quote.low ?? quote.price ?? quote.close),
           close: price,
           volume: rawVolume == null ? null : rawVolume * volumeScaleForAsset(instrument.assetType),
           turnover: quote.turnover == null ? null : Number(quote.turnover),
@@ -2341,7 +2380,9 @@ export class TdxLocalStore {
           quoteTimestamp: Date.now(),
           realtime: true,
           dailyBarClosed: dailyBarClosed && Number(last.timestamp) === currentTimestamp,
+          closed: dailyBarClosed && Number(last.timestamp) === currentTimestamp,
           ...(entryBars.length ? { entryBars } : {}),
+          ...(last.hasMoreEntryBars ? { hasMoreEntryBars: true } : {}),
         });
       }
     }

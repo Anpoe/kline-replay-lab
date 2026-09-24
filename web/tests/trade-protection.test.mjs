@@ -104,7 +104,7 @@ test("uses a distinct limit-order label for the movable draft entry line", () =>
   assert.equal(lines[0].label, "限价单（Limit Order）");
 });
 
-test("adds a locked opening-gap threshold guide without exposing a price label", () => {
+test("adds a movable opening-gap threshold guide without exposing a price label", () => {
   const lines = deriveProtectionLines({
     currentTimestamp: 3_000,
     openingGapPreviousClose: 100,
@@ -122,7 +122,7 @@ test("adds a locked opening-gap threshold guide without exposing a price label",
     price: 103,
     timestamp: 3_000,
     label: "高开不买阈值",
-    movable: false,
+    movable: true,
     source: "rule",
   });
 });

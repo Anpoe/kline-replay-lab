@@ -113,7 +113,7 @@ export function deriveProtectionLines({
     price: openingGapPrice,
     timestamp: currentTimestamp,
     label: openingGapMode === "low" ? "低开不买阈值" : "高开不买阈值",
-    movable: false,
+    movable,
     source: "rule",
   });
   if (triggerPrice != null) lines.push({

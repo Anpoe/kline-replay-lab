@@ -49,6 +49,9 @@ test("loads and normalizes legacy settings without changing the storage key", ()
   assert.equal(result.settings.defaultOrderQty, 250);
   assert.equal(result.settings.defaultTimeframe, defaultAppSettings.defaultTimeframe);
   assert.equal(result.settings.riskPercent, 100);
+  assert.deepEqual(result.settings.trainingAccount, defaultAppSettings.trainingAccount);
+  assert.deepEqual(result.settings.liveAccount, defaultAppSettings.liveAccount);
+  assert.deepEqual(JSON.parse(storage.getItem(settingsStorageKeys.appSettings)), result.settings);
   assert.equal(storage.values.has(settingsStorageKeys.appSettings), true);
   assert.equal(result.recoveredFromCorruption, false);
 });

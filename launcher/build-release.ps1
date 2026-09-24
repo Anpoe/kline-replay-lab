@@ -82,23 +82,14 @@ function Invoke-Checked {
 function Copy-WebSource {
     param([string]$Destination)
 
-    $excludedDirectories = @(
-        (Join-Path $webSource 'node_modules'),
-        (Join-Path $webSource 'dist'),
-        (Join-Path $webSource '.next'),
-        (Join-Path $webSource '.vinext'),
-        (Join-Path $webSource '.wrangler'),
-        (Join-Path $webSource '.local-data'),
-        (Join-Path $webSource '.playwright-cli'),
-        (Join-Path $webSource 'coverage'),
-        (Join-Path $webSource 'artifacts'),
-        (Join-Path $webSource 'outputs'),
-        (Join-Path $webSource 'output'),
-        (Join-Path $webSource 'work')
-    )
-    $robocopyArguments = @($webSource, $Destination, '/E', '/NFL', '/NDL', '/NJH', '/NJS', '/NP', '/XD') + $excludedDirectories
-    & robocopy.exe @robocopyArguments
-    if ($LASTEXITCODE -gt 7) { throw "Copying web source failed with robocopy exit code $LASTEXITCODE." }
+    # Only committed source belongs in a release; ignored local config must stay out.
+    $sourceArchive = Join-Path $temporaryDirectory 'web-source.zip'
+    & git -C $projectRoot archive --format=zip "--output=$sourceArchive" HEAD web
+    if ($LASTEXITCODE -ne 0) { throw "Archiving committed web source failed with exit code $LASTEXITCODE." }
+    Expand-Archive -LiteralPath $sourceArchive -DestinationPath (Split-Path -Parent $Destination) -Force
+    if (-not (Test-Path -LiteralPath (Join-Path $Destination 'package.json'))) {
+        throw 'The committed WebUI source is missing from the release staging directory.'
+    }
 }
 
 $nodePath = Resolve-NodeExecutable $NodeExecutable
@@ -210,10 +201,16 @@ $gitRevision = 'local-build'
 finally {
     if (Test-Path -LiteralPath $temporaryDirectory) {
         try {
-            $quotedTemporaryDirectory = '"' + $temporaryDirectory + '"'
-            Start-Process -FilePath $env:ComSpec -ArgumentList @('/d', '/c', 'rmdir', '/s', '/q', $quotedTemporaryDirectory) -WindowStyle Hidden | Out-Null
+            $temporaryRoot = [IO.Path]::GetFullPath([IO.Path]::GetTempPath()).TrimEnd('\') + '\'
+            $resolvedTemporaryDirectory = [IO.Path]::GetFullPath($temporaryDirectory)
+            $temporaryLeaf = Split-Path -Leaf $resolvedTemporaryDirectory
+            if (-not $resolvedTemporaryDirectory.StartsWith($temporaryRoot, [StringComparison]::OrdinalIgnoreCase) -or
+                -not $temporaryLeaf.StartsWith('KLineTrainingCamp.Release.', [StringComparison]::Ordinal)) {
+                throw "Unexpected release staging path: $resolvedTemporaryDirectory"
+            }
+            Remove-Item -LiteralPath $resolvedTemporaryDirectory -Recurse -Force
         } catch {
-            Write-Warning ("Temporary release staging cleanup could not be scheduled: " + $_.Exception.Message)
+            Write-Warning ("Temporary release staging cleanup failed: " + $_.Exception.Message)
         }
     }
 }

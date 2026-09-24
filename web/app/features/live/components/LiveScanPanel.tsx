@@ -79,10 +79,10 @@ export function LiveScanPanel({
         <div className="task-modal-head">
           <div>
             <span>LIVE MARKET SCREENER</span>
-            <h2 id="live-scan-title">实盘筛选</h2>
+            <h2 id="live-scan-title">实时筛选</h2>
             <p>只判断所选市场最近一个已收盘交易日；缺少当日数据时先自动增量更新。</p>
           </div>
-          <button aria-label="关闭实盘筛选" disabled={running} onClick={onClose}><X size={19} /></button>
+          <button aria-label="关闭实时筛选" disabled={running} onClick={onClose}><X size={19} /></button>
         </div>
 
         <div className="live-scan-market" role="group" aria-label="筛选市场">

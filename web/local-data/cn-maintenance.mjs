@@ -88,3 +88,18 @@ export function closedCnDateWindow(nowProvider = () => new Date(), repairDays = 
     dates,
   };
 }
+
+export function closedCnDatesAfter(lastTimestamp, nowProvider = () => new Date(), format = "iso") {
+  const endTimestamp = timestampFromDate(latestClosedCnDate(nowProvider, "iso"));
+  const lastDateTimestamp = Number.isFinite(Number(lastTimestamp)) && Number(lastTimestamp) > 0
+    ? Math.floor(Number(lastTimestamp) / DAY_MS) * DAY_MS
+    : Date.UTC(1990, 0, 1) - DAY_MS;
+  const dates = [];
+  for (let timestamp = Math.max(Date.UTC(1990, 0, 1), lastDateTimestamp + DAY_MS);
+    timestamp <= endTimestamp;
+    timestamp += DAY_MS) {
+    const weekday = new Date(timestamp).getUTCDay();
+    if (weekday !== 0 && weekday !== 6) dates.push(formatDate(timestamp, format));
+  }
+  return dates;
+}

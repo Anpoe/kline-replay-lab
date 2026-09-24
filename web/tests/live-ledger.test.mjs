@@ -30,6 +30,13 @@ test("live performance data uses isolated tables and a patch API", async () => {
     "live_order_rejections",
     "live_watchlist",
   ]) assert.match(runtime, new RegExp(`CREATE TABLE IF NOT EXISTS ${table}`));
+  assert.match(schema, /export const liveCommandReceipts =/);
+  assert.match(runtime, /CREATE TABLE IF NOT EXISTS live_command_receipts/);
+  for (const column of ["rawPrice", "quotePrice", "priceImpactCost", "engineVersion", "payloadVersion"]) {
+    assert.match(ledger, new RegExp(column));
+  }
+  assert.match(ledger, /WHERE excluded\.updated_at >= live_accounts\.updated_at/);
+  assert.match(ledger, /excluded\.account_version > live_accounts\.account_version/);
   assert.match(runtime, /migrateLegacyLiveData\(db\)/);
   assert.match(ledger, /live_data_migrated_v1/);
   assert.match(ledger, /portfolioUpserts/);
@@ -38,6 +45,7 @@ test("live performance data uses isolated tables and a patch API", async () => {
   assert.match(route, /export async function GET/);
   assert.match(route, /export async function PUT/);
   assert.match(route, /applyLiveStatePatch/);
+  assert.match(workbench, /postCommand/);
   assert.match(preferences, /delete preferences\.livePortfolios/);
   assert.match(preferences, /delete preferences\.liveWatchlist/);
   assert.match(workbench, /fetch\("\/api\/live-state"/);

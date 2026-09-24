@@ -103,5 +103,5 @@ test("最新交易日涨跌幅使用收盘价和前收计算，并拒绝无效�
 test("实时扫描错误统一为用户可见文本", () => {
   assert.equal(normalizeLiveScanError(new Error("离线")), "离线");
   assert.equal(normalizeLiveScanError(new Error("Failed to fetch")), "网络连接失败，请检查网络或本机数据服务后重试");
-  assert.equal(normalizeLiveScanError(undefined), "实盘筛选失败");
+  assert.equal(normalizeLiveScanError(undefined), "实时筛选失败");
 });

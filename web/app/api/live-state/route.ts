@@ -13,14 +13,14 @@ export async function PUT(request: Request) {
   try {
     payload = await request.json();
   } catch {
-    return Response.json({ error: "实盘数据请求格式不正确" }, { status: 400 });
+    return Response.json({ error: "实时模拟数据请求格式不正确" }, { status: 400 });
   }
   try {
     const result = await applyLiveStatePatch(getRawDb(), payload);
     return Response.json({ saved: true, ...result });
   } catch (error) {
     return Response.json({
-      error: error instanceof Error ? error.message : "实盘数据保存失败",
+      error: error instanceof Error ? error.message : "实时模拟数据保存失败",
     }, { status: 400 });
   }
 }

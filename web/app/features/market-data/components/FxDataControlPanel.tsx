@@ -10,7 +10,7 @@ import {
   RefreshCw,
   XCircle,
 } from "lucide-react";
-import { useId, useMemo, useState } from "react";
+import { useMemo, useState } from "react";
 import { TIMEFRAME_IDS, timeframeLabel, type TimeframeId } from "../../../lib/timeframeCatalog.ts";
 
 export type FxTimeframe = TimeframeId;
@@ -235,7 +235,6 @@ export function FxDataControlPanel({
   onError,
   onRefreshStatus,
 }: FxDataControlPanelProps) {
-  const titleId = useId();
   const pairs = useMemo(() => [...currencyPairs], [currencyPairs]);
   const initialPairId = defaultPairId && pairs.some((pair) => pair.id === defaultPairId)
     ? defaultPairId
@@ -363,12 +362,7 @@ export function FxDataControlPanel({
         : "";
 
   return (
-    <section className="settings-section provider-settings-section" aria-labelledby={titleId} aria-busy={busy}>
-      <div className="settings-section-head">
-        <strong id={titleId}>{datasetLabel}数据维护</strong>
-        <span>{historicalSourceLabel} 建立历史基准，{incrementalSourceLabel} 负责每日增量和缺口修复；两类任务分开执行。</span>
-      </div>
-
+    <section className="settings-section provider-settings-section" aria-label={`${datasetLabel}数据维护`} aria-busy={busy}>
       <div className="provider-setting-card">
         <div className="provider-setting-title">
           <div>

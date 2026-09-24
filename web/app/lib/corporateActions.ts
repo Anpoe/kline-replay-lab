@@ -14,6 +14,8 @@ export type CorporateActionEvent = {
   rightsSharesPer10: number;
   rightsPrice: number;
   shareRatio?: number | null;
+  source?: string;
+  priceBasis?: "raw" | "adjusted" | "unknown";
 };
 
 export type CorporateActionMarker = CorporateActionEvent & {

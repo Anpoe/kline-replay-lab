@@ -1,6 +1,7 @@
 import { ensureSchema, getRawDb } from "../../../db/runtime";
 import { fetchLocalData } from "../../lib/localDataService";
 import { matchesPattern, normalizePatternPresets, type PatternCandle, type PatternPreset } from "../../lib/patternFilters";
+import { stableLiveBarRevision } from "../../lib/liveExecutionAdapter";
 
 type ScanFilters = {
   minPrice?: number;
@@ -37,10 +38,43 @@ function finite(value: unknown) {
   return Number.isFinite(parsed) ? parsed : 0;
 }
 
+function parseQualityFlags(value: unknown) {
+  if (Array.isArray(value)) return value.filter((item): item is string => typeof item === "string").slice(0, 32);
+  if (typeof value !== "string") return [];
+  try {
+    const parsed = JSON.parse(value);
+    return Array.isArray(parsed)
+      ? parsed.filter((item): item is string => typeof item === "string").slice(0, 32)
+      : [];
+  } catch {
+    return [];
+  }
+}
+
 function normalizeScanLimit(value: unknown) {
   const parsed = Number(value);
   if (parsed === 0 && (typeof value === "number" || (typeof value === "string" && value.trim() === "0"))) return 0;
   return Number.isFinite(parsed) ? Math.min(500, Math.max(1, Math.round(parsed))) : 100;
+}
+
+function withBarRevision<T extends {
+  timestamp: number;
+  open: number;
+  high: number;
+  low: number;
+  close: number;
+  volume?: number | null;
+  turnover?: number | null;
+  source?: string;
+  qualityFlags?: string[];
+  revision?: string | null;
+  priceBasis?: "raw" | "adjusted" | "unknown";
+}>(bar: T, priceBasis: "raw" | "adjusted" | "unknown") {
+  return {
+    ...bar,
+    priceBasis,
+    revision: bar.revision ?? stableLiveBarRevision({ ...bar, priceBasis }),
+  };
 }
 
 export async function POST(request: Request) {
@@ -68,19 +102,72 @@ export async function POST(request: Request) {
           }),
         }, 30_000);
         const result = await response.json() as Record<string, unknown>;
+        const priceBasis: "raw" | "adjusted" = result.activeSource === "baostock" ? "adjusted" : "raw";
         const prices = Array.isArray(result.prices)
           ? result.prices.map((value) => {
               if (!value || typeof value !== "object" || Array.isArray(value)) return value;
               const price = value as Record<string, unknown>;
               const previousClose = Number(price.previousClose ?? price.lastClose);
+              const entryBars = Array.isArray(price.entryBars)
+                ? price.entryBars.flatMap((bar) => {
+                  if (!bar || typeof bar !== "object" || Array.isArray(bar)) return [];
+                  const candidate = bar as Record<string, unknown>;
+                  const timestamp = Number(candidate.timestamp);
+                  const open = Number(candidate.open);
+                  const high = Number(candidate.high);
+                  const low = Number(candidate.low);
+                  const close = Number(candidate.close);
+                  if (![timestamp, open, high, low, close].every(Number.isFinite)) return [];
+                  return [withBarRevision({
+                    ...candidate,
+                    timestamp,
+                    open,
+                    high,
+                    low,
+                    close,
+                    volume: candidate.volume == null ? null : Number(candidate.volume),
+                    turnover: candidate.turnover == null ? null : Number(candidate.turnover),
+                    source: typeof candidate.source === "string" ? candidate.source : undefined,
+                    qualityFlags: Array.isArray(candidate.qualityFlags)
+                      ? candidate.qualityFlags.filter((flag): flag is string => typeof flag === "string")
+                      : undefined,
+                  }, priceBasis as "raw" | "adjusted" | "unknown")];
+                })
+                : undefined;
+              const normalized = {
+                ...price,
+                priceBasis,
+                ...(entryBars?.length ? { entryBars } : {}),
+              };
+              const timestamp = Number(price.timestamp);
+              const open = Number(price.open);
+              const high = Number(price.high ?? price.open);
+              const low = Number(price.low ?? price.close);
+              const close = Number(price.close);
+              const withRevision = [timestamp, open, high, low, close].every(Number.isFinite)
+                ? withBarRevision({
+                  ...normalized,
+                  timestamp,
+                  open,
+                  high,
+                  low,
+                  close,
+                  volume: price.volume == null ? null : Number(price.volume),
+                  turnover: price.turnover == null ? null : Number(price.turnover),
+                  source: typeof price.source === "string" ? price.source : undefined,
+                  qualityFlags: Array.isArray(price.qualityFlags)
+                    ? price.qualityFlags.filter((flag): flag is string => typeof flag === "string")
+                    : undefined,
+                }, priceBasis as "raw" | "adjusted" | "unknown")
+                : normalized;
               return Number.isFinite(previousClose) && previousClose > 0
-                ? { ...price, previousClose }
-                : price;
+                ? { ...withRevision, previousClose }
+                : withRevision;
             })
           : result.prices;
         return Response.json({ ...result, prices }, { status: response.status });
       } catch (error) {
-        return Response.json({ error: error instanceof Error ? error.message : "A 股实盘价格同步失败" }, { status: 502 });
+        return Response.json({ error: error instanceof Error ? error.message : "A 股实时价格同步失败" }, { status: 502 });
       }
     }
     await ensureSchema();
@@ -89,17 +176,39 @@ export async function POST(request: Request) {
       instrumentId: string;
       timestamp: number;
       open: number;
+      high: number;
+      low: number;
       close: number;
+      volume: number | null;
+      turnover: number | null;
+      closed: boolean;
+      source?: string;
+      qualityFlags?: string[];
       previousClose?: number;
       entryTimestamp?: number;
       entryOpen?: number;
-      entryBars?: Array<{ timestamp: number; open: number; close: number }>;
+      entryBars?: Array<{
+        timestamp: number;
+        open: number;
+        high: number;
+        low: number;
+        close: number;
+        volume: number | null;
+        turnover: number | null;
+        closed: boolean;
+        source?: string;
+        qualityFlags?: string[];
+        revision?: string | null;
+        priceBasis?: "raw" | "adjusted" | "unknown";
+      }>;
+      hasMoreEntryBars?: boolean;
     }> = [];
     for (let offset = 0; offset < instrumentIds.length; offset += 80) {
       const batch = instrumentIds.slice(offset, offset + 80);
       const placeholders = batch.map(() => "?").join(",");
       const rows = await db.prepare(`
-        SELECT c.instrument_id AS instrumentId, c.timestamp, c.open, c.close,
+        SELECT c.instrument_id AS instrumentId, c.timestamp, c.open, c.high, c.low, c.close,
+          c.volume, c.turnover, c.source, c.quality_flags AS qualityFlags,
           (SELECT previous.close FROM candles previous
             WHERE previous.instrument_id = c.instrument_id
               AND previous.timeframe = '1d'
@@ -118,29 +227,72 @@ export async function POST(request: Request) {
         instrumentId: string;
         timestamp: number;
         open: number;
+        high: number;
+        low: number;
         close: number;
+        volume: number | null;
+        turnover: number | null;
+        source: string;
+        qualityFlags: string;
         previousClose: number | null;
       }>();
       const entryByInstrument = new Map<string, { entryTimestamp: number; entryOpen: number }>();
-      const entryBarsByInstrument = new Map<string, Array<{ timestamp: number; open: number; close: number }>>();
+      const entryBarsByInstrument = new Map<string, Array<{
+        timestamp: number;
+        open: number;
+        high: number;
+        low: number;
+        close: number;
+        volume: number | null;
+        turnover: number | null;
+        closed: boolean;
+        source?: string;
+        qualityFlags?: string[];
+        revision?: string | null;
+        priceBasis?: "raw" | "adjusted" | "unknown";
+      }>>();
+      const entryHasMoreByInstrument = new Map<string, boolean>();
       for (const instrumentId of batch) {
         const after = entryAfter[instrumentId];
         if (!Number.isFinite(after)) continue;
         const entries = await db.prepare(`
-          SELECT timestamp, open, close
+          SELECT timestamp, open, high, low, close, volume, turnover, source,
+            quality_flags AS qualityFlags
           FROM candles
           WHERE instrument_id = ? AND timeframe = '1d' AND adjustment_type = 'all' AND timestamp > ?
           ORDER BY timestamp ASC
-          LIMIT 64
-        `).bind(instrumentId, after).all<{ timestamp: number; open: number; close: number }>();
+          LIMIT 65
+        `).bind(instrumentId, after).all<{
+          timestamp: number;
+          open: number;
+          high: number;
+          low: number;
+          close: number;
+          volume: number | null;
+          turnover: number | null;
+          source: string;
+          qualityFlags: string;
+        }>();
+        entryHasMoreByInstrument.set(instrumentId, (entries.results ?? []).length > 64);
         const entryBars = (entries.results ?? [])
           .filter((entry) => Number.isFinite(Number(entry.timestamp))
             && Number.isFinite(Number(entry.open))
+            && Number.isFinite(Number(entry.high))
+            && Number.isFinite(Number(entry.low))
             && Number.isFinite(Number(entry.close)))
+          .slice(0, 64)
           .map((entry) => ({
             timestamp: Number(entry.timestamp),
             open: Number(entry.open),
+            high: Number(entry.high),
+            low: Number(entry.low),
             close: Number(entry.close),
+            volume: entry.volume == null ? null : Number(entry.volume),
+            turnover: entry.turnover == null ? null : Number(entry.turnover),
+            closed: true,
+            ...(entry.source ? { source: entry.source } : {}),
+            ...(entry.qualityFlags ? { qualityFlags: parseQualityFlags(entry.qualityFlags) } : {}),
+            priceBasis: "adjusted" as const,
           }));
         if (entryBars.length) {
           entryBarsByInstrument.set(instrumentId, entryBars);
@@ -154,7 +306,13 @@ export async function POST(request: Request) {
         instrumentId: string;
         timestamp: number;
         open: number;
+        high: number;
+        low: number;
         close: number;
+        volume: number | null;
+        turnover: number | null;
+        source: string;
+        qualityFlags: string;
         previousClose: number | null;
       }>).map((row) => {
         const entry = entryByInstrument.get(row.instrumentId);
@@ -163,12 +321,33 @@ export async function POST(request: Request) {
           instrumentId: row.instrumentId,
           timestamp: Number(row.timestamp),
           open: Number(row.open),
+          high: Number(row.high),
+          low: Number(row.low),
           close: Number(row.close),
+          volume: row.volume == null ? null : Number(row.volume),
+          turnover: row.turnover == null ? null : Number(row.turnover),
+          closed: true,
+          ...(row.source ? { source: row.source } : {}),
+          ...(row.qualityFlags ? { qualityFlags: parseQualityFlags(row.qualityFlags) } : {}),
+          priceBasis: "adjusted" as const,
           ...(Number.isFinite(Number(row.previousClose)) && Number(row.previousClose) > 0
             ? { previousClose: Number(row.previousClose) }
             : {}),
           ...(entry ?? {}),
-          ...(entryBars?.length ? { entryBars } : {}),
+          ...(entryBars?.length ? { entryBars: entryBars.map((bar) => withBarRevision(bar, "adjusted")) } : {}),
+          revision: withBarRevision({
+            timestamp: Number(row.timestamp),
+            open: Number(row.open),
+            high: Number(row.high),
+            low: Number(row.low),
+            close: Number(row.close),
+            volume: row.volume == null ? null : Number(row.volume),
+            turnover: row.turnover == null ? null : Number(row.turnover),
+            source: row.source,
+            qualityFlags: parseQualityFlags(row.qualityFlags),
+            priceBasis: "adjusted",
+          }, "adjusted").revision,
+          ...(entryHasMoreByInstrument.get(row.instrumentId) ? { hasMoreEntryBars: true } : {}),
         };
       }));
     }

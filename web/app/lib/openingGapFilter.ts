@@ -13,7 +13,13 @@ export const DEFAULT_OPENING_GAP_FILTER: OpeningGapFilter = {
   threshold: 3,
 };
 
+export const OPENING_GAP_THRESHOLD_DECIMALS = 4;
+export const MIN_OPENING_GAP_THRESHOLD = 10 ** -OPENING_GAP_THRESHOLD_DECIMALS;
 const MAX_OPENING_GAP_THRESHOLD = 1_000_000;
+
+export function roundOpeningGapThreshold(value: number) {
+  return Number(value.toFixed(OPENING_GAP_THRESHOLD_DECIMALS));
+}
 
 export function nextOpeningGapMode(mode: OpeningGapMode): OpeningGapMode {
   if (mode === "off") return "high";
@@ -26,12 +32,13 @@ export function normalizeOpeningGapFilter(value: unknown): OpeningGapFilter {
     ? value as Partial<OpeningGapFilter>
     : {};
   const threshold = Number(stored.threshold);
+  const normalizedThreshold = Number.isFinite(threshold) && threshold > 0
+    ? Math.min(MAX_OPENING_GAP_THRESHOLD, Math.max(MIN_OPENING_GAP_THRESHOLD, threshold))
+    : DEFAULT_OPENING_GAP_FILTER.threshold;
   return {
     mode: stored.mode === "high" || stored.mode === "low" ? stored.mode : "off",
     unit: stored.unit === "price" ? "price" : "percent",
-    threshold: Number.isFinite(threshold) && threshold > 0
-      ? Math.min(MAX_OPENING_GAP_THRESHOLD, threshold)
-      : DEFAULT_OPENING_GAP_FILTER.threshold,
+    threshold: roundOpeningGapThreshold(normalizedThreshold),
   };
 }
 
@@ -59,17 +66,23 @@ export function evaluateOpeningGap(
     : close > 0 && Number.isFinite(close)
       ? close * normalized.threshold / 100
       : 0;
-  const gapAmount = normalized.mode === "low" ? -gapPrice : gapPrice;
-  const directionalGapAmount = normalized.unit === "price" ? gapAmount : normalized.mode === "low" ? -gapPercent : gapPercent;
-  const thresholdAmount = normalized.threshold;
+  const thresholdLevel = normalized.mode === "low"
+    ? close - thresholdPrice
+    : close + thresholdPrice;
+  const validPrices = Number.isFinite(close)
+    && close > 0
+    && Number.isFinite(open)
+    && open > 0;
+  const outsideAllowedRange = normalized.mode === "high"
+    ? open < close || open >= thresholdLevel
+    : normalized.mode === "low"
+      ? open > close || open <= thresholdLevel
+      : false;
 
   return {
     blocked: normalized.mode !== "off"
-      && Number.isFinite(close)
-      && close > 0
-      && Number.isFinite(open)
-      && open > 0
-      && directionalGapAmount >= thresholdAmount,
+      && validPrices
+      && outsideAllowedRange,
     gapPrice,
     gapPercent,
     thresholdPrice,
@@ -101,4 +114,26 @@ export function openingGapThresholdPrice(
   return Number.isFinite(directionalPrice) && directionalPrice > 0
     ? directionalPrice
     : undefined;
+}
+
+/** Convert a dragged guide price back into the configured directional distance. */
+export function openingGapThresholdFromPrice(
+  previousClose: number,
+  guidePrice: number,
+  filter: Pick<OpeningGapFilter, "mode" | "unit">,
+): number | undefined {
+  const close = Number(previousClose);
+  const price = Number(guidePrice);
+  if (filter.mode === "off"
+    || !Number.isFinite(close)
+    || close <= 0
+    || !Number.isFinite(price)
+    || price <= 0) return undefined;
+
+  const distance = filter.mode === "high" ? price - close : close - price;
+  if (!Number.isFinite(distance) || distance <= 0) return undefined;
+  const threshold = filter.unit === "percent" ? distance / close * 100 : distance;
+  if (!Number.isFinite(threshold) || threshold <= 0 || threshold > MAX_OPENING_GAP_THRESHOLD) return undefined;
+  const rounded = roundOpeningGapThreshold(threshold);
+  return rounded >= MIN_OPENING_GAP_THRESHOLD ? rounded : undefined;
 }

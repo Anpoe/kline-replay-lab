@@ -58,7 +58,7 @@ export function buildLiveScanRequest(input: {
   };
 }
 
-export function normalizeLiveScanError(error: unknown, fallback = "实盘筛选失败") {
+export function normalizeLiveScanError(error: unknown, fallback = "实时筛选失败") {
   const message = error instanceof Error
     ? error.message
     : typeof error === "string"

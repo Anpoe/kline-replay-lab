@@ -765,10 +765,10 @@ export function DataSourceManager({
           : "系统将回查最近 30 个自然日，使用 BaoStock 修复 A 股前复权日线缺口；停牌和休市不会造数据。确定开始吗？"
         : localIncrementalSource === "tushare"
           ? mode === "incremental"
-            ? "系统将使用初始化方案绑定的 Tushare daily 更新最近一个已收盘交易日；缺口修复也只使用 Tushare。确定开始吗？"
+            ? "系统将使用初始化方案绑定的 Tushare，从本地最新日线逐日更新至最近一个已收盘交易日；缺口修复也只使用 Tushare。确定开始吗？"
             : "系统将使用初始化方案绑定的 Tushare daily 回查最近 30 个自然日并修复缺口，不会混入通达信或 BaoStock。确定开始吗？"
         : mode === "incremental"
-          ? "系统将从每个品种最后一根完整通达信日线之后继续，拉取到当前可用的完整交易日；未收盘的当日行情不会写入。确定开始吗？"
+          ? "系统将从每个品种最后一根完整日线之后继续，更新至最近一个已收盘交易日，并核对近 30 天的缺失日线；未收盘的当天不会写入。确定开始吗？"
           : "系统将回查最近 30 个自然日，使用通达信历史日线补齐和校正 A 股不复权日线缺口；周末、节假日和停牌不会造数据。确定开始吗？";
       if (!window.confirm(prompt)) return;
     }
@@ -1659,7 +1659,6 @@ export function DataSourceManager({
 
   return (
     <section className="data-source-manager">
-      {clearPanel}
       <div className="data-source-head">
         <div>
           <span className="section-label">{marketCopy.label} · 真实历史行情</span>
@@ -1674,6 +1673,7 @@ export function DataSourceManager({
           <CloudDownload size={24} />
         </div>
       </div>
+      {clearPanel}
 
       {market === "CN" && savedPlan && (
         <div className="saved-data-plan">
@@ -1790,7 +1790,7 @@ export function DataSourceManager({
                 ? "每日更新会回查最近 30 个自然日，自动补齐漏日并校正已有前复权日线；周线和月线继续由本地日线生成。"
                 : localIncrementalSource === "tushare"
                   ? "日线价格保持不复权；每日增量和缺口修复都只使用初始化时绑定的 Tushare daily 接口。"
-                  : "日线价格保持不复权；每日增量从最后一根完整日线续传，缺口修复会回查通达信历史日线。"
+                  : "日线价格保持不复权；每日增量会续传并核对近 30 天的缺失日线，缺口修复可单独回查通达信历史日线。"
               : localServiceError || "请检查本机数据服务状态后重试。")}</small>
             {cnMaintenanceTask && (
               <>

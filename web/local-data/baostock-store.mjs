@@ -840,7 +840,8 @@ export class BaoStockLocalStore {
     const requested = new Set(instrumentIds.map((value) => String(value)).filter(Boolean));
     const output = [];
     for (const instrument of manifest.instruments.filter((item) => requested.has(item.id))) {
-      const latest = this.ensureDb().prepare(`SELECT latest.timestamp, latest.open, latest.close,
+      const latest = this.ensureDb().prepare(`SELECT latest.timestamp, latest.open, latest.high,
+          latest.low, latest.close, latest.volume, latest.turnover,
           (SELECT previous.close FROM candles previous
             WHERE previous.instrument_id = latest.instrument_id
               AND previous.adjustment_type = latest.adjustment_type
@@ -857,26 +858,38 @@ export class BaoStockLocalStore {
             ORDER BY timestamp ASC LIMIT 1`).get(instrument.id, BAOSTOCK_ADJUSTMENT_TYPE, after)
         : null;
       const entryBars = Number.isFinite(after)
-        ? this.ensureDb().prepare(`SELECT timestamp, open, close FROM candles
+        ? this.ensureDb().prepare(`SELECT timestamp, open, high, low, close, volume, turnover FROM candles
             WHERE instrument_id = ? AND adjustment_type = ? AND timestamp > ?
-            ORDER BY timestamp ASC LIMIT 64`).all(instrument.id, BAOSTOCK_ADJUSTMENT_TYPE, after)
+            ORDER BY timestamp ASC LIMIT 65`).all(instrument.id, BAOSTOCK_ADJUSTMENT_TYPE, after)
         : [];
+      const hasMoreEntryBars = entryBars.length > 64;
       output.push({
         instrumentId: instrument.id,
         timestamp: Number(latest.timestamp),
         open: Number(latest.open),
+        high: Number(latest.high),
+        low: Number(latest.low),
         close: Number(latest.close),
+        volume: latest.volume == null ? null : Number(latest.volume),
+        turnover: latest.turnover == null ? null : Number(latest.turnover),
+        closed: true,
         ...(Number.isFinite(Number(latest.previousClose)) && Number(latest.previousClose) > 0
           ? { previousClose: Number(latest.previousClose) }
           : {}),
         ...(entry ? { entryTimestamp: Number(entry.timestamp), entryOpen: Number(entry.open) } : {}),
         ...(entryBars.length ? {
-          entryBars: entryBars.map((bar) => ({
+          entryBars: entryBars.slice(0, 64).map((bar) => ({
             timestamp: Number(bar.timestamp),
             open: Number(bar.open),
+            high: Number(bar.high),
+            low: Number(bar.low),
             close: Number(bar.close),
+            volume: bar.volume == null ? null : Number(bar.volume),
+            turnover: bar.turnover == null ? null : Number(bar.turnover),
+            closed: true,
           })),
         } : {}),
+        ...(hasMoreEntryBars ? { hasMoreEntryBars: true } : {}),
       });
     }
     return output;

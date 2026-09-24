@@ -144,7 +144,7 @@ export function SettingsPanel({
               <small>跟随图表时区，按 K 线时间判断，包含开始、不含结束；结束早于开始时表示跨午夜，例如 22:00–07:00。</small>
               <small>保存后从下一次推进生效。</small>
               <small>开启“只在指定时段训练”后，还会跳过所选时间外的历史 K 线；已有平仓挂单及止损止盈照常执行，开仓挂单顺延到下一个交易时段。</small>
-              <small>仅适用于非随机训练的分钟线、小时线；随机训练、日线及更大周期、实盘观察不受影响。</small>
+              <small>仅适用于非随机训练的分钟线、小时线；随机训练、日线及更大周期、实时模拟不受影响。</small>
             </div>
             <div className="settings-rule">
               <div className="settings-row-action">
@@ -162,34 +162,126 @@ export function SettingsPanel({
                 />
               </div>
               <small>开启后，单步、快进和自动播放会跳过周六、周日的历史 K 线；周末不执行委托，已有持仓会保留。</small>
-              <small>仅适用于非随机训练的分钟线、小时线；随机训练、日线及更大周期、实盘观察不受影响。</small>
+              <small>仅适用于非随机训练的分钟线、小时线；随机训练、日线及更大周期、实时模拟不受影响。</small>
             </div>
             <div className="settings-rule">
-              <span>模拟交易账户</span>
+              <span>训练模拟账户</span>
               <div className="task-start-options">
                 <button
-                  className={draft.tradingMode === "return" ? "active" : ""}
-                  onClick={() => onDraftChange((next) => ({ ...next, tradingMode: "return" }))}
+                  className={draft.trainingAccount.tradingMode === "return" ? "active" : ""}
+                  onClick={() => onDraftChange((next) => ({
+                    ...next,
+                    trainingAccount: { ...next.trainingAccount, tradingMode: "return" },
+                    tradingMode: "return",
+                  }))}
                 >收益率模式</button>
                 <button
-                  className={draft.tradingMode === "capital" ? "active" : ""}
-                  onClick={() => onDraftChange((next) => ({ ...next, tradingMode: "capital" }))}
+                  className={draft.trainingAccount.tradingMode === "capital" ? "active" : ""}
+                  onClick={() => onDraftChange((next) => ({
+                    ...next,
+                    trainingAccount: { ...next.trainingAccount, tradingMode: "capital" },
+                    tradingMode: "capital",
+                  }))}
                 >资金账户模式</button>
               </div>
-              <small>{draft.tradingMode === "return"
-                ? "不限制本金和购买力，只比较仓位收益率，适合练习入场与出场质量。"
+              <small>{draft.trainingAccount.tradingMode === "return"
+                ? "不限制本金和购买力，只比较仓位收益率；风险仓位使用单独的计算基准。"
                 : "按初始资金核算现金、持仓市值和账户权益；买入资金不足时拒单。"}</small>
-              {draft.tradingMode === "capital" && (
-                <label>新训练初始资金
+              <label>{draft.trainingAccount.tradingMode === "capital" ? "新训练初始资金" : "收益率风险计算基准"}
+                <input
+                  type="number"
+                  min="1000"
+                  step="1000"
+                  value={draft.trainingAccount.tradingMode === "capital"
+                    ? draft.trainingAccount.initialCapital
+                    : draft.trainingAccount.riskCapital}
+                  onChange={(event) => onDraftChange((next) => {
+                    const amount = Math.max(1000, Number(event.target.value));
+                    return {
+                      ...next,
+                      trainingAccount: {
+                        ...next.trainingAccount,
+                        ...(next.trainingAccount.tradingMode === "capital"
+                          ? { initialCapital: amount }
+                          : { riskCapital: amount }),
+                      },
+                      initialCapital: amount,
+                    };
+                  })}
+                />
+              </label>
+              <small>只影响之后新建的训练；已开始或已保存训练继续使用创建时冻结的账户配置。</small>
+            </div>
+            <div className="settings-rule">
+              <span>实时模拟账户</span>
+              <div className="task-start-options">
+                <button
+                  className={draft.liveAccount.tradingMode === "return" ? "active" : ""}
+                  onClick={() => onDraftChange((next) => ({
+                    ...next,
+                    liveAccount: { ...next.liveAccount, tradingMode: "return" },
+                  }))}
+                >收益率模式</button>
+                <button
+                  className={draft.liveAccount.tradingMode === "capital" ? "active" : ""}
+                  onClick={() => onDraftChange((next) => ({
+                    ...next,
+                    liveAccount: { ...next.liveAccount, tradingMode: "capital" },
+                  }))}
+                >资金账户模式</button>
+              </div>
+              <small>{draft.liveAccount.tradingMode === "return"
+                ? "A 股和美股分别使用各自的风险计算基准，不建立购买力限制。"
+                : "A 股和美股分别使用独立资金账户；同一市场内的品种共享现金和权益。"}</small>
+              <div className="execution-settings-grid">
+                <label>{draft.liveAccount.tradingMode === "capital" ? "A 股初始资金" : "A 股风险计算基准"}
                   <input
                     type="number"
                     min="1000"
                     step="1000"
-                    value={draft.initialCapital}
-                    onChange={(event) => onDraftChange((next) => ({ ...next, initialCapital: Math.max(1000, Number(event.target.value)) }))}
+                    value={draft.liveAccount.tradingMode === "capital"
+                      ? draft.liveAccount.initialCapitalByMarket.CN
+                      : draft.liveAccount.riskCapitalByMarket.CN}
+                    onChange={(event) => onDraftChange((next) => {
+                      const amount = Math.max(1000, Number(event.target.value));
+                      const key = next.liveAccount.tradingMode === "capital"
+                        ? "initialCapitalByMarket"
+                        : "riskCapitalByMarket";
+                      return {
+                        ...next,
+                        liveAccount: {
+                          ...next.liveAccount,
+                          [key]: { ...next.liveAccount[key], CN: amount },
+                        },
+                      };
+                    })}
                   />
                 </label>
-              )}
+                <label>{draft.liveAccount.tradingMode === "capital" ? "美股初始资金" : "美股风险计算基准"}
+                  <input
+                    type="number"
+                    min="1000"
+                    step="1000"
+                    value={draft.liveAccount.tradingMode === "capital"
+                      ? draft.liveAccount.initialCapitalByMarket.US
+                      : draft.liveAccount.riskCapitalByMarket.US}
+                    onChange={(event) => onDraftChange((next) => {
+                      const amount = Math.max(1000, Number(event.target.value));
+                      const key = next.liveAccount.tradingMode === "capital"
+                        ? "initialCapitalByMarket"
+                        : "riskCapitalByMarket";
+                      return {
+                        ...next,
+                        liveAccount: {
+                          ...next.liveAccount,
+                          [key]: { ...next.liveAccount[key], US: amount },
+                        },
+                      };
+                    })}
+                  />
+                </label>
+              </div>
+              <small>这是模拟交易，不会向券商发送订单。每个市场账户首次使用时冻结当前默认值；已有持仓、挂单或成交时不会被设置修改静默重置。</small>
             </div>
             <div className="settings-rule">
               <span>不同市场默认下单数量 / 手数</span>
@@ -212,7 +304,7 @@ export function SettingsPanel({
                   </label>
                 ))}
               </div>
-              <small>新建训练、切换到新市场或打开实盘观察时会按当前市场使用对应值；已保存训练继续沿用训练内记录的下单数量。外汇和黄金可按 0.01 手递增。</small>
+              <small>新建训练、切换到新市场或打开实时模拟时会按当前市场使用对应值；已保存训练继续沿用训练内记录的下单数量。外汇和黄金可按 0.01 手递增。</small>
             </div>
             <div className="settings-rule">
               <span>下单方式</span>
@@ -318,7 +410,7 @@ export function SettingsPanel({
                   <option value="seeded">种子确定：固定抽样</option>
                 </select>
               </label>
-              <small>参数在新训练创建时锁定并随保存点恢复；成交量参与上限为 0 时整单成交，否则按当根成交量分批撮合、余量继续挂单。实盘观察仍沿用零成本、次日开盘模型。</small>
+              <small>训练和实时模拟均使用这套参数；参数在新训练或新实时市场账户创建时锁定。成交量参与上限为 0 时整单成交，否则按当根成交量分批撮合、余量继续挂单。</small>
             </div>
             <div className="settings-rule">
               <span>图表左侧历史 K 线</span>

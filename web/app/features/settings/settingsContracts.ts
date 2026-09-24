@@ -43,6 +43,23 @@ export type { DataMarket } from "../../lib/dataMarkets.ts";
 export type PositionSizeMode = "fixed" | "risk-percent";
 export type MarketOrderQtySettings = Record<DataMarket, number>;
 export type SettingsTab = "basic" | "training" | "discipline" | "data";
+export type LiveAccountMarket = "CN" | "US";
+
+export type TrainingAccountDefaults = {
+  tradingMode: TradingMode;
+  /** Starting cash for capital mode. */
+  initialCapital: number;
+  /** Risk calculation base for return mode. */
+  riskCapital: number;
+};
+
+export type LiveAccountDefaults = {
+  tradingMode: TradingMode;
+  /** Starting cash for each market in capital mode. */
+  initialCapitalByMarket: Record<LiveAccountMarket, number>;
+  /** Risk calculation base for each market in return mode. */
+  riskCapitalByMarket: Record<LiveAccountMarket, number>;
+};
 
 export type PretradePlanField = "marketState" | "location" | "reasons" | "stop" | "target" | "note";
 
@@ -90,9 +107,14 @@ export type AppSettings = {
   positionSizeMode: PositionSizeMode;
   riskPercent: number;
   defaultSpeed: number;
+  trainingAccount: TrainingAccountDefaults;
+  liveAccount: LiveAccountDefaults;
+  /** @deprecated Compatibility alias for older clients and stored preferences. */
   tradingMode: TradingMode;
+  /** @deprecated Compatibility alias for older clients and stored preferences. */
   initialCapital: number;
   executionProfile: ExecutionCostProfile;
+  executionProfileVersion: string;
   fxAccountConfig: FxAccountConfig;
   replayHistoryBars: number;
   replayTradingSession: ReplayTradingSession;
@@ -118,6 +140,21 @@ export type AppSettings = {
   activePersonalSopRule: PersonalSopRule | null;
 };
 
+const DEFAULT_ACCOUNT_CAPITAL = 100000;
+export const DEFAULT_EXECUTION_PROFILE_VERSION = "2026.09-profile-v1";
+
+const defaultTrainingAccount: TrainingAccountDefaults = {
+  tradingMode: "return",
+  initialCapital: DEFAULT_ACCOUNT_CAPITAL,
+  riskCapital: DEFAULT_ACCOUNT_CAPITAL,
+};
+
+const defaultLiveAccount: LiveAccountDefaults = {
+  tradingMode: "return",
+  initialCapitalByMarket: { CN: DEFAULT_ACCOUNT_CAPITAL, US: DEFAULT_ACCOUNT_CAPITAL },
+  riskCapitalByMarket: { CN: DEFAULT_ACCOUNT_CAPITAL, US: DEFAULT_ACCOUNT_CAPITAL },
+};
+
 export const defaultAppSettings: AppSettings = {
   defaultInstrumentId: "600519.SH",
   defaultTimeframe: "1d",
@@ -130,9 +167,16 @@ export const defaultAppSettings: AppSettings = {
   positionSizeMode: "fixed",
   riskPercent: 1,
   defaultSpeed: 1,
+  trainingAccount: { ...defaultTrainingAccount },
+  liveAccount: {
+    ...defaultLiveAccount,
+    initialCapitalByMarket: { ...defaultLiveAccount.initialCapitalByMarket },
+    riskCapitalByMarket: { ...defaultLiveAccount.riskCapitalByMarket },
+  },
   tradingMode: "return",
-  initialCapital: 100000,
+  initialCapital: DEFAULT_ACCOUNT_CAPITAL,
   executionProfile: { ...DEFAULT_EXECUTION_COST_PROFILE, maxVolumeParticipationPct: 10 },
+  executionProfileVersion: DEFAULT_EXECUTION_PROFILE_VERSION,
   fxAccountConfig: { ...DEFAULT_FX_ACCOUNT_CONFIG },
   replayHistoryBars: DEFAULT_REPLAY_HISTORY_BARS,
   replayTradingSession: { ...DEFAULT_REPLAY_TRADING_SESSION },
@@ -176,9 +220,87 @@ export function tradingModeForInstrument(
   return key === "FX" || key === "GOLD" ? "capital" : requested === "capital" ? "capital" : "return";
 }
 
+export function trainingAccountRuntimeDefaults(
+  settings: AppSettings,
+  market: string | undefined,
+  instrumentId: string,
+) {
+  const tradingMode = tradingModeForInstrument(settings.trainingAccount.tradingMode, market, instrumentId);
+  return {
+    tradingMode,
+    initialCapital: tradingMode === "capital"
+      ? settings.trainingAccount.initialCapital
+      : settings.trainingAccount.riskCapital,
+  };
+}
+
+export function liveAccountRuntimeDefaultsForMarket(
+  settings: AppSettings,
+  market: string | undefined,
+) {
+  const key: LiveAccountMarket = marketOrderQtyKey(market) === "US" ? "US" : "CN";
+  const tradingMode = settings.liveAccount.tradingMode;
+  return {
+    market: key,
+    tradingMode,
+    initialCapital: tradingMode === "capital"
+      ? settings.liveAccount.initialCapitalByMarket[key]
+      : settings.liveAccount.riskCapitalByMarket[key],
+  };
+}
+
 export function positiveOrderQty(value: unknown, fallback: number) {
   const quantity = Number(value);
   return Number.isFinite(quantity) && quantity > 0 ? quantity : fallback;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return Boolean(value) && typeof value === "object" && !Array.isArray(value);
+}
+
+function normalizeTradingMode(value: unknown, fallback: TradingMode): TradingMode {
+  return value === "capital" || value === "return" ? value : fallback;
+}
+
+function normalizeAccountCapital(value: unknown, fallback: number) {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) && parsed >= 1000 ? Math.round(parsed) : fallback;
+}
+
+function normalizeTrainingAccount(
+  value: unknown,
+  fallback: TrainingAccountDefaults,
+): TrainingAccountDefaults {
+  const candidate = isRecord(value) ? value : {};
+  return {
+    tradingMode: normalizeTradingMode(candidate.tradingMode, fallback.tradingMode),
+    initialCapital: normalizeAccountCapital(candidate.initialCapital, fallback.initialCapital),
+    riskCapital: normalizeAccountCapital(candidate.riskCapital, fallback.riskCapital),
+  };
+}
+
+function normalizeLiveAccount(
+  value: unknown,
+  fallback: LiveAccountDefaults,
+): LiveAccountDefaults {
+  const candidate = isRecord(value) ? value : {};
+  const initialCapitalByMarket = isRecord(candidate.initialCapitalByMarket)
+    ? candidate.initialCapitalByMarket
+    : {};
+  const riskCapitalByMarket = isRecord(candidate.riskCapitalByMarket)
+    ? candidate.riskCapitalByMarket
+    : {};
+  return {
+    tradingMode: normalizeTradingMode(candidate.tradingMode, fallback.tradingMode),
+    initialCapitalByMarket: {
+      CN: normalizeAccountCapital(initialCapitalByMarket.CN, fallback.initialCapitalByMarket.CN),
+      US: normalizeAccountCapital(initialCapitalByMarket.US, fallback.initialCapitalByMarket.US),
+    },
+    riskCapitalByMarket: {
+      CN: normalizeAccountCapital(riskCapitalByMarket.CN, fallback.riskCapitalByMarket.CN),
+      US: normalizeAccountCapital(riskCapitalByMarket.US, fallback.riskCapitalByMarket.US),
+    },
+  };
 }
 
 function normalizeRequiredPretradeFields(value: unknown): PretradePlanField[] {
@@ -211,6 +333,30 @@ export function normalizeMarketOrderQtySettings(value: unknown, legacyValue?: un
 
 export function normalizeSettings(value: Partial<AppSettings>): AppSettings {
   const merged = { ...defaultAppSettings, ...value };
+  const legacyTradingMode = normalizeTradingMode(value.tradingMode, defaultTrainingAccount.tradingMode);
+  const legacyCapital = normalizeAccountCapital(value.initialCapital, defaultTrainingAccount.initialCapital);
+  const hasTrainingAccount = Object.prototype.hasOwnProperty.call(value, "trainingAccount");
+  const hasLiveAccount = Object.prototype.hasOwnProperty.call(value, "liveAccount");
+  const trainingAccount = normalizeTrainingAccount(
+    value.trainingAccount,
+    hasTrainingAccount
+      ? defaultTrainingAccount
+      : {
+          tradingMode: legacyTradingMode,
+          initialCapital: legacyCapital,
+          riskCapital: legacyCapital,
+        },
+  );
+  const liveAccount = normalizeLiveAccount(
+    value.liveAccount,
+    hasLiveAccount
+      ? defaultLiveAccount
+      : {
+          tradingMode: legacyTradingMode,
+          initialCapitalByMarket: { CN: legacyCapital, US: legacyCapital },
+          riskCapitalByMarket: { CN: legacyCapital, US: legacyCapital },
+        },
+  );
   const defaultOrderQtyByMarket = normalizeMarketOrderQtySettings(
     value.defaultOrderQtyByMarket,
     value.defaultOrderQty,
@@ -240,12 +386,21 @@ export function normalizeSettings(value: Partial<AppSettings>): AppSettings {
     openingGapThreshold: openingGap.threshold,
     positionSizeMode: merged.positionSizeMode === "risk-percent" ? "risk-percent" : "fixed",
     riskPercent: Math.max(0.1, Math.min(100, Number(merged.riskPercent) || defaultAppSettings.riskPercent)),
-    tradingMode: merged.tradingMode === "capital" ? "capital" : "return",
-    initialCapital: Math.max(1000, Math.round(Number(merged.initialCapital) || defaultAppSettings.initialCapital)),
+    trainingAccount,
+    liveAccount,
+    // Keep the old aliases in sync so older clients read the training default,
+    // while all new account-entry paths use the scoped settings above.
+    tradingMode: trainingAccount.tradingMode,
+    initialCapital: trainingAccount.tradingMode === "capital"
+      ? trainingAccount.initialCapital
+      : trainingAccount.riskCapital,
     executionProfile: normalizeExecutionCostProfile({
       ...defaultAppSettings.executionProfile,
       ...merged.executionProfile,
     }),
+    executionProfileVersion: typeof merged.executionProfileVersion === "string" && merged.executionProfileVersion.trim()
+      ? merged.executionProfileVersion.trim()
+      : defaultAppSettings.executionProfileVersion,
     fxAccountConfig: normalizeFxAccountConfig(merged.fxAccountConfig),
     replayHistoryBars: normalizeReplayHistoryBars(merged.replayHistoryBars),
     replayTradingSession: normalizeReplayTradingSession(merged.replayTradingSession),

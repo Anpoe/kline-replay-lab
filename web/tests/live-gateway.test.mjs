@@ -97,8 +97,8 @@ test("sends pending-order dates when requesting historical entry bars", async ()
 test("normalizes live gateway errors", async () => {
   const gateway = createLiveGateway(async () => response({ ok: false, payload: { error: "offline" } }));
 
-  await assert.rejects(() => gateway.loadState(), { message: "读取实盘数据失败" });
-  await assert.rejects(() => gateway.saveState({}), { message: "保存实盘数据失败" });
+  await assert.rejects(() => gateway.loadState(), { message: "读取实时模拟数据失败" });
+  await assert.rejects(() => gateway.saveState({}), { message: "保存实时模拟数据失败" });
   await assert.rejects(() => gateway.scan({}), { message: "offline" });
   await assert.rejects(() => gateway.refreshPrices("US", []), { message: "offline" });
 });

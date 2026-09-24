@@ -25,6 +25,44 @@ test("normalizes legacy and per-market order quantity settings", () => {
   assert.equal(settings.riskPercent, 100);
 });
 
+test("migrates the legacy account setting into independent training and live defaults", () => {
+  const settings = normalizeSettings({
+    tradingMode: "capital",
+    initialCapital: 250000,
+  });
+
+  assert.deepEqual(settings.trainingAccount, {
+    tradingMode: "capital",
+    initialCapital: 250000,
+    riskCapital: 250000,
+  });
+  assert.deepEqual(settings.liveAccount, {
+    tradingMode: "capital",
+    initialCapitalByMarket: { CN: 250000, US: 250000 },
+    riskCapitalByMarket: { CN: 250000, US: 250000 },
+  });
+  assert.equal(settings.tradingMode, "capital");
+  assert.equal(settings.initialCapital, 250000);
+});
+
+test("normalizes account groups independently when one group is damaged", () => {
+  const settings = normalizeSettings({
+    ...defaultAppSettings,
+    trainingAccount: { tradingMode: "broken", initialCapital: "bad", riskCapital: null },
+    liveAccount: {
+      tradingMode: "capital",
+      initialCapitalByMarket: { CN: 300000, US: "bad" },
+      riskCapitalByMarket: { CN: 400000, US: 500000 },
+    },
+  });
+
+  assert.deepEqual(settings.trainingAccount, defaultAppSettings.trainingAccount);
+  assert.equal(settings.liveAccount.tradingMode, "capital");
+  assert.equal(settings.liveAccount.initialCapitalByMarket.CN, 300000);
+  assert.equal(settings.liveAccount.initialCapitalByMarket.US, 100000);
+  assert.deepEqual(settings.liveAccount.riskCapitalByMarket, { CN: 400000, US: 500000 });
+});
+
 test("rejects an incomplete random date range before persistence", () => {
   const result = prepareSettingsSave({
     ...defaultAppSettings,

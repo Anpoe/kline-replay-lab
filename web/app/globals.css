@@ -653,7 +653,7 @@ button { color: inherit; }
 .training-complete-banner strong { font-size: 12px; }
 .training-complete-banner small { color: #73978c; font-size: 9px; }
 
-.trade-dock { min-height: 250px; padding: 12px 16px 14px; display: grid; grid-template-columns: minmax(330px, 1fr) auto; align-items: center; gap: 9px 18px; background: #0d1517; }
+.trade-dock { flex-shrink: 0; min-height: 250px; padding: 12px 16px 14px; display: grid; grid-template-columns: minmax(330px, 1fr) auto; align-items: center; gap: 9px 18px; background: #0d1517; }
 .trade-setup-panel, .trade-fixed-dock { display: contents; }
 .trade-stats { grid-column: 1; grid-row: 1; display: grid; grid-template-columns: repeat(4, minmax(80px, 1fr)); gap: 8px; }
 .trade-stats span { display: flex; flex-direction: column; gap: 4px; color: var(--faint); font-size: 10px; text-transform: uppercase; letter-spacing: .05em; }
@@ -1092,6 +1092,7 @@ button { color: inherit; }
 .performance-view-tabs button span { min-width: 16px; padding: 2px 4px; color: var(--faint); background: rgba(255, 255, 255, .05); border-radius: 99px; font: 8px var(--font-geist-mono), monospace; }
 .live-performance-panel { display: grid; gap: 0; min-width: 0; }
 .live-performance-overview { margin-bottom: 0; }
+.live-account-overview .performance-metric > small { display: block; margin-top: 6px; line-height: 1.4; }
 .live-watch-performance-overview { grid-template-columns: 1.45fr repeat(6, 1fr); }
 .live-performance-sessions { margin-top: 16px; }
 .live-performance-list { display: grid; min-width: 0; overflow: auto; border: 1px solid var(--line); border-radius: 10px; }
@@ -1345,6 +1346,7 @@ button { color: inherit; }
 .delete-session:disabled { opacity: .4; cursor: default; }
 .delete-session:disabled:hover { color: #d88f8d; background: rgba(239, 106, 104, .07); }
 .empty-state { color: var(--faint); font-size: 12px; padding: 28px 0; line-height: 1.6; }
+.live-state-status { display: flex; align-items: flex-start; flex-direction: column; gap: 12px; }
 .review-detail-grid { display: grid; grid-template-columns: 1.2fr .8fr; gap: 14px; margin-top: 14px; align-items: start; }
 .decision-history-card, .audit-timeline { background: var(--surface); border: 1px solid var(--line); border-radius: 12px; padding: 22px; }
 .decision-history-card > h2 { margin: 12px 0 16px; font-size: 18px; }

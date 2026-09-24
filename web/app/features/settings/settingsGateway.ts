@@ -130,8 +130,17 @@ export function createSettingsStorageGateway(storage: SettingsStorage) {
     const stored = storage.getItem(settingsStorageKeys.appSettings);
     if (stored == null) return { settings: normalizeSettings(defaultAppSettings), recoveredFromCorruption: false };
     try {
+      const settings = normalizeSettings(JSON.parse(stored) as Partial<AppSettings>);
+      // Persist the normalized shape on first read so legacy single-account
+      // preferences gain independent training/live defaults without changing
+      // the storage key or requiring a separate migration command.
+      try {
+        storage.setItem(settingsStorageKeys.appSettings, JSON.stringify(settings));
+      } catch {
+        // Reading settings must remain available even when storage is full.
+      }
       return {
-        settings: normalizeSettings(JSON.parse(stored) as Partial<AppSettings>),
+        settings,
         recoveredFromCorruption: false,
       };
     } catch {
