@@ -19,6 +19,7 @@ const alwaysInLong = defaultPatternPresets.find((preset) => preset.id === "alway
 const alwaysInShort = defaultPatternPresets.find((preset) => preset.id === "always-in-short");
 const bullishEngulfing = defaultPatternPresets.find((preset) => preset.id === "bullish-engulfing");
 const contraction = defaultPatternPresets.find((preset) => preset.id === "contraction");
+const priceAcceleration = defaultPatternPresets.find((preset) => preset.id === "price-acceleration");
 const usDailyFirstPullback = defaultPatternPresets.find((preset) => preset.id === "us-daily-first-pullback");
 const fxFiveMinuteFirstPullback = defaultPatternPresets.find((preset) => preset.id === "fx-5m-hourly-first-pullback");
 
@@ -179,6 +180,38 @@ test("upgrades legacy pattern preferences with the optimized US and FX built-ins
   assert.equal(fxFiveMinute?.parameters.pivotStrength, 1);
   assert.equal(fxFiveMinute?.parameters.controlWindow, 8);
   assert.equal(fxFiveMinute?.parameters.maximumEmaCrosses, 3);
+});
+
+function accelerationBars({ baseline = 0.001, previous = 0.001, recent = 0.003 } = {}) {
+  const closes = [100];
+  for (const [count, step] of [[100, baseline], [8, previous], [8, recent]]) {
+    for (let index = 0; index < count; index += 1) closes.push(closes.at(-1) * (1 + step));
+  }
+  return closes.map((close, index) => candle(index, close, close * 1.001, close * 0.999, close));
+}
+
+test("price acceleration recognizes strong same-direction moves on both sides without future bars", () => {
+  assert.equal(priceAcceleration?.kind, "price_acceleration");
+  const rising = accelerationBars();
+  const falling = accelerationBars({ baseline: -0.001, previous: -0.001, recent: -0.003 });
+  const target = rising.length - 1;
+
+  assert.equal(matchesPattern(rising, target, priceAcceleration), true);
+  assert.equal(matchesPattern(falling, target, priceAcceleration), true);
+  assert.equal(matchesPattern(rising.slice(0, 115), 114, priceAcceleration), false);
+  assert.equal(matchesPattern([...rising, ...accelerationBars().slice(1)], target, priceAcceleration), true);
+  assert.equal(requiredPatternHistory([priceAcceleration]), 116);
+  assert.equal(normalizePatternPresets([breakout]).some((preset) => preset.id === priceAcceleration.id), true);
+});
+
+test("price acceleration rejects reversals, ordinary moves, and weak moves below history", () => {
+  const reversed = accelerationBars({ previous: -0.001 });
+  const ordinary = accelerationBars({ recent: 0.001 });
+  const weakAgainstHistory = accelerationBars({ baseline: 0.005, previous: 0.0005, recent: 0.001 });
+
+  for (const bars of [reversed, ordinary, weakAgainstHistory]) {
+    assert.equal(matchesPattern(bars, bars.length - 1, priceAcceleration), false);
+  }
 });
 
 test("reserves enough hidden history for optimized first-pullback random windows", async () => {

@@ -42,6 +42,8 @@ export type { DataMarket } from "../../lib/dataMarkets.ts";
 
 export type PositionSizeMode = "fixed" | "risk-percent";
 export type MarketOrderQtySettings = Record<DataMarket, number>;
+export type ChartTimeZonePreference = "market" | "Asia/Shanghai" | "America/New_York" | "Europe/London" | "UTC";
+export type ChartTimeZoneSettings = Record<DataMarket, ChartTimeZonePreference>;
 export type SettingsTab = "basic" | "training" | "discipline" | "data";
 export type LiveAccountMarket = "CN" | "US";
 
@@ -83,6 +85,29 @@ export const DEFAULT_MARKET_ORDER_QTYS: MarketOrderQtySettings = {
   GOLD: 1,
 };
 
+export const DEFAULT_CHART_TIME_ZONES: ChartTimeZoneSettings = {
+  CN: "market",
+  US: "market",
+  FX: "market",
+  GOLD: "market",
+};
+
+const CHART_TIME_ZONE_OPTIONS: readonly ChartTimeZonePreference[] = [
+  "market", "Asia/Shanghai", "America/New_York", "Europe/London", "UTC",
+];
+
+export function normalizeChartTimeZones(value: unknown): ChartTimeZoneSettings {
+  const stored = value && typeof value === "object" && !Array.isArray(value)
+    ? value as Partial<Record<DataMarket, unknown>>
+    : {};
+  const normalize = (market: DataMarket): ChartTimeZonePreference => (
+    CHART_TIME_ZONE_OPTIONS.includes(stored[market] as ChartTimeZonePreference)
+      ? stored[market] as ChartTimeZonePreference
+      : DEFAULT_CHART_TIME_ZONES[market]
+  );
+  return { CN: normalize("CN"), US: normalize("US"), FX: normalize("FX"), GOLD: normalize("GOLD") };
+}
+
 export const marketOrderQuantityFields: Array<{
   key: DataMarket;
   label: string;
@@ -100,6 +125,7 @@ export type AppSettings = {
   defaultTimeframe: string;
   defaultOrderQty: number;
   defaultOrderQtyByMarket: MarketOrderQtySettings;
+  chartTimeZones: ChartTimeZoneSettings;
   orderType: OrderType;
   openingGapMode: OpeningGapMode;
   openingGapUnit: OpeningGapUnit;
@@ -160,6 +186,7 @@ export const defaultAppSettings: AppSettings = {
   defaultTimeframe: "1d",
   defaultOrderQty: 100,
   defaultOrderQtyByMarket: { ...DEFAULT_MARKET_ORDER_QTYS },
+  chartTimeZones: { ...DEFAULT_CHART_TIME_ZONES },
   orderType: "market",
   openingGapMode: "off",
   openingGapUnit: "percent",
@@ -209,6 +236,25 @@ export function marketOrderQtyKey(market: string | undefined, instrumentId = "")
   if (normalized === "FX" || normalized === "FOREX" || normalized === "外汇" || /\.FX$/i.test(instrumentId)) return "FX";
   if (normalized === "GOLD" || normalized === "METAL" || normalized === "黄金" || /\.GOLD$/i.test(instrumentId)) return "GOLD";
   return null;
+}
+
+export function chartDisplayTimeZone(
+  settings: AppSettings,
+  market: string | undefined,
+  instrumentId: string,
+  instrumentTimeZone: string,
+): string {
+  const key = marketOrderQtyKey(market, instrumentId);
+  const selected = key ? settings.chartTimeZones[key] : "market";
+  return selected === "market" ? instrumentTimeZone : selected;
+}
+
+export function chartTimeZoneLabel(timeZone: string): string {
+  if (timeZone === "Asia/Shanghai") return "北京时间";
+  if (timeZone === "America/New_York") return "纽约时间";
+  if (timeZone === "Europe/London") return "伦敦时间";
+  if (timeZone === "UTC") return "UTC 时间";
+  return timeZone;
 }
 
 export function tradingModeForInstrument(
@@ -378,6 +424,7 @@ export function normalizeSettings(value: Partial<AppSettings>): AppSettings {
     // All new order-entry paths use the market-specific map below.
     defaultOrderQty: defaultOrderQtyByMarket.CN,
     defaultOrderQtyByMarket,
+    chartTimeZones: normalizeChartTimeZones(merged.chartTimeZones),
     orderType: ["market", "limit", "stop"].includes(merged.orderType)
       ? merged.orderType
       : defaultAppSettings.orderType,

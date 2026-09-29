@@ -9,7 +9,7 @@ import {
   type PointerEvent as ReactPointerEvent,
 } from "react";
 import type { CandleTooltipStyle, Chart, Crosshair, KLineData, Overlay, OverlayCreate, OverlayFigure, OverlayTemplate, Period, Point } from "klinecharts";
-import type { MovingAverageSettings } from "../lib/chartIndicators";
+import type { MacdSettings, MovingAverageSettings } from "../lib/chartIndicators";
 import type { ProtectionLine, ProtectionPriceKind } from "../lib/tradeProtection";
 import type { TimeframeId } from "../lib/timeframeCatalog";
 import type { CorporateActionMarker } from "../lib/corporateActions";
@@ -110,6 +110,19 @@ function syncMovingAverageIndicators(chart: Chart, settings: MovingAverageSettin
     if (existing.length) chart.overrideIndicator(override);
     else chart.createIndicator(override, true);
   });
+}
+
+function syncMacdIndicator(chart: Chart, settings: MacdSettings) {
+  const existing = chart.getIndicators({ name: "MACD" });
+  if (!settings.enabled) {
+    if (existing.length) chart.removeIndicator({ name: "MACD" });
+    return;
+  }
+  if (existing.length) {
+    chart.overrideIndicator({ id: existing[0].id, name: "MACD", calcParams: settings.periods });
+  } else {
+    chart.createIndicator({ name: "MACD", calcParams: settings.periods }, false);
+  }
 }
 let tradeOverlayRegistered = false;
 let decisionOverlayRegistered = false;
@@ -971,6 +984,7 @@ export function KLineReplayChart({
   timeframe,
   pricePrecision,
   movingAverageSettings,
+  macdSettings,
   drawingRequest,
   clearNonce,
   tradeMarkers,
@@ -999,6 +1013,7 @@ export function KLineReplayChart({
   timeframe: string;
   pricePrecision: number;
   movingAverageSettings: MovingAverageSettings;
+  macdSettings: MacdSettings;
   drawingRequest: DrawingRequest;
   clearNonce: number;
   tradeMarkers: TradeMarker[];
@@ -1038,6 +1053,7 @@ export function KLineReplayChart({
   const syncedProtectionLinesRef = useRef("");
   const drawingsRef = useRef<PersistedDrawing[]>(drawings);
   const movingAverageSettingsRef = useRef(movingAverageSettings);
+  const macdSettingsRef = useRef(macdSettings);
   const onDecisionSelectRef = useRef(onDecisionSelect);
   const onCorporateActionSelectRef = useRef(onCorporateActionSelect);
   const onProtectionPriceSelectRef = useRef(onProtectionPriceSelect);
@@ -1258,6 +1274,7 @@ export function KLineReplayChart({
       chartContainer.addEventListener("wheel", handleWheelZoom, { capture: true, passive: false });
       chart.createIndicator("VOL", false);
       syncMovingAverageIndicators(chart, movingAverageSettingsRef.current);
+      syncMacdIndicator(chart, macdSettingsRef.current);
       syncTradeMarkers(chart, tradeMarkersRef.current);
       syncedTradeMarkersRef.current = tradeMarkerSignature(tradeMarkersRef.current);
       syncDecisionMarkers(chart, decisionMarkersRef.current, (id) => onDecisionSelectRef.current(id));
@@ -1361,6 +1378,11 @@ export function KLineReplayChart({
     movingAverageSettingsRef.current = movingAverageSettings;
     if (chartRef.current) syncMovingAverageIndicators(chartRef.current, movingAverageSettings);
   }, [movingAverageSettings]);
+
+  useEffect(() => {
+    macdSettingsRef.current = macdSettings;
+    if (chartRef.current) syncMacdIndicator(chartRef.current, macdSettings);
+  }, [macdSettings]);
 
   useEffect(() => {
     const mobileQuery = window.matchMedia(MOBILE_CHART_QUERY);

@@ -21,7 +21,15 @@ test("limits each moving-average group to six unique lines", () => {
   );
 });
 
-test("wires configurable MA and EMA into the price pane and both toolbar layouts", async () => {
+test("normalizes MACD periods and keeps older preferences disabled by default", () => {
+  assert.deepEqual(indicators.normalizeMacdSettings(undefined), indicators.defaultMacdSettings);
+  assert.deepEqual(
+    indicators.normalizeMacdSettings({ enabled: true, periods: [0, "26.6", 999] }),
+    { enabled: true, periods: [12, 27, 500] },
+  );
+});
+
+test("wires MA and EMA into the price pane and MACD into a separate pane", async () => {
   const [chart, workbench, styles] = await Promise.all([
     readFile(new URL("../app/components/KLineReplayChart.tsx", import.meta.url), "utf8"),
     readFile(new URL("../app/components/TrainingWorkbench.tsx", import.meta.url), "utf8"),
@@ -31,8 +39,10 @@ test("wires configurable MA and EMA into the price pane and both toolbar layouts
   assert.match(chart, /PRICE_INDICATOR_PANE = "candle_pane"/);
   assert.match(chart, /chart\.createIndicator\(override, true\)/);
   assert.match(chart, /chart\.overrideIndicator\(override\)/);
-  assert.match(workbench, /aria-label="主图指标设置"/);
-  assert.match(workbench, /aria-label="MA 和 EMA 指标设置"/);
+  assert.match(chart, /chart\.createIndicator\(\{ name: "MACD", calcParams: settings\.periods \}, false\)/);
+  assert.match(chart, /chart\.removeIndicator\(\{ name: "MACD" \}\)/);
+  assert.match(workbench, /aria-label="图表指标设置"/);
+  assert.match(workbench, /aria-label="MACD 指标"/);
   assert.match(workbench, /MOVING_AVERAGE_SETTINGS_KEY/);
   assert.match(workbench, /className="mobile-indicator-settings"/);
   assert.match(styles, /\.indicator-popover/);

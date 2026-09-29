@@ -31,6 +31,8 @@ namespace KLineTrainingCamp.Launcher
         private readonly FormsTimer statusTimer;
         private readonly FormsTimer updateTimer;
         private readonly Button updateButton;
+        private readonly Label updateStatusLabel;
+        private readonly ProgressBar updateProgressBar;
         private readonly NativeUpdateService updateService;
         private CancellationTokenSource updateCancellation = new CancellationTokenSource();
         private readonly bool startHidden;
@@ -47,6 +49,8 @@ namespace KLineTrainingCamp.Launcher
         private bool runtimeStarted;
         private bool updateChecking;
         private bool updateApplying;
+        private bool updateDownloading;
+        private bool updateVerifying;
         private ReleaseUpdateInfo availableUpdate;
 
         private enum PanelAction { Start, Stop, Restart }
@@ -67,7 +71,8 @@ namespace KLineTrainingCamp.Launcher
             Icon = applicationIcon;
             if (startHidden) ShowInTaskbar = false;
 
-            var root = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 1, RowCount = 5, Padding = new Padding(16) };
+            var root = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 1, RowCount = 6, Padding = new Padding(16) };
+            root.RowStyles.Add(new RowStyle(SizeType.AutoSize));
             root.RowStyles.Add(new RowStyle(SizeType.AutoSize));
             root.RowStyles.Add(new RowStyle(SizeType.AutoSize));
             root.RowStyles.Add(new RowStyle(SizeType.AutoSize));
@@ -107,8 +112,15 @@ namespace KLineTrainingCamp.Launcher
             actions.Controls.Add(updateButton);
             root.Controls.Add(actions, 0, 3);
 
+            var updateStatus = new TableLayoutPanel { AutoSize = true, Dock = DockStyle.Top, ColumnCount = 1, RowCount = 2, Margin = new Padding(0, 0, 0, 10), Visible = supervisor.IsPackagedRelease };
+            updateStatusLabel = new Label { AutoSize = true, Dock = DockStyle.Top, ForeColor = Color.DimGray, Text = "软件更新：等待检查。", AccessibleName = "软件更新状态" };
+            updateProgressBar = new ProgressBar { Dock = DockStyle.Top, Height = 12, Maximum = 100, Visible = false, AccessibleName = "软件更新下载进度" };
+            updateStatus.Controls.Add(updateStatusLabel, 0, 0);
+            updateStatus.Controls.Add(updateProgressBar, 0, 1);
+            root.Controls.Add(updateStatus, 0, 4);
+
             logBox = new TextBox { Dock = DockStyle.Fill, Multiline = true, ReadOnly = true, ScrollBars = ScrollBars.Vertical, WordWrap = false, BackColor = Color.White, Font = new Font(FontFamily.GenericMonospace, 9.0f), AccessibleName = "已脱敏运行日志" };
-            root.Controls.Add(logBox, 0, 4);
+            root.Controls.Add(logBox, 0, 5);
             trayIcon = new NotifyIcon { Icon = applicationIcon, Text = "K线训练营 2.0 控制面板", Visible = true, ContextMenuStrip = CreateTrayMenu() };
             trayIcon.DoubleClick += delegate { RestoreFromTray(); };
             logTimer = new FormsTimer { Interval = 500 };
@@ -324,6 +336,7 @@ namespace KLineTrainingCamp.Launcher
             updateChecking = true;
             updateButton.Enabled = false;
             updateButton.Text = "正在检查软件更新…";
+            updateStatusLabel.Text = "软件更新：正在检查新版本…";
             try
             {
                 ReleaseUpdateInfo update = await updateService.CheckForUpdateAsync(updateCancellation.Token);
@@ -333,12 +346,14 @@ namespace KLineTrainingCamp.Launcher
                 {
                     updateButton.Text = "检查软件更新";
                     updateButton.Enabled = true;
+                    updateStatusLabel.Text = "软件更新：当前已是最新版本 v" + updateService.InstalledVersion + "。";
                     RecordPanelLog("INFO", "当前已是最新软件版本：" + updateService.InstalledVersion + "。");
                 }
                 else
                 {
                     updateButton.Text = "更新到 v" + update.LatestVersion;
                     updateButton.Enabled = true;
+                    updateStatusLabel.Text = "软件更新：发现新版本 v" + update.LatestVersion + "，可点击按钮更新。";
                     RecordPanelLog("INFO", "发现软件新版本 v" + update.LatestVersion + "，可点击更新。" );
                     if (!startHidden) summaryLabel.Text = "发现软件新版本 v" + update.LatestVersion + "，点击“更新到 v" + update.LatestVersion + "”。";
                 }
@@ -349,6 +364,7 @@ namespace KLineTrainingCamp.Launcher
                 {
                     updateButton.Text = "检查软件更新";
                     updateButton.Enabled = true;
+                    updateStatusLabel.Text = "软件更新：检查已取消，可重新检查。";
                 }
             }
             catch (Exception error)
@@ -356,6 +372,7 @@ namespace KLineTrainingCamp.Launcher
                 availableUpdate = null;
                 updateButton.Text = "检查软件更新";
                 updateButton.Enabled = true;
+                updateStatusLabel.Text = "软件更新：检查失败，可点击按钮重试。";
                 RecordPanelLog("WARN", "软件更新检查失败：" + error.Message);
             }
             finally
@@ -378,34 +395,78 @@ namespace KLineTrainingCamp.Launcher
             if (confirmation != DialogResult.Yes) return;
 
             updateApplying = true;
+            updateDownloading = true;
+            updateVerifying = false;
             updateButton.Enabled = false;
             updateButton.Text = "正在下载软件更新…";
+            updateStatusLabel.Text = "软件更新：正在连接下载服务…";
+            updateProgressBar.Value = 0;
+            updateProgressBar.Style = ProgressBarStyle.Marquee;
+            updateProgressBar.Visible = true;
             string packagePath = null;
             try
             {
-                packagePath = await updateService.DownloadPackageAsync(update, updateCancellation.Token);
+                var progress = new Progress<UpdateDownloadProgress>(ShowUpdateDownloadProgress);
+                packagePath = await updateService.DownloadPackageAsync(update, progress, updateCancellation.Token);
+                updateDownloading = false;
+                updateStatusLabel.Text = "软件更新：校验通过，正在停止本地服务…";
+                updateProgressBar.Style = ProgressBarStyle.Marquee;
                 summaryLabel.Text = "更新包已校验，正在停止本地服务…";
                 bool launched = await StopAndLaunchUpdaterAsync(packagePath);
                 if (launched) packagePath = null;
             }
             catch (OperationCanceledException)
             {
-                if (!shuttingDown) summaryLabel.Text = "软件更新已取消。";
+                if (!shuttingDown)
+                {
+                    summaryLabel.Text = "软件更新已取消。";
+                    updateStatusLabel.Text = "软件更新：已取消，可重新更新。";
+                }
             }
             catch (Exception error)
             {
                 RecordPanelLog("ERROR", "软件更新失败：" + error.Message);
                 if (!shuttingDown) summaryLabel.Text = "软件更新失败：" + error.Message;
+                if (!shuttingDown) updateStatusLabel.Text = "软件更新：失败，可点击按钮重试。";
             }
             finally
             {
                 if (packagePath != null) NativeUpdateService.DeleteDownloadedPackage(packagePath);
+                updateDownloading = false;
                 updateApplying = false;
+                if (!shuttingDown) updateProgressBar.Visible = false;
                 if (!shuttingDown && !shutdownComplete)
                 {
                     updateButton.Text = availableUpdate == null ? "检查软件更新" : "更新到 v" + availableUpdate.LatestVersion;
                     updateButton.Enabled = true;
                 }
+            }
+        }
+
+        private void ShowUpdateDownloadProgress(UpdateDownloadProgress progress)
+        {
+            if (shuttingDown || IsDisposed || !updateDownloading) return;
+            if (progress.Verifying)
+            {
+                updateVerifying = true;
+                updateStatusLabel.Text = "软件更新：下载完成，正在校验更新包…";
+                updateProgressBar.Style = ProgressBarStyle.Marquee;
+                return;
+            }
+            if (updateVerifying) return;
+            if (progress.TotalBytes > 0)
+            {
+                int percent = (int)Math.Min(100, progress.DownloadedBytes * 100.0 / progress.TotalBytes);
+                updateProgressBar.Style = ProgressBarStyle.Blocks;
+                updateProgressBar.Value = percent;
+                updateStatusLabel.Text = string.Format("软件更新：已下载 {0:0.0} / {1:0.0} MB（{2}%）",
+                    progress.DownloadedBytes / 1048576.0, progress.TotalBytes / 1048576.0, percent);
+            }
+            else
+            {
+                updateProgressBar.Style = ProgressBarStyle.Marquee;
+                updateStatusLabel.Text = string.Format("软件更新：已下载 {0:0.0} MB，正在继续下载…",
+                    progress.DownloadedBytes / 1048576.0);
             }
         }
 
@@ -428,6 +489,7 @@ namespace KLineTrainingCamp.Launcher
                     supervisor.ProjectRoot,
                     Process.GetCurrentProcess().Id,
                     startHidden);
+                updateStatusLabel.Text = "软件更新：正在安装新版本，完成后会自动重启。";
                 updaterLaunched = true;
                 shutdownComplete = true;
                 closeAfterShutdown = true;

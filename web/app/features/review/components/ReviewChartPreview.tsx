@@ -32,7 +32,7 @@ import {
   type PersistedDrawing,
   type TradeMarker,
 } from "../../../components/KLineReplayChart";
-import type { MovingAverageSettings } from "../../../lib/chartIndicators";
+import type { MacdSettings, MovingAverageSettings } from "../../../lib/chartIndicators";
 import type { CorporateActionMarker } from "../../../lib/corporateActions";
 
 type ReviewChartInstrument = {
@@ -124,9 +124,12 @@ function drawingsEqual(left: PersistedDrawing[], right: PersistedDrawing[]) {
 type ReviewChartPreviewProps = {
   bars: KLineData[];
   instrument: ReviewChartInstrument;
+  displayTimezone: string;
+  displayTimezoneLabel: string;
   timeframe: string;
   dataIndexOffset: number;
   movingAverageSettings: MovingAverageSettings;
+  macdSettings: MacdSettings;
   initialDrawings: PersistedDrawing[];
   tradeMarkers: TradeMarker[];
   decisionMarkers: DecisionMarker[];
@@ -139,9 +142,12 @@ type ReviewChartPreviewProps = {
 export function ReviewChartPreview({
   bars,
   instrument,
+  displayTimezone,
+  displayTimezoneLabel,
   timeframe,
   dataIndexOffset,
   movingAverageSettings,
+  macdSettings,
   initialDrawings,
   tradeMarkers,
   decisionMarkers,
@@ -516,10 +522,11 @@ export function ReviewChartPreview({
             bars={bars}
             dataIndexOffset={dataIndexOffset}
             symbol={instrument.symbol}
-            timezone={instrument.timezone}
+            timezone={displayTimezone}
             timeframe={timeframe}
             pricePrecision={instrument.pricePrecision}
             movingAverageSettings={movingAverageSettings}
+            macdSettings={macdSettings}
             drawingRequest={drawingRequest}
             clearNonce={clearNonce}
             tradeMarkers={tradeMarkers}
@@ -544,7 +551,7 @@ export function ReviewChartPreview({
           {loading && <div className="review-chart-state">正在准备训练行情…</div>}
           {!loading && error && <div className="review-chart-state error" role="alert">{error}</div>}
           {!loading && !error && !bars.length && <div className="review-chart-state">暂无可预览的 K 线</div>}
-          <div className="review-chart-watermark">REVIEW · READ ONLY</div>
+          <div className="review-chart-watermark">REVIEW · READ ONLY · {displayTimezoneLabel}</div>
         </div>
       </div>
       <footer className="review-chart-preview-note">图表以查看为主；左侧标记仅用于本次复盘，不会修改训练记录。</footer>

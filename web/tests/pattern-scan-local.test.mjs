@@ -120,6 +120,35 @@ test("selected patterns reject a symbol when none match", () => {
   assert.equal(result, null);
 });
 
+test("local latest scanner uses the same price acceleration threshold", () => {
+  const preset = {
+    id: "price-acceleration",
+    name: "行情加速",
+    kind: "price_acceleration",
+    parameters: { lookback: 8, accelerationRatio: 1.5, percentile: 80 },
+  };
+  const closes = [100];
+  for (const [count, step] of [[100, 0.001], [8, 0.001], [8, 0.003]]) {
+    for (let index = 0; index < count; index += 1) closes.push(closes.at(-1) * (1 + step));
+  }
+  const bars = closes.map((close, index) => ({
+    timestamp: index,
+    open: close,
+    high: close * 1.001,
+    low: close * 0.999,
+    close,
+    volume: 100,
+    turnover: 1_000,
+  }));
+
+  assert.deepEqual(screenLatestCandles(bars, [preset])?.presetIds, [preset.id]);
+  assert.equal(screenLatestCandles(bars.slice(0, -8), [preset]), null);
+  assert.equal(screenLatestCandles(bars, [{
+    ...preset,
+    parameters: { ...preset.parameters, accelerationRatio: 5 },
+  }]), null);
+});
+
 test("local scanner recognizes modular custom conditions with AND semantics", () => {
   const candles = makeCandles(25);
   candles[candles.length - 1] = {

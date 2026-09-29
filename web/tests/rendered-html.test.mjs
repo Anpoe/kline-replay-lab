@@ -95,7 +95,9 @@ test("ships the K-line training workbench instead of the starter", async () => {
   assert.match(settingsPanel, /交易时段/);
   assert.match(settingsPanel, /自动跳过周末/);
   assert.match(settingsPanel, /<span>交易时段<\/span>[\s\S]*?<small>开启“只在指定时段训练”[\s\S]*?<\/div>\r?\n\s*<div className="settings-rule">\r?\n\s*<div className="settings-row-action">[\s\S]*?<span>周末时段<\/span>/);
-  assert.match(settingsPanel, /跟随图表时区/);
+  assert.match(settingsPanel, /按该市场上方所选的图表显示时区判断/);
+  assert.match(settingsPanel, /图表显示时区/);
+  assert.match(settingsPanel, /黄金/);
   assert.match(workbench, /RANDOM_TRAINING_PATTERN_PRESETS_KEY/);
   assert.match(workbench, /patternPresetIds: randomTrainingPatternPresetIds/);
   assert.doesNotMatch(workbench, /className="restore-notice"/);

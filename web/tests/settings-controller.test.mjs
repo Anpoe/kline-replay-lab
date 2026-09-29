@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  chartDisplayTimeZone,
   defaultAppSettings,
   normalizeSettings,
 } from "../app/features/settings/settingsContracts.ts";
@@ -23,6 +24,23 @@ test("normalizes legacy and per-market order quantity settings", () => {
   assert.deepEqual(settings.defaultOrderQtyByMarket, { CN: 250, US: 250, FX: 250, GOLD: 250 });
   assert.equal(settings.defaultTimeframe, "1d");
   assert.equal(settings.riskPercent, 100);
+});
+
+test("keeps existing market chart times and normalizes each display time zone independently", () => {
+  const legacy = normalizeSettings({});
+  assert.deepEqual(legacy.chartTimeZones, { CN: "market", US: "market", FX: "market", GOLD: "market" });
+  assert.equal(chartDisplayTimeZone(legacy, "GOLD", "XAUUSD.GOLD", "America/New_York"), "America/New_York");
+
+  const settings = normalizeSettings({
+    chartTimeZones: { CN: "invalid", US: "UTC", FX: "Europe/London", GOLD: "Asia/Shanghai" },
+  });
+  assert.deepEqual(settings.chartTimeZones, {
+    CN: "market", US: "UTC", FX: "Europe/London", GOLD: "Asia/Shanghai",
+  });
+  assert.equal(chartDisplayTimeZone(settings, "GOLD", "XAUUSD.GOLD", "America/New_York"), "Asia/Shanghai");
+  assert.equal(chartDisplayTimeZone(settings, "FX", "EURUSD.FX", "America/New_York"), "Europe/London");
+  assert.equal(chartDisplayTimeZone(settings, "US", "AAPL", "America/New_York"), "UTC");
+  assert.equal(chartDisplayTimeZone(settings, "CN", "600519.SH", "Asia/Shanghai"), "Asia/Shanghai");
 });
 
 test("migrates the legacy account setting into independent training and live defaults", () => {

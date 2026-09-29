@@ -7,7 +7,7 @@ import {
   settingsStorageKeys,
 } from "../app/features/settings/settingsGateway.ts";
 import { defaultAppSettings } from "../app/features/settings/settingsContracts.ts";
-import { defaultMovingAverageSettings } from "../app/lib/chartIndicators.ts";
+import { defaultMacdSettings, defaultMovingAverageSettings } from "../app/lib/chartIndicators.ts";
 import { defaultPatternPresets } from "../app/lib/patternFilters.ts";
 
 function createMemoryStorage(initial = {}) {
@@ -51,9 +51,22 @@ test("loads and normalizes legacy settings without changing the storage key", ()
   assert.equal(result.settings.riskPercent, 100);
   assert.deepEqual(result.settings.trainingAccount, defaultAppSettings.trainingAccount);
   assert.deepEqual(result.settings.liveAccount, defaultAppSettings.liveAccount);
+  assert.deepEqual(result.settings.chartTimeZones, defaultAppSettings.chartTimeZones);
   assert.deepEqual(JSON.parse(storage.getItem(settingsStorageKeys.appSettings)), result.settings);
   assert.equal(storage.values.has(settingsStorageKeys.appSettings), true);
   assert.equal(result.recoveredFromCorruption, false);
+});
+
+test("saves separate chart display time zones for each market", () => {
+  const storage = createMemoryStorage();
+  const gateway = createSettingsStorageGateway(storage);
+  gateway.saveAppSettings({
+    ...defaultAppSettings,
+    chartTimeZones: { CN: "market", US: "UTC", FX: "Europe/London", GOLD: "Asia/Shanghai" },
+  });
+  assert.deepEqual(gateway.loadAppSettings().settings.chartTimeZones, {
+    CN: "market", US: "UTC", FX: "Europe/London", GOLD: "Asia/Shanghai",
+  });
 });
 
 test("removes malformed settings and returns defaults", () => {
@@ -89,6 +102,15 @@ test("loads pattern, reason-tag, and indicator preferences with legacy fallbacks
   assert.deepEqual(patterns.randomTrainingPatternPresetIds, [defaultPatternPresets[0].id]);
   assert.deepEqual(reasons.customReasonTags, ["自定义理由"]);
   assert.deepEqual(indicators, defaultMovingAverageSettings);
+  assert.deepEqual(gateway.loadMacdSettings(), defaultMacdSettings);
+});
+
+test("saves and restores MACD settings independently of moving averages", () => {
+  const storage = createMemoryStorage();
+  const gateway = createSettingsStorageGateway(storage);
+  gateway.saveMacdSettings({ enabled: true, periods: [8, 21, 5] });
+  assert.deepEqual(gateway.loadMacdSettings(), { enabled: true, periods: [8, 21, 5] });
+  assert.equal(storage.getItem(settingsStorageKeys.movingAverageSettings), null);
 });
 
 test("keeps a local hidden-pattern shadow across legacy and synced preference reads", () => {

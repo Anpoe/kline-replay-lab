@@ -6,6 +6,7 @@ export type PatternKind =
   | "always_in_short"
   | "trend_pullback"
   | "contraction"
+  | "price_acceleration"
   | "bullish_engulfing"
   | "bearish_engulfing"
   | "breakout_retest"
@@ -149,6 +150,11 @@ export const patternParameterDefinitions: Record<PatternKind, PatternParameterDe
   contraction: [
     { key: "lookback", label: "收缩窗口", min: 3, max: 40, step: 1, suffix: "根" },
     { key: "rangeRatio", label: "近期/此前波幅上限", min: 0.1, max: 1, step: 0.05 },
+  ],
+  price_acceleration: [
+    { key: "lookback", label: "比较窗口", min: 3, max: 40, step: 1, suffix: "根" },
+    { key: "accelerationRatio", label: "加速倍数下限", min: 1, max: 5, step: 0.1, suffix: "倍" },
+    { key: "percentile", label: "历史强度分位下限", min: 50, max: 95, step: 5, suffix: "%" },
   ],
   bullish_engulfing: [
     { key: "minimumBodyPct", label: "实体占整根最低比例", min: 0, max: 100, step: 5, suffix: "%" },
@@ -430,6 +436,7 @@ export const defaultPatternPresets: PatternPreset[] = [
   { id: "always-in-short", kind: "always_in_short", name: "Always In Short（严格结构）", description: "LH/LL 后向下突破并跟进，且当前仍在 EMA 下方单边控制；排除过期状态与频繁穿越均线的震荡。", builtIn: true, parameters: { emaPeriod: 20, pivotStrength: 2, followThroughBars: 2, emaSlopeBars: 3, stateLookback: 120, recentBreakoutBars: 18, controlWindow: 12, minimumTrendCloses: 9, maximumEmaCrosses: 1 } },
   { id: "trend-pullback", kind: "trend_pullback", name: "趋势回调", description: "短均线保持在长均线之上，价格回踩短均线后重新收在其上方。", builtIn: true, parameters: { fastPeriod: 10, slowPeriod: 20, touchTolerancePct: 1.5 } },
   { id: "contraction", kind: "contraction", name: "波幅收缩", description: "近期平均振幅显著小于此前同长度窗口，代表价格正在压缩。", builtIn: true, parameters: { lookback: 8, rangeRatio: 0.65 } },
+  { id: "price-acceleration", kind: "price_acceleration", name: "行情加速", description: "相邻两个窗口同向涨跌，近期累计涨跌幅的绝对值更大，且达到此前 100 个同长度窗口的设定分位。", builtIn: true, parameters: { lookback: 8, accelerationRatio: 1.5, percentile: 80 } },
   { id: "bullish-engulfing", kind: "bullish_engulfing", name: "看涨吞没", description: "阳线实体完整吞没上一根阴线实体。", builtIn: true, parameters: { minimumBodyPct: 45 } },
   { id: "bearish-engulfing", kind: "bearish_engulfing", name: "看跌吞没", description: "阴线实体完整吞没上一根阳线实体。", builtIn: true, parameters: { minimumBodyPct: 45 } },
   { id: "breakout-retest", kind: "breakout_retest", name: "突破回踩", description: "此前刚完成向上突破，随后回踩旧阻力且收盘仍守在其上方。", builtIn: true, parameters: { lookback: 20, retestWindow: 6, tolerancePct: 1.2 } },
@@ -492,6 +499,7 @@ export function requiredPatternHistory(presets: PatternPreset[]) {
       return Math.round(Math.max(p.fastPeriod ?? 0, p.slowPeriod ?? 0) * 4);
     }
     if (preset.kind === "contraction") return Math.round((p.lookback ?? 0) * 2);
+    if (preset.kind === "price_acceleration") return Math.round((p.lookback ?? 8) * 2 + 100);
     if (preset.kind === "breakout_retest") {
       return Math.round((p.lookback ?? 0) + (p.retestWindow ?? 0));
     }
@@ -1222,6 +1230,36 @@ function matchesCustomPattern(candles: PatternCandle[], index: number, preset: P
   return conditions.length > 0 && conditions.every((condition) => matchesPatternCondition(candles, index, condition));
 }
 
+function matchesPriceAcceleration(candles: PatternCandle[], index: number, parameters: Record<string, number>) {
+  const lookback = patternInteger(parameters.lookback, 8, 3, 40);
+  const historyCount = 100;
+  if (index < lookback * 2 + historyCount - 1) return false;
+  const currentClose = candles[index].close;
+  const middleClose = candles[index - lookback].close;
+  const earlierClose = candles[index - lookback * 2].close;
+  if (currentClose <= 0 || middleClose <= 0 || earlierClose <= 0) return false;
+
+  const recentReturn = Math.log(currentClose / middleClose);
+  const previousReturn = Math.log(middleClose / earlierClose);
+  if (recentReturn * previousReturn <= 0) return false;
+  const recentMagnitude = Math.abs(recentReturn);
+  if (recentMagnitude < Math.abs(previousReturn) * Math.max(1, finite(parameters.accelerationRatio, 1.5))) return false;
+
+  const percentile = Math.max(50, Math.min(95, finite(parameters.percentile, 80)));
+  let historicalAtOrBelow = 0;
+  let historicalNonzero = 0;
+  for (let end = index - lookback - historyCount + 1; end <= index - lookback; end += 1) {
+    const endClose = candles[end].close;
+    const startClose = candles[end - lookback].close;
+    if (endClose <= 0 || startClose <= 0) return false;
+    const magnitude = Math.abs(Math.log(endClose / startClose));
+    if (magnitude > 0) historicalNonzero += 1;
+    if (magnitude <= recentMagnitude) historicalAtOrBelow += 1;
+  }
+  return historicalNonzero > historyCount * (1 - percentile / 100)
+    && historicalAtOrBelow >= historyCount * percentile / 100;
+}
+
 export function matchesPattern(candles: PatternCandle[], index: number, preset: PatternPreset) {
   const current = candles[index];
   if (!current || !isPatternPresetAvailable(preset)) return false;
@@ -1266,6 +1304,9 @@ export function matchesPattern(candles: PatternCandle[], index: number, preset: 
     const recent = average(ranges.slice(index - lookback + 1, index + 1));
     const previous = average(ranges.slice(index - lookback * 2 + 1, index - lookback + 1));
     return previous > 0 && recent / previous <= p.rangeRatio;
+  }
+  if (preset.kind === "price_acceleration") {
+    return matchesPriceAcceleration(candles, index, p);
   }
   if (preset.kind === "bullish_engulfing" || preset.kind === "bearish_engulfing") {
     const previous = candles[index - 1];

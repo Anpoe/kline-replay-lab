@@ -1,6 +1,9 @@
 import {
+  defaultMacdSettings,
   defaultMovingAverageSettings,
+  normalizeMacdSettings,
   normalizeMovingAverageSettings,
+  type MacdSettings,
   type MovingAverageSettings,
 } from "../../lib/chartIndicators.ts";
 import {
@@ -28,6 +31,7 @@ export const settingsStorageKeys = Object.freeze({
   randomTrainingPatternPresets: "kline-replay-lab:random-training-pattern-presets-v1",
   quickRandomMode: "kline-replay-lab:quick-random-mode-v1",
   movingAverageSettings: "kline-replay-lab:moving-average-indicators-v1",
+  macdSettings: "kline-replay-lab:macd-indicator-v1",
 });
 
 export type SettingsStorage = {
@@ -279,6 +283,21 @@ export function createSettingsStorageGateway(storage: SettingsStorage) {
     storage.setItem(settingsStorageKeys.movingAverageSettings, JSON.stringify(normalizeMovingAverageSettings(settings)));
   };
 
+  const loadMacdSettings = (): MacdSettings => {
+    const stored = storage.getItem(settingsStorageKeys.macdSettings);
+    if (stored == null) return defaultMacdSettings;
+    try {
+      return normalizeMacdSettings(JSON.parse(stored));
+    } catch {
+      storage.removeItem(settingsStorageKeys.macdSettings);
+      return defaultMacdSettings;
+    }
+  };
+
+  const saveMacdSettings = (settings: MacdSettings) => {
+    storage.setItem(settingsStorageKeys.macdSettings, JSON.stringify(normalizeMacdSettings(settings)));
+  };
+
   const saveLastDraft = <T>(draft: T) => {
     storage.setItem(settingsStorageKeys.lastDraft, JSON.stringify(draft));
   };
@@ -314,6 +333,8 @@ export function createSettingsStorageGateway(storage: SettingsStorage) {
     removeLegacyReasonTagPreferences,
     loadMovingAverageSettings,
     saveMovingAverageSettings,
+    loadMacdSettings,
+    saveMacdSettings,
     saveLastDraft,
     loadLastDraft,
     removeLastDraft,

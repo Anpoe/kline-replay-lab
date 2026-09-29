@@ -92,7 +92,7 @@ test("automatically skips weekend candles without enabling a daily session", () 
   }), 1);
 });
 
-test("evaluates the weekend in the chart timezone and keeps exclusions unchanged", () => {
+test("evaluates the weekend in the market timezone and keeps exclusions unchanged", () => {
   const boundaryBars = [
     bar("2026-09-12T01:00:00Z"), // Friday evening in New York.
     bar("2026-09-12T04:00:00Z"), // Saturday midnight in New York.
@@ -138,6 +138,37 @@ test("does not fill an order when replay re-enters its creation candle", () => {
 test("uses the chart timezone and supports minute precision", () => {
   assert.equal(advance({ timezone: "UTC" }), 1);
   assert.equal(advance({ session: { ...session, startTime: "07:05" } }), 4);
+});
+
+test("uses the selected display timezone for training hours while keeping weekends on market time", () => {
+  const goldBars = [
+    bar("2026-01-02T09:30:00Z"), // New York 04:30, Beijing 17:30.
+    bar("2026-01-02T09:45:00Z"), // New York 04:45, Beijing 17:45.
+    bar("2026-01-02T10:00:00Z"), // Beijing 18:00, exclusive end.
+  ];
+  const options = {
+    bars: goldBars,
+    cursor: 0,
+    requestedCount: 1,
+    session,
+    timeframe: "15m",
+    timezone: "America/New_York",
+    sessionTimeZone: "Asia/Shanghai",
+  };
+  assert.equal(isReplayTradingSessionBar(goldBars[1].timestamp, options), true);
+  assert.equal(isReplayTradingSessionBar(goldBars[1].timestamp, { ...options, sessionTimeZone: undefined }), false);
+  assert.equal(isReplayTradingSessionBar(goldBars[2].timestamp, options), false);
+  assert.equal(advanceReplayCursor(options), 1);
+  assert.equal(firstReplaySkippedBarIndex({ ...options, destination: 2 }), 2);
+
+  const fridayNewYork = bar("2026-09-12T01:00:00Z"); // Saturday in Beijing.
+  const saturdayNewYork = bar("2026-09-12T04:00:00Z");
+  const weekendOptions = {
+    ...options,
+    session: { ...session, enabled: false, skipWeekends: true },
+  };
+  assert.equal(isReplayTradingSessionBar(fridayNewYork.timestamp, weekendOptions), true);
+  assert.equal(isReplayTradingSessionBar(saturdayNewYork.timestamp, weekendOptions), false);
 });
 
 test("supports an overnight session and excludes its end", () => {

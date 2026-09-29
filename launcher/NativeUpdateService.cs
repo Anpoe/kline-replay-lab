@@ -26,6 +26,13 @@ namespace KLineTrainingCamp.Launcher
         public string ReleaseNotes { get; set; }
     }
 
+    public sealed class UpdateDownloadProgress
+    {
+        public long DownloadedBytes { get; set; }
+        public long TotalBytes { get; set; }
+        public bool Verifying { get; set; }
+    }
+
     public sealed class NativeUpdateService
     {
         public const string Repository = "Anpoe/kline-replay-lab";
@@ -67,7 +74,7 @@ namespace KLineTrainingCamp.Launcher
             }, cancellationToken);
         }
 
-        public Task<string> DownloadPackageAsync(ReleaseUpdateInfo update, CancellationToken cancellationToken)
+        public Task<string> DownloadPackageAsync(ReleaseUpdateInfo update, IProgress<UpdateDownloadProgress> progress, CancellationToken cancellationToken)
         {
             if (update == null) throw new ArgumentNullException("update");
             return Task.Run(delegate
@@ -79,7 +86,8 @@ namespace KLineTrainingCamp.Launcher
                 try
                 {
                     Directory.CreateDirectory(directory);
-                    DownloadFile(update.DownloadUrl, packagePath, cancellationToken);
+                    DownloadFile(update.DownloadUrl, packagePath, progress, cancellationToken);
+                    if (progress != null) progress.Report(new UpdateDownloadProgress { Verifying = true });
                     VerifySha256(packagePath, update.Sha256, cancellationToken);
                     return packagePath;
                 }
@@ -312,24 +320,35 @@ namespace KLineTrainingCamp.Launcher
             }
         }
 
-        private static void DownloadFile(string url, string destination, CancellationToken cancellationToken)
+        private static void DownloadFile(string url, string destination, IProgress<UpdateDownloadProgress> progress, CancellationToken cancellationToken)
         {
             using (HttpWebResponse response = SendRequest(url, "application/octet-stream").GetResponse() as HttpWebResponse)
             {
                 cancellationToken.ThrowIfCancellationRequested();
                 if (response == null || response.StatusCode != HttpStatusCode.OK)
                     throw new InvalidOperationException("下载软件更新失败：HTTP 响应无效。");
+                long totalBytes = response.ContentLength;
+                long downloadedBytes = 0;
+                if (progress != null) progress.Report(new UpdateDownloadProgress { DownloadedBytes = 0, TotalBytes = totalBytes });
                 using (Stream input = response.GetResponseStream())
                 using (var output = new FileStream(destination, FileMode.Create, FileAccess.Write, FileShare.None, CopyBufferSize, FileOptions.SequentialScan))
                 {
                     byte[] buffer = new byte[CopyBufferSize];
                     int read;
+                    DateTime lastReport = DateTime.UtcNow;
                     while ((read = input.Read(buffer, 0, buffer.Length)) > 0)
                     {
                         cancellationToken.ThrowIfCancellationRequested();
                         output.Write(buffer, 0, read);
+                        downloadedBytes += read;
+                        if (progress != null && (DateTime.UtcNow - lastReport).TotalMilliseconds >= 100)
+                        {
+                            progress.Report(new UpdateDownloadProgress { DownloadedBytes = downloadedBytes, TotalBytes = totalBytes });
+                            lastReport = DateTime.UtcNow;
+                        }
                     }
                 }
+                if (progress != null) progress.Report(new UpdateDownloadProgress { DownloadedBytes = downloadedBytes, TotalBytes = totalBytes });
             }
         }
 
@@ -367,21 +386,30 @@ namespace KLineTrainingCamp.Launcher
             installRoot = NormalizeDirectoryPath(installRoot);
             if (!Directory.Exists(installRoot)) throw new DirectoryNotFoundException("找不到软件安装目录：" + installRoot);
 
-            string updateRoot = installRoot + ".update-" + Guid.NewGuid().ToString("N");
-            string backupRoot = installRoot + ".backup-" + Guid.NewGuid().ToString("N");
-            string dataBackupRoot = installRoot + ".data-backup-" + Guid.NewGuid().ToString("N");
+            string installParent = Path.GetDirectoryName(installRoot);
+            string updateRoot = CreateSiblingPath(installParent, ".u-");
+            string backupRoot = CreateSiblingPath(installParent, ".b-");
+            string dataBackupRoot = CreateSiblingPath(installParent, ".d-");
             bool oldMoved = false;
             bool newMoved = false;
             try
             {
                 Directory.CreateDirectory(updateRoot);
-                ZipFile.ExtractToDirectory(packagePath, updateRoot);
-                ValidateStagedRelease(updateRoot);
+                string stagedReleaseRoot;
+                try
+                {
+                    ZipFile.ExtractToDirectory(packagePath, updateRoot);
+                    stagedReleaseRoot = FindStagedReleaseRoot(updateRoot);
+                }
+                catch (PathTooLongException error)
+                {
+                    throw new PathTooLongException("软件安装位置过深，请将程序移到较短的目录后重试更新。", error);
+                }
                 MovePreservedData(installRoot, dataBackupRoot);
 
                 Directory.Move(installRoot, backupRoot);
                 oldMoved = true;
-                Directory.Move(updateRoot, installRoot);
+                Directory.Move(stagedReleaseRoot, installRoot);
                 newMoved = true;
                 RestorePreservedData(dataBackupRoot, installRoot);
 
@@ -408,10 +436,17 @@ namespace KLineTrainingCamp.Launcher
                 if (newMoved && Directory.Exists(installRoot))
                 {
                     string failedRoot = installRoot + ".failed-" + Guid.NewGuid().ToString("N");
+                    bool preservedDataMoved = false;
+                    try
+                    {
+                        MovePreservedData(installRoot, dataBackupRoot);
+                        preservedDataMoved = true;
+                    }
+                    catch { }
                     try
                     {
                         Directory.Move(installRoot, failedRoot);
-                        TryDeleteDirectory(failedRoot);
+                        if (preservedDataMoved) TryDeleteDirectory(failedRoot);
                     }
                     catch { }
                 }
@@ -421,7 +456,6 @@ namespace KLineTrainingCamp.Launcher
                 }
                 try { RestorePreservedData(dataBackupRoot, installRoot); } catch { }
                 TryDeleteDirectory(updateRoot);
-                TryDeleteDirectory(dataBackupRoot);
                 throw;
             }
             finally
@@ -430,15 +464,32 @@ namespace KLineTrainingCamp.Launcher
             }
         }
 
-        private static void ValidateStagedRelease(string root)
+        private static string CreateSiblingPath(string parent, string prefix)
         {
-            if (!File.Exists(Path.Combine(root, ControlPanelExecutableName))
-                || !File.Exists(Path.Combine(root, "release-manifest.json"))
-                || !Directory.Exists(Path.Combine(root, "web"))
-                || !Directory.Exists(Path.Combine(root, "runtime")))
+            string path;
+            do
             {
-                throw new InvalidDataException("更新包缺少必要的程序文件。");
-            }
+                path = Path.Combine(parent, prefix + Guid.NewGuid().ToString("N").Substring(0, 12));
+            } while (Directory.Exists(path) || File.Exists(path));
+            return path;
+        }
+
+        private static string FindStagedReleaseRoot(string extractionRoot)
+        {
+            if (IsStagedRelease(extractionRoot)) return extractionRoot;
+            string[] children = Directory.GetDirectories(extractionRoot);
+            if (Directory.GetFiles(extractionRoot).Length == 0
+                && children.Length == 1
+                && IsStagedRelease(children[0])) return children[0];
+            throw new InvalidDataException("更新包缺少必要的程序文件。");
+        }
+
+        private static bool IsStagedRelease(string root)
+        {
+            return File.Exists(Path.Combine(root, ControlPanelExecutableName))
+                && File.Exists(Path.Combine(root, "release-manifest.json"))
+                && Directory.Exists(Path.Combine(root, "web"))
+                && Directory.Exists(Path.Combine(root, "runtime"));
         }
 
         private static void MovePreservedData(string installRoot, string dataBackupRoot)

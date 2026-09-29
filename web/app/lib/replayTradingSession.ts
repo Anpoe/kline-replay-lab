@@ -40,12 +40,15 @@ function minuteOfDay(time: string) {
 export type ReplaySessionPredicateOptions = {
   session?: ReplayTradingSession;
   timeframe: string;
+  /** Market time zone, used for weekend exclusion. */
   timezone: string;
+  /** Display time zone for the user-configured daily training window. */
+  sessionTimeZone?: string;
   randomRun?: boolean;
   liveMode?: boolean;
 };
 
-export function createReplayTradingSessionPredicate({ session, timeframe, timezone, randomRun = false, liveMode = false }: ReplaySessionPredicateOptions) {
+export function createReplayTradingSessionPredicate({ session, timeframe, timezone, sessionTimeZone = timezone, randomRun = false, liveMode = false }: ReplaySessionPredicateOptions) {
   const normalized = normalizeReplayTradingSession(session);
   const minutes = timeframeMinutes(timeframe);
   const restricted = (normalized.enabled || normalized.skipWeekends)
@@ -56,7 +59,7 @@ export function createReplayTradingSessionPredicate({ session, timeframe, timezo
   if (!restricted) return undefined;
   const formatter = normalized.enabled
     ? new Intl.DateTimeFormat("en-GB", {
-        timeZone: timezone, hour: "2-digit", minute: "2-digit", hourCycle: "h23",
+        timeZone: sessionTimeZone, hour: "2-digit", minute: "2-digit", hourCycle: "h23",
       })
     : undefined;
   const weekdayFormatter = normalized.skipWeekends
@@ -119,6 +122,7 @@ export function advanceReplayCursor({
   session,
   timeframe,
   timezone,
+  sessionTimeZone = timezone,
   randomRun = false,
   liveMode = false,
   scheduledOrderTimestamps = [],
@@ -130,6 +134,7 @@ export function advanceReplayCursor({
   session?: ReplayTradingSession;
   timeframe: string;
   timezone: string;
+  sessionTimeZone?: string;
   randomRun?: boolean;
   liveMode?: boolean;
   scheduledOrderTimestamps?: readonly number[];
@@ -137,7 +142,7 @@ export function advanceReplayCursor({
   const end = Math.min(endCursor, bars.length - 1);
   if (cursor >= end) return cursor;
   const count = Number.isFinite(requestedCount) ? Math.max(1, Math.floor(requestedCount)) : 1;
-  const inSession = createReplayTradingSessionPredicate({ session, timeframe, timezone, randomRun, liveMode });
+  const inSession = createReplayTradingSessionPredicate({ session, timeframe, timezone, sessionTimeZone, randomRun, liveMode });
   let destination = Math.min(end, cursor + count);
   if (inSession) {
     let remaining = count;

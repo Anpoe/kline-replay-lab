@@ -59,6 +59,7 @@ export default defineConfig(async ({ mode }) => {
     plugins: [
       vinext(),
       cloudflare({
+        inspectorPort: false,
         viteEnvironment: { name: "rsc", childEnvironments: ["ssr"] },
         config: localBindingConfig,
       }),

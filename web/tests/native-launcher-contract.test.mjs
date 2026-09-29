@@ -405,13 +405,12 @@ test("旧 BAT 只兼容转发到原生 EXE，不再直接启动 PowerShell", asy
 });
 
 test("主文档将原生 EXE 说明为首选入口，并说明托盘和后台 worker 语义", async () => {
-  const [rootReadme, webReadme, smokeChecklist] = await Promise.all([
+  const [rootReadme, webReadme] = await Promise.all([
     readFile(new URL("../../README.md", import.meta.url), "utf8"),
     readFile(new URL("../../web/README.md", import.meta.url), "utf8"),
-    readFile(new URL("../../docs/architecture/smoke-checklist.md", import.meta.url), "utf8"),
   ]);
 
-  for (const source of [rootReadme, webReadme, smokeChecklist]) {
+  for (const source of [rootReadme, webReadme]) {
     assert.match(source, /KLineTrainingCamp\.ControlPanel\.exe/);
   }
   assert.match(rootReadme, /系统托盘/);

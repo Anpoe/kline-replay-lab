@@ -364,6 +364,36 @@ function isLimitUpCandle(latest, previous, ratio = 0.1, tick = 0.01) {
   return close >= upper - parsedTick / 10;
 }
 
+function matchesPriceAcceleration(candles, index, parameters) {
+  const lookback = patternInteger(parameters.lookback, 8, 3, 40);
+  const historyCount = 100;
+  if (index < lookback * 2 + historyCount - 1) return false;
+  const currentClose = candles[index].close;
+  const middleClose = candles[index - lookback].close;
+  const earlierClose = candles[index - lookback * 2].close;
+  if (currentClose <= 0 || middleClose <= 0 || earlierClose <= 0) return false;
+
+  const recentReturn = Math.log(currentClose / middleClose);
+  const previousReturn = Math.log(middleClose / earlierClose);
+  if (recentReturn * previousReturn <= 0) return false;
+  const recentMagnitude = Math.abs(recentReturn);
+  if (recentMagnitude < Math.abs(previousReturn) * Math.max(1, finite(parameters.accelerationRatio, 1.5))) return false;
+
+  const percentile = Math.max(50, Math.min(95, finite(parameters.percentile, 80)));
+  let historicalAtOrBelow = 0;
+  let historicalNonzero = 0;
+  for (let end = index - lookback - historyCount + 1; end <= index - lookback; end += 1) {
+    const endClose = candles[end].close;
+    const startClose = candles[end - lookback].close;
+    if (endClose <= 0 || startClose <= 0) return false;
+    const magnitude = Math.abs(Math.log(endClose / startClose));
+    if (magnitude > 0) historicalNonzero += 1;
+    if (magnitude <= recentMagnitude) historicalAtOrBelow += 1;
+  }
+  return historicalNonzero > historyCount * (1 - percentile / 100)
+    && historicalAtOrBelow >= historyCount * percentile / 100;
+}
+
 export function matchesLatestPattern(candles, preset) {
   const index = candles.length - 1;
   const current = candles[index];
@@ -405,6 +435,9 @@ export function matchesLatestPattern(candles, preset) {
     const recent = average(ranges.slice(index - lookback + 1, index + 1));
     const previous = average(ranges.slice(index - lookback * 2 + 1, index - lookback + 1));
     return previous > 0 && recent / previous <= p.rangeRatio;
+  }
+  if (preset.kind === "price_acceleration") {
+    return matchesPriceAcceleration(candles, index, p);
   }
   if (preset.kind === "bullish_engulfing" || preset.kind === "bearish_engulfing") {
     const previous = candles[index - 1];

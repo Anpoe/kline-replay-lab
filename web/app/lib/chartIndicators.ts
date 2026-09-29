@@ -7,6 +7,11 @@ export type MovingAverageIndicator = {
 
 export type MovingAverageSettings = Record<MovingAverageKind, MovingAverageIndicator>;
 
+export type MacdSettings = {
+  enabled: boolean;
+  periods: [number, number, number];
+};
+
 export const MAX_MOVING_AVERAGE_LINES = 6;
 export const MIN_MOVING_AVERAGE_PERIOD = 1;
 export const MAX_MOVING_AVERAGE_PERIOD = 500;
@@ -15,6 +20,8 @@ export const defaultMovingAverageSettings: MovingAverageSettings = {
   ma: { enabled: true, periods: [5, 10, 20] },
   ema: { enabled: false, periods: [12, 26] },
 };
+
+export const defaultMacdSettings: MacdSettings = { enabled: false, periods: [12, 26, 9] };
 
 export function normalizeMovingAveragePeriods(value: unknown, fallback: number[]): number[] {
   if (!Array.isArray(value)) return [...fallback];
@@ -41,5 +48,19 @@ export function normalizeMovingAverageSettings(value: unknown): MovingAverageSet
       enabled: typeof source.ema?.enabled === "boolean" ? source.ema.enabled : defaultMovingAverageSettings.ema.enabled,
       periods: normalizeMovingAveragePeriods(source.ema?.periods, defaultMovingAverageSettings.ema.periods),
     },
+  };
+}
+
+export function normalizeMacdSettings(value: unknown): MacdSettings {
+  const source = value && typeof value === "object" ? value as Partial<MacdSettings> : {};
+  const periods = Array.isArray(source.periods) ? source.periods : [];
+  return {
+    enabled: typeof source.enabled === "boolean" ? source.enabled : defaultMacdSettings.enabled,
+    periods: defaultMacdSettings.periods.map((fallback, index) => {
+      const period = Number(periods[index]);
+      return Number.isFinite(period) && period > 0
+        ? Math.min(MAX_MOVING_AVERAGE_PERIOD, Math.max(MIN_MOVING_AVERAGE_PERIOD, Math.round(period)))
+        : fallback;
+    }) as MacdSettings["periods"],
   };
 }

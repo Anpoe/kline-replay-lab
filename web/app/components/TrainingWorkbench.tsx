@@ -44,7 +44,7 @@ import {
   X,
 } from "lucide-react";
 import type { KLineData } from "klinecharts";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
 import {
   KLineReplayChart,
   type CandleContextTarget,
@@ -63,6 +63,8 @@ import {
   resetConsumedStopDraftAfterOpenFills,
 } from "../lib/tradeProtection";
 import {
+  chartDisplayTimeZone,
+  chartTimeZoneLabel,
   configuredDefaultOrderQuantity,
   configuredDefaultOrderQuantityForRequest,
   defaultAppSettings,
@@ -222,12 +224,15 @@ import {
   PATTERN_PRESET_RESTORE_ACTION,
 } from "../lib/patternPresetPersistence";
 import {
+  defaultMacdSettings,
   defaultMovingAverageSettings,
   MAX_MOVING_AVERAGE_LINES,
   MAX_MOVING_AVERAGE_PERIOD,
   MIN_MOVING_AVERAGE_PERIOD,
+  normalizeMacdSettings,
   normalizeMovingAveragePeriods,
   normalizeMovingAverageSettings,
+  type MacdSettings,
   type MovingAverageKind,
   type MovingAverageSettings,
 } from "../lib/chartIndicators";
@@ -1003,6 +1008,7 @@ type SyncedPreferences = {
   patternPresets: PatternPreset[];
   patternPresetAction?: "restore-defaults";
   movingAverageSettings: MovingAverageSettings;
+  macdSettings?: MacdSettings;
   reasonTags?: string[];
   customReasonTags: string[];
   drawingPreferences: {
@@ -1186,13 +1192,17 @@ function sanitizeRecentLiveResults(value: unknown): LiveScanResult[] {
   }).slice(0, 50);
 }
 
-function MovingAverageEditor({
+function ChartIndicatorEditor({
   settings,
   onChange,
+  macdSettings,
+  onMacdChange,
   compact = false,
 }: {
   settings: MovingAverageSettings;
   onChange: (settings: MovingAverageSettings) => void;
+  macdSettings: MacdSettings;
+  onMacdChange: (settings: MacdSettings) => void;
   compact?: boolean;
 }) {
   const updateGroup = (kind: MovingAverageKind, next: MovingAverageSettings[MovingAverageKind]) => {
@@ -1268,7 +1278,39 @@ function MovingAverageEditor({
           </section>
         );
       })}
-      <p>周期范围 1–500；每组最多 6 条，只使用已经揭示的 K 线计算。</p>
+      <section className={macdSettings.enabled ? "enabled" : ""}>
+        <div className="moving-average-row-head">
+          <button
+            type="button"
+            className="indicator-switch"
+            role="switch"
+            aria-checked={macdSettings.enabled}
+            aria-label="MACD 指标"
+            onClick={() => onMacdChange({ ...macdSettings, enabled: !macdSettings.enabled })}
+          ><span />MACD</button>
+          <small>平滑异同移动平均线 · 显示在副图</small>
+        </div>
+        <div className="indicator-period-list" aria-label="MACD 周期">
+          {(["快线", "慢线", "信号线"] as const).map((label, index) => (
+            <label key={label}>
+              <span>{label}</span>
+              <input
+                type="number"
+                min={MIN_MOVING_AVERAGE_PERIOD}
+                max={MAX_MOVING_AVERAGE_PERIOD}
+                value={macdSettings.periods[index]}
+                aria-label={`MACD ${label}周期`}
+                onChange={(event) => {
+                  const periods = [...macdSettings.periods] as MacdSettings["periods"];
+                  periods[index] = Math.min(MAX_MOVING_AVERAGE_PERIOD, Math.max(MIN_MOVING_AVERAGE_PERIOD, Math.round(Number(event.target.value) || 1)));
+                  onMacdChange({ ...macdSettings, periods });
+                }}
+              />
+            </label>
+          ))}
+        </div>
+      </section>
+      <p>周期范围 1–500；MA 和 EMA 每组最多 6 条。指标只使用已经揭示的 K 线计算。</p>
     </div>
   );
 }
@@ -1727,11 +1769,11 @@ function randomItem<T>(items: T[]) {
   return items[randomUint32() % items.length];
 }
 
-function formatDate(timestamp: number, timeframe: string) {
+function formatDate(timestamp: number, timeframe: string, timeZone?: string) {
   const date = new Date(timestamp);
   return (timeframeMinutes(timeframe) ?? 24 * 60) < 24 * 60
-    ? date.toLocaleString("zh-CN", { month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit" })
-    : date.toLocaleDateString("zh-CN", { year: "numeric", month: "2-digit", day: "2-digit" });
+    ? date.toLocaleString("zh-CN", { timeZone, month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit" })
+    : date.toLocaleDateString("zh-CN", { timeZone, year: "numeric", month: "2-digit", day: "2-digit" });
 }
 
 function createTrainingEvent(
@@ -1946,9 +1988,30 @@ export function TrainingWorkbench() {
   const [orderPanelTab, setOrderPanelTab] = useState<"positions" | "pending" | "history">("positions");
   const [hoveredClosedPositionId, setHoveredClosedPositionId] = useState<string | null>(null);
   const [mobileOrdersExpanded, setMobileOrdersExpanded] = useState(false);
+  const [chartHeight, setChartHeight] = useState(520);
+  const [chartHeightAdjusted, setChartHeightAdjusted] = useState(false);
+  const [chartHeightLimit, setChartHeightLimit] = useState(720);
+  const [actualChartHeight, setActualChartHeight] = useState(520);
+  const chartAreaRef = useRef<HTMLDivElement>(null);
+  const chartResizeStart = useRef<{ y: number; height: number } | null>(null);
+  const visibleChartHeight = Math.min(chartHeight, chartHeightLimit);
+  useEffect(() => {
+    const updateChartHeightLimit = () => setChartHeightLimit(Math.max(350, window.innerHeight - 370));
+    updateChartHeightLimit();
+    window.addEventListener("resize", updateChartHeightLimit);
+    return () => window.removeEventListener("resize", updateChartHeightLimit);
+  }, []);
+  useEffect(() => {
+    if (view !== "replay" || !chartAreaRef.current) return;
+    const chartArea = chartAreaRef.current;
+    const observer = new ResizeObserver(() => setActualChartHeight(Math.round(chartArea.getBoundingClientRect().height)));
+    observer.observe(chartArea);
+    return () => observer.disconnect();
+  }, [view]);
   const [mobileToolbarOpen, setMobileToolbarOpen] = useState(false);
   const [indicatorMenuOpen, setIndicatorMenuOpen] = useState(false);
   const [movingAverageSettings, setMovingAverageSettings] = useState<MovingAverageSettings>(defaultMovingAverageSettings);
+  const [macdSettings, setMacdSettings] = useState<MacdSettings>(defaultMacdSettings);
   const [movingAverageSettingsReady, setMovingAverageSettingsReady] = useState(false);
   const [quickRandomMode, setQuickRandomMode] = useState<"free" | "blind">("free");
   const [quickRandomPatternPresetId, setQuickRandomPatternPresetId] = useState("");
@@ -2040,6 +2103,7 @@ export function TrainingWorkbench() {
   const [settingsTab, setSettingsTab] = useState<SettingsTab>("basic");
   const [appSettings, setAppSettings] = useState<AppSettings>(defaultAppSettings);
   const [settingsDraft, setSettingsDraft] = useState<AppSettings>(defaultAppSettings);
+  const activeChartTimeZone = chartDisplayTimeZone(appSettings, instrument.market, instrument.id, instrument.timezone);
   const [settingsError, setSettingsError] = useState("");
   const [patternPresets, setPatternPresets] = useState<PatternPreset[]>(defaultPatternPresets);
   const [patternPresetsReady, setPatternPresetsReady] = useState(false);
@@ -2426,7 +2490,7 @@ export function TrainingWorkbench() {
   ]);
   const selectedCorporateAction = corporateActionMarkers.find((action) => action.id === selectedCorporateActionId) ?? null;
   const trainingDateLabel = (timestamp: number) => {
-    if (!hideTaskDate) return formatDate(timestamp, timeframe);
+    if (!hideTaskDate) return formatDate(timestamp, timeframe, activeChartTimeZone);
     const index = bars.findIndex((bar) => bar.timestamp === timestamp);
     return index >= 0 ? `K线 #${index + 1}` : "日期已隐藏";
   };
@@ -2951,6 +3015,12 @@ export function TrainingWorkbench() {
         name: reviewedSession.session.instrumentId,
       }
     : instrument;
+  const reviewChartTimeZone = chartDisplayTimeZone(
+    appSettings,
+    reviewPreviewInstrument.market,
+    reviewedSession?.session.instrumentId ?? instrument.id,
+    reviewPreviewInstrument.timezone,
+  );
   const reviewPreviewTimeframe = reviewedSession?.session.timeframe ?? timeframe;
   const reviewPreviewDataIndexOffset = reviewedSession
     ? reviewPreviewSnapshot?.dataIndexOffset ?? 0
@@ -3082,6 +3152,7 @@ export function TrainingWorkbench() {
       patternPresets: persistedPatternPresets,
       ...(options?.allowPatternPresetRestore ? { patternPresetAction: PATTERN_PRESET_RESTORE_ACTION } : {}),
       movingAverageSettings,
+      macdSettings,
       reasonTags,
       customReasonTags,
       drawingPreferences: {
@@ -3126,6 +3197,7 @@ export function TrainingWorkbench() {
     liveScanResume,
     liveScanSort,
     movingAverageSettings,
+    macdSettings,
     patternPresets,
     reasonTags,
     settingsGateway,
@@ -3188,6 +3260,11 @@ export function TrainingWorkbench() {
       const nextIndicators = normalizeMovingAverageSettings(stored.movingAverageSettings);
       setMovingAverageSettings(nextIndicators);
       settingsGateway.saveMovingAverageSettings(nextIndicators);
+    }
+    if (stored.macdSettings && typeof stored.macdSettings === "object") {
+      const nextMacd = normalizeMacdSettings(stored.macdSettings);
+      setMacdSettings(nextMacd);
+      settingsGateway.saveMacdSettings(nextMacd);
     }
     setQuickRandomMode(localRandomPreferences.quickRandomMode);
     const syncedReasonTags = Array.isArray(stored.reasonTags)
@@ -3313,6 +3390,7 @@ export function TrainingWorkbench() {
   useEffect(() => {
     const timer = window.setTimeout(() => {
       setMovingAverageSettings(settingsGateway.loadMovingAverageSettings());
+      setMacdSettings(settingsGateway.loadMacdSettings());
       setMovingAverageSettingsReady(true);
     }, 0);
     return () => window.clearTimeout(timer);
@@ -3322,6 +3400,11 @@ export function TrainingWorkbench() {
     if (!movingAverageSettingsReady) return;
     settingsGateway.saveMovingAverageSettings(movingAverageSettings);
   }, [movingAverageSettings, movingAverageSettingsReady, settingsGateway]);
+
+  useEffect(() => {
+    if (!movingAverageSettingsReady) return;
+    settingsGateway.saveMacdSettings(macdSettings);
+  }, [macdSettings, movingAverageSettingsReady, settingsGateway]);
 
   useEffect(() => {
     if (!patternPresetsReady) return;
@@ -4589,6 +4672,12 @@ export function TrainingWorkbench() {
       return;
     }
     const replayTradingSession = appSettingsRef.current.replayTradingSession;
+    const sessionTimeZone = chartDisplayTimeZone(
+      appSettingsRef.current,
+      instrument.market,
+      instrument.id,
+      instrument.timezone,
+    );
     const nextCursor = advanceReplayCursor({
       bars,
       cursor,
@@ -4597,6 +4686,7 @@ export function TrainingWorkbench() {
       session: replayTradingSession,
       timeframe,
       timezone: instrument.timezone,
+      sessionTimeZone,
       randomRun: trainingTask?.randomRun,
       liveMode,
       scheduledOrderTimestamps: pendingOrders
@@ -4607,6 +4697,7 @@ export function TrainingWorkbench() {
       session: replayTradingSession,
       timeframe,
       timezone: instrument.timezone,
+      sessionTimeZone,
       randomRun: trainingTask?.randomRun,
       liveMode,
     };
@@ -4878,7 +4969,7 @@ export function TrainingWorkbench() {
         endCursor: completedTask.endCursor,
       }, bars[nextCursor]?.timestamp);
     }
-  }, [appendEvent, bars, cashBalance, corporateActions, corporateActionsForInstrumentId, cursor, events, executeOrders, executionProfile, instrument.id, instrument.timezone, liveMode, marketRules, pendingOrders, positions, settleTrainingAtBar, timeframe, tradingMode, trainingTask]);
+  }, [appendEvent, bars, cashBalance, corporateActions, corporateActionsForInstrumentId, cursor, events, executeOrders, executionProfile, instrument.id, instrument.market, instrument.timezone, liveMode, marketRules, pendingOrders, positions, settleTrainingAtBar, timeframe, tradingMode, trainingTask]);
 
   const revealNext = useCallback(() => revealMany(1), [revealMany]);
   const revealPrevious = () => {
@@ -8888,8 +8979,8 @@ export function TrainingWorkbench() {
       id: event.id,
       sequence: event.sequence,
       label: eventLabel(event.type),
-      occurredAtLabel: `${new Date(event.occurredAt).toLocaleString("zh-CN")}${event.barTimestamp ? ` · K线 ${formatDate(event.barTimestamp, reviewedSession?.session.timeframe ?? timeframe)}` : ""}`,
-    })), [reviewState.events, reviewedSession, timeframe]);
+      occurredAtLabel: `${new Date(event.occurredAt).toLocaleString("zh-CN")}${event.barTimestamp ? ` · K线 ${formatDate(event.barTimestamp, reviewedSession?.session.timeframe ?? timeframe, reviewChartTimeZone)}` : ""}`,
+  })), [reviewState.events, reviewedSession, timeframe, reviewChartTimeZone]);
   const reviewPanelSummary = {
     heroLabel: reviewState.tradingMode === "capital" ? "本次已实现盈亏" : "本次已实现收益率",
     heroValue: reviewState.tradingMode === "capital" ? money(reviewRealizedPnl) : percent(reviewRealizedReturnPct),
@@ -9877,25 +9968,26 @@ export function TrainingWorkbench() {
               <button
                 type="button"
                 className={indicatorMenuOpen ? "active" : ""}
-                aria-label="主图指标设置"
+                aria-label="图表指标设置"
                 aria-expanded={indicatorMenuOpen}
                 onClick={() => setIndicatorMenuOpen((open) => !open)}
               >
                 <LineChart size={15} />
                 <span>指标</span>
-                <small>{(["ma", "ema"] as MovingAverageKind[])
+                <small>{[...(["ma", "ema"] as MovingAverageKind[])
                   .filter((kind) => movingAverageSettings[kind].enabled)
-                  .map((kind) => `${kind.toUpperCase()} ${movingAverageSettings[kind].periods.join("/")}`)
+                  .map((kind) => `${kind.toUpperCase()} ${movingAverageSettings[kind].periods.join("/")}`),
+                  ...(macdSettings.enabled ? [`MACD ${macdSettings.periods.join("/")}`] : [])]
                   .join(" · ") || "未启用"}</small>
                 <ChevronDown size={13} />
               </button>
               {indicatorMenuOpen && (
-                <div className="indicator-popover" role="dialog" aria-label="MA 和 EMA 指标设置">
+                <div className="indicator-popover" role="dialog" aria-label="图表指标设置">
                   <header>
-                    <div><strong>主图指标</strong><span>曲线叠加在 K 线上</span></div>
+                    <div><strong>图表指标</strong><span>均线显示在主图，MACD 显示在副图</span></div>
                     <button type="button" aria-label="关闭指标设置" onClick={() => setIndicatorMenuOpen(false)}><X size={15} /></button>
                   </header>
-                  <MovingAverageEditor settings={movingAverageSettings} onChange={setMovingAverageSettings} />
+                  <ChartIndicatorEditor settings={movingAverageSettings} onChange={setMovingAverageSettings} macdSettings={macdSettings} onMacdChange={setMacdSettings} />
                 </div>
               )}
             </div>
@@ -9973,8 +10065,8 @@ export function TrainingWorkbench() {
               {chartViewLoading && <div className="mobile-random-status"><Activity size={12} />正在切换观察周期…</div>}
               {chartViewError && <div className="mobile-random-error" role="alert">{chartViewError}</div>}
               <div className="mobile-indicator-settings">
-                <strong><LineChart size={13} />主图指标</strong>
-                <MovingAverageEditor compact settings={movingAverageSettings} onChange={setMovingAverageSettings} />
+                <strong><LineChart size={13} />图表指标</strong>
+                <ChartIndicatorEditor compact settings={movingAverageSettings} onChange={setMovingAverageSettings} macdSettings={macdSettings} onMacdChange={setMacdSettings} />
               </div>
               <div className="mobile-random-mode" aria-label="随机训练方式">
                 <span>随机方式</span>
@@ -10682,7 +10774,7 @@ export function TrainingWorkbench() {
                 </div>
               </aside>
             )}
-            <section className="chart-stage">
+            <section className={`chart-stage${chartHeightAdjusted ? " chart-height-adjusted" : ""}`} style={{ "--chart-height": `${visibleChartHeight}px` } as CSSProperties}>
               <div className="chart-heading">
                 <div>
                   <button
@@ -10757,7 +10849,7 @@ export function TrainingWorkbench() {
                 </div>
               )}
 
-              <div className="chart-area">
+              <div className="chart-area" ref={chartAreaRef}>
                 <div className={`drawing-rail${showingCanonicalChart ? "" : " observation-only"}`} aria-label="画图工具">
                   <button
                     className={!selectedDrawingId && !drawingGroupOpen && !drawingRequest && !drawingTextOpen ? "active" : ""}
@@ -10948,10 +11040,11 @@ export function TrainingWorkbench() {
                       bars={renderedChartBars}
                       dataIndexOffset={showingCanonicalChart ? chartDataIndexOffset : 0}
                       symbol={hideTaskInstrument ? "BLIND" : instrument.symbol}
-                      timezone={instrument.timezone}
+                      timezone={activeChartTimeZone}
                       timeframe={chartTimeframe}
                       pricePrecision={instrument.pricePrecision}
                       movingAverageSettings={movingAverageSettings}
+                      macdSettings={macdSettings}
                       drawingRequest={showingCanonicalChart ? drawingRequest : null}
                       clearNonce={clearNonce}
                       tradeMarkers={tradeMarkers}
@@ -10990,7 +11083,7 @@ export function TrainingWorkbench() {
                       <div className="decision-chart-card-head">
                         <div>
                           <span>{selectedDecision.autoGenerated ? "订单自动计划" : selectedDecision.backfilled ? "补写决策" : "已提交决策"}</span>
-                          <strong>{hideTaskDate ? `K线 #${selectedDecision.cursor + 1}` : formatDate(selectedDecision.barTimestamp, timeframe)}</strong>
+                          <strong>{hideTaskDate ? `K线 #${selectedDecision.cursor + 1}` : formatDate(selectedDecision.barTimestamp, timeframe, activeChartTimeZone)}</strong>
                         </div>
                         <button aria-label="关闭决策卡" onClick={() => setSelectedDecisionId("")}>×</button>
                       </div>
@@ -11020,14 +11113,48 @@ export function TrainingWorkbench() {
                       </div>
                     </div>
                   )}
-                  <div className="replay-watermark">{liveMode || latestWatchMode ? "WATCH · 最新行情" : `REPLAY · ${trainingComplete ? "未来已揭示" : "未来已隐藏"}`}</div>
+                  <div className="replay-watermark">{liveMode || latestWatchMode ? "WATCH · 最新行情" : `REPLAY · ${trainingComplete ? "未来已揭示" : "未来已隐藏"}`} · {chartTimeZoneLabel(activeChartTimeZone)}</div>
                   <div className="chart-touch-hint">长按 K 线补写决策</div>
                 </div>
               </div>
 
+              <div
+                className="chart-resize-handle"
+                role="separator"
+                tabIndex={0}
+                aria-label="调整看盘区域高度"
+                aria-orientation="horizontal"
+                aria-valuemin={350}
+                aria-valuemax={chartHeightLimit}
+                aria-valuenow={actualChartHeight}
+                title="拖动调整看盘区域高度"
+                onPointerDown={(event) => {
+                  if (event.button !== 0) return;
+                  const currentHeight = Math.round(chartAreaRef.current?.getBoundingClientRect().height ?? actualChartHeight);
+                  chartResizeStart.current = { y: event.clientY, height: currentHeight };
+                  setChartHeight(currentHeight);
+                  setChartHeightAdjusted(true);
+                  event.currentTarget.setPointerCapture(event.pointerId);
+                }}
+                onPointerMove={(event) => {
+                  if (!chartResizeStart.current) return;
+                  const { y, height } = chartResizeStart.current;
+                  setChartHeight(Math.max(350, Math.min(chartHeightLimit, Math.round(height + event.clientY - y))));
+                }}
+                onPointerUp={() => { chartResizeStart.current = null; }}
+                onPointerCancel={() => { chartResizeStart.current = null; }}
+                onKeyDown={(event) => {
+                  if (event.key === "ArrowUp" || event.key === "ArrowDown") {
+                    event.preventDefault();
+                    setChartHeightAdjusted(true);
+                    setChartHeight(Math.max(350, Math.min(chartHeightLimit, actualChartHeight + (event.key === "ArrowDown" ? 20 : -20))));
+                  }
+                }}
+              />
+
               <div className="replay-controls">
                 <div className="progress-meta">
-                  <span>{currentBar ? (hideTaskDate ? `训练第 ${currentTaskProgress.revealed} 根` : formatDate(currentBar.timestamp, timeframe)) : "--"}</span>
+                  <span>{currentBar ? (hideTaskDate ? `训练第 ${currentTaskProgress.revealed} 根` : formatDate(currentBar.timestamp, timeframe, activeChartTimeZone)) : "--"}</span>
                   <span>{loading ? "正在加载…" : trainingTask ? `${currentTaskProgress.revealed} / ${currentTaskProgress.total} 根` : `${cursor + 1} / ${bars.length} 根`}</span>
                 </div>
                 <div className="progress-track"><span style={{ width: `${progress}%` }} /></div>
@@ -11431,7 +11558,7 @@ export function TrainingWorkbench() {
                 <div className="decision-backfill-target">
                   <div>
                     <span>{editingDecisionId ? "正在编辑" : "正在补写"}</span>
-                    <strong>{hideTaskDate ? `K线 #${decisionTarget.dataIndex + 1}` : formatDate(decisionTarget.timestamp, timeframe)}</strong>
+                    <strong>{hideTaskDate ? `K线 #${decisionTarget.dataIndex + 1}` : formatDate(decisionTarget.timestamp, timeframe, activeChartTimeZone)}</strong>
                     <small>{hideTaskPrice ? "参考价已隐藏" : `参考价 ${decisionTarget.referencePrice.toFixed(instrument.pricePrecision)}`}</small>
                   </div>
                   <button type="button" onClick={cancelDecisionBackfill}>取消</button>
@@ -12348,7 +12475,7 @@ export function TrainingWorkbench() {
               }}
               onBack={() => duplicateTrainingPreview ? returnFromDuplicateTrainingPreview() : setReviewedSession(null)}
               onEvidence={openReviewEvidence}
-              formatDate={formatDate}
+              formatDate={(timestamp, targetTimeframe) => formatDate(timestamp, targetTimeframe, reviewChartTimeZone)}
               money={money}
               percent={percent}
               profitFactorLabel={profitFactorLabel}
@@ -12360,9 +12487,12 @@ export function TrainingWorkbench() {
                 key={reviewedSession ? `${reviewedSession.session.id}:${reviewPreviewSnapshot?.snapshotId ?? "loading"}` : "current-training"}
                 bars={reviewPreviewBars}
                 instrument={reviewPreviewInstrument}
+                displayTimezone={reviewChartTimeZone}
+                displayTimezoneLabel={chartTimeZoneLabel(reviewChartTimeZone)}
                 timeframe={timeframeLabel(reviewPreviewTimeframe)}
                 dataIndexOffset={reviewPreviewDataIndexOffset}
                 movingAverageSettings={movingAverageSettings}
+                macdSettings={macdSettings}
                 initialDrawings={reviewState.drawings}
                 tradeMarkers={reviewPreviewTradeMarkers}
                 decisionMarkers={reviewPreviewDecisionMarkers}
@@ -12381,7 +12511,7 @@ export function TrainingWorkbench() {
                         <div className="decision-history-head">
                           <div>
                             <strong>计划 {reviewState.decisionSubmissions.length - reverseIndex}{submission.autoGenerated ? " · 自动关联保护价" : submission.backfilled ? " · 补写" : ""}</strong>
-                            <span><button type="button" className="evidence-link" onClick={() => openReviewEvidence(submission.barTimestamp, "计划")}>{formatDate(submission.barTimestamp, reviewedSession?.session.timeframe ?? timeframe)}</button> · 参考价 {submission.referencePrice.toFixed(2)}</span>
+                            <span><button type="button" className="evidence-link" onClick={() => openReviewEvidence(submission.barTimestamp, "计划")}>{formatDate(submission.barTimestamp, reviewedSession?.session.timeframe ?? timeframe, reviewChartTimeZone)}</button> · 参考价 {submission.referencePrice.toFixed(2)}</span>
                           </div>
                           <b>{decisionScore(submission.decision)}%</b>
                         </div>

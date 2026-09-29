@@ -9,10 +9,18 @@ import {
   normalizeReplayHistoryBars,
   pretradePlanFieldOptions,
   type AppSettings,
+  type ChartTimeZonePreference,
   type PositionSizeMode,
   type SettingsTab,
 } from "../settingsContracts";
 import { canAggregateTimeframe, TIMEFRAME_IDS, timeframeLabel } from "../../../lib/timeframeCatalog";
+
+const chartTimeZoneMarkets = [
+  { key: "CN", label: "A 股" },
+  { key: "US", label: "美股" },
+  { key: "FX", label: "外汇" },
+  { key: "GOLD", label: "黄金" },
+] as const;
 
 function SettingsSwitch({
   checked,
@@ -111,6 +119,29 @@ export function SettingsPanel({
               <span>管理回放偏好，以及新建 Replay 训练时使用的默认选项。</span>
             </div>
             <div className="settings-rule">
+              <span>图表显示时区</span>
+              <div className="execution-settings-grid">
+                {chartTimeZoneMarkets.map(({ key, label }) => (
+                  <label key={key}>{label}
+                    <select value={draft.chartTimeZones[key]} onChange={(event) => onDraftChange((next) => ({
+                      ...next,
+                      chartTimeZones: {
+                        ...next.chartTimeZones,
+                        [key]: event.target.value as ChartTimeZonePreference,
+                      },
+                    }))}>
+                      <option value="market">市场时间（默认）</option>
+                      <option value="Asia/Shanghai">北京时间</option>
+                      <option value="America/New_York">纽约时间</option>
+                      <option value="Europe/London">伦敦时间</option>
+                      <option value="UTC">UTC 时间</option>
+                    </select>
+                  </label>
+                ))}
+              </div>
+              <small>保存后，各市场的训练和复盘图表分别按所选时区显示；下方训练时段也按该时区判断。周末仍按市场时间判断，纽约和伦敦时间会自动适应冬夏令时。</small>
+            </div>
+            <div className="settings-rule">
               <div className="settings-row-action">
                 <div>
                   <span>交易时段</span>
@@ -141,7 +172,7 @@ export function SettingsPanel({
                   </label>
                 </div>
               )}
-              <small>跟随图表时区，按 K 线时间判断，包含开始、不含结束；结束早于开始时表示跨午夜，例如 22:00–07:00。</small>
+              <small>按该市场上方所选的图表显示时区判断，包含开始、不含结束；结束早于开始时表示跨午夜，例如 22:00–07:00。</small>
               <small>保存后从下一次推进生效。</small>
               <small>开启“只在指定时段训练”后，还会跳过所选时间外的历史 K 线；已有平仓挂单及止损止盈照常执行，开仓挂单顺延到下一个交易时段。</small>
               <small>仅适用于非随机训练的分钟线、小时线；随机训练、日线及更大周期、实时模拟不受影响。</small>
@@ -161,7 +192,7 @@ export function SettingsPanel({
                   }))}
                 />
               </div>
-              <small>开启后，单步、快进和自动播放会跳过周六、周日的历史 K 线；周末不执行委托，已有持仓会保留。</small>
+              <small>开启后，单步、快进和自动播放会按市场交易时间跳过周六、周日的历史 K 线；周末不执行委托，已有持仓会保留。</small>
               <small>仅适用于非随机训练的分钟线、小时线；随机训练、日线及更大周期、实时模拟不受影响。</small>
             </div>
             <div className="settings-rule">
