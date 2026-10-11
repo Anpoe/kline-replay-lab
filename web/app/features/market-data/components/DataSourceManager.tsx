@@ -97,7 +97,7 @@ type JobRunResult = {
 type MarketSyncStatus = {
   run: {
     id: string;
-    mode: "initialize" | "update";
+    mode: "initialize" | "update" | "repair";
     status: "queued" | "running" | "paused" | "completed" | "completed_with_errors" | "failed" | "cancelled";
     feed: "sip" | "iex";
     totalSymbols: number;
@@ -946,7 +946,11 @@ export function DataSourceManager({
           failedBatches: Number(data.failedBatches ?? 0),
         };
         setMarketSync(next);
-        const title = next.run.mode === "initialize" ? "美股历史初始化" : "美股最新日线更新";
+        const title = next.run.mode === "initialize"
+          ? "美股历史初始化"
+          : next.run.mode === "repair"
+            ? "美股缺口修复"
+            : "美股最新日线更新";
         const failed = next.run.failedSymbols
           ? "，失败 " + next.run.failedSymbols.toLocaleString() + " 个"
           : "";
@@ -987,7 +991,7 @@ export function DataSourceManager({
     }
   }, [loadJobs, loadMarketSync, marketDataGateway, notifyDataChanged, setNotice]);
 
-  const syncUsMarket = async (mode: "initialize" | "update") => {
+  const syncUsMarket = async (mode: "initialize" | "update" | "repair") => {
     if (!configured.alpaca) {
       setNotice("请先进入“设置 → 数据源设置”配置 Alpaca 免费账户密钥。");
       return;
@@ -996,7 +1000,9 @@ export function DataSourceManager({
       ? usNeedsRebuild
         ? `检测到 ${legacyUsData?.instrumentCount.toLocaleString() ?? "部分"} 个品种只有未复权数据。现有数据会保留，系统将重新下载 Alpaca 全复权历史；任务可能较多，可以随时暂停，确定继续吗？`
         : "初始化会读取 Alpaca 的活跃可交易美股目录，并从 2016 年开始批量下载 SIP/IEX 全复权日线。任务可能较多，可以随时暂停，确定继续吗？"
-      : "只同步最新已收盘日线：服务端会根据缺失交易日和 URL 长度自动计算批量。不会删除旧训练快照，确定继续吗？";
+      : mode === "repair"
+        ? "扫描并修复历史缺口：服务端会检查每个品种断档以来的缺失交易日并按批次补全。确定继续吗？"
+        : "每日增量更新：默认倒查最近 7 天，服务端会根据缺失交易日和 URL 长度自动计算批量。不会删除旧训练快照，确定继续吗？";
     if (!window.confirm(message)) return;
     try {
     setMarketSyncBusy(true);
@@ -1853,7 +1859,7 @@ export function DataSourceManager({
             <small>{usNeedsRebuild
               ? `原有 ${legacyUsData?.instrumentCount.toLocaleString() ?? "部分"} 个品种、约 ${legacyUsData?.barCount.toLocaleString() ?? "—"} 根未复权 K 线仍保留，但已停止用于训练；点击重建后才会恢复全复权历史。`
               : usInitialized
-              ? "点击更新后，系统会检查已初始化的全部美股并从最后日期继续，不需要输入代码。"
+              ? "每日更新默认倒查最近 7 天并高速批量同步；历史存在较长断档时可使用“扫描并修复缺口”。"
               : marketSync
                 ? `当前批量任务：${marketSync.run.completedSymbols.toLocaleString()} / ${marketSync.run.totalSymbols.toLocaleString()} 个品种，${marketSync.run.completedBatches.toLocaleString()} / ${marketSync.run.totalBatches.toLocaleString()} 批，数据源 ${marketSync.run.feed.toUpperCase()}。`
                 : usStarted
@@ -1863,13 +1869,20 @@ export function DataSourceManager({
           <div className="market-maintenance-actions">
             {!configured.alpaca && <button onClick={onOpenSettings}><Settings2 size={14} />配置 Alpaca</button>}
             {configured.alpaca && !marketSyncBusy && !["queued", "running", "paused"].includes(marketSync?.run.status ?? "") && (
-              <button className="primary" onClick={() => void syncUsMarket(usNeedsRebuild ? "initialize" : chooseUsSyncMode({ started: usStarted, remaining: usRemaining }))}>
-                <CloudDownload size={14} />{usNeedsRebuild
-                  ? "重建美股全复权数据"
-                  : usInitialized
-                  ? "拉取最新美股数据"
-                  : usStarted ? "继续初始化美股" : "初始化美股市场库"}
-              </button>
+              <>
+                <button className="primary" onClick={() => void syncUsMarket(usNeedsRebuild ? "initialize" : chooseUsSyncMode({ started: usStarted, remaining: usRemaining }))}>
+                  <CloudDownload size={14} />{usNeedsRebuild
+                    ? "重建美股全复权数据"
+                    : usInitialized
+                    ? "拉取最新美股数据"
+                    : usStarted ? "继续初始化美股" : "初始化美股市场库"}
+                </button>
+                {usInitialized && !usNeedsRebuild && (
+                  <button onClick={() => void syncUsMarket("repair")}>
+                    <RefreshCw size={14} />扫描并修复缺口
+                  </button>
+                )}
+              </>
             )}
             {marketSync?.run.status === "running" && <button className="danger" disabled={marketSyncBusy} onClick={() => void controlUsMarketSync("pause")}>
               <Pause size={14} />暂停同步

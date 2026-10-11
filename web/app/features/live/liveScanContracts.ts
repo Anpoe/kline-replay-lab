@@ -7,6 +7,8 @@ export type LiveScanResult = {
   name: string;
   market: LiveScanMarket;
   timestamp: number;
+  matchedTimestamp?: number;
+  lagTradingDays?: number;
   close: number;
   changePct: number;
   volume: number;
@@ -20,6 +22,7 @@ export type LiveScanResult = {
 export type LiveScanResponse = {
   market: LiveScanMarket;
   latestTimestamp: number;
+  lookbackDays?: number;
   scannedCount: number;
   matchedCount: number;
   results: LiveScanResult[];

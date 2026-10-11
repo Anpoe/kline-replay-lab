@@ -12,6 +12,21 @@ const bars = [
   { timestamp: 5, open: 101, high: 104, low: 95, close: 96 },
 ];
 
+test("review excursions and drawdown use each bar's share units across a 10转7 event", () => {
+  const metrics = calculateDeterministicReviewMetrics({
+    bars: [
+      { timestamp: 1, open: 50.5, high: 50.5, low: 50.5, close: 50.5 },
+      { timestamp: 2, open: 50.4 / 1.7, high: 50.4 / 1.7, low: 50.4 / 1.7, close: 50.4 / 1.7 },
+    ],
+    positions: [{ id: "p1", side: "long", qty: 170, entryPrice: 50.5 / 1.7, entryTimestamp: 1, status: "closed", exitPrice: 50.4 / 1.7, exitTimestamp: 2, realizedPnl: -10, grossRealizedPnl: -10 }],
+    initialCapital: 10000,
+    corporateActionEvents: [{ type: "corporate_action_applied", barTimestamp: 2, payload: { eventId: "bonus", bonusSharesPer10: 7, cashPer10: 1, positionIds: ["p1"] } }],
+  });
+  assert.ok(Math.abs(metrics.trades[0].mfe) < 1e-8);
+  assert.ok(Math.abs(metrics.trades[0].mae) < 1e-8);
+  assert.ok(Math.abs(metrics.maxDrawdown) < 1e-8);
+});
+
 test("trade metrics calculate MFE, MAE, R and forward horizons from candle evidence", () => {
   const metrics = calculateDeterministicReviewMetrics({
     bars,

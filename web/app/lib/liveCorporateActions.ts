@@ -1,8 +1,8 @@
 import {
-  cashDividendCreditsForBar,
   type CorporateActionEvent,
   type CorporateActionHolding,
 } from "./corporateActions.ts";
+import { applyCorporateActionsBeforeBar, type CorporateActionOrder, type CorporateActionPosition } from "./corporateActionExecution.ts";
 
 export type LiveCorporateActionLedgerEntry = {
   eventId: string;
@@ -29,6 +29,7 @@ export type LiveCorporateActionResult<TPosition extends CorporateActionHolding, 
   positions: TPosition[];
   pendingOrders: TOrder[];
   requiresUserAction: boolean;
+  referenceClose?: number;
 };
 
 type LiveCorporateActionInput<TPosition extends CorporateActionHolding, TOrder> = {
@@ -43,6 +44,8 @@ type LiveCorporateActionInput<TPosition extends CorporateActionHolding, TOrder> 
   existingEntries?: ReadonlyMap<string, LiveCorporateActionLedgerEntry>;
   now?: string;
   revision?: string | null;
+  previousTimestamp?: number;
+  previousClose?: number;
 };
 
 function ledgerEntry(
@@ -53,7 +56,7 @@ function ledgerEntry(
   return {
     eventId: event.id,
     instrumentId: event.instrumentId,
-    eventType: event.category === 1 ? "cash-dividend" : "quantity-adjustment",
+    eventType: event.category === 1 && !event.bonusSharesPer10 ? "cash-dividend" : "quantity-adjustment",
     date: event.date,
     timestamp: event.timestamp,
     status: "pending",
@@ -83,15 +86,12 @@ export function liveCorporateActionFingerprint(event: CorporateActionEvent) {
 }
 
 /**
- * Applies only the safe first-phase company-action behavior.  Cash dividends
- * reuse the training-side eligibility calculation; adjusted or unknown price
- * series remain pending so the same economic adjustment is never counted
- * twice. Quantity events stay visible but are not guessed from an opaque
- * provider ratio.
+ * Reuses the training adjustment before execution. Opaque quantity ratios and
+ * corrections pause processing rather than guessing or replaying old fills.
  */
 export function applyLiveCorporateActionsBeforeBar<
-  TPosition extends CorporateActionHolding,
-  TOrder,
+  TPosition extends CorporateActionPosition,
+  TOrder extends CorporateActionOrder,
 >(input: LiveCorporateActionInput<TPosition, TOrder>): LiveCorporateActionResult<TPosition, TOrder> {
   if (!Number.isFinite(input.barTimestamp)) {
     return { cashDelta: 0, ledgerEntries: [], positions: input.positions, pendingOrders: input.pendingOrders, requiresUserAction: false };
@@ -99,6 +99,9 @@ export function applyLiveCorporateActionsBeforeBar<
   const processed = input.processedEventIds ?? new Set<string>();
   const existingEntries = input.existingEntries ?? new Map<string, LiveCorporateActionLedgerEntry>();
   let cashDelta = 0;
+  let positions = input.positions;
+  let pendingOrders = input.pendingOrders;
+  let referenceClose = input.previousClose;
   let requiresUserAction = false;
   const ledgerEntries: LiveCorporateActionLedgerEntry[] = [];
   const dueEvents = input.events
@@ -108,6 +111,14 @@ export function applyLiveCorporateActionsBeforeBar<
   for (const event of dueEvents) {
     const fingerprint = liveCorporateActionFingerprint(event);
     const existing = existingEntries.get(event.id);
+    if (existing?.status === "applied" && event.bonusSharesPer10 > 0 && existing.quantityAfter === existing.quantityBefore
+      && positions.some(position => position.status === "open" && position.entryTimestamp < event.timestamp)) {
+      requiresUserAction = true;
+      ledgerEntries.push(ledgerEntry(event, input as LiveCorporateActionInput<CorporateActionHolding, unknown>, {
+        status: "corrected", reason: "这笔持仓的送转股数尚未处理，已暂停账户；请核对后新建账户。",
+      }));
+      break;
+    }
     if (existing?.status === "corrected" && existing.eventFingerprint === fingerprint) continue;
     if (existing?.eventFingerprint && existing.eventFingerprint !== fingerprint
       && (existing.status === "applied" || existing.status === "not-eligible" || existing.status === "corrected")) {
@@ -125,17 +136,29 @@ export function applyLiveCorporateActionsBeforeBar<
         status: "pending",
         reason: input.priceBasis === "adjusted" ? "成交价格已包含调整口径，等待确认后不重复计入" : "行情复权口径未知，暂不自动记账",
       }));
+      if (input.priceBasis === "unknown" && (positions.some(position => position.status === "open" && position.entryTimestamp < event.timestamp)
+        || pendingOrders.some(order => order.createdAt < event.timestamp))) requiresUserAction = true;
       continue;
     }
-    if (event.category !== 1 || event.cashPer10 <= 0) {
+    const action = applyCorporateActionsBeforeBar({
+      events: [event], positions, pendingOrders,
+      barTimestamp: input.barTimestamp, previousTimestamp: input.previousTimestamp,
+      priceBasis: input.priceBasis, previousClose: referenceClose,
+    });
+    if (action.blockedReason) {
+      requiresUserAction = true;
       ledgerEntries.push(ledgerEntry(event, input as LiveCorporateActionInput<CorporateActionHolding, unknown>, {
         status: "pending",
-        reason: "数量型公司行为比例尚未标准化，保持只读提示",
+        reason: action.blockedReason,
       }));
-      continue;
+      break;
     }
-    const credit = cashDividendCreditsForBar([event], input.positions, input.barTimestamp)[0];
-    if (!credit) {
+    positions = action.positions;
+    pendingOrders = action.pendingOrders;
+    referenceClose = action.referenceClose;
+    const applied = action.appliedEvents[0];
+    const credit = action.dividendCredits[0];
+    if (!applied?.quantityBefore && !applied?.cancelledOrderIds.length) {
       ledgerEntries.push(ledgerEntry(event, input as LiveCorporateActionInput<CorporateActionHolding, unknown>, {
         status: "not-eligible",
         amount: 0,
@@ -143,22 +166,25 @@ export function applyLiveCorporateActionsBeforeBar<
       }));
       continue;
     }
-    cashDelta += input.capitalMode ? credit.amount : 0;
+    cashDelta += input.capitalMode ? credit?.amount ?? 0 : 0;
     ledgerEntries.push(ledgerEntry(event, input as LiveCorporateActionInput<CorporateActionHolding, unknown>, {
       status: "applied",
-      amount: credit.amount,
-      quantityBefore: credit.quantity,
-      quantityAfter: credit.quantity,
-      reason: input.capitalMode ? "现金分红已计入市场账户现金" : "收益率模式已记录分红事件，不改变购买力",
+      amount: credit?.amount ?? 0,
+      quantityBefore: applied.quantityBefore,
+      quantityAfter: applied.quantityAfter,
+      reason: event.bonusSharesPer10 > 0
+        ? "送转股数、持仓成本和保护价已调整；除权日前的开仓委托已取消"
+        : input.capitalMode ? "现金分红已计入市场账户现金" : "收益率模式已记录分红事件，不改变购买力",
     }));
   }
 
   return {
     cashDelta: Number(cashDelta.toFixed(6)),
     ledgerEntries,
-    positions: input.positions,
-    pendingOrders: input.pendingOrders,
+    positions,
+    pendingOrders,
     requiresUserAction,
+    referenceClose,
   };
 }
 

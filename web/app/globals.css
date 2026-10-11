@@ -368,6 +368,7 @@ button { color: inherit; }
 .live-scan-market button small { color: var(--faint); font-size: 8px; font-weight: 500; }
 .live-scan-market button.active { color: var(--accent-strong); background: var(--accent-soft); border-color: rgba(32, 201, 151, .35); }
 .live-scan-filter-grid { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 8px; margin-top: 13px; }
+.live-scan-filter-grid input, .live-scan-filter-grid select { height: 36px; }
 .live-scan-filter-options { display: flex; align-items: center; gap: 8px; margin-top: 9px; }
 .live-scan-filter-options label { display: inline-flex; align-items: center; gap: 6px; min-height: 30px; padding: 6px 9px; color: var(--muted); background: var(--surface-raised); border: 1px solid var(--line); border-radius: 999px; cursor: pointer; font-size: 9px; white-space: nowrap; }
 .live-scan-filter-options label:has(input:checked) { color: var(--accent-strong); background: var(--accent-soft); border-color: rgba(32, 201, 151, .3); }
@@ -386,7 +387,8 @@ button { color: inherit; }
 .live-scan-result-list { max-height: 310px; overflow-y: auto; }
 .live-scan-result-list > button { width: 100%; display: grid; grid-template-columns: 1.3fr 1.6fr .55fr .55fr .8fr; align-items: center; gap: 10px; padding: 9px 12px; text-align: left; color: #aebcba; background: transparent; border: 0; border-bottom: 1px solid rgba(186, 209, 205, .06); cursor: pointer; font-size: 9px; }
 .live-scan-result-list > button:hover { background: rgba(32, 201, 151, .055); }
-.live-scan-result-list > button > span:first-child { display: grid; gap: 2px; }
+.live-scan-result-list > button > span:first-child,
+.live-scan-result-list > button > span:nth-child(2) { display: grid; gap: 2px; }
 .live-scan-result-list > button strong { color: #e1e9e7; }
 .live-scan-result-list > button small { color: var(--faint); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .live-scan-result-list .up { color: var(--accent); }
@@ -1096,6 +1098,11 @@ button { color: inherit; }
 .performance-view-tabs button { display: inline-flex; align-items: center; gap: 6px; padding: 8px 14px; color: var(--muted); background: transparent; border: 1px solid transparent; border-radius: 7px; font-size: 10px; cursor: pointer; }
 .performance-view-tabs button.active { color: var(--accent-strong); background: var(--accent-soft); border-color: rgba(32, 201, 151, .28); }
 .performance-view-tabs button span { min-width: 16px; padding: 2px 4px; color: var(--faint); background: rgba(255, 255, 255, .05); border-radius: 99px; font: 8px var(--font-geist-mono), monospace; }
+.performance-page-toolbar { display: flex; align-items: center; flex-wrap: wrap; gap: 8px 12px; margin-bottom: 14px; }
+.performance-page-toolbar .performance-view-tabs { width: auto; max-width: 100%; margin-bottom: 0; }
+.performance-page-toolbar .performance-discipline-button { flex: 0 0 auto; min-height: 32px; padding: 7px 10px; gap: 6px; border-radius: 8px; font-size: 11px; line-height: 16px; white-space: nowrap; color: var(--muted); background: var(--surface-soft); }
+.performance-page-toolbar .performance-discipline-button:hover { color: var(--accent-strong); border-color: var(--line-strong); background: var(--accent-soft); }
+.performance-discipline-button:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
 .live-performance-panel { display: grid; gap: 0; min-width: 0; }
 .live-performance-overview { margin-bottom: 0; }
 .live-account-overview .performance-metric > small { display: block; margin-top: 6px; line-height: 1.4; }
@@ -1120,7 +1127,7 @@ button { color: inherit; }
   width: 100%; min-width: 0; color: #cbd6d4; background: var(--surface-soft); border: 1px solid var(--line-strong); border-radius: 8px; padding: 9px 10px; outline: none;
 }
 .performance-filters select:focus, .performance-filters input:focus { border-color: rgba(32, 201, 151, .5); }
-.live-performance-filters { grid-template-columns: repeat(5, minmax(0, 1fr)); }
+.live-performance-filters { grid-template-columns: repeat(6, minmax(0, 1fr)); }
 .live-performance-filter-hint { display: block; margin-top: 10px; color: var(--faint); font-size: 9px; line-height: 1.5; }
 .filtered-performance-head { margin-top: 22px; }
 .filtered-performance-grid { display: grid; grid-template-columns: repeat(6, 1fr); gap: 10px; }
@@ -1814,4 +1821,126 @@ button { color: inherit; }
   .provider-secret-fields { grid-template-columns: 1fr; }
   .training-complete-banner { grid-template-columns: 1fr 1fr; }
   .training-complete-banner > div { grid-column: 1 / -1; }
+}
+
+/* Compact live overview reuses workbench surfaces, controls and semantic colors. */
+.live-compact-panel { gap: 16px; }
+.live-compact-panel .ghost-button { min-height: 36px; white-space: nowrap; }
+.live-compact-filter-card { margin-top: 0; }
+.live-compact-toolbar { display: grid; grid-template-columns: minmax(0, 600px) auto; align-items: end; justify-content: start; gap: 12px; }
+.live-compact-scope { grid-template-columns: minmax(0, 1fr) minmax(110px, .5fr); max-width: 100%; }
+.live-compact-picker { min-width: 0; }
+.live-compact-picker select { min-height: 36px; }
+.live-compact-picker select:disabled { opacity: .65; }
+.live-compact-refresh { display: flex; align-items: center; gap: 10px; color: var(--muted); font-size: 10px; }
+.live-compact-refresh .ghost-button { color: var(--accent-strong); }
+.live-compact-notice { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 10px; color: var(--muted); font-size: 12px; }
+.live-compact-notice.rule-notice { color: var(--danger); }
+.live-compact-accounts { display: grid; gap: 20px; min-width: 0; margin-top: 20px; }
+.live-compact-accounts:empty { display: none; }
+.live-account-band { padding-top: 20px; border-top: 1px solid var(--line); min-width: 0; }
+.live-account-summary { display: grid; grid-template-columns: minmax(160px, 1fr) auto auto; align-items: center; gap: 20px; min-width: 0; }
+.live-account-identity { display: grid; gap: 10px; min-width: 0; }
+.live-account-band-head { display: flex; align-items: center; flex-wrap: wrap; gap: 8px 10px; min-width: 0; }
+.live-account-band-head strong { font-size: 13px; font-weight: 600; }
+.live-account-tags { display: flex; flex-wrap: wrap; gap: 6px; }
+.live-account-tags > span { padding: 4px 7px; color: var(--muted); background: var(--surface-soft); border: 1px solid var(--line); border-radius: 5px; font-size: 10px; }
+.live-account-status { color: var(--muted); font-size: 10px; }
+.live-account-status[data-state="active"] { color: var(--accent); }
+.live-account-status[data-state="active"]::before { content: ""; display: inline-block; width: 5px; height: 5px; margin-right: 5px; border-radius: 50%; background: var(--accent); vertical-align: middle; }
+.live-account-status[data-state="ending"] { color: var(--danger); }
+.live-account-band-tools { justify-self: end; }
+.live-account-band-tools time { color: var(--muted); font-size: 11px; }
+.live-account-funds { display: flex; flex-wrap: wrap; align-items: flex-end; gap: 16px 30px; margin: 0; }
+.live-account-funds > div { display: grid; gap: 5px; min-width: 0; }
+.live-account-funds dt { color: var(--muted); font-size: 10px; }
+.live-account-funds dd { margin: 0; color: var(--foreground); font: 650 23px/1.15 var(--font-geist-mono), monospace; font-variant-numeric: tabular-nums; }
+.live-account-funds .live-account-equity dd { font-size: 30px; }
+.live-account-card-footer { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 10px 20px; margin-top: 18px; color: var(--muted); font-size: 10px; }
+.live-account-card-footer:empty { display: none; }
+.live-account-card-footer .live-compact-notice { font-size: inherit; }
+.live-account-card-footer .rule-notice { width: 100%; font-size: 12px; }
+.live-account-default-notice { margin-left: auto; }
+.live-compact-filter-card > .live-compact-notice { margin-top: 14px; }
+.live-compact-filter-card .live-state-status { margin-top: 16px; }
+.live-account-mode-notice, .live-account-action-needed { margin: 10px 0 0; color: var(--muted); font-size: 12px; line-height: 1.5; }
+.live-account-action-needed { color: var(--danger); }
+.live-compact-history-status { padding: 8px 0; color: var(--muted); font-size: 13px; }
+.live-account-menu { position: relative; }
+.live-account-menu summary { display: inline-flex; align-items: center; justify-content: center; min-width: 36px; min-height: 36px; border: 1px solid var(--line); border-radius: 8px; background: var(--surface-raised); color: var(--muted); cursor: pointer; list-style: none; }
+.live-account-menu summary::-webkit-details-marker { display: none; }
+.live-account-menu summary:hover, .live-account-menu[open] summary { color: var(--foreground); border-color: var(--line-strong); }
+.live-account-menu-content { position: absolute; right: 0; top: calc(100% + 8px); z-index: 30; display: grid; gap: 7px; width: min(280px, calc(100vw - 44px)); padding: 12px; background: var(--surface-raised); border: 1px solid var(--line-strong); border-radius: 10px; }
+.live-account-menu-content .ghost-button { width: 100%; justify-content: flex-start; color: var(--foreground); }
+.live-account-menu-content .live-account-danger { color: var(--danger); }
+.live-account-menu-note { margin: 3px 0 0; color: var(--muted); font-size: 12px; line-height: 1.5; }
+.live-compact-overview { grid-template-columns: 1.2fr repeat(3, minmax(0, 1fr)); gap: 12px; margin: 0; }
+.live-compact-overview > div { min-width: 0; }
+.live-compact-overview .performance-hero { grid-column: auto; }
+.live-compact-overview .performance-hero > strong, .live-compact-overview .performance-metric > strong { overflow-wrap: anywhere; font-variant-numeric: tabular-nums; }
+.live-performance-hint { position: relative; display: inline-block; width: fit-content; max-width: 100%; cursor: help; }
+.live-performance-hint::after { content: attr(data-help); display: none; position: absolute; left: 0; bottom: calc(100% + 8px); z-index: 35; width: 270px; max-width: calc(100vw - 44px); padding: 10px 12px; color: var(--foreground); background: var(--surface-raised); border: 1px solid var(--line-strong); border-radius: 8px; font: 12px/1.5 var(--font-geist-sans), sans-serif; letter-spacing: normal; white-space: normal; pointer-events: none; }
+.live-performance-hint:hover::after, .live-performance-hint:focus::after { display: block; }
+.live-compact-overview .performance-metric .live-performance-hint::after { left: auto; right: 0; }
+.live-compact-trades { min-width: 0; }
+.live-compact-trades-head { flex-wrap: wrap; }
+.live-compact-filterbar { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 10px; margin-bottom: 12px; }
+.live-compact-trades-head h2 { display: flex; align-items: center; gap: 8px; }
+.live-compact-trades-head h2 span { color: var(--muted); font: 500 13px var(--font-geist-mono), monospace; }
+.live-compact-review { color: var(--accent-strong); background: var(--accent-soft); }
+.live-holding-filters, .live-compact-filter-actions { display: flex; align-items: center; flex-wrap: wrap; gap: 5px; }
+.live-holding-filters button { display: inline-flex; align-items: center; gap: 5px; min-height: 36px; padding: 8px 14px; background: transparent; color: var(--muted); border: 1px solid transparent; border-radius: 7px; font-size: 10px; cursor: pointer; }
+.live-holding-filters button[aria-pressed="true"] { color: var(--accent-strong); background: var(--accent-soft); border-color: var(--line-strong); }
+.live-holding-filters button:hover { color: var(--foreground); }
+.live-holding-filters button span { font-family: var(--font-geist-mono), monospace; font-variant-numeric: tabular-nums; }
+.live-compact-filter-actions { font-size: 10px; }
+.live-compact-filter-actions .ghost-button[aria-expanded="true"] { color: var(--accent-strong); }
+.live-compact-advanced { grid-template-columns: repeat(3, minmax(0, 180px)); gap: 12px; margin: 0 0 14px; }
+.live-compact-advanced[hidden] { display: none; }
+.live-compact-advanced input, .live-compact-advanced select { min-height: 36px; }
+.live-compact-table-wrap { position: relative; width: 100%; min-width: 0; overflow-x: auto; }
+.live-compact-table { width: 100%; min-width: 730px; border-collapse: collapse; font-size: 10px; }
+.live-compact-table th, .live-compact-table td { padding: 12px 10px; text-align: left; border-bottom: 1px solid var(--line); white-space: nowrap; font-variant-numeric: tabular-nums; }
+.live-compact-table thead th { color: var(--muted); font-weight: 400; }
+.live-compact-table tbody th { max-width: 230px; font-weight: 500; }
+.live-compact-table tbody th strong { display: block; color: var(--foreground); font-size: 12px; }
+.live-compact-table small { display: block; max-width: 220px; margin-top: 3px; color: var(--muted); font-size: 9px; overflow: hidden; text-overflow: ellipsis; }
+.live-compact-table td { color: var(--muted); }
+.live-compact-table .live-number { text-align: right; }
+.live-compact-table tbody .live-number { font-family: var(--font-geist-mono), monospace; }
+.live-compact-table .live-total { font-weight: 600; }
+.live-compact-table .ghost-button { min-height: 32px; padding: 5px 10px; }
+.live-compact-table tbody tr:hover { background: var(--surface-soft); }
+.live-compact-empty { display: flex; align-items: center; justify-content: center; flex-wrap: wrap; gap: 12px; padding: 28px 12px; color: var(--muted); font-size: 13px; }
+.live-sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0; }
+.live-compact-panel :is(button, select, input, summary, .live-performance-hint, .live-compact-table-wrap):focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
+@media (max-width: 920px) {
+  .live-compact-overview { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .live-account-summary { grid-template-columns: minmax(0, 1fr) auto; }
+  .live-account-summary .live-account-funds { grid-column: 1 / -1; }
+  .live-account-band-tools { grid-column: 2; grid-row: 1; }
+  .live-account-funds { gap: 16px 24px; }
+}
+@media (max-width: 600px) {
+  .live-compact-toolbar, .live-compact-scope { width: 100%; }
+  .live-compact-toolbar { grid-template-columns: minmax(0, 1fr); }
+  .live-compact-scope { grid-template-columns: minmax(0, 1fr) 90px; }
+  .live-compact-refresh { justify-self: end; }
+  .live-account-funds { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px; }
+  .live-account-funds dd { font-size: 19px; overflow-wrap: anywhere; }
+  .live-account-funds .live-account-equity dd { font-size: 27px; }
+  .live-account-band[data-mode="return"] .live-account-funds { grid-template-columns: minmax(0, 1fr); }
+  .live-compact-overview { gap: 8px; }
+  .live-compact-overview > div { padding: 14px; }
+  .live-compact-overview .performance-hero > strong { font-size: 27px; }
+  .live-compact-overview .performance-metric > strong { font-size: 19px; }
+  .live-compact-advanced { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .live-compact-filterbar { align-items: flex-start; }
+  .live-holding-filters button { padding: 7px 8px; }
+  .live-performance-hint::after { position: fixed; left: 16px !important; right: 16px !important; bottom: 16px; width: auto; max-width: none; }
+}
+@media (pointer: coarse) {
+  .live-compact-panel :is(.ghost-button, .live-holding-filters button, .live-account-menu summary) { min-height: 44px; }
+  .live-compact-panel :is(select, input) { min-height: 44px; font-size: 16px; }
+  .live-account-menu summary { min-width: 44px; }
 }

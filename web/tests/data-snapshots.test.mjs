@@ -8,6 +8,7 @@ import {
   materializeSnapshotCandleWindow,
   materializeSnapshotCandles,
   snapshotBucketKey,
+  snapshotResponse,
 } from "../app/lib/snapshotStorage.ts";
 
 const candle = (timestamp, close) => ({
@@ -18,6 +19,20 @@ const candle = (timestamp, close) => ({
   close,
   volume: 100,
   turnover: 1000,
+});
+
+test("legacy local TDX snapshots report raw prices without rewriting frozen evidence", async () => {
+  const bars = [candle(1, 50.5)];
+  const row = { id: "legacy", contentHash: "frozen-hash", instrumentId: "300730.SZ", timeframe: "1d", adjustmentType: "qfq", instrumentJson: JSON.stringify({ id: "300730.SZ", market: "CN" }), candlesJson: JSON.stringify(bars), barCount: 1, firstTimestamp: 1, lastTimestamp: 1, storageMode: "full", formatVersion: 1, sourceJson: JSON.stringify({ kind: "local", source: "tdx-official+tushare-daily" }) };
+  const original = structuredClone(row);
+  const response = await snapshotResponse({}, row);
+  assert.equal(response.snapshot.adjustmentType, "none");
+  assert.equal(response.snapshot.contentHash, "frozen-hash");
+  assert.deepEqual(response.candles, bars);
+  assert.deepEqual(row, original);
+  for (const sourceJson of [JSON.stringify({ kind: "local", source: "baostock" }), JSON.stringify({ kind: "d1", source: "tdx-official" }), "{}", "bad-json"]) {
+    assert.equal((await snapshotResponse({}, { ...row, sourceJson })).snapshot.adjustmentType, "qfq");
+  }
 });
 
 test("snapshot delta stores additions, corrections, and removals", () => {

@@ -127,9 +127,9 @@ test("ships the K-line training workbench instead of the starter", async () => {
   assert.match(workbench, /选择具体训练/);
   assert.match(workbench, /什么是盲测/);
   assert.match(workbench, /总盈亏/);
-  assert.match(workbench, /cashDividendCreditsForBar/);
+  assert.match(workbench, /applyCorporateActionsBeforeBar/);
   assert.match(workbench, /CASH_DIVIDEND_INCOME_EVENT_TYPE/);
-  assert.match(workbench, /simulatedCashBalance \+= dividendAmount/);
+  assert.match(workbench, /simulatedCashBalance \+= credit.amount/);
   assert.match(workbench, /const dividendIncome = cashDividendIncomeFromEvents\(events\)/);
   assert.match(workbench, /分红收入/);
   assert.match(workbench, /observationClose/);
@@ -253,7 +253,7 @@ test("ships the K-line training workbench instead of the starter", async () => {
   assert.match(snapshotsRoute, /getCachedTimeframeView/);
   assert.doesNotMatch(snapshotsRoute, /isLegacyUnadjustedStockSnapshot/);
   assert.doesNotMatch(snapshotsRoute, /旧的不复权价格，已停用/);
-  assert.match(snapshotsRoute, /adjustmentType = sourceViewRow\.adjustmentType/);
+  assert.match(snapshotsRoute, /adjustmentType = effectiveSnapshotAdjustmentType\(sourceViewRow\)/);
   assert.match(workbench, /createRandomWindowSnapshot/);
   assert.match(workbench, /replayWindow: newTaskRequest/);
   assert.match(workbench, /data\.selection\.startCursor \+ 1/);
@@ -341,7 +341,7 @@ test("keeps large review history responsive while preserving full-list access", 
 
 test("renders personal SOP recommendations inside the performance panel", async () => {
   const workbench = await readFile(new URL("app/components/TrainingWorkbench.tsx", root), "utf8");
-  const performanceStart = workbench.indexOf('<section className="content-page performance-page">');
+  const performanceStart = workbench.indexOf('{view === "performance" && (');
   const databaseStart = workbench.indexOf('{view === "database"', performanceStart);
   const performancePage = performanceStart >= 0 && databaseStart >= 0
     ? workbench.slice(performanceStart, databaseStart)

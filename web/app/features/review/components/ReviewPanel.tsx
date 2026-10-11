@@ -31,6 +31,7 @@ type ReviewPanelProps = {
   percent: (value: number) => string;
   profitFactorLabel: (value: number | null, infinite?: boolean) => string;
   exitReasonLabel: (value: ExecutionReason | undefined) => string;
+  resultWarning?: string;
 };
 
 export function ReviewPanel({
@@ -49,6 +50,7 @@ export function ReviewPanel({
   percent,
   profitFactorLabel,
   exitReasonLabel,
+  resultWarning = "",
 }: ReviewPanelProps) {
   return (
     <>
@@ -67,14 +69,15 @@ export function ReviewPanel({
           <button type="button" className="ghost-button" onClick={onOpenSettings}><Settings2 size={15} />设置</button>
         </div>
       </div>
-      <div className="review-grid">
+      {resultWarning && <p className="rule-notice" role="alert">{resultWarning}</p>}
+      {!resultWarning && <div className="review-grid">
         <div className="review-hero">
           <span>{summary.heroLabel}</span><strong className={summary.heroTone}>{summary.heroValue}</strong><small>{summary.heroMeta}</small>
         </div>
         <div className="metric-card"><span>本场按交易胜率</span><strong>{summary.tradeWinRate}%</strong><small>{summary.tradeMeta}</small></div>
         <div className="metric-card"><span>已提交计划</span><strong>{summary.submittedPlans}</strong><small>每次提交均绑定原始K线</small></div>
         <div className="metric-card"><span>本场训练结果</span><strong className={summary.resultTone}>{summary.resultValue}</strong><small>{summary.resultMeta}</small></div>
-      </div>
+      </div>}
       <article className="deterministic-review-card">
         <div className="performance-section-head">
           <div><span className="section-label">确定性指标 · {reviewMetrics?.version ?? "历史记录"}</span><h2>每个结果都能回到原始 K 线</h2></div>
@@ -82,7 +85,7 @@ export function ReviewPanel({
             ? `${reviewMetrics.generatedFromBarCount} 根证据 K 线 · ${reviewMetrics.evidenceComplete ? "证据完整" : "部分记录缺少入场/出场 K 线"}`
             : "这份训练保存时尚未生成确定性指标；继续训练并重新保存后会补齐。"}</small>
         </div>
-        {reviewMetrics ? (
+        {resultWarning ? <div className="empty-state">权息处理证据不完整，暂不展示收益指标。</div> : reviewMetrics ? (
           <>
             <div className="deterministic-metrics-grid">
               <div><span>期望值 / 笔</span><strong className={reviewMetrics.expectancy >= 0 ? "up" : "down"}>{money(reviewMetrics.expectancy)}</strong><small>{reviewMetrics.expectancyR == null ? "无初始止损，无法计算 R" : `${reviewMetrics.expectancyR.toFixed(2)}R`}</small></div>

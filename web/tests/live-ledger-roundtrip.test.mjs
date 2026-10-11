@@ -4,6 +4,8 @@ import test from "node:test";
 
 import { applyLiveStatePatch, readLiveState } from "../db/live-ledger.ts";
 import { applyLiveTradingCommand } from "../db/live-command.ts";
+import { buildLiveAccountLifecycleCommand } from "../app/features/live/liveAccountController.ts";
+import { defaultAppSettings } from "../app/features/settings/settingsContracts.ts";
 
 function createD1(t) {
   const sqlite = new DatabaseSync(":memory:");
@@ -200,6 +202,19 @@ test("live command receipts make account lifecycle commands idempotent", async (
   });
   assert.equal(paused.account.status, "paused");
   assert.equal(paused.account.version, 2);
+  await assert.rejects(() => applyLiveTradingCommand(db, {
+    ...create, commandId: "stale-resume", type: "resume-account", observedAccountVersion: 1,
+  }), error => error.code === "account_version_conflict");
+  const resumed = await applyLiveTradingCommand(db, {
+    ...create, commandId: "resume-account-command", type: "resume-account", observedAccountVersion: 2,
+  });
+  assert.equal(resumed.account.status, "active");
+  assert.equal(resumed.account.version, 3);
+  const ended = await applyLiveTradingCommand(db, {
+    ...create, commandId: "end-account-command", type: "end-account", observedAccountVersion: 3,
+  });
+  assert.equal(ended.account.status, "archived");
+  assert.equal((await readLiveState(db)).accounts[0].status, "archived");
 });
 
 test("first shared order bootstraps a portfolio and reset never silently drops activity", async (t) => {
@@ -289,4 +304,33 @@ test("first shared order bootstraps a portfolio and reset never silently drops a
   });
   assert.equal(attached.portfolios[0].instrumentId, "000001.SZ");
   assert.equal(attached.account.portfolioInstrumentIds.includes("000001.SZ"), true);
+});
+
+test("return account resets to latest capital defaults while unlinked history keeps its original ledger", async (t) => {
+  const { db } = createD1(t);
+  const history = {
+    instrumentId: "LEGACY.US", symbol: "LEGACY", market: "US", latestTimestamp: 10, latestClose: 12,
+    tradingMode: "return", initialCapital: 1000, cashBalance: 0, updatedAt: "2026-10-01T00:00:00.000Z",
+    positions: [{ id: "legacy-closed", side: "long", qty: 10, entryPrice: 10, entryTimestamp: 1,
+      entryOrderId: "legacy-entry", status: "closed", exitPrice: 12, exitTimestamp: 10, realizedPnl: 20 }],
+  };
+  await applyLiveStatePatch(db, { portfolioUpserts: [history] });
+  const created = await applyLiveTradingCommand(db, {
+    commandId: "create-return", type: "create-account", environment: "live", accountId: "old-return-US",
+    market: "US", timestamp: 10, observedAccountVersion: 0, tradingMode: "return", riskCapital: 1000,
+  });
+  const settings = { ...defaultAppSettings, liveAccount: {
+    ...defaultAppSettings.liveAccount, tradingMode: "capital", initialCapitalByMarket: { CN: 10000, US: 5000 },
+  } };
+  const reset = await applyLiveTradingCommand(db,
+    buildLiveAccountLifecycleCommand(created.account, "reset-account", settings, "reset-to-capital", "new-capital-US", 11));
+  assert.equal(reset.account.tradingMode, "capital");
+  assert.equal(reset.account.cashBalance, 5000);
+  assert.equal(reset.account.equity, 5000);
+  const state = await readLiveState(db);
+  assert.equal(state.accounts.find(item => item.id === created.account.id).status, "archived");
+  assert.deepEqual(state.accounts.find(item => item.id === reset.account.id).portfolioInstrumentIds, []);
+  assert.equal(state.portfolios[0].accountId ?? null, null);
+  assert.equal(state.portfolios[0].tradingMode, "return");
+  assert.equal(state.portfolios[0].positions[0].realizedPnl, 20);
 });

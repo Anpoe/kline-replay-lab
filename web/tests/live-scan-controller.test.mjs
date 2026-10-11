@@ -105,3 +105,10 @@ test("实时扫描错误统一为用户可见文本", () => {
   assert.equal(normalizeLiveScanError(new Error("Failed to fetch")), "网络连接失败，请检查网络或本机数据服务后重试");
   assert.equal(normalizeLiveScanError(undefined), "实时筛选失败");
 });
+
+test("扫描请求支持有界交易日回看，旧调用保持默认请求", () => {
+  const input = { market: "CN", presetIds: [], presets: [], minPrice: "", maxPrice: "", minVolume: "", sort: "turnover", limit: 100 };
+  assert.equal(buildLiveScanRequest({ ...input, lookbackDays: 5 }).lookbackDays, 5);
+  assert.equal(buildLiveScanRequest({ ...input, lookbackDays: 100 }).lookbackDays, 60);
+  assert.equal(buildLiveScanRequest({ ...input, lookbackDays: -1 }).lookbackDays, 1);
+});

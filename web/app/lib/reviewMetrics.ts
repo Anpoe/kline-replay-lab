@@ -4,8 +4,27 @@ import {
   sourceQuotePrice,
   type InstrumentEconomics,
 } from "./fxTrading.ts";
+import { CORPORATE_ACTION_APPLIED_EVENT_TYPE } from "./corporateActionExecution.ts";
 
-export const REVIEW_METRICS_VERSION = "2026.08-v3";
+type ReviewCorporateActionEvent = { type?: string; barTimestamp?: number; payload?: Record<string, unknown> };
+type ReviewAction = { timestamp: number; ratio: number; cashPerShare: number; positionIds: string[] };
+
+function positionActions(position: ReviewPosition, actions: ReviewAction[]) {
+  return actions.filter(action => action.timestamp > position.entryTimestamp
+    && (position.exitTimestamp == null || action.timestamp <= position.exitTimestamp)
+    && action.positionIds.some(id => position.id === id || position.id.startsWith(`${id}:partial:`)));
+}
+
+function unitsAt(position: ReviewPosition, timestamp: number, actions: ReviewAction[]) {
+  const futureRatio = actions.filter(action => action.timestamp > timestamp).reduce((ratio, action) => ratio * action.ratio, 1);
+  const dividend = position.side === "long" ? actions.filter(action => action.timestamp <= timestamp).reduce((sum, action, index) => {
+    const ratioFromEvent = actions.slice(index).reduce((ratio, next) => ratio * next.ratio, 1);
+    return sum + position.qty / ratioFromEvent * action.cashPerShare;
+  }, 0) : 0;
+  return { entryPrice: position.entryPrice * futureRatio, qty: position.qty / futureRatio, dividend };
+}
+
+export const REVIEW_METRICS_VERSION = "2026.10-v4";
 
 export type ReviewCandle = {
   timestamp: number;
@@ -115,6 +134,7 @@ function tradeMetric(
   bars: ReviewCandle[],
   horizons: number[],
   spreadBps: number,
+  actions: ReviewAction[],
 ): DeterministicTradeMetric | null {
   if (position.status !== "closed" || position.exitTimestamp == null || position.exitPrice == null) return null;
   const entryIndex = findBarIndex(bars, position.entryTimestamp);
@@ -126,20 +146,22 @@ function tradeMetric(
   let mae = 0;
   let mfeTimestamp = position.entryTimestamp;
   let maeTimestamp = position.entryTimestamp;
-  const pnlAt = (sourcePrice: number) => {
+  const holdingActions = positionActions(position, actions);
+  const pnlAt = (sourcePrice: number, timestamp: number) => {
+    const units = unitsAt(position, timestamp, holdingActions);
     const exitSide = position.side === "long" ? "sell" : "buy";
     const quotePrice = sourceQuotePrice(exitSide, sourcePrice, spreadBps, position.instrumentEconomics);
-    return accountPnl(
-      position.entryPrice,
+    return (accountPnl(
+      units.entryPrice,
       quotePrice,
-      position.qty,
+      units.qty,
       position.side,
       position.instrumentEconomics,
-    ) ?? 0;
+    ) ?? 0) + units.dividend;
   };
 
   if (evidenceComplete && position.entryIntrabar) {
-    const entryClose = pnlAt(bars[entryIndex].close);
+    const entryClose = pnlAt(bars[entryIndex].close, bars[entryIndex].timestamp);
     if (entryClose > mfe) mfe = entryClose;
     if (entryClose < mae) mae = entryClose;
   }
@@ -147,8 +169,8 @@ function tradeMetric(
   for (const bar of range) {
     const favorablePrice = position.side === "long" ? bar.high : bar.low;
     const adversePrice = position.side === "long" ? bar.low : bar.high;
-    const favorable = pnlAt(favorablePrice);
-    const adverse = pnlAt(adversePrice);
+    const favorable = pnlAt(favorablePrice, bar.timestamp);
+    const adverse = pnlAt(adversePrice, bar.timestamp);
     if (favorable > mfe) {
       mfe = favorable;
       mfeTimestamp = bar.timestamp;
@@ -200,7 +222,7 @@ function tradeMetric(
     horizons: horizons.map((barsAfterEntry) => {
       const bar = entryIndex >= 0 ? bars[entryIndex + barsAfterEntry] : undefined;
       if (!bar) return { bars: barsAfterEntry };
-      const pnl = pnlAt(bar.close);
+      const pnl = pnlAt(bar.close, bar.timestamp);
       return {
         bars: barsAfterEntry,
         timestamp: bar.timestamp,
@@ -217,6 +239,7 @@ function equityDrawdown(
   positions: ReviewPosition[],
   initialCapital: number,
   spreadBps: number,
+  actions: ReviewAction[],
 ) {
   if (!bars.length) return {
     maxDrawdown: 0,
@@ -237,19 +260,20 @@ function equityDrawdown(
   for (const bar of bars) {
     const pnl = positions.reduce((sum, position) => {
       if (position.entryTimestamp > bar.timestamp) return sum;
+      const units = unitsAt(position, bar.timestamp, positionActions(position, actions));
       if (position.status === "closed" && position.exitTimestamp != null && position.exitTimestamp <= bar.timestamp) {
-        return sum + finite(position.realizedPnl);
+        return sum + finite(position.realizedPnl) + units.dividend;
       }
       const exitSide = position.side === "long" ? "sell" : "buy";
       const quotePrice = sourceQuotePrice(exitSide, bar.close, spreadBps, position.instrumentEconomics);
       const floating = accountPnl(
-        position.entryPrice,
+        units.entryPrice,
         quotePrice,
-        position.qty,
+        units.qty,
         position.side,
         position.instrumentEconomics,
       ) ?? 0;
-      return sum + floating - finite(position.entryFee);
+      return sum + floating - finite(position.entryFee) + units.dividend;
     }, 0);
     const equity = initialCapital + pnl;
     if (equity >= peakEquity) {
@@ -278,6 +302,7 @@ export function calculateDeterministicReviewMetrics(input: {
   initialCapital: number;
   horizons?: number[];
   spreadBps?: number;
+  corporateActionEvents?: ReviewCorporateActionEvent[];
 }): DeterministicReviewMetrics {
   const bars = [...input.bars]
     .filter((bar) => Number.isFinite(bar.timestamp))
@@ -286,8 +311,19 @@ export function calculateDeterministicReviewMetrics(input: {
     .map((value) => Math.max(1, Math.round(value)))
     .filter((value, index, values) => values.indexOf(value) === index)
     .sort((left, right) => left - right);
+  const seen = new Set<string>();
+  const actions = (input.corporateActionEvents ?? []).flatMap(event => {
+    if (event.type !== CORPORATE_ACTION_APPLIED_EVENT_TYPE || !Number.isFinite(event.barTimestamp)) return [];
+    const id = String(event.payload?.eventId ?? "");
+    if (!id || seen.has(id)) return [];
+    const ratio = 1 + Number(event.payload?.bonusSharesPer10 ?? 0) / 10;
+    const cashPerShare = Number(event.payload?.cashPer10 ?? 0) / 10;
+    if (!Number.isFinite(ratio) || ratio < 1 || !Number.isFinite(cashPerShare) || cashPerShare < 0) return [];
+    seen.add(id);
+    return [{ timestamp: event.barTimestamp!, ratio, cashPerShare, positionIds: Array.isArray(event.payload?.positionIds) ? event.payload.positionIds.filter((value): value is string => typeof value === "string") : [] }];
+  }).sort((a, b) => a.timestamp - b.timestamp);
   const trades = input.positions
-    .map((position) => tradeMetric(position, bars, horizons, Math.max(0, finite(input.spreadBps))))
+    .map((position) => tradeMetric(position, bars, horizons, Math.max(0, finite(input.spreadBps)), actions))
     .filter((metric): metric is DeterministicTradeMetric => Boolean(metric))
     .sort((left, right) => left.exitTimestamp - right.exitTimestamp || left.positionId.localeCompare(right.positionId));
   const wins = trades.filter((trade) => trade.netPnl > 0);
@@ -307,6 +343,7 @@ export function calculateDeterministicReviewMetrics(input: {
     input.positions,
     Math.max(0, finite(input.initialCapital)),
     Math.max(0, finite(input.spreadBps)),
+    actions,
   );
 
   return {

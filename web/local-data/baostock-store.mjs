@@ -17,7 +17,8 @@ import {
   normalizeBaoStockCatalog,
   normalizeBaoStockRows,
 } from "./baostock.mjs";
-import { screenLatestCandles } from "./pattern-scan.mjs";
+import { screenRecentCandles } from "./pattern-scan.mjs";
+import { normalizeLiveScanLookbackDays, restrictMatchesToMarketDays } from "../app/lib/liveScanLookback.mjs";
 import { writeJsonAtomic } from "./atomic-json.mjs";
 import { CN_ASSET_TYPES, DEFAULT_CN_ASSETS, filterCnInstruments, normalizeCnAssets } from "./cn-asset-scope.mjs";
 import { latestClosedCnDate } from "./cn-maintenance.mjs";
@@ -895,28 +896,34 @@ export class BaoStockLocalStore {
     return output;
   }
 
-  async scanLatest({ presets = [], filters = {}, limit = 100, sort = "turnover" } = {}) {
+  async scanLatest({ presets = [], filters = {}, limit = 100, sort = "turnover", lookbackDays = 1 } = {}) {
+    lookbackDays = normalizeLiveScanLookbackDays(lookbackDays);
     const manifest = await this.getManifest();
     if (!manifest) throw new Error("请先完成 BaoStock A 股全市场前复权初始化");
     const stocks = manifest.instruments.filter((instrument) => instrument.assetType === "stock" && Number(instrument.barCount) > 0);
     const latestTimestamp = stocks.reduce((maximum, instrument) => Math.max(maximum, Number(instrument.lastTimestamp) || 0), 0);
-    const results = [];
+    const matches = [];
+    const tradingDates = new Set();
     for (const instrument of stocks) {
       if (Number(instrument.lastTimestamp) < latestTimestamp - 3 * DAY_MS) continue;
-      const candles = this.readDaily(instrument.id, latestTimestamp - 420 * DAY_MS);
+      const candles = this.readDaily(instrument.id, latestTimestamp - (420 + (lookbackDays - 1) * 3) * DAY_MS);
       const scanFilters = filters.excludeLimitUp
         ? { ...filters, limitUpRatio: cnPriceLimitRatio(instrument.id), priceTick: 0.01 }
         : filters;
-      const match = screenLatestCandles(candles, presets, scanFilters);
+      if (candles.at(-1)?.timestamp !== latestTimestamp) continue;
+      for (const candle of candles) tradingDates.add(candle.timestamp);
+      const match = screenRecentCandles(candles, presets, scanFilters, lookbackDays);
       if (!match || match.timestamp !== latestTimestamp) continue;
-      results.push({ instrumentId: instrument.id, symbol: instrument.symbol, name: instrument.name, market: "CN", ...match });
+      matches.push({ instrumentId: instrument.id, symbol: instrument.symbol, name: instrument.name, market: "CN", ...match });
     }
+    const results = restrictMatchesToMarketDays(matches, tradingDates, lookbackDays);
     const sortKey = sort === "change" ? "changePct" : sort === "volume" ? "averageVolume" : "averageTurnover";
     results.sort((left, right) => Number(right[sortKey]) - Number(left[sortKey]));
     const resultLimit = Number(limit);
     return {
       market: "CN",
       latestTimestamp,
+      lookbackDays,
       scannedCount: stocks.length,
       matchedCount: results.length,
       results: resultLimit === 0

@@ -2,6 +2,7 @@ import { ensureSchema, getRawDb } from "../../../db/runtime";
 import { fetchLocalData } from "../../lib/localDataService";
 import { matchesPattern, normalizePatternPresets, type PatternCandle, type PatternPreset } from "../../lib/patternFilters";
 import { stableLiveBarRevision } from "../../lib/liveExecutionAdapter";
+import { findRecentCandleMatch, normalizeLiveScanLookbackDays, restrictMatchesToMarketDays } from "../../lib/liveScanLookback.mjs";
 
 type ScanFilters = {
   minPrice?: number;
@@ -23,6 +24,7 @@ type ScanRequest = {
   presets?: PatternPreset[];
   filters?: ScanFilters;
   limit?: number;
+  lookbackDays?: number;
   sort?: "turnover" | "volume" | "change";
 };
 
@@ -362,6 +364,7 @@ export async function POST(request: Request) {
     filters: payload.filters ?? {},
     limit: normalizeScanLimit(payload.limit),
     sort: payload.sort ?? "turnover",
+    lookbackDays: normalizeLiveScanLookbackDays(payload.lookbackDays),
   };
 
   if (market === "CN") {
@@ -371,7 +374,10 @@ export async function POST(request: Request) {
         headers: { "content-type": "application/json" },
         body: JSON.stringify(body),
       }, 180_000);
-      const result = await response.json();
+      const result = await response.json() as { lookbackDays?: number };
+      if (response.ok && body.lookbackDays > 1 && result.lookbackDays !== body.lookbackDays) {
+        return Response.json({ error: "行情连接尚未支持回看筛选，请重启程序后重试" }, { status: 502 });
+      }
       return Response.json(result, { status: response.status });
     } catch (error) {
       return Response.json({ error: error instanceof Error ? error.message : "本机 A 股筛选服务不可用" }, { status: 502 });
@@ -390,8 +396,9 @@ export async function POST(request: Request) {
   const latestTimestamp = instruments.reduce((maximum, item) => Math.max(maximum, item.lastTimestamp), 0);
   if (!latestTimestamp) return Response.json({ error: "美股 Alpaca 日线库为空，请先初始化或更新行情" }, { status: 400 });
   const eligible = instruments.filter((item) => item.lastTimestamp === latestTimestamp);
-  const results: Array<Record<string, unknown>> = [];
-  const cutoff = latestTimestamp - 420 * 86_400_000;
+  const matches: Array<Record<string, unknown> & { matchedTimestamp: number }> = [];
+  const tradingDates = new Set<number>();
+  const cutoff = latestTimestamp - (420 + (body.lookbackDays - 1) * 3) * 86_400_000;
   for (let offset = 0; offset < eligible.length; offset += 40) {
     const batch = eligible.slice(offset, offset + 40);
     const placeholders = batch.map(() => "?").join(",");
@@ -409,35 +416,44 @@ export async function POST(request: Request) {
     for (const item of batch) {
       const candles = grouped.get(item.id) ?? [];
       const latest = candles.at(-1);
-      const previous = candles.at(-2);
       if (!latest || latest.timestamp !== latestTimestamp) continue;
-      const recent = candles.slice(-20);
-      const averageVolume = average(recent.map((bar) => finite(bar.volume)));
-      const averageTurnover = average(recent.map((bar) => finite(bar.turnover)));
-      const changePct = previous?.close ? (latest.close / previous.close - 1) * 100 : 0;
-      const filters = body.filters;
-      if (filters.minPrice != null && latest.close < filters.minPrice) continue;
-      if (filters.maxPrice != null && latest.close > filters.maxPrice) continue;
-      if (filters.minAverageVolume != null && averageVolume < filters.minAverageVolume) continue;
-      if (filters.minAverageTurnover != null && averageTurnover < filters.minAverageTurnover) continue;
-      if (filters.minChangePct != null && changePct < filters.minChangePct) continue;
-      if (filters.maxChangePct != null && changePct > filters.maxChangePct) continue;
-      const hits = presets.filter((preset) => matchesPattern(candles, candles.length - 1, preset));
-      if (presets.length && !hits.length) continue;
-      results.push({
+      for (const candle of candles) tradingDates.add(candle.timestamp);
+      const match = findRecentCandleMatch(candles, body.lookbackDays, (history, applyFilters) => {
+        const current = history.at(-1);
+        const previous = history.at(-2);
+        if (!current) return null;
+        const recent = history.slice(-20);
+        const averageVolume = average(recent.map((bar) => finite(bar.volume)));
+        const averageTurnover = average(recent.map((bar) => finite(bar.turnover)));
+        const changePct = previous?.close ? (current.close / previous.close - 1) * 100 : 0;
+        const filters = applyFilters ? body.filters : {};
+        if (filters.minPrice != null && current.close < filters.minPrice) return null;
+        if (filters.maxPrice != null && current.close > filters.maxPrice) return null;
+        if (filters.minAverageVolume != null && averageVolume < filters.minAverageVolume) return null;
+        if (filters.minAverageTurnover != null && averageTurnover < filters.minAverageTurnover) return null;
+        if (filters.minChangePct != null && changePct < filters.minChangePct) return null;
+        if (filters.maxChangePct != null && changePct > filters.maxChangePct) return null;
+        const hits = applyFilters ? presets.filter((preset) => matchesPattern(history, history.length - 1, preset)) : [];
+        if (applyFilters && presets.length && !hits.length) return null;
+        return {
+          timestamp: current.timestamp, close: current.close, changePct,
+          volume: finite(current.volume), turnover: finite(current.turnover),
+          averageVolume, averageTurnover,
+          presetIds: hits.map((preset) => preset.id), presetNames: hits.map((preset) => preset.name),
+        };
+      });
+      if (!match) continue;
+      matches.push({
         instrumentId: item.id, symbol: item.symbol, name: item.name, market: "US",
-        timestamp: latest.timestamp, close: latest.close,
-        changePct,
-        volume: finite(latest.volume), turnover: finite(latest.turnover),
-        averageVolume, averageTurnover,
-        presetIds: hits.map((preset) => preset.id), presetNames: hits.map((preset) => preset.name),
+        ...match,
       });
     }
   }
+  const results = restrictMatchesToMarketDays(matches, tradingDates, body.lookbackDays);
   const key = body.sort === "change" ? "changePct" : body.sort === "volume" ? "averageVolume" : "averageTurnover";
   results.sort((left, right) => finite(right[key]) - finite(left[key]));
   return Response.json({
-    market: "US", latestTimestamp, scannedCount: eligible.length,
+    market: "US", latestTimestamp, lookbackDays: body.lookbackDays, scannedCount: eligible.length,
     matchedCount: results.length, results: body.limit > 0 ? results.slice(0, body.limit) : results,
   });
 }

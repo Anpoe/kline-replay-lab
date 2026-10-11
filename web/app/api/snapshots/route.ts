@@ -33,6 +33,7 @@ import {
   buildSnapshotChunks,
   buildSnapshotContentHash,
   canonicalStringify,
+  effectiveSnapshotAdjustmentType,
   getSnapshotByContentHash,
   getSnapshotRow,
   materializeSnapshotCandles,
@@ -827,7 +828,7 @@ export async function POST(request: Request) {
     // A timeframe view belongs to the immutable source snapshot. Inherit its
     // adjustment type so switching the market-data policy cannot invalidate a
     // historical training session or silently mix price series.
-    adjustmentType = sourceViewRow.adjustmentType;
+    adjustmentType = effectiveSnapshotAdjustmentType(sourceViewRow);
     if (payload.timeframe === sourceTimeframe) {
       return Response.json(await snapshotResponse(db, sourceViewRow));
     }
@@ -1009,6 +1010,12 @@ export async function POST(request: Request) {
         }, { status: 422 });
       }
       candles = localWindow?.candles ?? local.candles;
+      // The provider's actual basis owns the snapshot label; the request is
+      // only a preference. In particular TDX raw candles must not be called qfq.
+      if (!["none", "qfq", "hfq", "all"].includes(local.adjustmentType ?? "")) {
+        return Response.json({ error: "行情复权口径未确认，请检查数据来源后重试。" }, { status: 422 });
+      }
+      adjustmentType = local.adjustmentType!;
       windowSelection = localWindow?.selection ?? null;
       randomPatternMatch = localWindow?.patternMatch ?? null;
       const windowMetadata = payload.randomWindow ? "randomWindow" : "replayWindow";

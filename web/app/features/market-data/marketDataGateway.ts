@@ -257,7 +257,7 @@ export function createMarketDataGateway(fetcher: MarketDataGatewayFetch) {
 
   const startMarketSync = <T = unknown>(
     market: string,
-    mode: "initialize" | "update",
+    mode: "initialize" | "update" | "repair",
     instrumentIds?: string[],
     signal?: AbortSignal,
   ) => requestJson<T>(

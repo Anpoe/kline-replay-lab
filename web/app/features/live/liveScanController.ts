@@ -3,6 +3,7 @@ import type {
   LiveScanResult,
   LiveScanSort,
 } from "./liveScanContracts.ts";
+import { normalizeLiveScanLookbackDays } from "../../lib/liveScanLookback.mjs";
 
 export function calculateDailyChangePct(close: unknown, previousClose: unknown) {
   const current = Number(close);
@@ -38,6 +39,7 @@ export function buildLiveScanRequest(input: {
   minChangePct: string;
   maxChangePct: string;
   excludeLimitUp?: boolean;
+  lookbackDays?: number;
   sort: LiveScanSort;
   limit: number;
 }) {
@@ -45,6 +47,7 @@ export function buildLiveScanRequest(input: {
     market: input.market,
     presetIds: input.presetIds,
     presets: input.presets,
+    ...(input.lookbackDays != null ? { lookbackDays: normalizeLiveScanLookbackDays(input.lookbackDays) } : {}),
     filters: {
       ...(input.minPrice ? { minPrice: Number(input.minPrice) } : {}),
       ...(input.maxPrice ? { maxPrice: Number(input.maxPrice) } : {}),

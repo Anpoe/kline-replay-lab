@@ -25,7 +25,8 @@ import {
   parseTdxDayBuffer,
   TDX_DAY_RECORD_SIZE,
 } from "./tdx-day.mjs";
-import { screenLatestCandles } from "./pattern-scan.mjs";
+import { screenRecentCandles } from "./pattern-scan.mjs";
+import { normalizeLiveScanLookbackDays, restrictMatchesToMarketDays } from "../app/lib/liveScanLookback.mjs";
 import { CorporateActionsStore } from "./corporate-actions-store.mjs";
 import { TdxCorporateActionsClient } from "./tdx-corporate-actions-client.mjs";
 import { writeJsonAtomic } from "./atomic-json.mjs";
@@ -2449,7 +2450,8 @@ export class TdxLocalStore {
     };
   }
 
-  async scanLatest({ presets = [], filters = {}, limit = 100, sort = "turnover" } = {}) {
+  async scanLatest({ presets = [], filters = {}, limit = 100, sort = "turnover", lookbackDays = 1 } = {}) {
+    lookbackDays = normalizeLiveScanLookbackDays(lookbackDays);
     const manifest = await this.getManifest();
     if (!manifest) throw new Error("请先完成 A 股全市场日线初始化");
     const stocks = manifest.instruments.filter((instrument) => instrument.assetType === "stock");
@@ -2461,7 +2463,7 @@ export class TdxLocalStore {
     const overlayRows = (await exists(this.overlayDbFile))
       ? this.ensureOverlayDb().prepare(`SELECT instrument_id, timestamp, open, high, low, close, volume, turnover
           FROM daily_overlay WHERE timestamp >= ? AND source IN (${overlaySources.map(() => "?").join(", ")}) ORDER BY instrument_id, timestamp`)
-        .all(latestTimestamp - 420 * DAY_MS, ...overlaySources)
+        .all(latestTimestamp - (420 + (lookbackDays - 1) * 3) * DAY_MS, ...overlaySources)
       : [];
     const overlays = new Map();
     for (const row of overlayRows) {
@@ -2473,13 +2475,14 @@ export class TdxLocalStore {
       });
       overlays.set(row.instrument_id, list);
     }
-    const results = [];
+    const matches = [];
+    const tradingDates = new Set();
     for (const instrument of stocks) {
       if (Number(instrument.lastTimestamp) < latestTimestamp - 3 * DAY_MS) continue;
       const target = path.resolve(this.root, instrument.relativePath);
       if (!target.startsWith(this.root) || !(await exists(target))) continue;
       const info = await stat(target);
-      const recordCount = Math.min(340, Math.trunc(info.size / TDX_DAY_RECORD_SIZE));
+      const recordCount = Math.min(340 + lookbackDays - 1, Math.trunc(info.size / TDX_DAY_RECORD_SIZE));
       if (!recordCount) continue;
       const byteLength = recordCount * TDX_DAY_RECORD_SIZE;
       const buffer = Buffer.allocUnsafe(byteLength);
@@ -2495,9 +2498,11 @@ export class TdxLocalStore {
       const scanFilters = filters.excludeLimitUp
         ? { ...filters, limitUpRatio: cnPriceLimitRatio(instrument.id), priceTick: 0.01 }
         : filters;
-      const match = screenLatestCandles(candles, presets, scanFilters);
+      if (candles.at(-1)?.timestamp !== latestTimestamp) continue;
+      for (const candle of candles) tradingDates.add(candle.timestamp);
+      const match = screenRecentCandles(candles, presets, scanFilters, lookbackDays);
       if (!match || match.timestamp !== latestTimestamp) continue;
-      results.push({
+      matches.push({
         instrumentId: instrument.id,
         symbol: instrument.symbol,
         name: instrument.name,
@@ -2505,12 +2510,14 @@ export class TdxLocalStore {
         ...match,
       });
     }
+    const results = restrictMatchesToMarketDays(matches, tradingDates, lookbackDays);
     const sortKey = sort === "change" ? "changePct" : sort === "volume" ? "averageVolume" : "averageTurnover";
     results.sort((left, right) => Number(right[sortKey]) - Number(left[sortKey]));
     const resultLimit = Number(limit);
     return {
       market: "CN",
       latestTimestamp,
+      lookbackDays,
       scannedCount: stocks.length,
       matchedCount: results.length,
       results: resultLimit === 0

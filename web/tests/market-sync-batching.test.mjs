@@ -6,6 +6,7 @@ import {
   isMarketSyncRunTerminal,
   planAlpacaBatches,
   splitSymbols,
+  US_SYNC_INCREMENTAL_LOOKBACK_DAYS,
 } from "../app/lib/marketSync.ts";
 
 test("批次都结束但仍有未终态任务时，市场同步不能提前标记完成", () => {
@@ -83,4 +84,20 @@ test("批次收到 414 或坏品种时可以二分定位", () => {
     ["NVDA", "TSLA"],
   ]);
   assert.deepEqual(splitSymbols(["AAPL"]), [["AAPL"]]);
+});
+
+
+test("增量倒查 7 天常量为 7，且在该跨度下依然可利用单批超大 URL 容量批量打包", () => {
+  assert.equal(US_SYNC_INCREMENTAL_LOOKBACK_DAYS, 7);
+  const symbols = Array.from({ length: 1_000 }, (_, index) => "SYM" + index.toString().padStart(4, "0"));
+  const plans = planAlpacaBatches({
+    symbols,
+    startDate: "2026-09-24",
+    endDate: "2026-10-01",
+    sessionCount: 5,
+  });
+  // 5 个交易日下，9500 / 5 = 1900 点数预算，因此完全由 6,500 字符的 URL 上限主导，1500 个品种仅需 2 批
+  assert.equal(plans.length, 2);
+  assert.ok(plans.every((plan) => plan.urlLength <= 6_500));
+  assert.equal(plans.flatMap((plan) => plan.symbols).length, symbols.length);
 });

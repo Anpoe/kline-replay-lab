@@ -18,6 +18,7 @@ import {
   US_SYNC_MAX_CONCURRENT_BATCHES,
   US_SYNC_MAX_ATTEMPTS,
   US_SYNC_REQUEST_SPACING_MS,
+  US_SYNC_INCREMENTAL_LOOKBACK_DAYS,
   isMarketSyncRunTerminal,
   type AlpacaBatchPlan,
   type MarketSyncMode,
@@ -552,6 +553,11 @@ export async function createMarketSyncRun(input: {
     .filter((date) => /^\d{4}-\d{2}-\d{2}$/.test(date))
     .sort()
     ?? [];
+  const defaultIncrementalStartDate = dateOffset(endDate, -US_SYNC_INCREMENTAL_LOOKBACK_DAYS);
+  const incrementalStartDate = defaultIncrementalStartDate < US_HISTORY_START_DATE
+    ? US_HISTORY_START_DATE
+    : defaultIncrementalStartDate;
+
   const eligible: Array<InstrumentRow & { startDate: string }> = [];
   let skippedSymbols = 0;
   for (const instrument of instruments) {
@@ -567,6 +573,15 @@ export async function createMarketSyncRun(input: {
       }
       continue;
     }
+    if (input.mode === "update") {
+      if (dateFromTimestamp(Number(instrument.lastTimestamp)) >= endDate) {
+        skippedSymbols += 1;
+        continue;
+      }
+      eligible.push({ ...instrument, startDate: incrementalStartDate });
+      continue;
+    }
+
     const startDate = dateAfterTimestamp(Number(instrument.lastTimestamp));
     if (startDate <= endDate) {
       eligible.push({ ...instrument, startDate });

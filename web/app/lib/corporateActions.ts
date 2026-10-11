@@ -105,17 +105,45 @@ export function corporateActionMarkersForBars(
   timeframe: string,
   timezone: string,
   cutoffTimestamp: number | null,
-  hidden = false,
+  hideDetails = false,
 ): CorporateActionMarker[] {
-  if (hidden || !bars.length) return [];
+  if (!bars.length) return [];
   const cutoff = cutoffTimestamp ?? bars.at(-1)?.timestamp ?? Number.POSITIVE_INFINITY;
   return events.flatMap((event) => {
     if (!Number.isFinite(event.timestamp) || event.timestamp > cutoff) return [];
-    const bar = timeframe === "1d"
-      ? bars.find((candidate) => candidate.timestamp >= event.timestamp)
+    const bar = timeframe !== "1w" && timeframe !== "1mo"
+      ? bars.find((candidate) => timeframeBucketKey(candidate.timestamp, "1d", timezone)
+        === timeframeBucketKey(event.timestamp, "1d", timezone))
       : bars.find((candidate) => timeframeBucketKey(candidate.timestamp, timeframe as SupportedTimeframe, timezone)
         === timeframeBucketKey(event.timestamp, timeframe as SupportedTimeframe, timezone));
     if (!bar || bar.timestamp > cutoff) return [];
-    return [{ ...event, price: Number(bar.low ?? bar.close), barTimestamp: bar.timestamp }];
+    const hasQuantityAction = event.bonusSharesPer10 > 0 || event.rightsSharesPer10 > 0;
+    const blindLabel = event.category !== 1 ? "权息" : hasQuantityAction
+      ? event.cashPer10 > 0 ? "除权除息" : "除权"
+      : event.cashPer10 > 0 ? "除息" : "权息";
+    return [{
+      ...event,
+      label: hideDetails ? blindLabel : event.label,
+      date: hideDetails ? "" : event.date,
+      description: hideDetails ? "训练结束后可查看权息明细。" : event.description,
+      price: Number(bar.low ?? bar.close),
+      barTimestamp: bar.timestamp,
+    }];
   });
+}
+
+/** Read-only diagnosis: an already executed fill cannot be recreated by
+ * multiplying a closed lot. Keep historical evidence and flag affected results. */
+export function unhandledQuantityActionIds(
+  events: CorporateActionEvent[],
+  holdings: Array<CorporateActionHolding & { exitTimestamp?: number }>,
+  recordedEvents: ReadonlyArray<{ type?: string; payload?: Record<string, unknown> }>,
+  cutoffTimestamp: number,
+) {
+  const applied = new Set(recordedEvents.filter(event => event.type === "corporate_action_applied").map(event => event.payload?.eventId));
+  return events.filter(event => event.timestamp <= cutoffTimestamp && !applied.has(event.id)
+    && (event.bonusSharesPer10 > 0 || event.rightsSharesPer10 > 0 || event.category !== 1)
+    && holdings.some(holding => holding.entryTimestamp < event.timestamp
+      && (holding.status === "open" || Number(holding.exitTimestamp) >= event.timestamp)))
+    .map(event => event.id);
 }

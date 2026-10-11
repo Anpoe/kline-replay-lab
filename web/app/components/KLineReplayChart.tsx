@@ -43,6 +43,7 @@ export type TradeMarker = {
   id: string;
   side: "long" | "short";
   qty: number;
+  entryQty?: number;
   entryPrice: number;
   entryTimestamp: number;
   exitPrice?: number;
@@ -546,7 +547,7 @@ function ensureTradeOverlay(registerOverlay: (template: OverlayTemplate<TradeOve
       const tagAlpha = trade.hovered ? "ff" : "86";
       const pointAlpha = trade.hovered ? "ff" : "78";
       const lineAlpha = trade.hovered ? "9a" : "34";
-      const entryText = (isLong ? "买" : "卖") + " " + trade.qty;
+      const entryText = (isLong ? "买" : "卖") + " " + (trade.entryQty ?? trade.qty);
       const figures: OverlayFigure[] = [
         {
           type: "circle",
@@ -580,8 +581,8 @@ function ensureTradeOverlay(registerOverlay: (template: OverlayTemplate<TradeOve
 
       const exit = coordinates[1];
       if (exit) {
-        const pnlValue = trade.realizedPnl ?? 0;
-        const pnlText = (pnlValue >= 0 ? "+" : "") + pnlValue.toFixed(2);
+        const pnlValue = trade.realizedPnl;
+        const pnlText = pnlValue == null ? "待核验" : (pnlValue >= 0 ? "+" : "") + pnlValue.toFixed(2);
         figures.unshift({
           type: "line",
           attrs: { coordinates: [entry, exit] },
@@ -771,6 +772,7 @@ function tradeMarkerSignature(tradeMarkers: TradeMarker[]) {
     trade.id,
     trade.side,
     trade.qty,
+    trade.entryQty ?? trade.qty,
     trade.entryTimestamp,
     trade.entryPrice,
     trade.exitTimestamp ?? "",
@@ -1743,5 +1745,5 @@ function syncCorporateActionMarkers(
 }
 
 function corporateActionMarkerSignature(markers: CorporateActionMarker[]) {
-  return markers.map((action) => [action.id, action.barTimestamp, action.price, action.label].join(":")).join("|");
+  return markers.map((action) => [action.id, action.barTimestamp, action.price, action.label, action.date, action.description].join(":")).join("|");
 }

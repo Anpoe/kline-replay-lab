@@ -1,3 +1,5 @@
+import { findRecentCandleMatch } from "../app/lib/liveScanLookback.mjs";
+
 function average(values) {
   return values.length ? values.reduce((sum, value) => sum + value, 0) / values.length : 0;
 }
@@ -504,4 +506,10 @@ export function screenLatestCandles(candles, presets, filters = {}) {
     presetIds: hits.map((preset) => preset.id),
     presetNames: hits.map((preset) => preset.name),
   };
+}
+
+export function screenRecentCandles(candles, presets, filters = {}, lookbackDays = 1) {
+  return findRecentCandleMatch(candles, lookbackDays, (history, applyFilters) => (
+    screenLatestCandles(history, applyFilters ? presets : [], applyFilters ? filters : {})
+  ));
 }

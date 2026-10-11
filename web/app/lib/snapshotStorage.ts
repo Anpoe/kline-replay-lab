@@ -474,6 +474,19 @@ export async function materializeSnapshotCandles(
   return (await materializeSnapshotCandleWindow(db, row)).candles;
 }
 
+export function effectiveSnapshotAdjustmentType(row: Pick<SnapshotRow, "adjustmentType" | "instrumentId" | "sourceJson">) {
+  // Old local TDX snapshots stored the requested qfq label even though this
+  // source supplied raw candles. Derive the price basis from frozen provenance;
+  // never modify the stored snapshot, its hash, candles or original fills.
+  if (/^\d{6}\.(SH|SZ|BJ)$/.test(row.instrumentId)) {
+    try {
+      const source = JSON.parse(row.sourceJson || "{}") as { kind?: string; source?: string } | null;
+      if (source?.kind === "local" && /^tdx-official(?:\+|$|-hsjday$)/.test(source.source ?? "")) return "none";
+    } catch { /* Legacy snapshots without provenance retain their recorded basis. */ }
+  }
+  return row.adjustmentType;
+}
+
 export async function snapshotResponse(db: SnapshotDatabase, row: SnapshotRow, range?: SnapshotReadRange) {
   const window = await materializeSnapshotCandleWindow(db, row, range);
   return {
@@ -482,7 +495,7 @@ export async function snapshotResponse(db: SnapshotDatabase, row: SnapshotRow, r
       contentHash: row.contentHash,
       instrumentId: row.instrumentId,
       timeframe: row.timeframe,
-      adjustmentType: row.adjustmentType,
+      adjustmentType: effectiveSnapshotAdjustmentType(row),
       barCount: row.barCount,
       firstTimestamp: row.firstTimestamp,
       lastTimestamp: row.lastTimestamp,

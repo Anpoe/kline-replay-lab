@@ -26,6 +26,27 @@ const heldPosition = {
   entryTimestamp: Date.parse("2026-03-10T00:00:00Z"),
 };
 
+test("unknown price basis pauses pre-ex-date orders even with no holdings", () => {
+  const pendingOrders = [{ id: "old-open", action: "open", qty: 100, createdAt: event.timestamp - 1, positionId: "new" }];
+  const result = applyLiveCorporateActionsBeforeBar({ events: [event], positions: [], pendingOrders, barTimestamp: event.timestamp, priceBasis: "unknown", currency: "CNY", capitalMode: true });
+  assert.equal(result.requiresUserAction, true);
+  assert.deepEqual(result.pendingOrders, pendingOrders);
+  assert.equal(result.cashDelta, 0);
+});
+
+test("live 10转7 adjusts the holding before ex-date execution and is repeat-safe", () => {
+  const bonusEvent = { ...event, cashPer10: 1, bonusSharesPer10: 7 };
+  const input = { events: [bonusEvent], positions: [{ ...heldPosition, entryPrice: 50.5, stopLoss: 45 }], pendingOrders: [], barTimestamp: event.timestamp, priceBasis: "raw", currency: "CNY", capitalMode: true };
+  const result = applyLiveCorporateActionsBeforeBar(input);
+  assert.equal(result.positions[0].qty, 170);
+  assert.ok(Math.abs(result.positions[0].entryPrice * 170 - 5050) < 1e-8);
+  assert.equal(result.cashDelta, 10);
+  assert.equal(result.ledgerEntries[0].quantityAfter, 170);
+  const repeated = applyLiveCorporateActionsBeforeBar({ ...input, positions: result.positions, processedEventIds: terminalLiveCorporateActionIds(result.ledgerEntries), existingEntries: new Map(result.ledgerEntries.map(entry => [entry.eventId, entry])) });
+  assert.equal(repeated.positions[0].qty, 170);
+  assert.equal(repeated.cashDelta, 0);
+});
+
 test("live cash dividend reuses training eligibility and is terminally idempotent", () => {
   const result = applyLiveCorporateActionsBeforeBar({
     events: [event],

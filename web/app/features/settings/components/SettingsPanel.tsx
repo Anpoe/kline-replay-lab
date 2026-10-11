@@ -244,7 +244,7 @@ export function SettingsPanel({
               <small>只影响之后新建的训练；已开始或已保存训练继续使用创建时冻结的账户配置。</small>
             </div>
             <div className="settings-rule">
-              <span>实时模拟账户</span>
+              <span title="只影响之后新建的实时模拟账户；同一市场内的品种共享资金。已有账户保留创建时的配置，需处理持仓和挂单后重置并新建才能使用新设置。" aria-label="新实时模拟账户默认配置：已有账户保留创建时的配置，处理持仓和挂单后重置并新建才能使用新设置。">新实时模拟账户默认配置</span>
               <div className="task-start-options">
                 <button
                   className={draft.liveAccount.tradingMode === "return" ? "active" : ""}
@@ -261,9 +261,6 @@ export function SettingsPanel({
                   }))}
                 >资金账户模式</button>
               </div>
-              <small>{draft.liveAccount.tradingMode === "return"
-                ? "A 股和美股分别使用各自的风险计算基准，不建立购买力限制。"
-                : "A 股和美股分别使用独立资金账户；同一市场内的品种共享现金和权益。"}</small>
               <div className="execution-settings-grid">
                 <label>{draft.liveAccount.tradingMode === "capital" ? "A 股初始资金" : "A 股风险计算基准"}
                   <input
@@ -312,7 +309,6 @@ export function SettingsPanel({
                   />
                 </label>
               </div>
-              <small>这是模拟交易，不会向券商发送订单。每个市场账户首次使用时冻结当前默认值；已有持仓、挂单或成交时不会被设置修改静默重置。</small>
             </div>
             <div className="settings-rule">
               <span>不同市场默认下单数量 / 手数</span>

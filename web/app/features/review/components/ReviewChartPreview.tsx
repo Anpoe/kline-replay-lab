@@ -137,6 +137,7 @@ type ReviewChartPreviewProps = {
   onCorporateActionSelect?: (id: string) => void;
   loading?: boolean;
   error?: string;
+  corporateActionsError?: string;
 };
 
 export function ReviewChartPreview({
@@ -155,7 +156,10 @@ export function ReviewChartPreview({
   onCorporateActionSelect = () => undefined,
   loading = false,
   error = "",
+  corporateActionsError = "",
 }: ReviewChartPreviewProps) {
+  const [selectedCorporateActionId, setSelectedCorporateActionId] = useState("");
+  const selectedCorporateAction = corporateActionMarkers.find(action => action.id === selectedCorporateActionId);
   const [drawingRequest, setDrawingRequest] = useState<DrawingRequest>(null);
   const [clearNonce, setClearNonce] = useState(0);
   const [drawingsRestoreNonce, setDrawingsRestoreNonce] = useState(0);
@@ -541,7 +545,10 @@ export function ReviewChartPreview({
             hidePrice={false}
             enableCandleContextMenu={false}
       onDecisionSelect={() => undefined}
-      onCorporateActionSelect={onCorporateActionSelect}
+      onCorporateActionSelect={(id) => {
+        setSelectedCorporateActionId(id);
+        onCorporateActionSelect(id);
+      }}
             onProtectionPriceSelect={() => undefined}
             onProtectionLineMove={() => false}
             onCandleContextMenu={() => undefined}
@@ -551,9 +558,16 @@ export function ReviewChartPreview({
           {loading && <div className="review-chart-state">正在准备训练行情…</div>}
           {!loading && error && <div className="review-chart-state error" role="alert">{error}</div>}
           {!loading && !error && !bars.length && <div className="review-chart-state">暂无可预览的 K 线</div>}
+          {selectedCorporateAction && (
+            <div className="corporate-action-card" role="status">
+              <div><span>权息事件 · {selectedCorporateAction.label}</span><strong>{selectedCorporateAction.date}</strong></div>
+              <p>{selectedCorporateAction.description}</p>
+            </div>
+          )}
           <div className="review-chart-watermark">REVIEW · READ ONLY · {displayTimezoneLabel}</div>
         </div>
       </div>
+      {!loading && corporateActionsError && <p role="alert" className="rule-notice">{corporateActionsError}</p>}
       <footer className="review-chart-preview-note">图表以查看为主；左侧标记仅用于本次复盘，不会修改训练记录。</footer>
     </article>
   );

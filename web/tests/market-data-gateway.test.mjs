@@ -184,3 +184,18 @@ test("preserves the market onboarding storage key and cleans malformed data", ()
   assert.equal(gateway.loadOnboardingPlan(), null);
   assert.equal(storage.getItem(marketDataStorageKeys.onboarding), null);
 });
+
+
+test("marketDataGateway supports repair mode when starting US market sync", async () => {
+  const requests = [];
+  const gateway = createMarketDataGateway(async (input, init) => {
+    requests.push({ input, init });
+    return response({ payload: { run: { id: "repair-run", mode: "repair", status: "running" } } });
+  });
+
+  const result = await gateway.startMarketSync("US", "repair");
+  assert.equal(requests[0].input, "/api/data-jobs/market/sync");
+  assert.equal(requests[0].init.method, "POST");
+  assert.deepEqual(JSON.parse(requests[0].init.body), { market: "US", mode: "repair" });
+  assert.equal(result.run.mode, "repair");
+});

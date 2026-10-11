@@ -33,7 +33,7 @@ export async function POST(request: Request) {
   try {
     const payload = await request.json().catch(() => ({})) as {
       market?: string;
-      mode?: "initialize" | "update";
+      mode?: "initialize" | "update" | "repair";
       instrumentIds?: string[];
       startDate?: string;
       endDate?: string;
@@ -41,7 +41,7 @@ export async function POST(request: Request) {
     if (payload.market && payload.market !== "US") {
       return Response.json({ error: "美股同步接口只支持 US" }, { status: 400 });
     }
-    if (payload.mode !== "initialize" && payload.mode !== "update") {
+    if (payload.mode !== "initialize" && payload.mode !== "update" && payload.mode !== "repair") {
       return Response.json({ error: "缺少有效的同步模式" }, { status: 400 });
     }
     const result = await createMarketSyncRun({

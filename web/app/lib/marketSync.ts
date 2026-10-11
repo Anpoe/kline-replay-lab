@@ -9,8 +9,9 @@ export const US_SYNC_MAX_URL_LENGTH = 6_500;
 export const US_SYNC_REQUEST_SPACING_MS = 400;
 export const US_SYNC_MAX_CONCURRENT_BATCHES = 2;
 export const US_SYNC_MAX_ATTEMPTS = 5;
+export const US_SYNC_INCREMENTAL_LOOKBACK_DAYS = 7;
 
-export type MarketSyncMode = "initialize" | "update";
+export type MarketSyncMode = "initialize" | "update" | "repair";
 
 export function isMarketSyncRunTerminal(input: {
   queuedBatches: number;
