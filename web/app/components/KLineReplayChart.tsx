@@ -1,5 +1,7 @@
 "use client";
 
+import { incrementalBarUpdates } from "../lib/chartBarUpdates.mjs";
+
 import {
   useCallback,
   useEffect,
@@ -50,6 +52,10 @@ export type TradeMarker = {
   exitTimestamp?: number;
   realizedPnl?: number;
   hovered?: boolean;
+  entryPlotTimestamp?: number;
+  exitPlotTimestamp?: number;
+  eventKind?: "entry" | "exit";
+  clickable?: boolean;
 };
 
 export type DecisionMarker = {
@@ -129,6 +135,7 @@ let tradeOverlayRegistered = false;
 let decisionOverlayRegistered = false;
 let trainingDrawingOverlaysRegistered = false;
 let protectionLineOverlayRegistered = false;
+let candleCountdownOverlayRegistered = false;
 let selectedTrainingTextId = "";
 
 type FigureStyleBag = {
@@ -519,6 +526,34 @@ function ensureProtectionLineOverlay(registerOverlay: (template: OverlayTemplate
   protectionLineOverlayRegistered = true;
 }
 
+function ensureCandleCountdownOverlay(registerOverlay: (template: OverlayTemplate) => void) {
+  if (candleCountdownOverlayRegistered) return;
+  registerOverlay({
+    name: "liveCandleCountdown", totalStep: 2,
+    needDefaultPointFigure: false, needDefaultXAxisFigure: false, needDefaultYAxisFigure: false,
+    createPointFigures: ({ overlay, coordinates, bounding }) => {
+      const point = coordinates[0], data = overlay.extendData as { text: string; color: string } | undefined;
+      if (!point || !data || point.x < 0 || point.x > bounding.width || point.y < 0 || point.y > bounding.height) return [];
+      return [{ type: "text", attrs: {
+        x: Math.max(4, Math.min(point.x + 20, bounding.width - Math.max(44, data.text.length * 9))),
+        y: Math.max(4, Math.min(point.y + 8, bounding.height - 20)), text: data.text, align: "left", baseline: "top",
+      }, styles: { color: data.color, size: 14, weight: 600, backgroundColor: "transparent", borderColor: "transparent", borderSize: 0,
+        paddingLeft: 0, paddingRight: 0, paddingTop: 0, paddingBottom: 0 }, ignoreEvent: overlayIgnoreEvents }];
+    },
+  });
+  candleCountdownOverlayRegistered = true;
+}
+
+function syncCandleCountdown(chart: Chart, text: string | null | undefined) {
+  const id = "live-candle-countdown", bar = chart.getDataList().at(-1);
+  if (!text || !bar) { chart.removeOverlay({ id }); return; }
+  const overlay = { id, name: "liveCandleCountdown", groupId: "live-candle-status", paneId: PRICE_INDICATOR_PANE,
+    points: [{ timestamp: bar.timestamp, value: bar.close }], lock: true, visible: true,
+    extendData: { text, color: getComputedStyle(document.documentElement).getPropertyValue("--accent").trim() } };
+  if (chart.getOverlays({ id }).length) chart.overrideOverlay(overlay);
+  else chart.createOverlay(overlay);
+}
+
 function wheelZoomScale(event: WheelEvent, viewportHeight: number) {
   const delta = event.deltaY * (event.deltaMode === WheelEvent.DOM_DELTA_LINE
     ? 32
@@ -547,16 +582,17 @@ function ensureTradeOverlay(registerOverlay: (template: OverlayTemplate<TradeOve
       const tagAlpha = trade.hovered ? "ff" : "86";
       const pointAlpha = trade.hovered ? "ff" : "78";
       const lineAlpha = trade.hovered ? "9a" : "34";
-      const entryText = (isLong ? "买" : "卖") + " " + (trade.entryQty ?? trade.qty);
+      const ignored = trade.clickable ? overlayIgnoreEvents.filter(event => event !== "onClick") : overlayIgnoreEvents;
+      const entryText = trade.eventKind === "exit" ? "平 " + (trade.realizedPnl ?? 0).toFixed(2) : (isLong ? "买" : "卖") + " " + (trade.entryQty ?? trade.qty);
       const figures: OverlayFigure[] = [
         {
-          type: "circle",
+          key: "entry-point", type: "circle",
           attrs: { x: entry.x, y: entry.y, r: 4 },
           styles: { style: "stroke_fill", color: "#0c1416", borderColor: entryColor + pointAlpha, borderSize: 2 },
-          ignoreEvent: overlayIgnoreEvents,
+          ignoreEvent: ignored,
         },
         {
-          type: "text",
+          key: "entry-label", type: "text",
           attrs: {
             x: entry.x,
             y: entry.y + (isLong ? 14 : -14),
@@ -575,7 +611,7 @@ function ensureTradeOverlay(registerOverlay: (template: OverlayTemplate<TradeOve
             paddingTop: 3,
             paddingBottom: 3,
           },
-          ignoreEvent: overlayIgnoreEvents,
+          ignoreEvent: ignored,
         },
       ];
 
@@ -587,17 +623,17 @@ function ensureTradeOverlay(registerOverlay: (template: OverlayTemplate<TradeOve
           type: "line",
           attrs: { coordinates: [entry, exit] },
           styles: { style: "dashed", size: 1, color: "#d6e7e3" + lineAlpha, dashedValue: [5, 5] },
-          ignoreEvent: overlayIgnoreEvents,
+          ignoreEvent: ignored,
         });
         figures.push(
           {
-            type: "circle",
+            key: "exit-point", type: "circle",
             attrs: { x: exit.x, y: exit.y, r: 4 },
             styles: { style: "stroke_fill", color: "#0c1416", borderColor: "#d9e8e4" + pointAlpha, borderSize: 2 },
-            ignoreEvent: overlayIgnoreEvents,
+            ignoreEvent: ignored,
           },
           {
-            type: "text",
+            key: "exit-label", type: "text",
             attrs: {
               x: exit.x,
               y: exit.y + (isLong ? -14 : 14),
@@ -616,7 +652,7 @@ function ensureTradeOverlay(registerOverlay: (template: OverlayTemplate<TradeOve
               paddingTop: 3,
               paddingBottom: 3,
             },
-            ignoreEvent: overlayIgnoreEvents,
+            ignoreEvent: ignored,
           },
         );
       }
@@ -749,18 +785,19 @@ function ensureCorporateActionOverlay(registerOverlay: (template: OverlayTemplat
   corporateActionOverlayRegistered = true;
 }
 
-function syncTradeMarkers(chart: Chart, tradeMarkers: TradeMarker[]) {
+function syncTradeMarkers(chart: Chart, tradeMarkers: TradeMarker[], onSelect?: (id: string, event: "entry" | "exit") => void) {
   chart.removeOverlay({ groupId: TRADE_MARKER_GROUP });
   tradeMarkers.forEach((trade) => {
-    const points = [{ timestamp: trade.entryTimestamp, value: trade.entryPrice }];
+    const points = [{ timestamp: trade.entryPlotTimestamp ?? trade.entryTimestamp, value: trade.entryPrice }];
     if (trade.exitTimestamp != null && trade.exitPrice != null) {
-      points.push({ timestamp: trade.exitTimestamp, value: trade.exitPrice });
+      points.push({ timestamp: trade.exitPlotTimestamp ?? trade.exitTimestamp, value: trade.exitPrice });
     }
     chart.createOverlay({
       name: "tradeLifecycle",
       groupId: TRADE_MARKER_GROUP,
       points,
-      extendData: trade,
+      extendData: { ...trade, clickable: !!onSelect },
+      onClick: onSelect ? ({ figure }) => { onSelect(trade.id, trade.eventKind === "exit" || figure?.key?.startsWith("exit") ? "exit" : "entry"); return true; } : undefined,
       lock: true,
       zLevel: 30,
     });
@@ -773,7 +810,7 @@ function tradeMarkerSignature(tradeMarkers: TradeMarker[]) {
     trade.side,
     trade.qty,
     trade.entryQty ?? trade.qty,
-    trade.entryTimestamp,
+    trade.entryTimestamp, trade.entryPlotTimestamp, trade.exitPlotTimestamp, trade.eventKind,
     trade.entryPrice,
     trade.exitTimestamp ?? "",
     trade.exitPrice ?? "",
@@ -979,6 +1016,7 @@ const periods: Record<TimeframeId, Period> = {
 };
 
 export function KLineReplayChart({
+  liveUpdates = false,
   bars,
   dataIndexOffset,
   symbol,
@@ -1000,6 +1038,10 @@ export function KLineReplayChart({
   hideDate,
   hidePrice,
   enableCandleContextMenu = true,
+  latestCandleCountdown,
+  enableChartShift = false,
+  focusTimestamp,
+  onTradeSelect,
   onDecisionSelect,
   onCorporateActionSelect,
   onProtectionPriceSelect,
@@ -1008,6 +1050,7 @@ export function KLineReplayChart({
   onDrawingsChange,
   onDrawingSelect,
 }: {
+  liveUpdates?: boolean;
   bars: KLineData[];
   dataIndexOffset: number;
   symbol: string;
@@ -1029,6 +1072,10 @@ export function KLineReplayChart({
   hideDate: boolean;
   hidePrice: boolean;
   enableCandleContextMenu?: boolean;
+  latestCandleCountdown?: string | null;
+  enableChartShift?: boolean;
+  focusTimestamp?: number;
+  onTradeSelect?: (id: string, event: "entry" | "exit") => void;
   onDecisionSelect: (id: string) => void;
   onCorporateActionSelect: (id: string) => void;
   onProtectionPriceSelect: (kind: PriceSelectionMode, price: number) => void;
@@ -1039,9 +1086,11 @@ export function KLineReplayChart({
 }) {
   const containerRef = useRef<HTMLDivElement>(null);
   const chartRef = useRef<Chart | null>(null);
+  const focusAppliedRef = useRef('');
   const preservedBarSpaceRef = useRef<number | null>(null);
   const refreshZoomAppliedRef = useRef(false);
   const barsRef = useRef<KLineData[]>(bars);
+  const countdownRef = useRef(latestCandleCountdown);
   const appliedBarsRef = useRef<KLineData[]>([]);
   const updateBarRef = useRef<((bar: KLineData) => void) | null>(null);
   const dataIndexOffsetRef = useRef(dataIndexOffset);
@@ -1057,6 +1106,8 @@ export function KLineReplayChart({
   const movingAverageSettingsRef = useRef(movingAverageSettings);
   const macdSettingsRef = useRef(macdSettings);
   const onDecisionSelectRef = useRef(onDecisionSelect);
+  const onTradeSelectRef = useRef(onTradeSelect);
+  useEffect(() => { onTradeSelectRef.current = onTradeSelect; }, [onTradeSelect]);
   const onCorporateActionSelectRef = useRef(onCorporateActionSelect);
   const onProtectionPriceSelectRef = useRef(onProtectionPriceSelect);
   const onProtectionLineMoveRef = useRef(onProtectionLineMove);
@@ -1068,6 +1119,38 @@ export function KLineReplayChart({
   const touchStartRef = useRef<{ x: number; y: number } | null>(null);
   const lastContextTriggerRef = useRef<{ timestamp: number; triggeredAt: number } | null>(null);
   const [drawingActive, setDrawingActive] = useState(false);
+  const shiftPercentRef = useRef(20);
+  const followLatestRef = useRef(true);
+  const applyingViewportRef = useRef(false);
+  const [shiftHandle, setShiftHandle] = useState({ x: 0, percent: 20 });
+
+  const alignViewport = useCallback((chart: Chart) => {
+    if (focusTimestamp && chart.getDataList().length && barsRef.current.some(bar => Math.abs(bar.timestamp - focusTimestamp) < 32 * 86400000)) {
+      const focusKey = `${symbol}:${timeframe}:${focusTimestamp}`;
+      const width = chart.getSize(PRICE_INDICATOR_PANE, 'main')?.width ?? 0;
+      if (width && focusAppliedRef.current !== focusKey) {
+        followLatestRef.current = false; applyingViewportRef.current = true;
+        chart.scrollToTimestamp(focusTimestamp, 0); chart.scrollByDistance(-width * 0.4, 0);
+        focusAppliedRef.current = focusKey; applyingViewportRef.current = false;
+      }
+      return;
+    }
+    if (!enableChartShift) { alignLatestCandle(chart); return; }
+    const width = chart.getSize(PRICE_INDICATOR_PANE, "main")?.width ?? 0;
+    if (!width) return;
+    setShiftHandle({ x: width * (1 - shiftPercentRef.current / 100), percent: shiftPercentRef.current });
+    if (!followLatestRef.current) return;
+    applyingViewportRef.current = true;
+    chart.setOffsetRightDistance(width * shiftPercentRef.current / 100);
+    chart.scrollToRealTime();
+    applyingViewportRef.current = false;
+  }, [enableChartShift, focusTimestamp, symbol, timeframe]);
+
+  const changeChartShift = (percent: number) => {
+    shiftPercentRef.current = Math.max(5, Math.min(50, percent));
+    followLatestRef.current = true;
+    if (chartRef.current) alignViewport(chartRef.current);
+  };
 
   useEffect(() => {
     dataIndexOffsetRef.current = dataIndexOffset;
@@ -1089,8 +1172,8 @@ export function KLineReplayChart({
     } else if (preservedBarSpaceRef.current != null) {
       chart.setBarSpace(preservedBarSpaceRef.current);
     }
-    alignLatestCandle(chart);
-  }, []);
+    alignViewport(chart);
+  }, [alignViewport]);
 
   const createPersistedDrawing = useCallback((chart: Chart, drawing: PersistedDrawing) => chart.createOverlay({
     id: drawing.id,
@@ -1163,6 +1246,7 @@ export function KLineReplayChart({
       if (cancelled || !containerRef.current) return;
       ensureTradeOverlay(registerOverlay);
       ensureProtectionLineOverlay(registerOverlay);
+      ensureCandleCountdownOverlay(registerOverlay);
       ensureDecisionOverlay(registerOverlay);
       ensureCorporateActionOverlay(registerOverlay);
       ensureTrainingDrawingOverlays(registerOverlay);
@@ -1231,6 +1315,7 @@ export function KLineReplayChart({
       });
       if (!chart) return;
       chartRef.current = chart;
+      focusAppliedRef.current = '';
       chart.setSymbol({ ticker: symbol, pricePrecision, volumePrecision: 0 });
       chart.setPeriod(periods[timeframe as TimeframeId] ?? periods["1d"]);
       chart.setDataLoader({
@@ -1277,7 +1362,7 @@ export function KLineReplayChart({
       chart.createIndicator("VOL", false);
       syncMovingAverageIndicators(chart, movingAverageSettingsRef.current);
       syncMacdIndicator(chart, macdSettingsRef.current);
-      syncTradeMarkers(chart, tradeMarkersRef.current);
+      syncTradeMarkers(chart, tradeMarkersRef.current, onTradeSelectRef.current ? (id, event) => onTradeSelectRef.current?.(id,event) : undefined);
       syncedTradeMarkersRef.current = tradeMarkerSignature(tradeMarkersRef.current);
       syncDecisionMarkers(chart, decisionMarkersRef.current, (id) => onDecisionSelectRef.current(id));
       syncedDecisionMarkersRef.current = decisionMarkerSignature(decisionMarkersRef.current);
@@ -1288,14 +1373,21 @@ export function KLineReplayChart({
       restoreDrawings(chart, drawingsRef.current);
       const preserveCurrentZoom = () => {
         preservedBarSpaceRef.current = chart.getBarSpace().bar;
+        if (enableChartShift && !applyingViewportRef.current) followLatestRef.current = false;
       };
+      const preserveManualScroll = () => { if (enableChartShift && !applyingViewportRef.current) followLatestRef.current = false; };
       chart.subscribeAction("onZoom", preserveCurrentZoom);
-      requestAnimationFrame(() => applyResponsiveViewport(chart, true));
+      if (enableChartShift) chart.subscribeAction("onScroll", preserveManualScroll);
+      const shiftResize = enableChartShift ? new ResizeObserver(() => requestAnimationFrame(() => alignViewport(chart))) : null;
+      shiftResize?.observe(chartContainer);
+      requestAnimationFrame(() => { applyResponsiveViewport(chart, true); syncCandleCountdown(chart, countdownRef.current); });
 
       disposeChart = () => {
         preservedBarSpaceRef.current = chart.getBarSpace().bar;
         chartContainer.removeEventListener("wheel", handleWheelZoom, { capture: true });
         chart.unsubscribeAction("onZoom", preserveCurrentZoom);
+        if (enableChartShift) chart.unsubscribeAction("onScroll", preserveManualScroll);
+        shiftResize?.disconnect();
         chart.unsubscribeAction("onCrosshairChange", handleCorporateActionCrosshair);
         onCorporateActionSelectRef.current("");
         dispose(chart);
@@ -1313,7 +1405,7 @@ export function KLineReplayChart({
       syncedCorporateActionMarkersRef.current = "";
       syncedProtectionLinesRef.current = "";
     };
-  }, [applyResponsiveViewport, hideDate, hidePrice, pricePrecision, restoreDrawings, symbol, timeframe, timezone]);
+  }, [alignViewport, applyResponsiveViewport, enableChartShift, hideDate, hidePrice, pricePrecision, restoreDrawings, symbol, timeframe, timezone]);
 
   useEffect(() => {
     barsRef.current = bars;
@@ -1322,6 +1414,30 @@ export function KLineReplayChart({
     const barSpaceBeforeUpdate = chart.getBarSpace().bar;
     preservedBarSpaceRef.current = barSpaceBeforeUpdate;
     const previouslyApplied = appliedBarsRef.current;
+    const visibleBefore = chart.getVisibleRange();
+    const anchorIndex = Math.max(0, Math.min(previouslyApplied.length - 1, Math.floor(visibleBefore.realTo)));
+    const anchorTimestamp = previouslyApplied[anchorIndex]?.timestamp;
+    const restoreViewport = () => {
+      if (!enableChartShift || followLatestRef.current) { alignViewport(chart); return; }
+      const nextAnchorIndex = bars.findIndex(bar => bar.timestamp === anchorTimestamp);
+      if (nextAnchorIndex < 0) return;
+      applyingViewportRef.current = true;
+      const desiredRight = nextAnchorIndex + visibleBefore.realTo - anchorIndex;
+      chart.scrollByDistance((chart.getVisibleRange().realTo - desiredRight) * barSpaceBeforeUpdate);
+      applyingViewportRef.current = false;
+    };
+    if (liveUpdates && updateBarRef.current) {
+      const updates = incrementalBarUpdates(previouslyApplied, bars);
+      if (updates) {
+        updates.forEach(bar => updateBarRef.current?.(bar));
+        appliedBarsRef.current = [...bars];
+        if (updates.length) requestAnimationFrame(() => {
+          if (chartRef.current !== chart) return;
+          chart.resize(); chart.setBarSpace(barSpaceBeforeUpdate); restoreViewport();
+        });
+        return;
+      }
+    }
     const samePrefix = previouslyApplied.length <= bars.length
       && previouslyApplied.every((bar, index) => bar.timestamp === bars[index]?.timestamp);
     const appendedBars = samePrefix ? bars.slice(previouslyApplied.length) : [];
@@ -1367,19 +1483,25 @@ export function KLineReplayChart({
       // a trade marker and the price axis continue to move.
       chart.resize();
       chart.setBarSpace(barSpaceBeforeUpdate);
-      alignLatestCandle(chart);
+      restoreViewport();
       requestAnimationFrame(() => {
         chart.resize();
         chart.setBarSpace(barSpaceBeforeUpdate);
-        alignLatestCandle(chart);
+        restoreViewport();
       });
     });
-  }, [bars]);
+  }, [alignViewport, bars, enableChartShift, liveUpdates]);
 
   useEffect(() => {
     movingAverageSettingsRef.current = movingAverageSettings;
     if (chartRef.current) syncMovingAverageIndicators(chartRef.current, movingAverageSettings);
   }, [movingAverageSettings]);
+
+  useEffect(() => {
+    countdownRef.current = latestCandleCountdown;
+    const frame = requestAnimationFrame(() => { if (chartRef.current) syncCandleCountdown(chartRef.current, latestCandleCountdown); });
+    return () => cancelAnimationFrame(frame);
+  }, [latestCandleCountdown, bars]);
 
   useEffect(() => {
     macdSettingsRef.current = macdSettings;
@@ -1391,24 +1513,24 @@ export function KLineReplayChart({
     const handleViewportChange = () => {
       const chart = chartRef.current;
       if (!chart) return;
-      requestAnimationFrame(() => alignLatestCandle(chart));
+      requestAnimationFrame(() => alignViewport(chart));
     };
 
     mobileQuery.addEventListener("change", handleViewportChange);
     return () => mobileQuery.removeEventListener("change", handleViewportChange);
-  }, []);
+  }, [alignViewport]);
 
   useEffect(() => {
     tradeMarkersRef.current = tradeMarkers;
     const signature = tradeMarkerSignature(tradeMarkers);
     if (chartRef.current && signature !== syncedTradeMarkersRef.current) {
-      syncTradeMarkers(chartRef.current, tradeMarkers);
+      syncTradeMarkers(chartRef.current, tradeMarkers, onTradeSelectRef.current ? (id, event) => onTradeSelectRef.current?.(id,event) : undefined);
       syncedTradeMarkersRef.current = signature;
       requestAnimationFrame(() => {
-        if (chartRef.current) alignLatestCandle(chartRef.current);
+        if (chartRef.current) alignViewport(chartRef.current);
       });
     }
-  }, [tradeMarkers]);
+  }, [alignViewport, tradeMarkers]);
 
   useEffect(() => {
     decisionMarkersRef.current = decisionMarkers;
@@ -1698,7 +1820,7 @@ export function KLineReplayChart({
       ? "止盈"
       : "触发价";
 
-  return <div
+  return <><div
     ref={containerRef}
     className={`chart-canvas${drawingActive ? " drawing-active" : ""}${priceSelectionMode ? " price-selecting" : ""}`}
     aria-label={drawingActive
@@ -1723,7 +1845,21 @@ export function KLineReplayChart({
       cancelLongPress();
       onCorporateActionSelectRef.current("");
     }}
-  />;
+  />{enableChartShift && shiftHandle.x > 0 && <button className="chart-shift-handle" style={{ left: shiftHandle.x }}
+    role="slider" aria-label="平移图表" aria-valuemin={50} aria-valuemax={95} aria-valuenow={100 - shiftHandle.percent}
+    aria-valuetext={`右侧留白 ${Math.round(shiftHandle.percent)}%`} title="左右拖动调整右侧留白；方向键微调，双击恢复"
+    onPointerDown={event => { event.preventDefault(); event.currentTarget.setPointerCapture(event.pointerId); }}
+    onPointerMove={event => {
+      if (!event.currentTarget.hasPointerCapture(event.pointerId) || !chartRef.current || !containerRef.current) return;
+      const width = chartRef.current.getSize(PRICE_INDICATOR_PANE, "main")?.width ?? 0;
+      if (width) changeChartShift(100 * (1 - (event.clientX - containerRef.current.getBoundingClientRect().left) / width));
+    }}
+    onPointerUp={event => { if (event.currentTarget.hasPointerCapture(event.pointerId)) event.currentTarget.releasePointerCapture(event.pointerId); }}
+    onDoubleClick={() => changeChartShift(20)} onKeyDown={event => {
+      if (["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) {
+        event.preventDefault(); changeChartShift(event.key === "Home" ? 50 : event.key === "End" ? 5 : shiftPercentRef.current + (event.key === "ArrowLeft" ? 2 : -2));
+      }
+    }} />}</>;
 }
 
 function syncCorporateActionMarkers(

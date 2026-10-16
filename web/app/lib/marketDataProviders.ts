@@ -195,25 +195,26 @@ function retryDelayMs(response: Response | null, attempt: number) {
   return Math.min(30_000, 500 * (2 ** attempt) + Math.floor(Math.random() * 250));
 }
 
-function errorMessage(payload: { message?: string }, status: number) {
-  return payload.message || `Alpaca 请求失败：HTTP ${status}`;
+function errorMessage(payload: unknown, status: number) {
+  if (status === 401) return "Alpaca 连接凭证无效，请到数据设置检查访问密钥后重试";
+  const message = payload && typeof payload === "object" && "message" in payload ? payload.message : null;
+  return typeof message === "string" && message ? message : `Alpaca 请求失败：HTTP ${status}`;
 }
 
 function isRetryableAlpacaStatus(status: number) {
   return status === 429 || status >= 500;
 }
 
-async function fetchAlpacaJson<T extends { message?: string }>(
+export async function fetchAlpacaJson<T>(
   url: string,
   init: RequestInit,
   fetcher: typeof fetch,
   timeoutMs = 30_000,
 ) {
-  let lastError: unknown;
   for (let attempt = 0; attempt < 5; attempt += 1) {
     let response: Response | null = null;
+    const controller = new AbortController();
     try {
-      const controller = new AbortController();
       const timeout = setTimeout(() => controller.abort(), timeoutMs);
       try {
         response = await fetcher(url, { ...init, signal: controller.signal });
@@ -224,21 +225,29 @@ async function fetchAlpacaJson<T extends { message?: string }>(
           if (response.ok) throw error;
           payload = {} as T;
         }
-        if (response.ok) return { response, payload };
+        if (response.ok) {
+          if (payload === null || typeof payload !== "object") {
+            throw new AlpacaApiError("Alpaca 行情数据为空或无效，请稍后重试", 502);
+          }
+          return { response, payload };
+        }
         const error = new AlpacaApiError(errorMessage(payload, response.status), response.status);
         if (!isRetryableAlpacaStatus(response.status) || attempt === 4) throw error;
-        lastError = error;
       } finally {
         clearTimeout(timeout);
       }
     } catch (error) {
       if (error instanceof AlpacaApiError && !isRetryableAlpacaStatus(error.status)) throw error;
-      lastError = error;
-      if (attempt === 4) throw error;
+      if (attempt === 4) {
+        if (error instanceof AlpacaApiError) throw error;
+        throw new AlpacaApiError(controller.signal.aborted
+          ? "连接 Alpaca 数据服务超时，请检查网络连接后重试"
+          : "无法连接 Alpaca 数据服务，请检查网络或代理设置后重试", 502);
+      }
     }
     await new Promise((resolve) => setTimeout(resolve, retryDelayMs(response, attempt)));
   }
-  throw lastError instanceof Error ? lastError : new Error("Alpaca 请求失败");
+  throw new AlpacaApiError("Alpaca 数据服务暂不可用，请稍后重试", 502);
 }
 
 function finiteOrNull(value: unknown) {

@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
   AlpacaApiError,
+  fetchAlpacaJson,
   fetchAlpacaMultiSymbolChunk,
   fetchProviderChunk,
   filterTradableUsAssets,
@@ -9,6 +10,56 @@ import {
   normalizeTusharePayload,
   validateCandles,
 } from "../app/lib/marketDataProviders.ts";
+
+test("美股目录与日历请求共用有界重试，短暂断线后仍返回有效数组", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  let attempts = 0;
+  const pending = fetchAlpacaJson("https://api.alpaca.markets/v2/calendar", {}, async () => {
+    if (++attempts === 1) throw new TypeError("fetch failed");
+    return Response.json([{ date: "2026-10-14" }]);
+  });
+  await new Promise(setImmediate);
+  t.mock.timers.tick(2_000);
+  const { payload } = await pending;
+  assert.deepEqual(payload, [{ date: "2026-10-14" }]);
+  assert.equal(attempts, 2);
+});
+
+test("美股连接持续失败时返回恢复指引并限制请求次数", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  let attempts = 0;
+  const pending = assert.rejects(fetchAlpacaJson("https://api.alpaca.markets/v2/calendar", {}, async () => {
+    attempts += 1;
+    throw new TypeError("fetch failed", { cause: { code: "ENOTFOUND" } });
+  }), /无法连接.*Alpaca.*网络.*重试/);
+  for (let index = 0; index < 5; index += 1) {
+    await new Promise(setImmediate);
+    t.mock.timers.tick(30_000);
+  }
+  await pending;
+  assert.equal(attempts, 5);
+});
+
+test("美股请求超时可中断，凭证错误直接提示重新配置且不重试", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  let attempts = 0;
+  const pending = assert.rejects(fetchAlpacaJson("https://api.alpaca.markets/v2/calendar", {}, async (_url, init) => {
+    attempts += 1;
+    return new Promise((_resolve, reject) => init.signal.addEventListener("abort", () => reject(init.signal.reason), { once: true }));
+  }, 20), /连接.*超时.*重试/);
+  for (let index = 0; index < 10; index += 1) {
+    await new Promise(setImmediate);
+    t.mock.timers.tick(30_000);
+  }
+  await pending;
+  assert.equal(attempts, 5);
+  attempts = 0;
+  await assert.rejects(fetchAlpacaJson("https://api.alpaca.markets/v2/assets", {}, async () => {
+    attempts += 1;
+    return Response.json({ message: "unauthorized" }, { status: 401 });
+  }), /连接凭证.*数据.*设置/);
+  assert.equal(attempts, 1);
+});
 
 test("Tushare daily 仍保留为不复权旧接口并换算 A 股成交量单位", () => {
   const result = normalizeTusharePayload({

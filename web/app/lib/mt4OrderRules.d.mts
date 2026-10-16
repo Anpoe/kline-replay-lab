@@ -1,0 +1,2 @@
+export function riskSizedMt4Lots(input: { balance: number; riskPercent: number; entryPrice: number; stopLoss: number; symbol: { tickValue: number; tickSize: number; minLot: number; maxLot: number; lotStep: number } }): { lots: number; riskBudget: number; estimatedRisk: number };
+export function checkMt4OpeningGap(input: { previousClose: number; openingPrice: number; mode: "off" | "high" | "low"; unit: "percent" | "price"; threshold: number }): void;

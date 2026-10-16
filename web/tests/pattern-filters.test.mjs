@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { matchesLatestPattern } from "../local-data/pattern-scan.mjs";
 
 import {
   defaultPatternPresets,
@@ -13,6 +14,80 @@ import {
 
 const candle = (timestamp, open, high, low, close, volume = 100) => ({ timestamp, open, high, low, close, volume });
 const breakout = defaultPatternPresets.find((preset) => preset.id === "breakout");
+
+const standardDeviationBars = (closes, breakoutClose) => [...closes, breakoutClose]
+  .map((close, index) => candle(index, close, close + 0.1, close - 0.1, close, 100));
+const standardDeviationPreset = (parameters = {}) => ({
+  ...breakout,
+  parameters: { ...breakout.parameters, lookback: 5, minimumBreakoutPct: 0, ...parameters },
+});
+
+test("breakout standard deviation settings default off and survive normalization", () => {
+  const preset = normalizePatternPresets([{
+    ...breakout,
+    parameters: { lookback: 5, minimumBreakoutPct: 0, volumeMultiplier: 0 },
+  }]).find((item) => item.id === "breakout");
+  assert.equal(preset.parameters.maximumRangeStdDevPct, 0);
+  assert.equal(preset.parameters.minimumBreakoutStdDev, 0);
+  const restored = normalizePatternPresets([standardDeviationPreset({
+    maximumRangeStdDevPct: 1.5, minimumBreakoutStdDev: 2,
+  })]).find((item) => item.id === "breakout");
+  assert.equal(restored.parameters.maximumRangeStdDevPct, 1.5);
+  assert.equal(restored.parameters.minimumBreakoutStdDev, 2);
+  const clamped = normalizePatternPresets([standardDeviationPreset({
+    maximumRangeStdDevPct: -1, minimumBreakoutStdDev: 999,
+  })]).find((item) => item.id === "breakout");
+  assert.equal(clamped.parameters.maximumRangeStdDevPct, 0);
+  assert.equal(clamped.parameters.minimumBreakoutStdDev, 10);
+});
+
+for (const [name, evaluate] of [
+  ["training", (bars, preset) => matchesPattern(bars, bars.length - 1, preset)],
+  ["local scanner", matchesLatestPattern],
+]) {
+  test(`${name}: breakout range standard deviation uses prior closes relative to their mean`, () => {
+    // Population standard deviation is sqrt(0.8), mean is 100, CV is about 0.8944%.
+    const bars = standardDeviationBars([99, 101, 99, 101, 100], 103);
+    const preset = standardDeviationPreset({ maximumRangeStdDevPct: 1 });
+    assert.equal(evaluate(bars, preset), true);
+    assert.equal(evaluate(bars, standardDeviationPreset({ maximumRangeStdDevPct: 0.8 })), false);
+    assert.equal(evaluate(bars.map((bar) => Object.fromEntries(Object.entries(bar)
+      .map(([key, value]) => [key, ["open", "high", "low", "close"].includes(key) ? value * 10 : value]))), preset), true);
+    assert.equal(evaluate(standardDeviationBars([99, 101, 99, 101, 100], 200), preset), true);
+  });
+
+  test(`${name}: breakout distance must satisfy both percentage and standard deviation gates in either direction`, () => {
+    const settings = { minimumBreakoutStdDev: 1 };
+    assert.equal(evaluate(standardDeviationBars([99, 101, 99, 101, 100], 101.5), standardDeviationPreset(settings)), false);
+    assert.equal(evaluate(standardDeviationBars([99, 101, 99, 101, 100], 102.5), standardDeviationPreset(settings)), true);
+    assert.equal(evaluate(standardDeviationBars([99, 101, 99, 101, 100], 98.5), standardDeviationPreset(settings)), false);
+    assert.equal(evaluate(standardDeviationBars([99, 101, 99, 101, 100], 97.5), standardDeviationPreset(settings)), true);
+    assert.equal(evaluate(standardDeviationBars([99, 101, 99, 101, 100], 102.5),
+      standardDeviationPreset({ ...settings, minimumBreakoutPct: 2 })), false);
+    assert.equal(evaluate(standardDeviationBars([99, 101, 99, 101, 100], 102.5),
+      standardDeviationPreset({ ...settings, maximumRangeStdDevPct: 0.8 })), false);
+  });
+
+  test(`${name}: flat ranges, disabled filters and insufficient history retain existing breakout rules`, () => {
+    assert.equal(evaluate(standardDeviationBars([100, 100, 100, 100, 100], 100.2),
+      standardDeviationPreset({ maximumRangeStdDevPct: 0.1, minimumBreakoutStdDev: 2 })), true);
+    assert.equal(evaluate(standardDeviationBars([100, 100, 100, 100, 100], 100.1),
+      standardDeviationPreset({ minimumBreakoutStdDev: 2 })), false);
+    assert.equal(evaluate(standardDeviationBars([99, 101, 99, 101, 100], 101.5), standardDeviationPreset()), true);
+    assert.equal(evaluate(standardDeviationBars([99, 100, 101], 102.5),
+      standardDeviationPreset({ minimumBreakoutStdDev: 1 })), false);
+    const bars = standardDeviationBars([99, 101, 99, 101, 100], 102.5);
+    assert.equal(evaluate(bars, standardDeviationPreset({ minimumBreakoutStdDev: 1, volumeMultiplier: 2 })), false);
+  });
+}
+
+test("historical breakout standard deviation ignores future bars and history outside the lookback", () => {
+  const bars = standardDeviationBars([99, 101, 99, 101, 100], 102.5);
+  const preset = standardDeviationPreset({ maximumRangeStdDevPct: 1, minimumBreakoutStdDev: 1 });
+  assert.equal(matchesPattern([...bars, candle(6, 1000, 1001, 999, 1000)], 5, preset), true);
+  const withEarlier = [candle(-1, 1000, 1001, 999, 1000), ...bars];
+  assert.equal(matchesPattern(withEarlier, 6, preset), true);
+});
 const uptrend = defaultPatternPresets.find((preset) => preset.id === "uptrend");
 const uptrendBreakout = defaultPatternPresets.find((preset) => preset.id === "uptrend-breakout");
 const alwaysInLong = defaultPatternPresets.find((preset) => preset.id === "always-in-long");

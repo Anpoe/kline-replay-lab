@@ -143,7 +143,7 @@ test("BaoStock bridge keeps Windows JSON output ASCII-safe", async (context) => 
       "-c",
       "import sys; sys.path.insert(0, sys.argv[1]); from baostock_bridge import reply; reply(7, True, {'name': '\\u4e0a\\u8bc1\\u7efc\\u5408\\u6307\\u6570'})",
       bridgeDirectory,
-    ], { encoding: "utf8" });
+    ], { encoding: "utf8", windowsHide: true });
     const output = result.stdout.trim();
     assert.match(output, /^[\x00-\x7f]+$/);
     assert.equal(JSON.parse(output).result.name, "上证综合指数");

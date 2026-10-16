@@ -8,7 +8,7 @@ const run = promisify(execFile);
 const root = new URL("../", import.meta.url);
 
 test("客户可见文案不暴露内部方案或调试表达", async () => {
-  const result = await run(process.execPath, ["scripts/check-customer-copy.mjs"], { cwd: root });
+  const result = await run(process.execPath, ["scripts/check-customer-copy.mjs"], { cwd: root, windowsHide: true });
   assert.match(result.stdout, /客户文案检查通过/);
 });
 

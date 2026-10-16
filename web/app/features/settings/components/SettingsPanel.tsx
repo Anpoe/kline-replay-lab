@@ -26,11 +26,13 @@ function SettingsSwitch({
   checked,
   disabled = false,
   label,
+  descriptionId,
   onChange,
 }: {
   checked: boolean;
   disabled?: boolean;
   label: string;
+  descriptionId?: string;
   onChange: () => void;
 }) {
   return (
@@ -38,6 +40,7 @@ function SettingsSwitch({
       type="button"
       role="switch"
       aria-label={label}
+      aria-describedby={descriptionId}
       aria-checked={checked}
       disabled={disabled}
       className={`settings-switch${checked ? " on" : ""}`}
@@ -465,6 +468,14 @@ export function SettingsPanel({
                   <Trash2 size={15} />打开回收站
                 </button>
               </div>
+            </div>
+            <div className="settings-rule mt4-settings-rule">
+              <div className="settings-row-action" title="保存后显示 MT4 导航入口和面板。关闭会保留连接配置、交易档案和绘图，不会平仓或停止 MT4 中的 EA。">
+                <div><span>MT4 功能</span><strong>显示 MT4 面板</strong></div>
+                <SettingsSwitch checked={draft.mt4Enabled} label="显示 MT4 面板" descriptionId="settings-mt4-description"
+                  onChange={() => onDraftChange(next => ({ ...next, mt4Enabled: !next.mt4Enabled }))} />
+              </div>
+              <span id="settings-mt4-description" className="live-sr-only">保存后显示 MT4 导航入口和面板。关闭会保留连接配置、交易档案和绘图，不会平仓或停止 MT4 中的 EA。</span>
             </div>
           </div>
         ) : tab === "training" ? (

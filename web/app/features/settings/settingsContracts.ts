@@ -121,6 +121,7 @@ export const marketOrderQuantityFields: Array<{
 ];
 
 export type AppSettings = {
+  mt4Enabled: boolean;
   defaultInstrumentId: string;
   defaultTimeframe: string;
   defaultOrderQty: number;
@@ -182,6 +183,7 @@ const defaultLiveAccount: LiveAccountDefaults = {
 };
 
 export const defaultAppSettings: AppSettings = {
+  mt4Enabled: false,
   defaultInstrumentId: "600519.SH",
   defaultTimeframe: "1d",
   defaultOrderQty: 100,
@@ -414,6 +416,7 @@ export function normalizeSettings(value: Partial<AppSettings>): AppSettings {
   });
   return {
     ...merged,
+    mt4Enabled: merged.mt4Enabled === true,
     defaultInstrumentId: typeof merged.defaultInstrumentId === "string" && merged.defaultInstrumentId
       ? merged.defaultInstrumentId
       : defaultAppSettings.defaultInstrumentId,

@@ -387,6 +387,8 @@ export function DataSourceManager({
   const [localTask, setLocalTask] = useState<LocalDataTask | null>(null);
   const [localDataset, setLocalDataset] = useState<LocalDatasetStatus | null>(null);
   const [localServiceError, setLocalServiceError] = useState("");
+  const [initializationStatus, setInitializationStatus] = useState<"idle" | "starting" | "failed">("idle");
+  const initializationPendingRef = useRef(false);
   const [catalogTask, setCatalogTask] = useState<CatalogTask | null>(null);
   const [cnMaintenanceTask, setCnMaintenanceTask] = useState<CnMaintenanceTask | null>(null);
   const [fxTask, setFxTask] = useState<FxDataTask | null>(null);
@@ -701,20 +703,34 @@ export function DataSourceManager({
     saved: Record<string, unknown>,
     plan: Record<string, unknown>,
   ) => {
-    setNotice("正在连接本机数据服务并创建可恢复初始化任务……");
+    if (initializationPendingRef.current) return;
+    initializationPendingRef.current = true;
+    setInitializationStatus("starting");
+    setNotice("正在准备训练数据，请稍候……");
     try {
       const result = await marketDataGateway.startLocalInitialization<{ task?: LocalDataTask; error?: string }>(plan);
       if (!result.task) throw new Error(result.error ?? "初始化任务创建失败");
-      marketDataStorageGateway.saveOnboardingPlan(saved);
+      let planSaved = true;
+      try {
+        marketDataStorageGateway.saveOnboardingPlan(saved);
+      } catch {
+        planSaved = false;
+      }
       setSavedPlan(saved);
       setLocalTask(result.task);
       setLocalServiceAvailable(true);
       setLocalServiceError("");
-      setNotice("初始化任务已开始。关闭网页不会丢失进度；再次打开后可以继续查看。");
+      setNotice(planSaved
+        ? "初始化任务已开始。关闭网页不会丢失进度；再次打开后可以继续查看。"
+        : "初始化任务已开始，但浏览器未能保存方案。请在数据维护页查看进度，无需重复启动。");
+      setInitializationStatus("idle");
       setSetupOpenedByUser(false);
       setSetupView("manager");
     } catch (error) {
-      setNotice(normalizeMarketDataError(error, "无法启动本机初始化任务"));
+      setInitializationStatus("failed");
+      setNotice(`初始化启动未确认：${normalizeMarketDataError(error, "暂时无法启动任务")}。请检查数据服务状态后重试；当前选择已保留。`);
+    } finally {
+      initializationPendingRef.current = false;
     }
   };
 
@@ -1256,7 +1272,7 @@ export function DataSourceManager({
   if (effectiveSetupView === "quick") {
     return (
       <section className="data-onboarding setup-detail">
-        <button className="setup-back" onClick={() => setSetupView("welcome")}><ArrowLeft size={15} />返回</button>
+        <button className="setup-back" disabled={initializationStatus === "starting"} onClick={() => setSetupView("welcome")}><ArrowLeft size={15} />返回</button>
         <div className="setup-detail-head">
           <div>
             <span className="section-label">推荐初始化方案</span>
@@ -1285,13 +1301,14 @@ export function DataSourceManager({
           ))}
         </div>
 
+        {initializationStatus !== "idle" && notice && <div className={initializationStatus === "failed" ? "task-error" : "status-banner"} role={initializationStatus === "failed" ? "alert" : "status"}>{notice}</div>}
         <div className="setup-actions">
-          <button className="ghost-button" onClick={() => {
+          <button className="ghost-button" disabled={initializationStatus === "starting"} onClick={() => {
             setAdvanced(defaultAdvancedSetup);
             setAdvancedStep(1);
             setSetupView("advanced");
           }}><Settings2 size={15} />改用高级自定义</button>
-          <button className="primary-button" onClick={() => {
+          <button className="primary-button" disabled={initializationStatus === "starting"} aria-busy={initializationStatus === "starting"} onClick={() => {
             const saved = { ...quickPlan, createdAt: new Date().toISOString() };
             void startLocalInitialization(saved, {
               assets: ["stock", "index"],
@@ -1302,7 +1319,7 @@ export function DataSourceManager({
               provider: "baostock",
               adjustmentType: "qfq",
             });
-          }}><CloudDownload size={15} />开始快速初始化</button>
+          }}><CloudDownload size={15} />{initializationStatus === "starting" ? "正在启动初始化…" : "开始快速初始化"}</button>
         </div>
       </section>
     );
@@ -1321,9 +1338,9 @@ export function DataSourceManager({
       && ["tdx-zip", "tushare"].includes(advanced.cnInitialSource);
     return (
       <section className="data-onboarding setup-detail advanced-setup">
-        <button className="setup-back" onClick={() => setSetupView("welcome")}><ArrowLeft size={15} />退出高级自定义</button>
+        <button className="setup-back" disabled={initializationStatus === "starting"} onClick={() => setSetupView("welcome")}><ArrowLeft size={15} />退出高级自定义</button>
         <div className="setup-detail-head">
-          <div><span className="section-label">高级自定义</span><h2>建立数据初始化方案</h2><p>凭证只在“设置 → 数据源设置”中管理，这里仅选择每个来源负责什么数据。</p></div>
+          <div><span className="section-label">高级自定义</span><h2 title="凭证只在“设置 → 数据源设置”中管理，这里仅选择每个来源负责什么数据。" tabIndex={0} aria-describedby="initialization-source-help">建立数据初始化方案</h2><span id="initialization-source-help" className="live-sr-only">凭证只在“设置 → 数据源设置”中管理，这里仅选择每个来源负责什么数据。</span></div>
         </div>
         <SetupProgress step={advancedStep} />
 
@@ -1557,12 +1574,13 @@ export function DataSourceManager({
           )}
         </div>
 
+        {initializationStatus !== "idle" && notice && <div className={initializationStatus === "failed" ? "task-error" : "status-banner"} role={initializationStatus === "failed" ? "alert" : "status"}>{notice}</div>}
         <div className="setup-actions">
-          <button className="ghost-button" disabled={advancedStep === 1} onClick={() => setAdvancedStep((value) => Math.max(1, value - 1))}><ArrowLeft size={15} />上一步</button>
+          <button className="ghost-button" disabled={advancedStep === 1 || initializationStatus === "starting"} onClick={() => setAdvancedStep((value) => Math.max(1, value - 1))}><ArrowLeft size={15} />上一步</button>
           {advancedStep < 4 ? (
             <button className="primary-button" disabled={advancedStep === 1 && !advanced.cnMarket && !advanced.usMarket} onClick={() => setAdvancedStep((value) => Math.min(4, value + 1))}>下一步<ArrowRight size={15} /></button>
           ) : (
-            <button className="primary-button" onClick={() => {
+            <button className="primary-button" disabled={initializationStatus === "starting"} aria-busy={initializationStatus === "starting"} onClick={() => {
               const saved = { kind: "advanced", ...advanced, createdAt: new Date().toISOString() };
               if (advanced.cnMarket && advanced.minimumTimeframe === "1d" && ["baostock", "tdx-zip"].includes(advanced.cnInitialSource)) {
                 const selectedAssets = [
@@ -1596,7 +1614,7 @@ export function DataSourceManager({
                   "高级初始化方案已保存。所选外部数据源可在下方创建下载任务。",
                 );
               }
-            }}><Check size={15} />保存并开始初始化</button>
+            }}><Check size={15} />{initializationStatus === "starting" ? "正在启动初始化…" : "保存并开始初始化"}</button>
           )}
         </div>
       </section>

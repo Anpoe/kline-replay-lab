@@ -4,7 +4,6 @@ import {
   Activity,
   BarChart3,
   BookOpenCheck,
-  Brush,
   ChevronDown,
   ChevronLeft,
   ChevronRight,
@@ -14,19 +13,15 @@ import {
   EyeOff,
   Ellipsis,
   FastForward,
-  Gauge,
   LineChart,
   List,
   ListFilter,
   ListChecks,
-  Lock,
-  Magnet,
   MousePointer2,
   Pause,
   Pencil,
   Play,
   Plus,
-  Redo2,
   RotateCcw,
   Save,
   Search,
@@ -34,15 +29,8 @@ import {
   SlidersHorizontal,
   Shuffle,
   Star,
-  Square,
-  Sparkles,
-  Tag,
-  Target,
   Trash2,
-  TrendingDown,
   TrendingUp,
-  Undo2,
-  Unlock,
   X,
 } from "lucide-react";
 import type { KLineData } from "klinecharts";
@@ -87,6 +75,18 @@ import {
   normalizeReasonTags,
 } from "../features/settings/settingsGateway";
 import { SettingsPanel } from "../features/settings/components/SettingsPanel";
+import { trainingPositionTool, defaultDrawingTools, type DrawingTool } from "./chartDrawingTools";
+import { DrawingObjectPanel } from "./DrawingObjectPanel";
+import { DrawingPropertyBar } from "./DrawingPropertyBar";
+import { ChartDrawingTextEditor } from "./ChartDrawingTextEditor";
+import { ChartDrawingRail } from "./ChartDrawingRail";
+import { DecisionPlanCard } from "./DecisionPlanCard";
+import { decisionPlanScore } from "../lib/decisionPlan";
+import { ChartIndicatorEditor } from "./ChartIndicatorEditor";
+import { ChartIndicatorMenu } from "./ChartIndicatorMenu";
+import { ChartTimeframePicker } from "./ChartTimeframePicker";
+import { OrderEntryControls, OrderEntryActions } from "./OrderEntryControls";
+import { Mt4Panel } from "../features/mt4/components/Mt4Panel";
 import { buildLiveAccountLifecycleCommand, livePortfolioMatchesScope, sharedLiveAccountEquity, type LiveAccountLifecycleType } from "../features/live/liveAccountController";
 import { PersonalSopRecommendations } from "../features/sop/components/PersonalSopRecommendations";
 import { evaluateDisciplineGate } from "../features/sop/sopController";
@@ -231,14 +231,9 @@ import {
 import {
   defaultMacdSettings,
   defaultMovingAverageSettings,
-  MAX_MOVING_AVERAGE_LINES,
-  MAX_MOVING_AVERAGE_PERIOD,
-  MIN_MOVING_AVERAGE_PERIOD,
   normalizeMacdSettings,
-  normalizeMovingAveragePeriods,
   normalizeMovingAverageSettings,
   type MacdSettings,
-  type MovingAverageKind,
   type MovingAverageSettings,
 } from "../lib/chartIndicators";
 import {
@@ -327,7 +322,7 @@ import {
  * fetch("/api/live-state") and fetch("/api/candles?instruments=1", { cache: "no-store" }) contracts.
  */
 
-type View = "replay" | "performance" | "database" | "review";
+type View = "replay" | "performance" | "database" | "review" | "mt4";
 type WatchlistSource = "watchlist" | "recent" | "scan";
 
 const WATCHLIST_COLLAPSED_STORAGE_KEY = "kline-training:watchlist-collapsed";
@@ -1202,128 +1197,6 @@ function sanitizeRecentLiveResults(value: unknown): LiveScanResult[] {
   }).slice(0, 50);
 }
 
-function ChartIndicatorEditor({
-  settings,
-  onChange,
-  macdSettings,
-  onMacdChange,
-  compact = false,
-}: {
-  settings: MovingAverageSettings;
-  onChange: (settings: MovingAverageSettings) => void;
-  macdSettings: MacdSettings;
-  onMacdChange: (settings: MacdSettings) => void;
-  compact?: boolean;
-}) {
-  const updateGroup = (kind: MovingAverageKind, next: MovingAverageSettings[MovingAverageKind]) => {
-    onChange({ ...settings, [kind]: next });
-  };
-
-  return (
-    <div className={`moving-average-editor${compact ? " compact" : ""}`}>
-      {(["ma", "ema"] as MovingAverageKind[]).map((kind) => {
-        const group = settings[kind];
-        const label = kind.toUpperCase();
-        return (
-          <section className={group.enabled ? "enabled" : ""} key={kind}>
-            <div className="moving-average-row-head">
-              <button
-                type="button"
-                className="indicator-switch"
-                role="switch"
-                aria-checked={group.enabled}
-                aria-label={`${label} 指标`}
-                onClick={() => updateGroup(kind, { ...group, enabled: !group.enabled })}
-              ><span />{label}</button>
-              <small>{kind === "ma" ? "简单移动平均" : "指数移动平均"}</small>
-            </div>
-            <div className="indicator-period-list" aria-label={`${label} 周期`}>
-              {group.periods.map((period, index) => (
-                <label key={`${kind}-${index}`}>
-                  <span>{label}{index + 1}</span>
-                  <input
-                    type="number"
-                    min={MIN_MOVING_AVERAGE_PERIOD}
-                    max={MAX_MOVING_AVERAGE_PERIOD}
-                    value={period}
-                    aria-label={`${label} 周期 ${index + 1}`}
-                    onChange={(event) => {
-                      const nextPeriods = [...group.periods];
-                      nextPeriods[index] = Math.min(
-                        MAX_MOVING_AVERAGE_PERIOD,
-                        Math.max(MIN_MOVING_AVERAGE_PERIOD, Math.round(Number(event.target.value) || 1)),
-                      );
-                      updateGroup(kind, { ...group, periods: nextPeriods });
-                    }}
-                    onBlur={() => updateGroup(kind, {
-                      ...group,
-                      periods: normalizeMovingAveragePeriods(group.periods, defaultMovingAverageSettings[kind].periods),
-                    })}
-                  />
-                  <button
-                    type="button"
-                    aria-label={`删除 ${label} 周期 ${period}`}
-                    disabled={group.periods.length === 1}
-                    onClick={() => updateGroup(kind, {
-                      ...group,
-                      periods: group.periods.filter((_, periodIndex) => periodIndex !== index),
-                    })}
-                  ><X size={12} /></button>
-                </label>
-              ))}
-              <button
-                type="button"
-                className="add-indicator-period"
-                disabled={group.periods.length >= MAX_MOVING_AVERAGE_LINES}
-                onClick={() => {
-                  const last = group.periods.at(-1) ?? 5;
-                  const candidate = Math.min(MAX_MOVING_AVERAGE_PERIOD, last + (last < 20 ? 5 : 10));
-                  const next = group.periods.includes(candidate)
-                    ? Math.min(MAX_MOVING_AVERAGE_PERIOD, candidate + 1)
-                    : candidate;
-                  updateGroup(kind, { ...group, periods: [...group.periods, next] });
-                }}
-              ><Plus size={12} />周期</button>
-            </div>
-          </section>
-        );
-      })}
-      <section className={macdSettings.enabled ? "enabled" : ""}>
-        <div className="moving-average-row-head">
-          <button
-            type="button"
-            className="indicator-switch"
-            role="switch"
-            aria-checked={macdSettings.enabled}
-            aria-label="MACD 指标"
-            onClick={() => onMacdChange({ ...macdSettings, enabled: !macdSettings.enabled })}
-          ><span />MACD</button>
-          <small>平滑异同移动平均线 · 显示在副图</small>
-        </div>
-        <div className="indicator-period-list" aria-label="MACD 周期">
-          {(["快线", "慢线", "信号线"] as const).map((label, index) => (
-            <label key={label}>
-              <span>{label}</span>
-              <input
-                type="number"
-                min={MIN_MOVING_AVERAGE_PERIOD}
-                max={MAX_MOVING_AVERAGE_PERIOD}
-                value={macdSettings.periods[index]}
-                aria-label={`MACD ${label}周期`}
-                onChange={(event) => {
-                  const periods = [...macdSettings.periods] as MacdSettings["periods"];
-                  periods[index] = Math.min(MAX_MOVING_AVERAGE_PERIOD, Math.max(MIN_MOVING_AVERAGE_PERIOD, Math.round(Number(event.target.value) || 1)));
-                  onMacdChange({ ...macdSettings, periods });
-                }}
-              />
-            </label>
-          ))}
-        </div>
-      </section>
-      <p>周期范围 1–500；MA 和 EMA 每组最多 6 条。指标只使用已经揭示的 K 线计算。</p>
-    </div>
-  );
-}
 const defaultPerformanceFilters: PerformanceFilters = {
   instrumentId: "all",
   market: "all",
@@ -1448,76 +1321,6 @@ function normalizeAvailableInstrument(item: Instrument & { timeframes?: string[]
 }
 
 const coveragePageSize = 100;
-type DrawingTool = {
-  name: string;
-  label: string;
-  icon: typeof LineChart;
-  kind?: "rectangle" | "position" | "text";
-};
-
-const drawingToolGroups: Array<{
-  id: string;
-  label: string;
-  icon: typeof LineChart;
-  tools: DrawingTool[];
-}> = [
-  {
-    id: "lines",
-    label: "趋势线工具",
-    icon: TrendingUp,
-    tools: [
-      { name: "segment", label: "趋势线", icon: TrendingDown },
-      { name: "rayLine", label: "射线", icon: TrendingUp },
-      { name: "horizontalStraightLine", label: "水平线", icon: LineChart },
-    ],
-  },
-  {
-    id: "channels",
-    label: "通道工具",
-    icon: Gauge,
-    tools: [
-      { name: "parallelStraightLine", label: "二线平行通道", icon: Gauge },
-      { name: "priceChannelLine", label: "三线价格通道", icon: Gauge },
-    ],
-  },
-  {
-    id: "fibonacci",
-    label: "斐波那契工具",
-    icon: Target,
-    tools: [{ name: "fibonacciLine", label: "斐波那契回撤", icon: Target }],
-  },
-  {
-    id: "shapes",
-    label: "几何图形",
-    icon: Square,
-    tools: [{ name: "trainingRectangle", label: "矩形区域", icon: Square, kind: "rectangle" }],
-  },
-  {
-    id: "notes",
-    label: "画笔",
-    icon: Brush,
-    tools: [{ name: "brush", label: "画笔", icon: Brush }],
-  },
-  {
-    id: "text",
-    label: "文字标记",
-    icon: Tag,
-    tools: [{ name: "trainingTextBox", label: "文字标记", icon: Tag, kind: "text" }],
-  },
-];
-
-const trainingPositionTool: DrawingTool = { name: "trainingPosition", label: "多空仓位", icon: TrendingUp, kind: "position" };
-const allDrawingTools = [...drawingToolGroups.flatMap((group) => group.tools), trainingPositionTool];
-const defaultDrawingTools = Object.fromEntries(drawingToolGroups.map((group) => [group.id, group.tools[0].name]));
-
-function drawingLabel(name: string) {
-  if (name === "trainingLongPosition") return "多头仓位（旧）";
-  if (name === "trainingShortPosition") return "空头仓位（旧）";
-  if (name === "trainingTextNote") return "文字标记（旧）";
-  if (name === "trainingTextBox") return "文字标记";
-  return allDrawingTools.find((tool) => tool.name === name)?.label ?? name;
-}
-
 function drawingStyles(color: string, size: number) {
   return {
     line: { color, size, style: "solid" },
@@ -1804,8 +1607,7 @@ function createTrainingEvent(
 }
 
 function decisionScore(decision: Decision) {
-  return [decision.marketState, decision.location, decision.stop, decision.target].filter(Boolean).length * 15
-    + Math.min(decision.reasons.length, 2) * 20;
+  return decisionPlanScore(decision);
 }
 
 function eventLabel(type: string) {
@@ -2256,6 +2058,7 @@ export function TrainingWorkbench() {
     const nextSettings = normalizeSettings({ ...appSettingsRef.current, ...update });
     appSettingsRef.current = nextSettings;
     setAppSettings(nextSettings);
+    if (!nextSettings.mt4Enabled) setView(current => current === "mt4" ? "replay" : current);
     setSettingsDraft((draft) => normalizeSettings({ ...draft, ...update }));
     settingsGateway.saveAppSettings(nextSettings);
   };
@@ -2707,7 +2510,6 @@ export function TrainingWorkbench() {
   const reviewLocked = Boolean(
     hideTaskInstrument || hideTaskDate || hideTaskPrice,
   );
-  const planScore = decisionScore(decision);
   const decisionMarkers = useMemo<DecisionMarker[]>(() => decisionSubmissions
     .filter((submission) => !currentBar || submission.barTimestamp <= currentBar.timestamp)
     .map((submission, index) => {
@@ -3281,6 +3083,7 @@ export function TrainingWorkbench() {
       const nextSettings = normalizeSettings(stored.appSettings);
       appSettingsRef.current = nextSettings;
       setAppSettings(nextSettings);
+      if (!nextSettings.mt4Enabled) setView(current => current === "mt4" ? "replay" : current);
       setSettingsDraft(nextSettings);
       setSpeed(nextSettings.defaultSpeed);
       setOrderQty(configuredDefaultOrderQuantity(nextSettings, instrument.market, instrument.id, marketRules));
@@ -3402,6 +3205,7 @@ export function TrainingWorkbench() {
       const nextSettings = settingsGateway.loadAppSettings().settings;
       appSettingsRef.current = nextSettings;
       setAppSettings(nextSettings);
+      if (!nextSettings.mt4Enabled) setView(current => current === "mt4" ? "replay" : current);
       setSettingsDraft(nextSettings);
       setSpeed(nextSettings.defaultSpeed);
       setOrderType(nextSettings.orderType);
@@ -9072,6 +8876,7 @@ export function TrainingWorkbench() {
     });
     appSettingsRef.current = nextSettings;
     setAppSettings(nextSettings);
+    if (!nextSettings.mt4Enabled) setView(current => current === "mt4" ? "replay" : current);
     setSettingsDraft(nextSettings);
     settingsGateway.saveAppSettings(nextSettings);
     setRuleNotice(`已采用个人 SOP：${recommendation.title} · ${recommendation.stats.samples} 笔样本`);
@@ -9186,6 +8991,7 @@ export function TrainingWorkbench() {
     settingsGateway.removeLegacyReasonTagPreferences();
     appSettingsRef.current = nextSettings;
     setAppSettings(nextSettings);
+    if (!nextSettings.mt4Enabled) setView(current => current === "mt4" ? "replay" : current);
     setSettingsDraft(nextSettings);
     setSpeed(nextSettings.defaultSpeed);
     setOrderQty(configuredDefaultOrderQuantity(nextSettings, instrument.market, instrument.id, marketRules));
@@ -10050,6 +9856,11 @@ export function TrainingWorkbench() {
           >
             <BookOpenCheck size={20} /><span>复盘</span>
           </button>
+          {appSettings.mt4Enabled && (
+          <button className={view === "mt4" ? "active" : ""} onClick={() => setView("mt4")}>
+            <TrendingUp size={20} /><span>MT4</span>
+          </button>
+          )}
         </nav>
         <button className={`rail-bottom pattern-entry ${showPatternFilters ? "active" : ""}`} aria-label="形态筛选" onClick={openPatternFiltersPanel}>
           <ListFilter size={20} /><span>形态</span>
@@ -10060,6 +9871,7 @@ export function TrainingWorkbench() {
       </aside>
 
       <main className="workspace">
+        {appSettings.mt4Enabled && view === "mt4" && <Mt4Panel />}
         {view === "replay" && (
           <header className="topbar">
           <div className="instrument-selectors">
@@ -10085,50 +9897,12 @@ export function TrainingWorkbench() {
                 形态 · {trainingTask.patternFilter.presetNames.join(" / ")}
               </span>
             )}
-            <div className="timeframes" aria-label="周期">
-              {TIMEFRAME_IDS.map((item) => {
-                const available = currentAvailableTimeframes.includes(item);
-                return (
-                  <button
-                    key={item}
-                    className={`${chartTimeframe === item ? "active" : ""}${available ? "" : " unavailable"}`}
-                    disabled={chartViewLoading || !available}
-                    onClick={() => handleTimeframeChange(item)}
-                  >{timeframeLabel(item)}</button>
-                );
-              })}
-            </div>
+            <ChartTimeframePicker value={chartTimeframe} available={currentAvailableTimeframes} disabled={chartViewLoading} onChange={handleTimeframeChange} />
             {chartViewLoading && <span className="chart-view-status">正在切换观察周期…</span>}
             {chartViewError && <span className="chart-view-status error" role="alert">{chartViewError}</span>}
             {chartViewSnapshotId && !chartViewLoading && !chartViewError && <span className="chart-view-status">观察数据已缓存</span>}
             {!showingCanonicalChart && <span className="chart-view-status">训练基准 {timeframeLabel(timeframe)} · 仅观察</span>}
-            <div className="indicator-toolbar">
-              <button
-                type="button"
-                className={indicatorMenuOpen ? "active" : ""}
-                aria-label="图表指标设置"
-                aria-expanded={indicatorMenuOpen}
-                onClick={() => setIndicatorMenuOpen((open) => !open)}
-              >
-                <LineChart size={15} />
-                <span>指标</span>
-                <small>{[...(["ma", "ema"] as MovingAverageKind[])
-                  .filter((kind) => movingAverageSettings[kind].enabled)
-                  .map((kind) => `${kind.toUpperCase()} ${movingAverageSettings[kind].periods.join("/")}`),
-                  ...(macdSettings.enabled ? [`MACD ${macdSettings.periods.join("/")}`] : [])]
-                  .join(" · ") || "未启用"}</small>
-                <ChevronDown size={13} />
-              </button>
-              {indicatorMenuOpen && (
-                <div className="indicator-popover" role="dialog" aria-label="图表指标设置">
-                  <header>
-                    <div><strong>图表指标</strong><span>均线显示在主图，MACD 显示在副图</span></div>
-                    <button type="button" aria-label="关闭指标设置" onClick={() => setIndicatorMenuOpen(false)}><X size={15} /></button>
-                  </header>
-                  <ChartIndicatorEditor settings={movingAverageSettings} onChange={setMovingAverageSettings} macdSettings={macdSettings} onMacdChange={setMacdSettings} />
-                </div>
-              )}
-            </div>
+            <ChartIndicatorMenu settings={movingAverageSettings} onChange={setMovingAverageSettings} macdSettings={macdSettings} onMacdChange={setMacdSettings} open={indicatorMenuOpen} onOpenChange={setIndicatorMenuOpen} />
           </div>
           <div className="top-actions">
             <span className={`save-state ${saveState.includes("已") ? "saved" : ""}`}>{saveState}</span>
@@ -10183,22 +9957,7 @@ export function TrainingWorkbench() {
                 <span>{trainingTask ? trainingModeLabels[trainingTask.mode] : "自由训练"}</span>
                 <span>{tradingMode === "capital" ? "资金账户" : "收益率"}</span>
               </div>
-              <div className="mobile-timeframes" aria-label="手机端周期">
-                {TIMEFRAME_IDS.map((item) => {
-                  const available = currentAvailableTimeframes.includes(item);
-                  return (
-                    <button
-                      key={item}
-                      className={`${chartTimeframe === item ? "active" : ""}${available ? "" : " unavailable"}`}
-                      disabled={chartViewLoading || !available}
-                      onClick={() => {
-                        setMobileToolbarOpen(false);
-                        handleTimeframeChange(item);
-                      }}
-                    >{timeframeLabel(item)}</button>
-                  );
-                })}
-              </div>
+              <ChartTimeframePicker className="mobile-timeframes" value={chartTimeframe} available={currentAvailableTimeframes} disabled={chartViewLoading} onChange={item => { setMobileToolbarOpen(false); handleTimeframeChange(item); }} />
               {!showingCanonicalChart && <span className="mobile-chart-view-note">训练基准 {timeframeLabel(timeframe)} · 仅观察</span>}
               {chartViewLoading && <div className="mobile-random-status"><Activity size={12} />正在切换观察周期…</div>}
               {chartViewError && <div className="mobile-random-error" role="alert">{chartViewError}</div>}
@@ -10439,16 +10198,19 @@ export function TrainingWorkbench() {
                               <div className="pattern-condition-row" key={condition.id}>
                                 <div className="pattern-condition-row-head">
                                   <div>
-                                    <strong>{definition.label}</strong>
-                                    <span>{definition.description}</span>
+                                    <strong title={definition.description}>{definition.label}</strong>
+                                    {condition.kind !== "standard_deviation" && <span>{definition.description}</span>}
                                   </div>
                                   <button type="button" aria-label={`删除${definition.label}条件`} onClick={() => removePatternCondition(selectedPatternPresetDraft.id, condition.id)}><X size={15} /></button>
                                 </div>
                                 <div className="pattern-condition-fields">
                                   {definition.fields.map((field) => (
-                                    <label key={field.key}>{field.label}
+                                    <label key={field.key} title={field.help}>{field.label}
+                                      {field.help && <span id={`condition-help-${encodeURIComponent(condition.id)}-${field.key}`} className="sr-only">{field.help}</span>}
                                       {field.type === "select" ? (
                                         <select
+                                          aria-label={field.label}
+                                          aria-describedby={field.help ? `condition-help-${encodeURIComponent(condition.id)}-${field.key}` : undefined}
                                           value={String(condition.parameters[field.key] ?? field.defaultValue)}
                                           onChange={(event) => updatePatternCondition(selectedPatternPresetDraft.id, condition.id, (current) => ({
                                             ...current,
@@ -10461,6 +10223,8 @@ export function TrainingWorkbench() {
                                         <span className="pattern-number-input">
                                           <input
                                             type="number"
+                                            aria-label={field.label}
+                                            aria-describedby={field.help ? `condition-help-${encodeURIComponent(condition.id)}-${field.key}` : undefined}
                                             min={field.min}
                                             max={field.max}
                                             step={field.step}
@@ -10487,10 +10251,13 @@ export function TrainingWorkbench() {
                     ) : (
                       <div className="pattern-parameter-grid">
                         {patternParameterDefinitions[selectedPatternPresetDraft.kind].map((definition) => (
-                          <label key={definition.key}>{definition.label}
+                          <label key={definition.key} title={definition.help}>{definition.label}
+                            {definition.help && <span id={`pattern-parameter-help-${definition.key}`} className="sr-only">{definition.help}</span>}
                             <span className="pattern-number-input">
                               <input
                                 type="number"
+                                aria-label={definition.label}
+                                aria-describedby={definition.help ? `pattern-parameter-help-${definition.key}` : undefined}
                                 min={definition.min}
                                 max={definition.max}
                                 step={definition.step}
@@ -10541,10 +10308,10 @@ export function TrainingWorkbench() {
                         </div>
                         <div className="pattern-condition-catalog">
                           {filteredPatternConditionDefinitions.map((definition) => (
-                            <button type="button" key={definition.kind} onClick={() => addPatternCondition(definition.kind)}>
+                            <button type="button" key={definition.kind} title={definition.description} onClick={() => addPatternCondition(definition.kind)}>
                               <span>
                                 <strong>{definition.label}</strong>
-                                <small>{definition.description}</small>
+                                {definition.kind !== "standard_deviation" && <small>{definition.description}</small>}
                               </span>
                               <Plus size={16} />
                             </button>
@@ -10990,184 +10757,25 @@ export function TrainingWorkbench() {
               )}
 
               <div className="chart-area" ref={chartAreaRef}>
-                <div className={`drawing-rail${showingCanonicalChart ? "" : " observation-only"}`} aria-label="画图工具">
-                  <button
-                    className={!selectedDrawingId && !drawingGroupOpen && !drawingRequest && !drawingTextOpen ? "active" : ""}
-                    title="光标"
-                    aria-label="光标"
-                    onClick={() => {
-                      setDrawingRequest(null);
-                      setDrawingTextOpen(false);
-                      setSelectedDrawingId("");
-                      setDrawingGroupOpen("");
-                    }}
-                  ><MousePointer2 size={18} /></button>
-                  {drawingToolGroups.map((group) => {
-                    const selectedTool = group.tools.find((tool) => tool.name === groupDrawingTools[group.id]) ?? group.tools[0];
-                    const Icon = selectedTool.icon;
-                    if (group.tools.length === 1) {
-                      return (
-                        <button
-                          key={group.id}
-                          className={drawingRequest?.name === selectedTool.name ? "active" : ""}
-                          title={selectedTool.label}
-                          aria-label={selectedTool.label}
-                          onClick={() => beginDrawing(selectedTool)}
-                        ><Icon size={18} /></button>
-                      );
-                    }
-                    return (
-                      <div className="drawing-tool-group" key={group.id}>
-                        <button
-                          className={drawingGroupOpen === group.id || drawingRequest?.name === selectedTool.name ? "active" : ""}
-                          title={selectedTool.label}
-                          aria-label={selectedTool.label}
-                          onClick={() => beginDrawing(selectedTool)}
-                        ><Icon size={18} /></button>
-                        <button
-                          className="drawing-group-trigger"
-                          aria-label={`展开${group.label}`}
-                          title={`展开${group.label}`}
-                          onClick={() => setDrawingGroupOpen((open) => open === group.id ? "" : group.id)}
-                        ><ChevronRight size={9} /></button>
-                      </div>
-                    );
-                  })}
-                  <span className="tool-divider" />
-                  <button
-                    className={drawingMagnetMode !== "normal" ? "active" : ""}
-                    title={drawingMagnetMode === "normal" ? "磁吸 OHLC：关闭；开启后落点会自动对齐附近 K 线的开高低收" : drawingMagnetMode === "weak_magnet" ? "磁吸 OHLC：弱吸附" : "磁吸 OHLC：强吸附"}
-                    aria-label="切换磁吸 OHLC"
-                    onClick={() => setDrawingMagnetMode((mode) => mode === "normal" ? "weak_magnet" : mode === "weak_magnet" ? "strong_magnet" : "normal")}
-                  ><Magnet size={18} /><small>{drawingMagnetMode === "weak_magnet" ? "弱" : drawingMagnetMode === "strong_magnet" ? "强" : ""}</small></button>
-                  <button title="撤销上一笔绘图" aria-label="撤销绘图" disabled={!drawingUndoStack.length} onClick={undoDrawing}><Undo2 size={18} /></button>
-                  <button title="重做已撤销的绘图" aria-label="重做绘图" disabled={!drawingRedoStack.length} onClick={redoDrawing}><Redo2 size={18} /></button>
-                  <button className={drawingObjectsOpen ? "active" : ""} title="对象树" aria-label="绘图对象列表" onClick={() => setDrawingObjectsOpen((open) => !open)}><List size={18} /></button>
-                  <button title="清除绘图" aria-label="清除绘图" onClick={() => {
-                    handleDrawingsChange([]);
-                    setSelectedDrawingId("");
-                    setClearNonce(Date.now());
-                  }}><Trash2 size={18} /></button>
-                </div>
+                <ChartDrawingRail observing={!showingCanonicalChart} cursorActive={!selectedDrawingId && !drawingGroupOpen && !drawingRequest && !drawingTextOpen}
+                  onCursor={() => { setDrawingRequest(null); setDrawingTextOpen(false); setSelectedDrawingId(""); setDrawingGroupOpen(""); }}
+                  activeTool={drawingRequest?.name} groupTools={groupDrawingTools} openGroup={drawingGroupOpen} onOpenGroup={setDrawingGroupOpen}
+                  onSelectTool={beginDrawing} onGroupTool={(group, tool) => setGroupDrawingTools(current => ({ ...current, [group]: tool }))}
+                  magnetMode={drawingMagnetMode} onMagnetMode={setDrawingMagnetMode} canUndo={!!drawingUndoStack.length} canRedo={!!drawingRedoStack.length}
+                  onUndo={undoDrawing} onRedo={redoDrawing} objectsOpen={drawingObjectsOpen} onObjects={() => setDrawingObjectsOpen(open => !open)}
+                  onClear={() => { handleDrawingsChange([]); setSelectedDrawingId(""); setClearNonce(Date.now()); }} />
 
-                {drawingGroupOpen && (() => {
-                  const groupIndex = drawingToolGroups.findIndex((group) => group.id === drawingGroupOpen);
-                  const group = drawingToolGroups[groupIndex];
-                  if (!group) return null;
-                  const precedingToolRows = groupIndex;
-                  return (
-                    <div className="drawing-tool-flyout" style={{ top: `${42 + precedingToolRows * 35}px` }}>
-                      <strong>{group.label}</strong>
-                      {group.tools.map((tool) => {
-                        const Icon = tool.icon;
-                        return (
-                          <button key={tool.name} onClick={() => {
-                            setGroupDrawingTools((current) => ({ ...current, [group.id]: tool.name }));
-                            beginDrawing(tool);
-                          }}>
-                            <Icon size={17} />
-                            <span>{tool.label}</span>
-                          </button>
-                        );
-                      })}
-                    </div>
-                  );
-                })()}
+                {drawingTextOpen && <ChartDrawingTextEditor value={drawingText} onChange={setDrawingText} onPlace={beginTextDrawing} onCancel={() => setDrawingTextOpen(false)} />}
 
-                {drawingTextOpen && (
-                  <form className="drawing-text-editor" aria-label="文字标记输入" onSubmit={(event) => {
-                    event.preventDefault();
-                    beginTextDrawing();
-                  }}>
-                    <input
-                      autoFocus
-                      value={drawingText}
-                      aria-label="图表文字"
-                      placeholder="输入要写在图表上的文字"
-                      onChange={(event) => setDrawingText(event.target.value)}
-                      onKeyDown={(event) => {
-                        if (event.key === "Escape") setDrawingTextOpen(false);
-                      }}
-                    />
-                    <button type="submit" disabled={!drawingText.trim()}>放置</button>
-                    <button type="button" aria-label="取消文字标记" onClick={() => setDrawingTextOpen(false)}><X size={15} /></button>
-                    <small>输入后按 Enter，再在图表上拖出文字区域；选中后可移动、缩放和改字。</small>
-                  </form>
-                )}
-
-                {selectedDrawing && (
-                  <div className={`drawing-property-bar ${selectedDrawing.name === "trainingTextBox" ? "text-box-properties" : ""}`} aria-label="绘图属性">
-                    <span className="drawing-selected-name">{drawingLabel(selectedDrawing.name)}</span>
-                    {selectedDrawing.name === "trainingTextBox" && (
-                      <input
-                        className="drawing-text-content"
-                        value={selectedDrawingText}
-                        aria-label="文字内容"
-                        title="文字内容"
-                        onChange={(event) => updateDrawingTextContent(selectedDrawing.id, event.target.value)}
-                      />
-                    )}
-                    <label className="drawing-color-control" title={selectedDrawing.name === "trainingTextBox" ? "文字颜色" : "线条颜色"}>
-                      <input
-                        type="color"
-                        value={selectedDrawingInputColor}
-                        aria-label={selectedDrawing.name === "trainingTextBox" ? "文字颜色" : "线条颜色"}
-                        onChange={(event) => {
-                          setDrawingColor(event.target.value);
-                          updateDrawingVisualStyle(selectedDrawing.id, event.target.value, selectedDrawingWidth);
-                        }}
-                      />
-                    </label>
-                    <select
-                      value={selectedDrawingWidth}
-                      aria-label="线条粗细"
-                      title="线条粗细"
-                      onChange={(event) => {
-                        const size = Number(event.target.value);
-                        setDrawingLineWidth(size);
-                        updateDrawingVisualStyle(selectedDrawing.id, selectedDrawingInputColor, size);
-                      }}
-                    >
-                      {[1, 2, 3, 4].map((size) => <option key={size} value={size}>{size}px</option>)}
-                    </select>
-                    {selectedDrawing.name === "trainingTextBox" && (
-                      <select
-                        value={selectedDrawingTextSize}
-                        aria-label="文字大小"
-                        title="文字大小"
-                        onChange={(event) => updateDrawingTextSize(selectedDrawing.id, Number(event.target.value))}
-                      >
-                        {drawingTextSizeOptions.map((size) => <option key={size} value={size}>{size}px</option>)}
-                      </select>
-                    )}
-                    <button title={selectedDrawing.lock ? "解锁绘图" : "锁定绘图"} aria-label={selectedDrawing.lock ? "解锁绘图" : "锁定绘图"} onClick={() => updateDrawing(selectedDrawing.id, { lock: !selectedDrawing.lock })}>
-                      {selectedDrawing.lock ? <Unlock size={16} /> : <Lock size={16} />}
-                    </button>
-                    <button title={selectedDrawing.visible ? "隐藏绘图" : "显示绘图"} aria-label={selectedDrawing.visible ? "隐藏绘图" : "显示绘图"} onClick={() => updateDrawing(selectedDrawing.id, { visible: !selectedDrawing.visible })}>
-                      {selectedDrawing.visible ? <Eye size={16} /> : <EyeOff size={16} />}
-                    </button>
-                    <button className="danger" title="删除绘图" aria-label="删除当前绘图" onClick={() => removeDrawing(selectedDrawing.id)}><Trash2 size={16} /></button>
-                    <button title="关闭属性栏" aria-label="关闭绘图属性" onClick={() => setSelectedDrawingId("")}><X size={15} /></button>
-                  </div>
-                )}
-
-                {drawingObjectsOpen && (
-                  <aside className="drawing-object-panel" aria-label="绘图对象列表">
-                    <header><strong>对象树</strong><button aria-label="关闭对象树" onClick={() => setDrawingObjectsOpen(false)}><X size={15} /></button></header>
-                    <div className="drawing-object-list">
-                      {drawings.length ? [...drawings].reverse().map((drawing, index) => (
-                        <div className={drawing.id === selectedDrawingId ? "active" : ""} key={drawing.id}>
-                          <button className="drawing-object-name" onClick={() => setSelectedDrawingId(drawing.id)}>
-                            <span>{drawingLabel(drawing.name)}</span><small>#{drawings.length - index}</small>
-                          </button>
-                          <button aria-label={drawing.visible ? "隐藏对象" : "显示对象"} onClick={() => updateDrawing(drawing.id, { visible: !drawing.visible })}>{drawing.visible ? <Eye size={14} /> : <EyeOff size={14} />}</button>
-                          <button aria-label={drawing.lock ? "解锁对象" : "锁定对象"} onClick={() => updateDrawing(drawing.id, { lock: !drawing.lock })}>{drawing.lock ? <Lock size={14} /> : <Unlock size={14} />}</button>
-                          <button className="danger" aria-label="删除对象" onClick={() => removeDrawing(drawing.id)}><Trash2 size={14} /></button>
-                        </div>
-                      )) : <p>还没有绘图对象。</p>}
-                    </div>
-                  </aside>
-                )}
+                {selectedDrawing && <DrawingPropertyBar drawing={selectedDrawing} text={selectedDrawingText} color={selectedDrawingInputColor}
+                  lineWidth={selectedDrawingWidth} textSize={selectedDrawingTextSize} textSizeOptions={drawingTextSizeOptions}
+                  onText={value => updateDrawingTextContent(selectedDrawing.id, value)}
+                  onColor={value => { setDrawingColor(value); updateDrawingVisualStyle(selectedDrawing.id, value, selectedDrawingWidth); }}
+                  onWidth={value => { setDrawingLineWidth(value); updateDrawingVisualStyle(selectedDrawing.id, selectedDrawingInputColor, value); }}
+                  onTextSize={value => updateDrawingTextSize(selectedDrawing.id, value)} onLock={() => updateDrawing(selectedDrawing.id, { lock: !selectedDrawing.lock })}
+                  onVisible={() => updateDrawing(selectedDrawing.id, { visible: !selectedDrawing.visible })} onDelete={() => removeDrawing(selectedDrawing.id)} onClose={() => setSelectedDrawingId("")} />}
+                {drawingObjectsOpen && <DrawingObjectPanel drawings={drawings} selectedId={selectedDrawingId} onSelect={setSelectedDrawingId}
+                  onUpdate={updateDrawing} onDelete={removeDrawing} onClose={() => setDrawingObjectsOpen(false)} />}
                 <div className="chart-wrap">
                   {loading ? <div className="chart-loading">正在准备历史 K 线…</div> : chartLoadError ? (
                     <div className="chart-loading" role="alert">
@@ -11362,49 +10970,18 @@ export function TrainingWorkbench() {
                     </>
                   )}
                   </div>
-                  <div className="execution-order-controls">
-                  <label>下单方式
-                    <select aria-label="下单方式" value={positionSizeMode} onChange={(event) => {
-                      const value = event.target.value as PositionSizeMode;
-                      setPositionSizeMode(value);
-                      rememberOrderEntryPreference({ positionSizeMode: value });
-                    }}>
-                      <option value="fixed">固定数量</option>
-                      <option value="risk-percent">按止损风险（余额%）</option>
-                    </select>
-                  </label>
-                  {positionSizeMode === "risk-percent" && <label>单笔风险（余额%）
+                  <OrderEntryControls
+                    sizing={{ value: positionSizeMode, options: [{ value: "fixed", label: "固定数量" }, { value: "risk-percent", label: "按止损风险（余额%）" }], onChange: value => { const mode = value as PositionSizeMode; setPositionSizeMode(mode); rememberOrderEntryPreference({ positionSizeMode: mode }); } }}
+                    order={{ value: orderType, options: [{ value: "market", label: "市价 · 下一根开盘" }, { value: "limit", label: "限价单（Limit Order）" }, { value: "stop", label: "突破单（Stop Order）" }], onChange: value => { const type = value as OrderType; setOrderType(type); rememberOrderEntryPreference({ orderType: type }); } }}
+                    gap={{ mode: openingGapMode, title: "按顺序点击：高开不买、低开不买、取消此功能", onChange: () => { const nextMode = nextOpeningGapMode(openingGapMode); setOpeningGapMode(nextMode); rememberOrderEntryPreference({ openingGapMode: nextMode }); } }}
+                    riskField={positionSizeMode === "risk-percent" && <label>单笔风险（余额%）
                     <input aria-label="单笔风险百分比" type="number" min="0.1" max="100" step="0.1" value={riskPercent} onChange={(event) => {
                       const value = Math.max(0.1, Math.min(100, Number(event.target.value) || 0.1));
                       setRiskPercent(value);
                       rememberOrderEntryPreference({ riskPercent: value });
                     }} />
                   </label>}
-                  <label>开仓委托
-                    <select aria-label="开仓委托类型" value={orderType} onChange={(event) => {
-                      const value = event.target.value as OrderType;
-                      setOrderType(value);
-                      rememberOrderEntryPreference({ orderType: value });
-                    }}>
-                      <option value="market">市价 · 下一根开盘</option>
-                      <option value="limit">限价单（Limit Order）</option>
-                      <option value="stop">突破单（Stop Order）</option>
-                    </select>
-                  </label>
-                  <label>跳空不买
-                    <button
-                      aria-label="跳空不买模式"
-                      className={`opening-gap-mode-button ${openingGapMode}`}
-                      type="button"
-                      title="按顺序点击：高开不买、低开不买、取消此功能"
-                      onClick={() => {
-                        const nextMode = nextOpeningGapMode(openingGapMode);
-                        setOpeningGapMode(nextMode);
-                        rememberOrderEntryPreference({ openingGapMode: nextMode });
-                      }}
-                    >{openingGapMode === "low" ? "低开不买" : "高开不买"}</button>
-                  </label>
-                  {openingGapMode !== "off" && <label>不买阈值
+                    thresholdField={openingGapMode !== "off" && <label>不买阈值
                     <span className="opening-gap-threshold-control">
                       <input
                         aria-label="跳空不买阈值"
@@ -11445,7 +11022,7 @@ export function TrainingWorkbench() {
                       </select>
                     </span>
                   </label>}
-                  {orderType !== "market" && (
+                    entryField={orderType !== "market" && (
                     <label>触发价
                       <span className="entry-trigger-control">
                         <input aria-label="委托触发价" type={hideTaskPrice ? "password" : "number"} inputMode="decimal" min="0" step="any" value={orderTriggerPrice} onChange={(event) => setOrderTriggerPrice(event.target.value)} placeholder={hideTaskPrice ? "•••" : currentBar?.close.toFixed(instrument.pricePrecision)} />
@@ -11467,64 +11044,27 @@ export function TrainingWorkbench() {
                       </span>
                     </label>
                   )}
-                  <label>止损
-                    <span className="protection-picker-control">
-                      <button
-                        aria-label="在图表选择保护止损价"
-                        aria-pressed={protectionPriceSelection === "stop-loss"}
-                        className={protectionPriceSelection === "stop-loss" ? "active" : ""}
-                        type="button"
-                        title={showingCanonicalChart ? "点击 K 线图选择止损价格" : `请先切换回基准周期 ${timeframeLabel(timeframe)}`}
-                        onClick={() => {
-                          if (!showingCanonicalChart) {
-                            setRuleNotice(`请先切换回基准周期 ${timeframeLabel(timeframe)}，再在图表选择止损价格`);
-                            return;
-                          }
-                          setProtectionPriceSelection((current) => current === "stop-loss" ? null : "stop-loss");
-                          setRuleNotice("请在上方 K 线图点击选择止损价格");
-                        }}
-                      >{effectiveOrderStop ? trainingPriceLabel(effectiveOrderStop) : "点击图表选价"}</button>
-                      {effectiveOrderStop && <button aria-label="清除保护止损价" className="clear" type="button" onClick={() => clearDraftProtectionPrice("stop-loss")}><X size={11} /></button>}
-                    </span>
-                  </label>
-                  <label>止盈
-                    <span className="protection-picker-control">
-                      <button
-                        aria-label="在图表选择保护止盈价"
-                        aria-pressed={protectionPriceSelection === "take-profit"}
-                        className={protectionPriceSelection === "take-profit" ? "active" : ""}
-                        type="button"
-                        title={showingCanonicalChart ? "点击 K 线图选择止盈价格" : `请先切换回基准周期 ${timeframeLabel(timeframe)}`}
-                        onClick={() => {
-                          if (!showingCanonicalChart) {
-                            setRuleNotice(`请先切换回基准周期 ${timeframeLabel(timeframe)}，再在图表选择止盈价格`);
-                            return;
-                          }
-                          setProtectionPriceSelection((current) => current === "take-profit" ? null : "take-profit");
-                          setRuleNotice("请在上方 K 线图点击选择止盈价格");
-                        }}
-                      >{effectiveOrderTarget ? trainingPriceLabel(effectiveOrderTarget) : "点击图表选价"}</button>
-                      {effectiveOrderTarget && <button aria-label="清除保护止盈价" className="clear" type="button" onClick={() => clearDraftProtectionPrice("take-profit")}><X size={11} /></button>}
-                    </span>
-                  </label>
-                  <small>{liveMode
+                    stop={{ label: "止损", value: effectiveOrderStop ? trainingPriceLabel(effectiveOrderStop) : "", selected: protectionPriceSelection === "stop-loss", pickLabel: "在图表选择保护止损价", clearLabel: "清除保护止损价", title: showingCanonicalChart ? "点击 K 线图选择止损价格" : `请先切换回基准周期 ${timeframeLabel(timeframe)}`, onPick: () => {
+                      if (!showingCanonicalChart) { setRuleNotice(`请先切换回基准周期 ${timeframeLabel(timeframe)}，再在图表选择止损价格`); return; }
+                      setProtectionPriceSelection(current => current === "stop-loss" ? null : "stop-loss"); setRuleNotice("请在上方 K 线图点击选择止损价格");
+                    }, onClear: () => clearDraftProtectionPrice("stop-loss") }}
+                    target={{ label: "止盈", value: effectiveOrderTarget ? trainingPriceLabel(effectiveOrderTarget) : "", selected: protectionPriceSelection === "take-profit", pickLabel: "在图表选择保护止盈价", clearLabel: "清除保护止盈价", title: showingCanonicalChart ? "点击 K 线图选择止盈价格" : `请先切换回基准周期 ${timeframeLabel(timeframe)}`, onPick: () => {
+                      if (!showingCanonicalChart) { setRuleNotice(`请先切换回基准周期 ${timeframeLabel(timeframe)}，再在图表选择止盈价格`); return; }
+                      setProtectionPriceSelection(current => current === "take-profit" ? null : "take-profit"); setRuleNotice("请在上方 K 线图点击选择止盈价格");
+                    }, onClear: () => clearDraftProtectionPrice("take-profit") }}
+                    info={(liveMode
                     ? "实时模拟按下一交易日开盘价处理；市价单直接成交，限价单和突破单不满足触发条件时继续挂单，并按确定性成交引擎设置计算费用。"
                     : marginInstrument
                       ? `成交模型 ${EXECUTION_ENGINE_VERSION} · BID K线 · 买入/回补用 Ask，卖出/平多用 Bid · 1 手 ${Number(instrumentEconomics?.contractSize ?? 100000).toLocaleString()} ${marginContractUnit} · ${marginPipLabel} ${oneLotPipValue == null ? "待换算" : `${oneLotPipValue.toFixed(2)} ${instrumentEconomics?.accountCurrency ?? "USD"}`} · 杠杆 1:${instrumentEconomics?.leverage ?? 100} · 强平线 ${instrumentEconomics?.stopOutLevelPct ?? 50}%`
-                      : `成交模型 ${EXECUTION_ENGINE_VERSION} · 佣金 ${executionProfile.commissionRateBps}bp · 滑点 ${executionProfile.slippageBps}bp · 价差 ${executionProfile.spreadBps}bp · 当根量参与 ${executionProfile.maxVolumeParticipationPct || "不限"}${executionProfile.maxVolumeParticipationPct ? "%" : ""}`}</small>
-                  {positionSizeMode === "risk-percent" && <small>
-                    {effectiveOrderStop
-                      ? `按账户余额 ${money(riskBalance)} × ${riskPercent}% 风险计算；拖动止损线后风险${marginInstrument ? "手数" : "数量"}会自动更新。`
-                      : "请先在图表点击或拖动止损线；系统会按账户余额和单笔风险自动计算数量/手数。"}
-                  </small>}
+                      : `成交模型 ${EXECUTION_ENGINE_VERSION} · 佣金 ${executionProfile.commissionRateBps}bp · 滑点 ${executionProfile.slippageBps}bp · 价差 ${executionProfile.spreadBps}bp · 当根量参与 ${executionProfile.maxVolumeParticipationPct || "不限"}${executionProfile.maxVolumeParticipationPct ? "%" : ""}`) + (positionSizeMode === "risk-percent" && effectiveOrderStop ? `；按账户余额 ${money(riskBalance)} × ${riskPercent}% 风险计算；拖动止损线后风险${marginInstrument ? "手数" : "数量"}会自动更新。` : "")}
+                    footer={<>{positionSizeMode === "risk-percent" && !effectiveOrderStop && <small role="status">请先在图表选择止损</small>}
                   {protectionPriceSelection && <div className="mobile-protection-selection-hint" role="status">
                     请在上方 K 线图点击选择{protectionPriceSelection === "stop-loss" ? "止损" : protectionPriceSelection === "take-profit" ? "止盈" : "委托触发价"}{positionSizeMode === "risk-percent" && protectionPriceSelection === "stop-loss" ? "，风险手数/数量会自动更新" : ""}。
-                  </div>}
-                  </div>
+                  </div>}</>}
+                  />
                 </div>
                 <div className="trade-fixed-dock">
-                  <div className="order-entry">
-                  <label><span className="quantity-label">{marginInstrument ? (positionSizeMode === "risk-percent" ? "风险手数" : "手数") : positionSizeMode === "risk-percent" ? "风险数量" : "数量"}</span><input
+                  <OrderEntryActions quantity={<label><span className="quantity-label">{marginInstrument ? (positionSizeMode === "risk-percent" ? "风险手数" : "手数") : positionSizeMode === "risk-percent" ? "风险数量" : "数量"}</span><input
                     aria-label="下单数量"
                     type="number"
                     min={minimumBuyQuantity(marketRules)}
@@ -11540,20 +11080,10 @@ export function TrainingWorkbench() {
                       appendEvent("order_quantity_changed", { quantity });
                     }}
                     step={buyQuantityStep(marketRules)}
-                  /></label>
-                  <button
-                    className="sell-button"
-                    disabled={(!liveMode && trainingComplete) || !marketRules.tradingEnabled || !marketRules.allowShort}
-                    title={!marketRules.tradingEnabled ? tradingDisabledReason : !marketRules.allowShort ? `${marketRules.name}禁止卖出开仓` : ""}
-                    onClick={() => queueOpenOrder("sell")}
-                  ><TrendingDown size={16} /><span className="desktop-order-label">{!marketRules.tradingEnabled ? currentAssetType === "index" ? "指数不可交易" : "暂不可交易" : marketRules.allowShort ? "卖出开仓" : "A股禁做空"}</span><span className="mobile-order-label">{!marketRules.tradingEnabled ? "不可交易" : marketRules.allowShort ? "卖出" : "禁做空"}</span></button>
-                  <button
-                    className="buy-button"
-                    disabled={(!liveMode && trainingComplete) || !marketRules.tradingEnabled}
-                    title={!marketRules.tradingEnabled ? tradingDisabledReason : ""}
-                    onClick={() => queueOpenOrder("buy")}
-                  ><TrendingUp size={16} /><span className="desktop-order-label">{marketRules.tradingEnabled ? "买入开仓" : currentAssetType === "index" ? "指数不可交易" : "暂不可交易"}</span><span className="mobile-order-label">{marketRules.tradingEnabled ? "买入" : "不可交易"}</span></button>
-                  <button className="flat-button" disabled={(!liveMode && trainingComplete) || !openPositions.some((position) => !pendingOrders.some((order) => order.action === "close" && order.positionId === position.id))} onClick={queueCloseAll}>
+                  /></label>}
+                    sell={{ disabled: (!liveMode && trainingComplete) || !marketRules.tradingEnabled || !marketRules.allowShort, title: !marketRules.tradingEnabled ? tradingDisabledReason : !marketRules.allowShort ? `${marketRules.name}禁止卖出开仓` : "", label: !marketRules.tradingEnabled ? currentAssetType === "index" ? "指数不可交易" : "暂不可交易" : marketRules.allowShort ? "卖出开仓" : "A股禁做空", mobileLabel: !marketRules.tradingEnabled ? "不可交易" : marketRules.allowShort ? "卖出" : "禁做空", onClick: () => queueOpenOrder("sell") }}
+                    buy={{ disabled: (!liveMode && trainingComplete) || !marketRules.tradingEnabled, title: !marketRules.tradingEnabled ? tradingDisabledReason : "", label: marketRules.tradingEnabled ? "买入开仓" : currentAssetType === "index" ? "指数不可交易" : "暂不可交易", mobileLabel: marketRules.tradingEnabled ? "买入" : "不可交易", onClick: () => queueOpenOrder("buy") }}>
+                    <button className="flat-button" disabled={(!liveMode && trainingComplete) || !openPositions.some((position) => !pendingOrders.some((order) => order.action === "close" && order.positionId === position.id))} onClick={queueCloseAll}>
                     <CircleStop size={16} /><span className="desktop-order-label">{openPositions.length && !closablePositions.length ? "次日开盘全平" : "全部平仓"}</span><span className="mobile-order-label">{openPositions.length && !closablePositions.length ? "次日全平" : "全平"}</span>
                   </button>
                   {liveMode && (
@@ -11561,7 +11091,7 @@ export function TrainingWorkbench() {
                       <Eye size={16} /><span className="desktop-order-label">{liveWatchExists ? "已观望" : "观望"}</span><span className="mobile-order-label">{liveWatchExists ? "已观望" : "观望"}</span>
                     </button>
                   )}
-                </div>
+                  </OrderEntryActions>
                 <div className={`pending-note ${ruleNotice || !marketRules.tradingEnabled ? "rule-warning" : ""} ${ruleNotice || pendingOrders.length || !marketRules.tradingEnabled ? "has-message" : ""}`}>
                   {ruleNotice || (!marketRules.tradingEnabled
                     ? tradingDisabledReason
@@ -11689,11 +11219,20 @@ export function TrainingWorkbench() {
               </div>
             </section>
 
-            <aside className="decision-panel" ref={decisionPanelRef}>
-              <div className="panel-title">
-                <div><span>{editingDecisionId ? "编辑事前决策" : decisionTarget ? "补写事前决策" : "事前决策卡"}</span><strong>{planScore}%</strong></div>
-                <p>{editingDecisionId ? "修改后会替换原记录，并保留原 K 线绑定" : decisionTarget ? "仅补充记录，不回退行情，也不改变持仓" : "先写计划，再揭示下一根"}</p>
-              </div>
+            <DecisionPlanCard panelRef={decisionPanelRef} value={decision} reasonTags={reasonTags}
+              onChange={changes => { for (const key of Object.keys(changes) as (keyof Decision)[]) { const value = changes[key]; if (value != null) updateDecision(key, value); } }}
+              title={editingDecisionId ? "编辑事前决策" : decisionTarget ? "补写事前决策" : "事前决策卡"}
+              hint="先写计划，再揭示下一根" notice={editingDecisionId ? "修改后会替换原记录，并保留原 K 线绑定" : decisionTarget ? "仅补充记录，不回退行情，也不改变持仓" : undefined}
+              reasonEditor={{ mode: reasonTagActionMode, onMode: setReasonTagActionMode, editingTag: editingReasonTag, editingValue: editingReasonInput,
+                onStartEdit: startEditReasonTag, onEditValue: setEditingReasonInput, onSaveEdit: saveReasonTagEdit, onCancelEdit: cancelEditReasonTag,
+                customValue: customReasonInput, onCustomValue: setCustomReasonInput, onAdd: addCustomReasonTag, onDelete: deleteReasonTag }}
+              hidePrice={hideTaskPrice} selectedPrice={protectionPriceSelection}
+              onPickPrice={kind => setProtectionPriceSelection(current => current === kind ? null : kind)} onDrawPosition={() => beginDrawing(trainingPositionTool)}
+              hasPosition={drawings.some(drawing => drawing.name === "trainingPosition")}
+              submitDisabled={trainingComplete && !decisionTarget} onSubmit={submitDecision}
+              submitLabel={editingDecisionId ? "保存编辑" : decisionTarget ? backfillCandidates.length && backfillAssociation === "associate" ? "保存并关联" : "只保存计划" : trainingComplete ? "训练已结束" : "提交决策并揭示下一根"}
+              footer={<div className="submitted-plan-count" title="右键或长按历史 K 线可补写">已提交 <strong>{decisionSubmissions.length}</strong> 份计划</div>}
+              context={<>
               {decisionTarget && (
                 <div className="decision-backfill-target">
                   <div>
@@ -11736,137 +11275,8 @@ export function TrainingWorkbench() {
                   onEvidence={openReviewEvidence}
                 />
               )}
-              <label>市场状态
-                <select value={decision.marketState} onChange={(event) => updateDecision("marketState", event.target.value)}>
-                  <option value="">请选择市场状态</option><option>趋势</option><option>宽通道</option><option>震荡区间</option><option>突破模式</option><option>反转尝试</option>
-                </select>
-              </label>
-              <label>当前位置
-                <select value={decision.location} onChange={(event) => updateDecision("location", event.target.value)}>
-                  <option value="">请选择当前位置</option><option>回调位置</option><option>区间上沿</option><option>区间中部</option><option>区间下沿</option><option>关键突破位</option>
-                </select>
-              </label>
-              <fieldset>
-                <legend>
-                  <span>交易理由 <small>至少 2 个</small></span>
-                  <span className="reason-tag-management" aria-label="交易理由标签管理">
-                    <button
-                      type="button"
-                      className={reasonTagActionMode === "edit" ? "active" : ""}
-                      aria-label="编辑交易理由标签"
-                      aria-pressed={reasonTagActionMode === "edit"}
-                      title="编辑标签：再点击一个标签"
-                      onClick={() => {
-                        setReasonTagActionMode((mode) => mode === "edit" ? "" : "edit");
-                        setEditingReasonTag("");
-                        setEditingReasonInput("");
-                      }}
-                    ><Pencil size={12} /></button>
-                    <button
-                      type="button"
-                      className={reasonTagActionMode === "delete" ? "active danger" : ""}
-                      aria-label="删除交易理由标签"
-                      aria-pressed={reasonTagActionMode === "delete"}
-                      title="删除标签：再点击标签右上角的 X"
-                      onClick={() => {
-                        setReasonTagActionMode((mode) => mode === "delete" ? "" : "delete");
-                        setEditingReasonTag("");
-                        setEditingReasonInput("");
-                      }}
-                    ><Trash2 size={12} /></button>
-                  </span>
-                </legend>
-                <div className="reason-chips">
-                  {reasonTags.map((reason) => {
-                    const selected = decision.reasons.includes(reason);
-                    if (editingReasonTag === reason) {
-                      return (
-                        <form className="reason-tag-editor" key={reason} onSubmit={(event) => {
-                          event.preventDefault();
-                          saveReasonTagEdit();
-                        }}>
-                          <input
-                            aria-label={`编辑交易理由标签 ${reason}`}
-                            maxLength={20}
-                            autoFocus
-                            value={editingReasonInput}
-                            onChange={(event) => setEditingReasonInput(event.target.value)}
-                          />
-                          <button type="submit" aria-label="保存交易理由标签" title="保存"><Save size={12} /></button>
-                          <button type="button" aria-label="取消编辑交易理由标签" title="取消" onClick={cancelEditReasonTag}><X size={12} /></button>
-                        </form>
-                      );
-                    }
-                    return (
-                      <span className={`reason-chip-wrap${reasonTagActionMode === "delete" ? " delete-mode" : ""}`} key={reason}>
-                        <button
-                          type="button"
-                          className={selected ? "selected" : ""}
-                          onClick={() => {
-                            if (reasonTagActionMode === "edit") {
-                              startEditReasonTag(reason);
-                              return;
-                            }
-                            if (reasonTagActionMode === "delete") return;
-                            updateDecision(
-                              "reasons",
-                              selected ? decision.reasons.filter((item) => item !== reason) : [...decision.reasons, reason],
-                            );
-                          }}
-                        >{selected ? "✓ " : "+ "}{reason}</button>
-                        {reasonTagActionMode === "delete" && (
-                          <button
-                            type="button"
-                            className="reason-chip-delete"
-                            aria-label={`删除交易理由标签 ${reason}`}
-                            title="删除标签"
-                            onClick={(event) => {
-                              event.stopPropagation();
-                              deleteReasonTag(reason);
-                            }}
-                          ><X size={10} /></button>
-                        )}
-                      </span>
-                    );
-                  })}
-                </div>
-                <form className="custom-reason-tag" onSubmit={(event) => {
-                  event.preventDefault();
-                  addCustomReasonTag();
-                }}>
-                  <input
-                    aria-label="自定义交易理由标签"
-                    maxLength={20}
-                    placeholder="输入自定义 Tag"
-                    value={customReasonInput}
-                    onChange={(event) => setCustomReasonInput(event.target.value)}
-                  />
-                  <button type="submit" disabled={!customReasonInput.trim()}>添加</button>
-                </form>
-              </fieldset>
-              <div className="price-plan">
-                <button type="button" className={`decision-price-level${protectionPriceSelection === "stop-loss" ? " active" : ""}`} onClick={() => setProtectionPriceSelection((current) => current === "stop-loss" ? null : "stop-loss")}>
-                  <span>失效 / 止损</span><strong>{hideTaskPrice ? "已隐藏" : decision.stop || "点击图表取点"}</strong>
-                </button>
-                <button type="button" className={`decision-price-level${protectionPriceSelection === "take-profit" ? " active" : ""}`} onClick={() => setProtectionPriceSelection((current) => current === "take-profit" ? null : "take-profit")}>
-                  <span>第一目标</span><strong>{hideTaskPrice ? "已隐藏" : decision.target || "点击图表取点"}</strong>
-                </button>
-                <button
-                  type="button"
-                  className={`decision-position-draw${drawings.some((drawing) => drawing.name === "trainingPosition") ? " active" : ""}`}
-                  onClick={() => beginDrawing(trainingPositionTool)}
-                ><TrendingUp size={14} /> 在图表绘制止损 / 目标</button>
-              </div>
-              <label>计划说明
-                <textarea placeholder="我在等待什么？什么情况放弃？" value={decision.note} onChange={(event) => updateDecision("note", event.target.value)} />
-              </label>
-              <div className="discipline-card">
-                <Sparkles size={18} />
-                <div><strong>{decision.reasons.length >= 2 ? "条件已成形" : "再找一个独立理由"}</strong><span>评分关注过程，不用结果倒推理由</span></div>
-              </div>
-              <div className="submitted-plan-count">已提交 <strong>{decisionSubmissions.length}</strong> 份计划 · 右键或长按历史 K 线可补写</div>
-              <button className="commit-plan" disabled={trainingComplete && !decisionTarget} onClick={submitDecision}><ListChecks size={17} />{editingDecisionId ? "保存编辑" : decisionTarget ? backfillCandidates.length && backfillAssociation === "associate" ? "保存并关联" : "只保存计划" : trainingComplete ? "训练已结束" : "提交决策并揭示下一根"}</button>
-            </aside>
+              </>}
+            />
           </div>
         )}
 

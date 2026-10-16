@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import { DatabaseSync } from "node:sqlite";
 import test from "node:test";
+import { createBackgroundAutoUpdateRunner } from "../local-data/background-auto-update.mjs";
 
 import {
   DATA_AUTO_UPDATE_SETTINGS_KEY,
@@ -109,14 +110,75 @@ test("A 股自动更新读取初始化时绑定的增量来源", async () => {
   assert.match(localServer, /manifest\.includeCorporateActions === true\s*\? store\.corporateActions\.getStatus\(\)\s*:\s*null/);
 });
 
-test("同日终态不再自动 claim，跨日才会再次 claim", () => {
+test("同日成功不再 claim，失败冷却后允许重试，跨日重新检查", () => {
   assert.equal(shouldClaimDataAutoUpdate(settings({ enabled: false }), today, now.getTime()), false);
   assert.equal(shouldClaimDataAutoUpdate(settings(), today, now.getTime()), false);
-  assert.equal(shouldClaimDataAutoUpdate(settings({ lastStatus: "failed" }), today, now.getTime()), false);
-  assert.equal(shouldClaimDataAutoUpdate(settings({ lastStatus: "partial" }), today, now.getTime()), false);
+  assert.equal(shouldClaimDataAutoUpdate(settings({ lastStatus: "failed" }), today, now.getTime()), true);
+  assert.equal(shouldClaimDataAutoUpdate(settings({ lastStatus: "partial" }), today, now.getTime()), true);
   assert.equal(shouldClaimDataAutoUpdate(settings({ lastCheckDate: "2026-08-22" }), today, now.getTime()), true);
   assert.equal(shouldClaimDataAutoUpdate(settings({ enabled: false, scheduledEnabled: true, scheduledTime: "09:00", lastCheckDate: "2026-08-22" }), today, new Date(2026, 7, 23, 10, 0).getTime()), true);
   assert.equal(shouldClaimDataAutoUpdate(settings({ lastStatus: "deferred" }), today, now.getTime()), true);
+});
+
+test("同日失败重试保留十五分钟冷却、定时开关和并发租约保护", async () => {
+  for (const lastStatus of ["failed", "partial"]) {
+    const previous = settings({ lastStatus, lastFinishedAt: now.toISOString() });
+    assert.equal(shouldClaimDataAutoUpdate(previous, today, now.getTime() + 899_999), false);
+    assert.equal(shouldClaimDataAutoUpdate(previous, today, now.getTime() + 900_000), true);
+    assert.equal(shouldClaimDataAutoUpdate({ ...previous, enabled: false }, today, now.getTime() + 900_000), false);
+    assert.equal(shouldClaimDataAutoUpdate({ ...previous, lastFinishedAt: null }, today, now.getTime()), true);
+    const store = createDb(previous);
+    try {
+      const results = await Promise.all(["retry-1", "retry-2"].map((runToken) => claimDataAutoUpdate(store, {
+        date: today, runToken, now: new Date(now.getTime() + 900_000),
+      })));
+      assert.equal(results.filter((result) => result.claimed).length, 1);
+    } finally { store.close(); }
+  }
+});
+
+test("后台更新在外汇服务恢复后同日重新执行，成功后不再重复创建任务", async () => {
+  const store = createDb(settings({ lastCheckDate: "2026-08-22" }));
+  let clock = new Date(now);
+  let available = false;
+  let tasks = 0;
+  const runner = createBackgroundAutoUpdateRunner({
+    now: () => clock,
+    sleep: async () => undefined,
+    leaseRenewIntervalMs: 0,
+    fetchImpl: async (input, init = {}) => {
+      const url = new URL(input);
+      const body = init.body ? JSON.parse(init.body) : {};
+      if (url.pathname === "/api/data-auto-update") {
+        if (body.action === "claim") {
+          const result = await claimDataAutoUpdate(store, { ...body, now: clock });
+          return Response.json({ shouldRun: result.claimed, settings: result.settings });
+        }
+        if (body.action === "complete") return Response.json(await completeDataAutoUpdate(store, { ...body, now: clock }));
+        if (url.searchParams.has("scope")) return Response.json({ markets: { FX: { existing: true, duePairIds: ["EURUSD.FX"] } } });
+        return Response.json({ settings: await readDataAutoUpdateSettings(store) });
+      }
+      if (url.pathname === "/api/fx-data") return Response.json({ task: null });
+      if (url.pathname === "/api/fx-data/update") return Response.json({ task: { id: `task-${++tasks}`, status: "queued" } });
+      if (url.pathname === "/api/fx-data/run") return Response.json({ task: {
+        status: available ? "completed" : "failed", error: available ? null : "数据服务要求访问验证，请稍后重试",
+      } });
+      throw new Error(`Unexpected request: ${url.pathname}`);
+    },
+  });
+  try {
+    assert.equal((await runner.runIfDue()).status, "failed");
+    clock = new Date(now.getTime() + 14 * 60_000);
+    assert.equal((await runner.runIfDue()).claimed, false);
+    assert.equal(tasks, 1);
+    available = true;
+    clock = new Date(now.getTime() + 15 * 60_000);
+    assert.equal((await runner.runIfDue()).status, "completed");
+    assert.equal((await readDataAutoUpdateSettings(store)).lastStatus, "completed");
+    assert.equal((await runner.runIfDue()).claimed, false);
+    assert.equal(runner.getState().error, null);
+    assert.equal(tasks, 2);
+  } finally { store.close(); }
 });
 
 test("收盘前未写入的自动更新标记为 deferred，并允许收盘后同日重试", async () => {

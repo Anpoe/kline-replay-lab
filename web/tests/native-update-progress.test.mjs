@@ -37,12 +37,20 @@ internal sealed class ProgressHarness : IProgress<UpdateDownloadProgress>
 
     public static void Main(string[] args)
     {
-        var progress = new ProgressHarness();
-        typeof(NativeUpdateService).GetMethod("DownloadFile", BindingFlags.NonPublic | BindingFlags.Static)
-            .Invoke(null, new object[] { args[0], args[1], progress, CancellationToken.None });
-        UpdateDownloadProgress first = progress.reports[0];
-        UpdateDownloadProgress last = progress.reports[progress.reports.Count - 1];
-        Console.WriteLine(first.DownloadedBytes + "," + first.TotalBytes + "," + last.DownloadedBytes + "," + last.TotalBytes);
+        try
+        {
+            var progress = new ProgressHarness();
+            typeof(NativeUpdateService).GetMethod("DownloadFile", BindingFlags.NonPublic | BindingFlags.Static)
+                .Invoke(null, new object[] { args[0], args[1], progress, CancellationToken.None });
+            UpdateDownloadProgress first = progress.reports[0];
+            UpdateDownloadProgress last = progress.reports[progress.reports.Count - 1];
+            Console.WriteLine(first.DownloadedBytes + "," + first.TotalBytes + "," + last.DownloadedBytes + "," + last.TotalBytes);
+        }
+        catch (Exception error)
+        {
+            Console.Error.WriteLine(error);
+            Environment.ExitCode = 1;
+        }
     }
 }
 `, "utf8");
@@ -54,8 +62,13 @@ internal sealed class ProgressHarness : IProgress<UpdateDownloadProgress>
     "/reference:System.Windows.Forms.dll",
     "/reference:System.Web.Extensions.dll",
     source, harness,
-  ], { encoding: "utf8" });
+  ], { encoding: "utf8", windowsHide: true });
   assert.equal(build.status, 0, `${build.stdout}\n${build.stderr}`);
+  await assert.rejects(execFileAsync(executable, [], { windowsHide: true }), (error) => {
+    assert.equal(error.code, 1, "测试程序遇到异常时仍须让测试失败");
+    assert.match(error.stderr, /IndexOutOfRangeException/);
+    return true;
+  });
 
   const payload = Buffer.alloc(150_000, 7);
   const server = createServer((request, response) => {
@@ -69,7 +82,7 @@ internal sealed class ProgressHarness : IProgress<UpdateDownloadProgress>
 
   for (const [path, expectedTotal] of [["known", payload.length], ["unknown", -1]]) {
     const destination = join(directory, `${path}.zip`);
-    const { stdout } = await execFileAsync(executable, [`http://127.0.0.1:${server.address().port}/${path}`, destination]);
+    const { stdout } = await execFileAsync(executable, [`http://127.0.0.1:${server.address().port}/${path}`, destination], { windowsHide: true });
     const [initialBytes, initialTotal, finalBytes, finalTotal] = stdout.trim().split(",").map(Number);
     assert.equal(initialBytes, 0);
     assert.equal(initialTotal, expectedTotal);

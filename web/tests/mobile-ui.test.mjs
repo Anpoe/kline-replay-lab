@@ -123,39 +123,40 @@ test("locks mobile gestures while drawing and preserves refresh-scoped chart zoo
 });
 
 test("supports TradingView-style drawing groups, object management and drawing history", async () => {
-  const [workbench, chart] = await Promise.all([
+  const [workbench, chart, catalog, rail, decision, text, objects, properties] = await Promise.all([
     readFile(new URL("app/components/TrainingWorkbench.tsx", root), "utf8"),
     readFile(new URL("app/components/KLineReplayChart.tsx", root), "utf8"),
+    ...["chartDrawingTools.ts", "ChartDrawingRail.tsx", "DecisionPlanCard.tsx", "ChartDrawingTextEditor.tsx", "DrawingObjectPanel.tsx", "DrawingPropertyBar.tsx"].map(file => readFile(new URL(`app/components/${file}`, root), "utf8")),
   ]);
-  const drawingGroupsStart = workbench.indexOf("const drawingToolGroups");
-  const drawingGroupsEnd = workbench.indexOf("const trainingPositionTool", drawingGroupsStart);
+  const drawingGroupsStart = catalog.indexOf("const drawingToolGroups");
+  const drawingGroupsEnd = catalog.indexOf("const trainingPositionTool", drawingGroupsStart);
   const drawingGroups = drawingGroupsStart >= 0 && drawingGroupsEnd >= 0
-    ? workbench.slice(drawingGroupsStart, drawingGroupsEnd)
+    ? catalog.slice(drawingGroupsStart, drawingGroupsEnd)
     : "";
 
   assert.match(workbench, /CUSTOM_REASON_TAGS_KEY/);
-  assert.match(workbench, /aria-label="自定义交易理由标签"/);
-  assert.match(workbench, /name: "segment", label: "趋势线"/);
-  assert.match(workbench, /name: "trainingRectangle", label: "矩形区域"/);
-  assert.match(workbench, /name: "trainingPosition", label: "多空仓位"/);
-  assert.match(workbench, /id: "channels"/);
-  assert.match(workbench, /name: "parallelStraightLine", label: "二线平行通道"/);
-  assert.match(workbench, /name: "priceChannelLine", label: "三线价格通道"/);
-  assert.match(workbench, /group\.tools\.length === 1/);
-  assert.doesNotMatch(workbench, /group\.id === "position"/);
+  assert.match(decision, /aria-label="自定义交易理由标签"/);
+  assert.match(catalog, /name: "segment", label: "趋势线"/);
+  assert.match(catalog, /name: "trainingRectangle", label: "矩形区域"/);
+  assert.match(catalog, /name: "trainingPosition", label: "多空仓位"/);
+  assert.match(catalog, /id: "channels"/);
+  assert.match(catalog, /name: "parallelStraightLine", label: "二线平行通道"/);
+  assert.match(catalog, /name: "priceChannelLine", label: "三线价格通道"/);
+  assert.match(rail, /group\.tools\.length === 1/);
+  assert.doesNotMatch(rail, /group\.id === "position"/);
   assert.match(drawingGroups, /id: "notes"[\s\S]*?label: "画笔"[\s\S]*?tools: \[\{ name: "brush", label: "画笔"/);
   assert.match(drawingGroups, /id: "text"[\s\S]*?tools: \[\{ name: "trainingTextBox", label: "文字标记"/);
   assert.doesNotMatch(drawingGroups, /画笔与注释/);
-  assert.match(workbench, /name: "trainingTextBox", label: "文字标记"/);
-  assert.match(workbench, /aria-label="图表文字"/);
-  assert.match(workbench, /aria-label="文字内容"/);
-  assert.match(workbench, /aria-label="文字大小"/);
-  assert.match(workbench, /aria-label="切换磁吸 OHLC"/);
-  assert.match(workbench, /aria-label="绘图对象列表"/);
-  assert.match(workbench, /aria-label="线条粗细"/);
+  assert.match(catalog, /name: "trainingTextBox", label: "文字标记"/);
+  assert.match(text, /aria-label="图表文字"/);
+  assert.match(properties, /aria-label="文字内容"/);
+  assert.match(properties, /aria-label="文字大小"/);
+  assert.match(rail, /aria-label="切换磁吸 OHLC"/);
+  assert.match(objects, /aria-label="绘图对象列表"/);
+  assert.match(properties, /aria-label="线条粗细"/);
   assert.match(workbench, /lock: !selectedDrawing\.lock/);
-  assert.match(workbench, /aria-label="撤销绘图"/);
-  assert.match(workbench, /aria-label="重做绘图"/);
+  assert.match(rail, /aria-label="撤销绘图"/);
+  assert.match(rail, /aria-label="重做绘图"/);
   assert.match(workbench, /setDrawingsRestoreNonce\(\(nonce\) => nonce \+ 1\)/);
   assert.match(chart, /name: "trainingRectangle"/);
   assert.match(chart, /registerPositionOverlay\("trainingPosition", "auto"\)/);
@@ -223,10 +224,12 @@ test("wires chart protection picking, trailing stops and risk sizing into the wo
   assert.match(workbench, /rememberOrderEntryPreference/);
   assert.match(workbench, /restoreRequest\.state\.orderStopLoss/);
   assert.match(settingsPanel, /默认开仓委托/);
-  assert.match(workbench, /<option value="limit">限价单（Limit Order）<\/option>/);
-  assert.match(workbench, /<option value="stop">突破单（Stop Order）<\/option>/);
-  assert.match(workbench, /<select aria-label="开仓委托类型" value=\{orderType\} onChange=/);
-  assert.doesNotMatch(workbench, /<select aria-label="开仓委托类型" value=\{liveMode \? "market" : orderType\} disabled=\{liveMode\}/);
+  assert.match(workbench, /value: "limit", label: "限价单（Limit Order）"/);
+  assert.match(workbench, /value: "stop", label: "突破单（Stop Order）"/);
+  assert.match(workbench, /order=\{\{ value: orderType,[\s\S]{0,280}onChange:/);
+  const sharedOrderControls = await readFile(new URL("app/components/OrderEntryControls.tsx", root), "utf8");
+  assert.match(sharedOrderControls, /<select aria-label="开仓委托类型" value=\{order.value\} onChange=/);
+  assert.doesNotMatch(workbench, /order=\{\{ value: liveMode \? "market" : orderType/);
   assert.match(workbench, /const selectedOrderType: OrderType = orderType/);
   assert.match(workbench, /resolveLivePendingOrderPrice/);
   assert.match(settingsPanel, /<option value="limit">限价单（Limit Order）<\/option>/);
@@ -264,7 +267,9 @@ test("keeps mobile protection picking and risk sizing controls reachable", async
     readFile(new URL("app/globals.css", root), "utf8"),
   ]);
 
-  assert.match(workbench, /aria-pressed=\{protectionPriceSelection === "stop-loss"\}/);
+  assert.match(workbench, /selected: protectionPriceSelection === "stop-loss"/);
+  const pricePicker = await readFile(new URL("app/components/OrderEntryControls.tsx", root), "utf8");
+  assert.match(pricePicker, /aria-pressed=\{selected\}/);
   assert.match(workbench, /请在上方 K 线图点击选择止损价格/);
   assert.match(workbench, /if \(!showingCanonicalChart\)/);
   assert.match(workbench, /风险手数/);
@@ -281,8 +286,8 @@ test("keeps the mobile trade setup in flow while the existing action dock stays 
   const setupStart = workbench.indexOf('className="trade-setup-panel"');
   const setupEnd = workbench.indexOf('className="trade-fixed-dock"', setupStart);
   const stats = workbench.indexOf('className="trade-stats"', setupStart);
-  const controls = workbench.indexOf('className="execution-order-controls"', setupStart);
-  const orderEntry = workbench.indexOf('className="order-entry"', setupStart);
+  const controls = workbench.indexOf("<OrderEntryControls", setupStart);
+  const orderEntry = workbench.indexOf("<OrderEntryActions", setupStart);
 
   assert.ok(setupStart >= 0, "mobile trade setup wrapper should exist");
   assert.ok(stats > setupStart && stats < setupEnd, "account stats should stay in the in-flow setup panel");
@@ -308,8 +313,10 @@ test("filters training cycles and disables empty mistake replay", async () => {
 
   assert.match(workbench, /taskDraft\.mode as string\) !== "mistake"/);
   assert.match(workbench, /disabled=\{startingTraining \|\| \(taskDraft\.mode === "mistake" && !mistakeSources\.length\)\}/);
-  assert.match(workbench, /TIMEFRAME_IDS\.map\(\(item\)/);
-  assert.match(workbench, /const available = currentAvailableTimeframes\.includes\(item\)/);
+  const picker = await readFile(new URL("app/components/ChartTimeframePicker.tsx", root), "utf8");
+  assert.match(workbench, /<ChartTimeframePicker[\s\S]{0,200}available=\{currentAvailableTimeframes\}/);
+  assert.match(picker, /TIMEFRAME_IDS\.map\(item/);
+  assert.match(picker, /const enabled = available\.includes\(item\)/);
   assert.match(workbench, /availableTimeframesForInstrument\(/);
 });
 

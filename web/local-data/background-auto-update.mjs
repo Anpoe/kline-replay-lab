@@ -6,6 +6,12 @@ const US_POLL_LIMIT = 2_000;
 const FX_POLL_LIMIT = 2_000;
 const DEFAULT_LEASE_RENEW_INTERVAL_MS = 2 * 60 * 1000;
 
+class LocalServiceConnectionError extends Error {
+  constructor(cause) {
+    super("无法连接行情更新服务，请检查服务状态后重试", { cause });
+  }
+}
+
 const jsonHeaders = {
   accept: "application/json",
   "content-type": "application/json",
@@ -135,10 +141,23 @@ export function createBackgroundAutoUpdateRunner({
   }
 
   async function requestJson(path, init = {}) {
-    const response = await fetchImpl(`${origin}${path}`, {
-      ...init,
-      headers: { ...jsonHeaders, ...(init.headers ?? {}) },
-    });
+    let response;
+    try {
+      response = await fetchImpl(`${origin}${path}`, {
+        ...init,
+        headers: { ...jsonHeaders, ...(init.headers ?? {}) },
+      });
+    } catch (error) {
+      log("warn", "行情更新请求连接中断", { path, method: init.method ?? "GET", code: error?.cause?.code ?? error?.code ?? error?.name });
+      throw new LocalServiceConnectionError(error);
+    }
+    if (path === "/api/data-jobs/market/sync/worker" && [502, 503, 504].includes(response.status)) {
+      // A local worker reload can produce a gateway reply rather than a fetch
+      // exception. Recover the existing run just as for a disconnected socket.
+      await response.body?.cancel();
+      log("warn", "行情更新请求暂时不可用", { path, method: init.method ?? "GET", code: `HTTP_${response.status}` });
+      throw new LocalServiceConnectionError(new Error(`HTTP ${response.status}`));
+    }
     return await readResponse(response, `请求 ${path} 失败`);
   }
 
@@ -253,12 +272,25 @@ export function createBackgroundAutoUpdateRunner({
       throw new Error(`美股自动更新状态为 ${run.status}`);
     }
 
+    let connectionFailures = 0;
     for (let attempt = 0; attempt < US_POLL_LIMIT; attempt += 1) {
       assertLease();
-      const payload = await requestJson("/api/data-jobs/market/sync/worker", {
-        method: "POST",
-        body: JSON.stringify({ runId: run.id }),
-      });
+      let payload;
+      try {
+        payload = await requestJson("/api/data-jobs/market/sync/worker", {
+          method: "POST",
+          body: JSON.stringify({ runId: run.id }),
+        });
+        connectionFailures = 0;
+      } catch (error) {
+        if (!(error instanceof LocalServiceConnectionError) || ++connectionFailures > 3) throw error;
+        // A lost HTTP reply does not prove the batch failed. Read the same run
+        // before continuing; the server gate and batch claims prevent overlap.
+        await sleep(1_500 * connectionFailures);
+        assertLease();
+        payload = await requestJson(`/api/data-jobs/market/sync?runId=${encodeURIComponent(run.id)}`);
+        log("warn", "美股批次连接中断后已恢复原任务状态", { runId: run.id, status: payload?.run?.status });
+      }
       const next = payload?.run;
       if (!next) {
         if (attempt >= 4) throw new Error(payload?.error ?? "美股自动更新批次执行失败");
@@ -367,14 +399,21 @@ export function createBackgroundAutoUpdateRunner({
       }),
     });
     if (!claim?.shouldRun) {
+      const lastStatus = claim?.settings?.lastStatus ?? state.lastStatus;
+      const lastMessage = claim?.settings?.lastMessage ?? state.lastMessage;
+      const retrying = lastStatus === "partial" || lastStatus === "failed";
+      const message = retrying && !lastMessage.includes("自动重试")
+        ? `${lastMessage}。更新未完成，将在上次结束 15 分钟后自动重试，也可到数据页手动重试`
+        : lastMessage || "今天已完成自动检查";
       updateState({
-        phase: "idle",
-        message: claim?.settings?.lastMessage ?? "今天已完成自动检查",
-        lastStatus: claim?.settings?.lastStatus ?? state.lastStatus,
+        phase: retrying ? lastStatus : "idle",
+        message,
+        error: retrying ? lastMessage : null,
+        lastStatus,
         lastFinishedAt: claim?.settings?.lastFinishedAt ?? state.lastFinishedAt,
         lastMessage: claim?.settings?.lastMessage ?? state.lastMessage,
       });
-      log("info", "今天已完成自动检查");
+      log("info", retrying ? "更新未完成，等待自动重试" : "今天已完成自动检查");
       return { claimed: false, reason: "already-checked" };
     }
 
@@ -472,6 +511,7 @@ export function createBackgroundAutoUpdateRunner({
         skipped.length ? `已跳过：${skipped.join("；")}` : "",
         deferredMarkets.length ? `待收盘重试：${deferredMarkets.join("；")}` : "",
         failures.length ? `失败：${failures.join("；")}` : "",
+        failures.length ? "将在 15 分钟后自动重试，也可到数据页手动重试" : "",
       ].filter(Boolean).join("。 ");
       await complete(token, status, message);
       updateState({

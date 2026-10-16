@@ -36,6 +36,33 @@ function createFakeFetch(routes) {
   return { fetchImpl, calls };
 }
 
+for (const failure of ["network", 502, 503, 504]) for (const recoveredStatus of ["running", "completed", "paused"]) {
+  test(`美股批次 ${failure} 中断后读取原任务并尊重 ${recoveredStatus} 状态`, async () => {
+    const { fetchImpl, calls } = createFakeFetch({
+      "GET /api/data-auto-update": { settings: { enabled: true } },
+      "POST /api/data-auto-update": ({ calls }) => calls.at(-1).body.action === "claim" ? { shouldRun: true } : { completed: true },
+      "GET /api/data-auto-update?scope=existing": { markets: { US: { existing: true, needsUpdate: true } } },
+      "POST /api/data-jobs/market/sync": { run: { id: "same-run", status: "running" } },
+      "POST /api/data-jobs/market/sync/worker": ({ count }) => {
+        if (count === 1) {
+          if (failure === "network") throw new TypeError("fetch failed", { cause: { code: "UND_ERR_HEADERS_TIMEOUT" } });
+          return response({}, failure);
+        }
+        return { run: { id: "same-run", status: "completed" } };
+      },
+      "GET /api/data-jobs/market/sync?runId=same-run": { run: { id: "same-run", status: recoveredStatus } },
+    });
+    const logs = [];
+    const runner = createBackgroundAutoUpdateRunner({ fetchImpl, sleep: async () => undefined, onLog: (entry) => logs.push(entry) });
+    const result = await runner.runIfDue();
+    assert.equal(result.status, recoveredStatus === "paused" ? "failed" : "completed");
+    assert.equal(calls.filter(c => c.key === "POST /api/data-jobs/market/sync").length, 1);
+    assert.equal(calls.filter(c => c.key === "POST /api/data-jobs/market/sync/worker").length, recoveredStatus === "running" ? 2 : 1);
+    assert.ok(calls.some(c => c.key === "GET /api/data-jobs/market/sync?runId=same-run"));
+    assert.ok(logs.some(entry => entry.path === "/api/data-jobs/market/sync/worker" && entry.code === (failure === "network" ? "UND_ERR_HEADERS_TIMEOUT" : `HTTP_${failure}`)));
+  });
+}
+
 test("按系统本地日期计算跨午夜日期", () => {
   assert.equal(
     localDateInTimeZone(new Date(2026, 7, 24, 0, 30)),
@@ -382,5 +409,19 @@ test("单个市场失败后继续执行其他市场并记录 partial", async () 
   assert.equal(result.status, "partial");
   assert.deepEqual(result.updated, ["美股"]);
   assert.equal(result.failures.length, 1);
+  assert.match(runner.getState().message, /15 分钟.*自动重试/);
   assert.ok(calls.some((call) => call.key === "POST /api/data-jobs/market/sync"));
+});
+
+test("失败等待重试时保留失败状态和恢复动作，不显示为已完成检查", async () => {
+  const settings = { enabled: true, lastStatus: "partial", lastMessage: "美股更新失败" };
+  const { fetchImpl } = createFakeFetch({
+    "GET /api/data-auto-update": { settings },
+    "POST /api/data-auto-update": { shouldRun: false, settings },
+  });
+  const runner = createBackgroundAutoUpdateRunner({ fetchImpl });
+  await runner.runIfDue();
+  assert.equal(runner.getState().phase, "partial");
+  assert.match(runner.getState().message, /自动重试/);
+  assert.match(runner.getState().error, /美股更新失败/);
 });

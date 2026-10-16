@@ -5,12 +5,19 @@ import { fileURLToPath } from "node:url";
 import { BaoStockLocalStore } from "./baostock-store.mjs";
 import { TdxLocalStore } from "./legacy-tdx-store.mjs";
 import { clearLocalMarketData } from "./clear-market-data.mjs";
+import { Mt4Bridge } from "./mt4-bridge.mjs";
+import { handleMt4Request, startMt4TerminalServer } from "./mt4-http.mjs";
+import { createDukascopyBrowserConnection, handleDukascopyBrowserRequest } from "./dukascopy-browser.mjs";
 
 const moduleDir = path.dirname(fileURLToPath(import.meta.url));
 const root = path.resolve(process.env.KLINE_DATA_DIR ?? path.join(moduleDir, "..", ".local-data"));
 const host = process.env.KLINE_DATA_HOST ?? "127.0.0.1";
 const port = Number(process.env.KLINE_DATA_PORT ?? 3100);
 const serviceVersion = 7;
+const mt4Bridge = new Mt4Bridge({ root });
+const dukascopyConnection = createDukascopyBrowserConnection();
+let mt4StartupError = null;
+try { await mt4Bridge.init(); } catch (error) { mt4StartupError = error; }
 const sourceSelectionFile = path.join(root, "source-selection.json");
 const stores = {
   baostock: await new BaoStockLocalStore({ root }).init(),
@@ -174,6 +181,8 @@ async function readJson(request) {
 let clearingMarketData = false;
 let activeRequests = 0;
 const server = http.createServer(async (request, response) => {
+  if (await handleDukascopyBrowserRequest(dukascopyConnection, request, response)) return;
+  if (await handleMt4Request(mt4Bridge, request, response, mt4StartupError)) return;
   if (request.method === "OPTIONS") return send(response, 204, {});
   const url = new URL(request.url ?? "/", `http://${request.headers.host ?? `${host}:${port}`}`);
   const clearRequest = request.method === "DELETE" && url.pathname === "/data/clear-market";
@@ -371,7 +380,7 @@ const server = http.createServer(async (request, response) => {
       });
     }
     if (request.method === "POST" && url.pathname === "/scan/latest") {
-      return send(response, 200, await store.scanLatest(await readJson(request)));
+      return send(response, 200, { ...await store.scanLatest(await readJson(request)), breakoutStdDevVersion: 1, standardDeviationConditionVersion: 1 });
     }
     return send(response, 404, { error: "接口不存在" });
   } catch (error) {
@@ -386,10 +395,16 @@ server.listen(port, host, () => {
   console.log(`K线训练营本机数据服务：http://${host}:${port}（可按设置选择行情来源）`);
 });
 
+const mt4TerminalServer = await startMt4TerminalServer(mt4Bridge, { startupError: mt4StartupError }).catch(() => null);
+
 for (const signal of ["SIGINT", "SIGTERM"]) {
-  process.on(signal, () => server.close(() => {
+  process.on(signal, async () => {
+    await dukascopyConnection.close();
+    mt4TerminalServer?.close();
+    server.close(() => {
     stores.baostock.close();
     stores.tdx.close();
     process.exit(0);
-  }));
+    });
+  });
 }

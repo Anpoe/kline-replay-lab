@@ -100,3 +100,88 @@ test("a running local service without lookback support asks for restart instead 
   assert.match((await response.json()).error, /重启程序/);
   assert.equal((await post(route, { market: "CN" })).status, 200);
 });
+
+test("CN standard deviation scan requires support and forwards both normalized parameters", async (t) => {
+  let supportsStandardDeviation = false;
+  let forwarded;
+  const { route } = createRoute(t, async (url, init) => {
+    forwarded = JSON.parse(init.body);
+    return Response.json({ market: "CN", results: [], ...(supportsStandardDeviation ? { breakoutStdDevVersion: 1 } : {}) });
+  });
+  const base = patterns.defaultPatternPresets.find((preset) => preset.id === "breakout");
+  const preset = { ...base, parameters: { ...base.parameters, maximumRangeStdDevPct: 1, minimumBreakoutStdDev: 2 } };
+  const request = { market: "CN", presets: [preset], presetIds: [preset.id] };
+  const unsupported = await post(route, request);
+  assert.equal(unsupported.status, 502);
+  assert.match((await unsupported.json()).error, /标准差.*重启程序/);
+  supportsStandardDeviation = true;
+  assert.equal((await post(route, request)).status, 200);
+  assert.equal(forwarded.presets[0].parameters.maximumRangeStdDevPct, 1);
+  assert.equal(forwarded.presets[0].parameters.minimumBreakoutStdDev, 2);
+  supportsStandardDeviation = false;
+  assert.equal((await post(route, { ...request, presets: [base] })).status, 200);
+  assert.equal((await post(route, { ...request, presetIds: [] })).status, 200);
+});
+
+test("US route applies both standard deviation gates to stored daily history", async (t) => {
+  const { route, sqlite } = createRoute(t);
+  const closes = [99, 101, 99, 101, 100, 102.5];
+  const latest = Date.UTC(2026, 9, 12);
+  sqlite.prepare("INSERT INTO instruments VALUES ('STD', 'STD', 'Test', 'US')").run();
+  sqlite.prepare("INSERT INTO candle_coverage VALUES ('STD', '1d', 6, 'alpaca-sip', 'all', ?)").run(latest);
+  closes.forEach((close, index) => sqlite.prepare("INSERT INTO candles VALUES ('STD', '1d', 'all', ?, ?, ?, ?, ?, 100, 1000)")
+    .run(latest - (5 - index) * 86_400_000, close, close + 0.1, close - 0.1, close));
+  const base = patterns.defaultPatternPresets.find((preset) => preset.id === "breakout");
+  const scan = async (maximumRangeStdDevPct, minimumBreakoutStdDev) => (await (await post(route, {
+    market: "US", presetIds: [base.id], presets: [{ ...base, parameters: {
+      ...base.parameters, lookback: 5, minimumBreakoutPct: 0, maximumRangeStdDevPct, minimumBreakoutStdDev,
+    } }],
+  })).json()).matchedCount;
+  assert.equal(await scan(1, 1), 1);
+  assert.equal(await scan(0.8, 1), 0);
+  assert.equal(await scan(1, 2), 0);
+});
+
+test("CN standalone standard deviation condition is preserved and requires a supported service", async (t) => {
+  let supported = false;
+  let forwarded;
+  const { route } = createRoute(t, async (url, init) => {
+    forwarded = JSON.parse(init.body);
+    return Response.json({ market: "CN", results: [], ...(supported ? { standardDeviationConditionVersion: 1 } : {}) });
+  });
+  const preset = {
+    id: "custom-std", kind: "custom", name: "标准差", builtIn: false, parameters: {},
+    conditions: [{ id: "std", kind: "standard_deviation", parameters: { period: 5, window: "previous", relation: "at_most", percentage: 0 } }],
+  };
+  const request = { market: "CN", presets: [preset], presetIds: [preset.id] };
+  const unsupported = await post(route, request);
+  assert.equal(unsupported.status, 502);
+  assert.match((await unsupported.json()).error, /标准差.*重启程序/);
+  supported = true;
+  assert.equal((await post(route, request)).status, 200);
+  assert.deepEqual(forwarded.presets[0].conditions, preset.conditions);
+  supported = false;
+  assert.equal((await post(route, { ...request, presetIds: [] })).status, 200);
+  assert.equal((await post(route, { ...request, presets: [{ ...preset, enabled: false }] })).status, 200);
+});
+
+test("US route supports a standalone standard deviation condition combined with a breakout", async (t) => {
+  const { route, sqlite } = createRoute(t);
+  const latest = Date.UTC(2026, 9, 12);
+  const closes = [100, 100, 100, 100, 100, 150];
+  sqlite.prepare("INSERT INTO instruments VALUES ('STD', 'STD', 'Test', 'US')").run();
+  sqlite.prepare("INSERT INTO candle_coverage VALUES ('STD', '1d', 6, 'alpaca-sip', 'all', ?)").run(latest);
+  closes.forEach((close, index) => sqlite.prepare("INSERT INTO candles VALUES ('STD', '1d', 'all', ?, ?, ?, ?, ?, 100, 1000)")
+    .run(latest - (5 - index) * 86_400_000, close, close + 0.1, close - 0.1, close));
+  const scan = async (window, relation = "at_most") => (await (await post(route, {
+    market: "US", presetIds: ["custom-std"], presets: [{
+      id: "custom-std", kind: "custom", name: "标准差突破", parameters: {}, conditions: [
+        { id: "std", kind: "standard_deviation", parameters: { period: 5, window, relation, percentage: 1 } },
+        { id: "break", kind: "breakout", parameters: { lookback: 5, direction: "up", minimumPct: 0 } },
+      ],
+    }],
+  })).json()).matchedCount;
+  assert.equal(await scan("previous"), 1);
+  assert.equal(await scan("current"), 0);
+  assert.equal(await scan("current", "at_least"), 1);
+});

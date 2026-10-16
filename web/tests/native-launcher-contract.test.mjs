@@ -300,7 +300,7 @@ test("原生构建产物携带自定义图标而不是 Windows 默认应用图�
       buildScript,
       "-OutputPath",
       executable,
-    ], { encoding: "utf8" });
+    ], { encoding: "utf8", windowsHide: true });
 
     assert.equal(build.status, 0, `${build.stdout}\n${build.stderr}`);
     const baselineSource = join(temporaryDirectory, "NoIcon.cs");
@@ -312,7 +312,7 @@ test("原生构建产物携带自定义图标而不是 Windows 默认应用图�
     ];
     const compiler = compilerCandidates.find(existsSync);
     assert.ok(compiler, "找不到 .NET Framework csc.exe");
-    const baselineBuild = spawnSync(compiler, ["/nologo", "/target:winexe", `/out:${baselineExecutable}`, baselineSource], { encoding: "utf8" });
+    const baselineBuild = spawnSync(compiler, ["/nologo", "/target:winexe", `/out:${baselineExecutable}`, baselineSource], { encoding: "utf8", windowsHide: true });
     assert.equal(baselineBuild.status, 0, `${baselineBuild.stdout}\n${baselineBuild.stderr}`);
 
     const compareIcons = String.raw`
@@ -344,6 +344,7 @@ finally {
 `;
       const comparison = spawnSync("powershell.exe", ["-NoProfile", "-Command", compareIcons], {
         encoding: "utf8",
+        windowsHide: true,
         env: {
           ...process.env,
           KLINE_ICON_TEST_EXE: executable,

@@ -1,4 +1,5 @@
 import { findRecentCandleMatch } from "../app/lib/liveScanLookback.mjs";
+import { matchesBreakoutStandardDeviation, matchesStandardDeviationCondition } from "../app/lib/breakoutStandardDeviation.mjs";
 
 function average(values) {
   return values.length ? values.reduce((sum, value) => sum + value, 0) / values.length : 0;
@@ -216,6 +217,7 @@ function matchesPatternCondition(candles, index, condition) {
   const current = candles[index];
   if (!current) return false;
   const p = condition.parameters ?? {};
+  if (condition.kind === "standard_deviation") return matchesStandardDeviationCondition(candles, index, p);
   if (condition.kind === "price_vs_ema") {
     const period = patternInteger(p.period, 20, 3, 200);
     const ema = emaAt(candles, index, period);
@@ -408,6 +410,7 @@ export function matchesLatestPattern(candles, preset) {
     const edge = priorExtremes(candles, index, lookback);
     const margin = p.minimumBreakoutPct / 100;
     return (current.close > edge.high * (1 + margin) || current.close < edge.low * (1 - margin))
+      && matchesBreakoutStandardDeviation(candles, index, lookback, p, edge.high, edge.low)
       && volumeConfirmed(candles, index, lookback, p.volumeMultiplier);
   }
   if (preset.kind === "uptrend") return uptrend(candles, index, p);

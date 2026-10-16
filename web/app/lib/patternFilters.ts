@@ -1,3 +1,5 @@
+import { matchesBreakoutStandardDeviation, matchesStandardDeviationCondition } from "./breakoutStandardDeviation.mjs";
+
 export type PatternKind =
   | "breakout"
   | "uptrend"
@@ -27,6 +29,7 @@ export type PatternConditionKind =
   | "close_location"
   | "wick_ratio"
   | "atr_percent"
+  | "standard_deviation"
   | "engulfing"
   | "breakout_retest";
 
@@ -56,6 +59,7 @@ export type PatternParameterDefinition = {
   max: number;
   step: number;
   suffix?: string;
+  help?: string;
 };
 
 export type PatternConditionOption = {
@@ -73,6 +77,7 @@ export type PatternConditionField = {
   step?: number;
   suffix?: string;
   options?: readonly PatternConditionOption[];
+  help?: string;
 };
 
 export type PatternConditionDefinition = {
@@ -104,6 +109,8 @@ export const patternParameterDefinitions: Record<PatternKind, PatternParameterDe
     { key: "lookback", label: "前高/前低回看", min: 5, max: 120, step: 1, suffix: "根" },
     { key: "minimumBreakoutPct", label: "最小突破幅度", min: 0, max: 10, step: 0.1, suffix: "%" },
     { key: "volumeMultiplier", label: "成交量相对均量", min: 0, max: 5, step: 0.1, suffix: "倍" },
+    { key: "maximumRangeStdDevPct", label: "区间标准差上限", min: 0, max: 50, step: 0.1, suffix: "%", help: "突破前回看区间的收盘价总体标准差 ÷ 平均收盘价 × 100%；越小表示价格越集中。0 表示关闭，不包含突破这根 K 线。" },
+    { key: "minimumBreakoutStdDev", label: "突破标准差倍数", min: 0, max: 10, step: 0.1, suffix: "倍", help: "收盘价越过区间最高价或最低价后，至少再超出该倍数的收盘价标准差；与最小突破幅度同时满足。标准差使用突破前回看区间计算，0 表示关闭。" },
   ],
   uptrend: [
     { key: "fastPeriod", label: "短均线周期", min: 3, max: 60, step: 1 },
@@ -333,6 +340,18 @@ export const patternConditionDefinitions: readonly PatternConditionDefinition[] 
     ],
   },
   {
+    kind: "standard_deviation",
+    group: "量价与波幅",
+    label: "标准差",
+    description: "按收盘价标准差占均价的百分比，筛选价格集中或分散的区间。",
+    fields: [
+      { key: "period", label: "回看根数", type: "number", defaultValue: 20, min: 2, max: 200, step: 1, suffix: "根", help: "取指定根数的收盘价计算总体标准差；数据不足时不命中。" },
+      { key: "window", label: "统计范围", type: "select", defaultValue: "current", options: [{ value: "current", label: "包含当前 K 线" }, { value: "previous", label: "仅当前 K 线之前" }], help: "与区间突破组合时可选择仅统计当前 K 线之前，避免突破本身抬高标准差。两种范围都不读取未来行情。" },
+      { key: "relation", label: "关系", type: "select", defaultValue: "at_most", options: [{ value: "at_most", label: "至多" }, { value: "at_least", label: "至少" }], help: "至多筛选价格更集中的区间，至少筛选价格更分散的区间；等于阈值也算命中。" },
+      { key: "percentage", label: "标准差阈值", type: "number", defaultValue: 2, min: 0, max: 100, step: 0.1, suffix: "%", help: "总体标准差 ÷ 平均收盘价 × 100%。阈值 0 仍参与判断，至多 0% 只匹配收盘价完全相同的区间。" },
+    ],
+  },
+  {
     kind: "atr_percent",
     group: "量价与波幅",
     label: "ATR 占价格",
@@ -429,7 +448,7 @@ export function createDefaultPatternCondition(kind: PatternConditionKind, id = "
 }
 
 export const defaultPatternPresets: PatternPreset[] = [
-  { id: "breakout", kind: "breakout", name: "区间突破", description: "收盘有效越过此前区间高点或低点，可附加成交量确认。", builtIn: true, parameters: { lookback: 20, minimumBreakoutPct: 0.2, volumeMultiplier: 0 } },
+  { id: "breakout", kind: "breakout", name: "区间突破", description: "收盘有效越过此前区间高点或低点，可附加成交量、区间标准差及突破距离确认。", builtIn: true, parameters: { lookback: 20, minimumBreakoutPct: 0.2, volumeMultiplier: 0, maximumRangeStdDevPct: 0, minimumBreakoutStdDev: 0 } },
   { id: "uptrend", kind: "uptrend", name: "上升趋势", description: "价格位于短均线上方、短均线位于长均线上方，并且长均线持续向上。", builtIn: true, parameters: { fastPeriod: 10, slowPeriod: 20, slopeLookback: 5, minimumRisePct: 0.5 } },
   { id: "uptrend-breakout", kind: "uptrend_breakout", name: "上升趋势突破", description: "先确认均线多头和长均线抬升，再要求当前收盘向上突破此前区间高点。", builtIn: true, parameters: { fastPeriod: 10, slowPeriod: 20, slopeLookback: 5, minimumRisePct: 0.5, lookback: 20, minimumBreakoutPct: 0.1, volumeMultiplier: 0 } },
   { id: "always-in-long", kind: "always_in_long", name: "Always In Long（严格结构）", description: "HH/HL 后向上突破并跟进，且当前仍在 EMA 上方单边控制；排除过期状态与频繁穿越均线的震荡。", builtIn: true, parameters: { emaPeriod: 20, pivotStrength: 2, followThroughBars: 2, emaSlopeBars: 3, stateLookback: 120, recentBreakoutBars: 18, controlWindow: 12, minimumTrendCloses: 9, maximumEmaCrosses: 1 } },
@@ -449,6 +468,8 @@ export const defaultPatternPresets: PatternPreset[] = [
 function patternConditionHistory(condition: PatternCondition) {
   const p = condition.parameters;
   switch (condition.kind) {
+    case "standard_deviation":
+      return patternInteger(p.period, 20, 2, 200) - (p.window === "previous" ? 0 : 1);
     case "price_vs_ema":
     case "atr_percent":
       return Math.round(finite(p.period, 20) * 4);
@@ -1094,6 +1115,8 @@ function matchesPatternCondition(candles: PatternCandle[], index: number, condit
   if (!current) return false;
   const p = condition.parameters;
   switch (condition.kind) {
+    case "standard_deviation":
+      return matchesStandardDeviationCondition(candles, index, p);
     case "price_vs_ema": {
       const period = patternInteger(p.period, 20, 3, 200);
       const ema = emaAt(candles, index, period);
@@ -1272,6 +1295,7 @@ export function matchesPattern(candles: PatternCandle[], index: number, preset: 
     const margin = p.minimumBreakoutPct / 100;
     const broke = current.close > boundary.high * (1 + margin) || current.close < boundary.low * (1 - margin);
     if (!broke) return false;
+    if (!matchesBreakoutStandardDeviation(candles, index, lookback, p, boundary.high, boundary.low)) return false;
     return hasVolumeConfirmation(candles, index, lookback, p.volumeMultiplier);
   }
   if (preset.kind === "uptrend") {

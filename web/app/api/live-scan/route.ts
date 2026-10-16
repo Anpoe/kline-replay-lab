@@ -374,7 +374,17 @@ export async function POST(request: Request) {
         headers: { "content-type": "application/json" },
         body: JSON.stringify(body),
       }, 180_000);
-      const result = await response.json() as { lookbackDays?: number };
+      const result = await response.json() as { lookbackDays?: number; breakoutStdDevVersion?: number; standardDeviationConditionVersion?: number };
+      const needsStandardDeviationCondition = presets.some((preset) => preset.enabled !== false && preset.kind === "custom"
+        && preset.conditions?.some((condition) => condition.kind === "standard_deviation"));
+      if (response.ok && needsStandardDeviationCondition && !(Number(result.standardDeviationConditionVersion) >= 1)) {
+        return Response.json({ error: "行情连接尚未支持标准差条件，请重启程序后重试" }, { status: 502 });
+      }
+      const needsStandardDeviation = presets.some((preset) => preset.enabled !== false && preset.kind === "breakout"
+        && (preset.parameters.maximumRangeStdDevPct > 0 || preset.parameters.minimumBreakoutStdDev > 0));
+      if (response.ok && needsStandardDeviation && !(Number(result.breakoutStdDevVersion) >= 1)) {
+        return Response.json({ error: "行情连接尚未支持标准差筛选，请重启程序后重试" }, { status: 502 });
+      }
       if (response.ok && body.lookbackDays > 1 && result.lookbackDays !== body.lookbackDays) {
         return Response.json({ error: "行情连接尚未支持回看筛选，请重启程序后重试" }, { status: 502 });
       }

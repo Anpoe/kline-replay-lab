@@ -28,6 +28,7 @@ export const DEFAULT_DATA_AUTO_UPDATE_SETTINGS: DataAutoUpdateSettings = {
 };
 
 const DATA_AUTO_UPDATE_LEASE_MS = 10 * 60 * 1000;
+const DATA_AUTO_UPDATE_RETRY_MS = 15 * 60 * 1000;
 
 function asNullableString(value: unknown) {
   return typeof value === "string" && value ? value : null;
@@ -102,6 +103,10 @@ export function shouldClaimDataAutoUpdate(
     return Number.isFinite(startedAt) && nowMs - startedAt > DATA_AUTO_UPDATE_LEASE_MS;
   }
   if (settings.lastStatus === "deferred" && settings.lastCheckDate === date) return true;
+  if ((settings.lastStatus === "failed" || settings.lastStatus === "partial") && settings.lastCheckDate === date) {
+    const finishedAt = Date.parse(settings.lastFinishedAt ?? settings.lastStartedAt ?? "");
+    return !Number.isFinite(finishedAt) || nowMs - finishedAt >= DATA_AUTO_UPDATE_RETRY_MS;
+  }
   if (settings.lastCheckDate === date) return false;
   return true;
 }

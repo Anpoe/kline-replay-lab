@@ -51,7 +51,7 @@ test("official client resolves Jetta config, decodes delta candles, and reuses t
       dataOrigins.push(new Headers(init?.headers).get("origin"));
       dataCaches.push(init?.cache);
     }
-    if (parsed.pathname === "/en/config.json") {
+    if (parsed.pathname === "/config.json") {
       return jsonResponse({ JETTA_SERVER_URL: "https://jetta.test.dukascopy.com" });
     }
     if (parsed.pathname === "/v1/instruments/EUR-USD") return jsonResponse(instrumentPayload());
@@ -265,7 +265,7 @@ test("official client prefers production when widget config advertises a test ho
     fetcher: async (url) => {
       const parsed = new URL(url);
       requested.push(parsed.toString());
-      if (parsed.pathname === "/en/config.json") {
+      if (parsed.pathname === "/config.json") {
         return jsonResponse({ JETTA_SERVER_URL: "https://jetta.test.dukascopy.com" });
       }
       if (parsed.hostname === "jetta.test.dukascopy.com") throw new Error("Network connection lost.");
@@ -320,6 +320,89 @@ test("official client automatically retries a transient daily download failure",
     "https://widgets.dukascopy.com",
   ]);
   assert.equal(result.report.accepted, 3);
+});
+
+test("official client retries empty accepted metadata and never reads histories from null", async () => {
+  for (const symbol of ["EURUSD", "XAUUSD"]) {
+    let attempts = 0;
+    const client = new DukascopyOfficialClient({
+      serverUrl: "https://jetta.dukascopy.com", maxAttempts: 2, retryBaseDelayMs: 0,
+      fetcher: async () => ++attempts === 1
+        ? new Response(null, { status: 202 })
+        : jsonResponse(instrumentPayload()),
+    });
+    assert.equal(await client.getMinuteAvailability(symbol), firstMinute);
+    assert.equal(attempts, 2);
+  }
+});
+
+test("official client reports persistent empty or invalid metadata as a recoverable provider failure", async () => {
+  for (const payload of [null, [], "", 1]) {
+    const client = new DukascopyOfficialClient({
+      serverUrl: "https://jetta.dukascopy.com", maxAttempts: 1,
+      fetcher: async () => jsonResponse(payload),
+    });
+    await assert.rejects(() => client.getMinuteAvailability("EURUSD"), /数据.*(?:为空|无效|未就绪).*重试/);
+  }
+});
+
+test("official client explains an upstream access challenge instead of treating it as missing history", async () => {
+  const client = new DukascopyOfficialClient({
+    serverUrl: "https://jetta.dukascopy.com", maxAttempts: 1,
+    fetcher: async () => new Response(null, { status: 202, headers: { "x-amzn-waf-action": "challenge" } }),
+  });
+  await assert.rejects(() => client.getMinuteAvailability("EURUSD"), /访问验证.*无法获取行情.*重试/);
+});
+
+test("an internal test host is skipped when production requires access verification", async () => {
+  const counts = { primary: 0, fallback: 0 };
+  const client = new DukascopyOfficialClient({
+    maxAttempts: 2, retryBaseDelayMs: 0,
+    fetcher: async (url) => {
+      const parsed = new URL(url);
+      if (parsed.pathname === "/config.json") return jsonResponse({ JETTA_SERVER_URL: "https://jetta.test.dukascopy.com" });
+      if (parsed.hostname === "jetta.dukascopy.com") {
+        counts.primary += 1;
+        return new Response(null, { status: 202, headers: { "x-amzn-waf-action": "challenge" } });
+      }
+      counts.fallback += 1;
+      throw new TypeError("fetch failed");
+    },
+  });
+  await assert.rejects(() => client.getMinuteAvailability("EURUSD"), /访问验证.*重试/);
+  assert.deepEqual(counts, { primary: 1, fallback: 0 });
+});
+
+test("official client falls back to production when an advertised public host stays empty", async () => {
+  const requested = [];
+  const client = new DukascopyOfficialClient({
+    maxAttempts: 1,
+    fetcher: async (url) => {
+      requested.push(String(url));
+      if (new URL(url).pathname === "/config.json") {
+        return jsonResponse({ JETTA_SERVER_URL: "https://jetta.eu.dukascopy.com" });
+      }
+      if (new URL(url).hostname === "jetta.eu.dukascopy.com") return new Response(null, { status: 202 });
+      return jsonResponse(instrumentPayload());
+    },
+  });
+  assert.equal(await client.getMinuteAvailability("EURUSD"), firstMinute);
+  assert.match(requested[1], /jetta\.eu\.dukascopy\.com/);
+  assert.match(requested.at(-1), /jetta\.dukascopy\.com/);
+});
+
+test("official client never marks an empty accepted daily response as a completed day", async () => {
+  let completed = 0;
+  const client = new DukascopyOfficialClient({
+    serverUrl: "https://jetta.dukascopy.com", maxAttempts: 1,
+    fetcher: async (url) => String(url).includes("/instruments/")
+      ? jsonResponse(instrumentPayload()) : new Response(null, { status: 202 }),
+  });
+  await assert.rejects(() => client.downloadAndParseCsv({
+    instrument: "EURUSD", start: "2026-01-05", end: "2026-01-05",
+    onDayComplete: () => { completed += 1; },
+  }), /数据.*重试/);
+  assert.equal(completed, 0);
 });
 
 test("official client reuses successful instrument metadata across task chunks", async () => {

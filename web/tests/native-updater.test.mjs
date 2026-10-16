@@ -63,8 +63,16 @@ internal static class UpdaterHarness
 
     public static void Main(string[] args)
     {
-        Check(args[0], "KLineTrainingCamp-Portable/");
-        Check(args[0], "");
+        try
+        {
+            Check(args[0], "KLineTrainingCamp-Portable/");
+            Check(args[0], "");
+        }
+        catch (Exception error)
+        {
+            Console.Error.WriteLine(error);
+            Environment.ExitCode = 1;
+        }
     }
 }
 `, "utf8");
@@ -77,11 +85,14 @@ internal static class UpdaterHarness
       "/reference:System.Windows.Forms.dll",
       "/reference:System.Web.Extensions.dll",
       source, harness,
-    ], { encoding: "utf8" });
+    ], { encoding: "utf8", windowsHide: true });
     assert.equal(build.status, 0, `${build.stdout}\n${build.stderr}`);
 
-    const run = spawnSync(executable, [directory], { encoding: "utf8" });
+    const run = spawnSync(executable, [directory], { encoding: "utf8", windowsHide: true });
     assert.equal(run.status, 0, `${run.stdout}\n${run.stderr}`);
+    const invalidRun = spawnSync(executable, [], { encoding: "utf8", windowsHide: true });
+    assert.equal(invalidRun.status, 1, "测试程序遇到异常时仍须让测试失败");
+    assert.match(invalidRun.stderr, /IndexOutOfRangeException/);
   } finally {
     await rm(directory, { recursive: true, force: true });
   }

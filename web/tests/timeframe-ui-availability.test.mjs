@@ -4,15 +4,18 @@ import test from "node:test";
 
 const root = new URL("../app/", import.meta.url);
 const workbench = await readFile(new URL("components/TrainingWorkbench.tsx", root), "utf8");
+const picker = await readFile(new URL("components/ChartTimeframePicker.tsx", root), "utf8");
 const settings = await readFile(new URL("features/settings/components/SettingsPanel.tsx", root), "utf8");
 const review = await readFile(new URL("features/review/components/SessionHistoryPanel.tsx", root), "utf8");
 const maintenance = await readFile(new URL("features/market-data/components/DataSourceManager.tsx", root), "utf8");
 
 test("training chart controls iterate the complete catalog and disable unavailable periods", () => {
   assert.match(workbench, /TIMEFRAME_IDS/);
-  assert.match(workbench, /TIMEFRAME_IDS\.map\(\(item\)/);
-  assert.match(workbench, /const available = currentAvailableTimeframes\.includes\(item\)/);
-  assert.match(workbench, /disabled=\{chartViewLoading \|\| !available\}/);
+  assert.match(picker, /TIMEFRAME_IDS\.map\(item/);
+  assert.match(workbench, /<ChartTimeframePicker[\s\S]{0,200}available=\{currentAvailableTimeframes\}/);
+  assert.match(picker, /const enabled = available\.includes\(item\)/);
+  assert.match(workbench, /<ChartTimeframePicker[\s\S]{0,240}disabled=\{chartViewLoading\}/);
+  assert.match(picker, /disabled=\{disabled \|\| !enabled\}/);
   assert.doesNotMatch(workbench, /currentAvailableTimeframes\.map\(\(item\)/);
   assert.doesNotMatch(workbench, /setRuleNotice\(`当前品种没有/);
 });

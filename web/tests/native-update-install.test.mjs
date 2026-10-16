@@ -109,14 +109,19 @@ internal static class InstallHarness
 `, "utf8");
     const source = fileURLToPath(new URL("../../launcher/NativeUpdateService.cs", import.meta.url));
     const build = spawnSync(compiler, [
-      "/nologo", "/target:exe", `/out:${executable}`,
+      // The updater starts a copy through the Windows shell. Keep that copy
+      // console-free even though the real restart uses normal window visibility.
+      "/nologo", "/target:winexe", `/out:${executable}`,
       "/reference:System.IO.Compression.dll",
       "/reference:System.IO.Compression.FileSystem.dll",
       "/reference:System.Windows.Forms.dll",
       "/reference:System.Web.Extensions.dll",
       source, harness,
-    ], { encoding: "utf8" });
+    ], { encoding: "utf8", windowsHide: true });
     assert.equal(build.status, 0, `${build.stdout}\n${build.stderr}`);
+    const program = await readFile(executable);
+    const peHeader = program.readUInt32LE(0x3c);
+    assert.equal(program.readUInt16LE(peHeader + 24 + 68), 2, "更新后重启的测试程序必须使用 Windows GUI 子系统，避免创建控制台窗口");
     const server = createServer(async (request, response) => {
       if (request.url !== "/release") {
         response.writeHead(404).end();
@@ -128,7 +133,7 @@ internal static class InstallHarness
     });
     await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
     try {
-      await execFileAsync(executable, [directory, `http://127.0.0.1:${server.address().port}/release`], { timeout: 25000 });
+      await execFileAsync(executable, [directory, `http://127.0.0.1:${server.address().port}/release`], { timeout: 25000, windowsHide: true });
     } finally {
       await new Promise((resolve) => server.close(resolve));
     }

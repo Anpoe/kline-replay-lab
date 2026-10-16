@@ -4,7 +4,13 @@
 
 当前版本支持 A 股、美股、外汇和现货黄金相关训练场景，并提供示例数据、逐根回放、模拟下单、仓位管理和训练记录功能。
 
-> 当前版本：`v0.1.10`<br>
+## MT4 连接
+
+在「设置 → 基本设置」的训练回收站下方开启「显示 MT4 面板」并保存，左侧即可进入「MT4」。连接同一台电脑上的 MT4 后，可查看终端行情、K 线、账户、持仓和历史档案，并发送下单、撤单、平仓及保护价修改。先登录模拟账户，按页面「连接设置」下载 EA 与配置，安装后验证连接并开启模拟交易。完整步骤见 [MT4 使用说明](web/public/mt4/使用说明.md)。
+
+实盘默认关闭，后续需要在 MT4 与训练营分别明确开启。历史回放训练继续使用独立的模拟账户。断线或执行结果未知时，请先在 MT4 核对，程序不会自动重复下单。
+
+> 当前版本：`v0.1.11`<br>
 > [下载最新版本（GitHub Releases）](https://github.com/Anpoe/kline-replay-lab/releases/latest)
 
 ## 给普通用户：三分钟开始使用
@@ -165,7 +171,7 @@ npm run verify
 生成正式发布包时请传入语义化版本号，例如：
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File launcher\build-release.ps1 -ReleaseVersion 0.1.10
+powershell -ExecutionPolicy Bypass -File launcher\build-release.ps1 -ReleaseVersion 0.1.11
 ```
 
 开发时通常需要分别启动本地数据服务和 WebUI：

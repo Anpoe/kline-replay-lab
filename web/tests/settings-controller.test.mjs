@@ -215,3 +215,20 @@ test("drops an active personal SOP that has not reached the 15-trade evidence li
 
   assert.equal(settings.activePersonalSopRule, null);
 });
+
+test("MT4 stays hidden unless the saved setting explicitly enables it", () => {
+  assert.equal(defaultAppSettings.mt4Enabled, false);
+  for (const mt4Enabled of [undefined, null, false, 0, 1, "true", "false"]) assert.equal(normalizeSettings({ mt4Enabled }).mt4Enabled, false);
+  assert.equal(normalizeSettings({ mt4Enabled: true }).mt4Enabled, true);
+});
+test("MT4 visibility survives normalized save and reload, independently of trading settings", async () => {
+  let stored;
+  for (const enabled of [true, false]) {
+    const result = await persistSettingsSave({ ...defaultAppSettings, mt4Enabled: enabled }, { write: value => { stored = JSON.stringify(value); } });
+    assert.equal(result.ok, true);
+    const reloaded = normalizeSettings(JSON.parse(stored));
+    assert.equal(reloaded.mt4Enabled, enabled);
+    assert.deepEqual(reloaded.trainingAccount, defaultAppSettings.trainingAccount);
+    assert.deepEqual(reloaded.executionProfile, defaultAppSettings.executionProfile);
+  }
+});

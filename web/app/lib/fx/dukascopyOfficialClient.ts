@@ -3,9 +3,10 @@ import {
   type DukascopyParseResult,
   type FxCandle,
 } from "./dukascopyCsv.ts";
+import { fetchDukascopy } from "./dukascopyTransport.ts";
 
 /** The official widget publishes the current Jetta service location here. */
-export const DUKASCOPY_WIDGET_CONFIG_URL = "https://widgets.dukascopy.com/en/config.json";
+export const DUKASCOPY_WIDGET_CONFIG_URL = "https://widgets.dukascopy.com/config.json";
 /**
  * Jetta varies its CloudFront response by Origin.  Supplying the official
  * widget origin selects the same cache variant used by the public widget;
@@ -103,13 +104,15 @@ export class DukascopyOfficialClientError extends Error {
   readonly status?: number;
   readonly url: string;
   readonly retryAfterMs?: number;
+  readonly requiresAccessVerification: boolean;
 
-  constructor(message: string, url: string, status?: number, retryAfterMs?: number) {
+  constructor(message: string, url: string, status?: number, retryAfterMs?: number, requiresAccessVerification = false) {
     super(message);
     this.name = "DukascopyOfficialClientError";
     this.url = url;
     this.status = status;
     this.retryAfterMs = retryAfterMs;
+    this.requiresAccessVerification = requiresAccessVerification;
   }
 }
 
@@ -136,6 +139,7 @@ function retryAfterMilliseconds(response: Response) {
 
 function isRetryableError(error: unknown) {
   if (!(error instanceof DukascopyOfficialClientError)) return false;
+  if (error.requiresAccessVerification) return false;
   return error.status === undefined
     || error.status === 408
     || error.status === 425
@@ -180,7 +184,7 @@ async function mapWithConcurrency<Input, Output>(
 
 function defaultFetcher(input: string | URL, init?: RequestInit) {
   if (typeof globalThis.fetch !== "function") throw new Error("当前运行时没有可用的 fetch");
-  return globalThis.fetch(input, init);
+  return fetchDukascopy(input, init);
 }
 
 function finiteNumber(value: unknown) {
@@ -493,6 +497,15 @@ export class DukascopyOfficialClient {
       signal,
     });
     const body = await response.text();
+    if (response.headers.get("x-amzn-waf-action") === "challenge") {
+      throw new DukascopyOfficialClientError(
+        "Dukascopy 数据服务暂时要求访问验证，当前无法获取行情；请稍后重试",
+        url,
+        503,
+        undefined,
+        true,
+      );
+    }
     if (allowMissing && response.status === 404) return null;
     let payload: unknown = null;
     try {
@@ -509,23 +522,33 @@ export class DukascopyOfficialClient {
         retryAfterMilliseconds(response),
       );
     }
+    // A successful status can still be a pending/empty response from the edge.
+    // Only an explicit 404 may represent an unavailable daily candle file.
+    if (response.status === 202 || !payload || typeof payload !== "object" || Array.isArray(payload)) {
+      throw new DukascopyOfficialClientError(
+        "Dukascopy 行情数据为空或未就绪，请稍后重试；持续失败时请检查网络连接",
+        url,
+        502,
+      );
+    }
     return payload;
   }
 
-  private async requestJsonWithRetry(url: string, signal: AbortSignal | undefined, allowMissing: boolean) {
-    for (let attempt = 1; attempt <= this.maxAttempts; attempt += 1) {
+  private async requestJsonWithRetry(url: string, signal: AbortSignal | undefined, allowMissing: boolean, maxAttempts = this.maxAttempts) {
+    for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
       if (attempt > 1) await this.waitForDailyRequest(signal);
       try {
         const origin = DUKASCOPY_REQUEST_ORIGINS[(attempt - 1) % DUKASCOPY_REQUEST_ORIGINS.length];
         return await this.requestJsonOnce(url, signal, allowMissing, origin);
       } catch (error) {
-        if (signal?.aborted || !isRetryableError(error) || attempt >= this.maxAttempts) {
+        if (signal?.aborted || !isRetryableError(error) || attempt >= maxAttempts) {
           if (isRetryableError(error) && attempt > 1 && error instanceof DukascopyOfficialClientError) {
             throw new DukascopyOfficialClientError(
               `${error.message}（已尝试 ${attempt} 次）`,
               error.url,
               error.status,
               error.retryAfterMs,
+              error.requiresAccessVerification,
             );
           }
           throw error;
@@ -553,8 +576,8 @@ export class DukascopyOfficialClient {
     throw new DukascopyOfficialClientError("Dukascopy 官方数据请求失败", url);
   }
 
-  private requestJson(url: string, signal?: AbortSignal) {
-    return this.requestJsonWithRetry(url, signal, false);
+  private requestJson(url: string, signal?: AbortSignal, maxAttempts = this.maxAttempts) {
+    return this.requestJsonWithRetry(url, signal, false, maxAttempts);
   }
 
   private requestJsonAllowMissing(url: string, signal?: AbortSignal) {
@@ -577,16 +600,18 @@ export class DukascopyOfficialClient {
     const servers = await this.serverUrls();
     let lastUrl = "";
     let lastError: unknown = null;
-    for (const base of servers) {
+    for (const [serverIndex, base] of servers.entries()) {
       let tryNextServer = false;
       for (const candidate of normalizeInstrumentCandidates(symbol)) {
         const url = pathUrl(base, ["instruments", candidate]);
         lastUrl = url;
         try {
-          const payload = await this.requestJson(url, signal) as OfficialInstrumentPayload;
+          // Probe a fallback once; an unreachable advertised host must not add
+          // another full retry window to every failed market update.
+          const payload = await this.requestJson(url, signal, serverIndex === 0 ? this.maxAttempts : 1) as OfficialInstrumentPayload;
           const histories = Array.isArray(payload.histories) ? payload.histories as OfficialHistoryDescriptor[] : [];
           const minuteHistory = histories.find((history) => {
-            const period = String(history.period ?? "").toUpperCase();
+            const period = String(history?.period ?? "").toUpperCase();
             return period === "MINUTE" || period === "M1" || period === "1";
           });
           const minuteFrom = normalizeTimestamp(minuteHistory?.from);
@@ -603,7 +628,9 @@ export class DukascopyOfficialClient {
             minuteFrom,
           };
         } catch (error) {
-          lastError = error;
+          if (!(lastError instanceof DukascopyOfficialClientError && lastError.requiresAccessVerification)) {
+            lastError = error;
+          }
           const status = error instanceof DukascopyOfficialClientError ? error.status : undefined;
           if (status !== 404 && status !== 400 && status !== 422) {
             tryNextServer = true;

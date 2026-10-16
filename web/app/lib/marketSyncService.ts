@@ -2,6 +2,7 @@ import { ensureSchema, getRawDb } from "../../db/runtime";
 import { withMarketDataWrite } from "./marketDataWriteGuard";
 import {
   fetchAlpacaMultiSymbolChunk,
+  fetchAlpacaJson,
   filterTradableUsAssets,
   type AlpacaAsset,
   type AlpacaFeed,
@@ -219,12 +220,11 @@ async function loadAlpacaCalendar(
   };
   for (const origin of ["https://api.alpaca.markets", "https://paper-api.alpaca.markets"]) {
     try {
-      const response = await rateLimitedFetch(
+      const { payload: calendar } = await fetchAlpacaJson<unknown>(
         origin + "/v2/calendar?start=" + startDate + "&end=" + endDate,
         { headers },
+        rateLimitedFetch,
       );
-      if (!response.ok) continue;
-      const calendar = await response.json().catch(() => []) as unknown;
       if (Array.isArray(calendar) && calendar.length) return calendar as AlpacaCalendarDay[];
     } catch {
       // Try the paper endpoint before falling back to a weekday upper bound.
@@ -248,13 +248,11 @@ async function loadAlpacaAssets(secrets: ProviderSecrets) {
   let lastError = "Alpaca 品种目录请求失败";
   for (const origin of ["https://api.alpaca.markets", "https://paper-api.alpaca.markets"]) {
     try {
-      const response = await rateLimitedFetch(origin + "/v2/assets?status=active&asset_class=us_equity", { headers });
-      const payload = await response.json().catch(() => ({})) as unknown;
-      if (response.ok && Array.isArray(payload)) return payload as AlpacaAsset[];
-      const message = payload && typeof payload === "object" && "message" in payload
-        ? String((payload as { message?: unknown }).message ?? "")
-        : "";
-      lastError = message || lastError + "：HTTP " + response.status;
+      const { payload } = await fetchAlpacaJson<unknown>(
+        origin + "/v2/assets?status=active&asset_class=us_equity", { headers }, rateLimitedFetch,
+      );
+      if (Array.isArray(payload)) return payload as AlpacaAsset[];
+      lastError = "Alpaca 品种目录数据无效，请稍后重试";
     } catch (error) {
       lastError = errorText(error);
     }
@@ -820,8 +818,7 @@ async function persistCandleRows(
 async function reconcileCompletedBatchJobs(db: D1Database, runId: string) {
   const timestamp = nowIso();
   const coverageExists = "EXISTS (SELECT 1 FROM candle_coverage c " +
-    "JOIN instruments i ON i.id = c.instrument_id " +
-    "WHERE i.symbol = data_download_jobs.vendor_symbol " +
+    "WHERE c.instrument_id = data_download_jobs.instrument_id " +
     "AND c.timeframe = '1d' AND c.source IN ('alpaca-sip', 'alpaca-iex') " +
     "AND c.adjustment_type = 'all' " +
     "AND c.bar_count > 0)";
@@ -980,9 +977,9 @@ async function markBatchFailed(db: D1Database, batch: BatchRow, message: string)
     "finished_at = ?, updated_at = ? WHERE id = ?")
     .bind(message, timestamp, timestamp, batch.id).run();
   await db.prepare("UPDATE data_download_jobs SET status = 'failed', last_error = ?, " +
-    "terminal_reason = 'request_failed', updated_at = ? WHERE sync_batch_id = ? " +
+    "terminal_reason = 'request_failed', updated_at = ? WHERE sync_run_id = ? AND sync_batch_id = ? " +
     "AND status NOT IN ('completed', 'no_data')")
-    .bind(message, timestamp, batch.id).run();
+    .bind(message, timestamp, batch.runId, batch.id).run();
 }
 
 async function processBatch(db: D1Database, run: RunRow, originalBatch: BatchRow, secrets: ProviderSecrets) {
@@ -1065,8 +1062,7 @@ async function processBatch(db: D1Database, run: RunRow, originalBatch: BatchRow
     ).run();
   if (!pageToken) {
     const coverageExists = "EXISTS (SELECT 1 FROM candle_coverage c " +
-      "JOIN instruments i ON i.id = c.instrument_id " +
-      "WHERE i.symbol = data_download_jobs.vendor_symbol " +
+      "WHERE c.instrument_id = data_download_jobs.instrument_id " +
       "AND c.timeframe = '1d' AND c.source IN ('alpaca-sip', 'alpaca-iex') " +
       "AND c.adjustment_type = 'all' " +
       "AND c.bar_count > 0)";
@@ -1074,15 +1070,15 @@ async function processBatch(db: D1Database, run: RunRow, originalBatch: BatchRow
       "status = CASE WHEN " + coverageExists + " THEN 'completed' ELSE 'no_data' END, " +
       "inserted_count = inserted_count + ?, feed = ?, last_error = NULL, " +
       "terminal_reason = CASE WHEN " + coverageExists + " THEN NULL ELSE 'no_bars_returned' END, " +
-      "updated_at = ? WHERE sync_batch_id = ? AND vendor_symbol = ?")
-      .bind(persisted.insertedBySymbol.get(symbol.toUpperCase()) ?? 0, feed, timestamp, batch.id, symbol));
+      "updated_at = ? WHERE sync_run_id = ? AND sync_batch_id = ? AND vendor_symbol = ?")
+      .bind(persisted.insertedBySymbol.get(symbol.toUpperCase()) ?? 0, feed, timestamp, batch.runId, batch.id, symbol));
     for (const group of chunks(updates, 80)) {
       if (group.length) await db.batch(group);
     }
   } else {
     const updates = symbols.map((symbol) => db.prepare("UPDATE data_download_jobs SET status = 'running', feed = ?, " +
-      "inserted_count = inserted_count + ?, updated_at = ? WHERE sync_batch_id = ? AND vendor_symbol = ?")
-      .bind(feed, persisted.insertedBySymbol.get(symbol.toUpperCase()) ?? 0, timestamp, batch.id, symbol));
+      "inserted_count = inserted_count + ?, updated_at = ? WHERE sync_run_id = ? AND sync_batch_id = ? AND vendor_symbol = ?")
+      .bind(feed, persisted.insertedBySymbol.get(symbol.toUpperCase()) ?? 0, timestamp, batch.runId, batch.id, symbol));
     for (const group of chunks(updates, 80)) {
       if (group.length) await db.batch(group);
     }
