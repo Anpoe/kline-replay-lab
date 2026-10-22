@@ -58,7 +58,7 @@ export default defineConfig(async ({ mode }) => {
         : {}),
     },
     plugins: [
-      mobileAccessPlugin(),
+      mobileAccessPlugin({ remoteHost: configuredRemoteHost }),
       vinext(),
       cloudflare({
         inspectorPort: false,

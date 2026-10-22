@@ -29,5 +29,5 @@ export function MobileSessionGuard() {
     document.addEventListener("visibilitychange", onResume);
     return () => { disposed = true; controller.abort(); window.clearInterval(interval); window.removeEventListener("online", onResume); document.removeEventListener("visibilitychange", onResume); };
   }, []);
-  return offline ? <div className="mobile-connection-error" role="alert">与电脑的连接已中断，请确认电脑开启，并检查 Wi-Fi 或 Tailscale 连接。<button type="button" className="ghost-button" onClick={() => window.location.reload()}>重新连接</button></div> : null;
+  return offline ? <div className="mobile-connection-error" role="alert">与电脑的连接已中断，请确认电脑开启且网络正常。<button type="button" className="ghost-button" onClick={() => window.location.reload()}>重新连接</button></div> : null;
 }

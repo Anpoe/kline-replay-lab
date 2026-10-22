@@ -11,7 +11,7 @@ test("verified ingress crosses frozen Vite host checks without granting localhos
   const root = await mkdtemp(path.join(os.tmpdir(), "kline-mobile-host-"));
   await mkdir(path.join(root, "app")); await writeFile(path.join(root, "app/globals.css"), ":root { --background: black; }");
   const stack = [];
-  const frozenHosts = Object.freeze(["localhost", "127.0.0.1"]);
+  const frozenHosts = Object.freeze(["localhost", "127.0.0.1", "camp.example.test"]);
   const server = http.createServer((req, res) => {
     if (!frozenHosts.includes(req.headers.host.split(":")[0])) { res.writeHead(403); res.end("frozen host check"); return; }
     let index = 0;
@@ -35,7 +35,7 @@ test("verified ingress crosses frozen Vite host checks without granting localhos
     await new Promise(resolve => server.close(resolve));
     await rm(root, { recursive: true, force: true });
   });
-  await mobileAccessPlugin().configureServer({ httpServer: server, config: { root, server: { port, allowedHosts: [] } }, middlewares: { use: handler => stack.push(handler) } });
+  await mobileAccessPlugin({ remoteHost: "camp.example.test" }).configureServer({ httpServer: server, config: { root, server: { port, allowedHosts: ["camp.example.test"] } }, middlewares: { use: handler => stack.push(handler) } });
   TailscaleAccess.prototype.init = originalInit;
   const local = `http://127.0.0.1:${port}`;
   const origin = "https://pc.example.ts.net";
@@ -54,6 +54,7 @@ test("verified ingress crosses frozen Vite host checks without granting localhos
     request.on("error", reject); request.end(options.body);
   });
   const initial = await (await fetch(local + "/api/mobile-access")).json();
+  assert.equal(initial.addresses.find(item => item.kind === "direct").url, `http://camp.example.test:${port}/mobile-connect`);
   const admin = async (action, extra = {}) => (await fetch(local + "/api/mobile-access", { method: "POST", headers: { origin: local, "content-type": "application/json", "x-kline-mobile-admin": initial.adminToken }, body: JSON.stringify({ action, ...extra }) })).json();
   const post = (pathname, body) => raw(gateway + pathname, { method: "POST", headers: { ...headers, "content-type": "application/json" }, body: JSON.stringify(body) });
   const denied = await raw(gateway + "/api/preferences", { headers }); assert.equal(denied.status, 401, await denied.text());
@@ -65,6 +66,15 @@ test("verified ingress crosses frozen Vite host checks without granting localhos
   await admin("approve", { id: pair.id, number: pair.number });
   const claimed = await post("/api/mobile-access/claim", { id: pair.id, secret: pair.secret });
   const cookie = claimed.headers.get("set-cookie").split(";")[0];
+  const directHeaders = { host: `camp.example.test:${port}`, origin: `http://camp.example.test:${port}`, cookie };
+  assert.equal((await raw("/api/mobile-access/session", { headers: directHeaders })).status, 200);
+  assert.equal((await (await raw("/api/mobile-access/session", { headers: directHeaders })).json()).authorized, true);
+  assert.equal((await raw("/api/mobile-access", { headers: directHeaders })).status, 403);
+  await new Promise((resolve, reject) => {
+    const request = http.request(local + "/socket", { headers: { ...directHeaders, connection: "Upgrade", upgrade: "websocket" } });
+    request.on("upgrade", (response, socket) => { assert.equal(response.statusCode, 101); socket.destroy(); resolve(); });
+    request.on("error", reject); request.end();
+  });
   await new Promise((resolve, reject) => {
     const request = http.request(local + gateway + "/socket", { headers: { ...headers, cookie, connection: "Upgrade", upgrade: "websocket" } });
     request.on("upgrade", (response, socket) => { assert.equal(response.statusCode, 101); socket.destroy(); resolve(); });

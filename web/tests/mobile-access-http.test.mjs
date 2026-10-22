@@ -8,16 +8,16 @@ import { MobileAccess } from "../server/mobile-access.mjs";
 import { createMobileAccessHandler, canUpgrade } from "../server/mobile-access-http.mjs";
 import { TailscaleAccess } from "../server/tailscale-access.mjs";
 
-async function fixture(t, tailscale) {
+async function fixture(t, tailscale, remoteHost) {
   const root = await mkdtemp(path.join(os.tmpdir(), "kline-mobile-http-"));
   t.after(() => rm(root, { recursive: true, force: true }));
   const service = await new MobileAccess({ stateFile: path.join(root, "access.json") }).init();
-  const handler = createMobileAccessHandler({ service, tailscale, interfaces: () => ({ WiFi: [{ address: "192.168.1.4", family: "IPv4", internal: false }] }), port: () => 3101, firewall: async () => {} });
-  async function request(url, { local = false, body, cookie, origin, host, adminToken, method = body === undefined ? "GET" : "POST", headers = {} } = {}) {
+  const handler = createMobileAccessHandler({ service, tailscale, remoteHost, interfaces: () => ({ WiFi: [{ address: "192.168.1.4", family: "IPv4", internal: false }] }), port: () => 3101, firewall: async () => {} });
+  async function request(url, { local = false, peer, body, cookie, origin, host, adminToken, method = body === undefined ? "GET" : "POST", headers = {} } = {}) {
     host ??= local ? "localhost:3101" : "192.168.1.4:3101";
     const req = Readable.from(body === undefined ? [] : [typeof body === "string" ? body : JSON.stringify(body)]);
     req.method = method; req.url = url;
-    req.socket = { remoteAddress: local ? "127.0.0.1" : "192.168.1.5", localAddress: local ? "127.0.0.1" : "192.168.1.4" };
+    req.socket = { remoteAddress: peer ?? (local ? "127.0.0.1" : "192.168.1.5"), localAddress: local ? "127.0.0.1" : "192.168.1.4" };
     req.headers = { host, ...(body === undefined ? {} : { "content-type": "application/json", origin: `http://${host}` }), ...(origin === undefined ? {} : { origin }), ...(cookie ? { cookie } : {}), ...(adminToken ? { "x-kline-mobile-admin": adminToken } : {}), ...headers };
     const response = { statusCode: 200, headers: {}, setHeader(key, value) { this.headers[key.toLowerCase()] = value; }, end(data = "") { this.body = data; } };
     let passed = false;
@@ -26,6 +26,58 @@ async function fixture(t, tailscale) {
   }
   return { service, request };
 }
+
+test("the configured IPv6 domain reuses pairing, QR, business access and revocation without becoming an admin", async t => {
+  const { service, request } = await fixture(t, undefined, "camp.example.test");
+  const origin = "http://camp.example.test:3101";
+  const options = { peer: "2001:db8:1::5", host: "camp.example.test:3101" };
+  const landing = await request("/", { ...options, headers: { accept: "text/html" } });
+  assert.equal(landing.statusCode, 302);
+  assert.equal(landing.headers.location, "/mobile-connect");
+  assert.equal((await request("/mobile-connect", options)).statusCode, 200);
+  assert.equal((await request("/api/mobile-access/session", options)).json().authorized, false);
+  assert.equal((await request("/api/preferences", options)).statusCode, 401);
+  assert.equal((await request("/api/mobile-access", { ...options, local: true })).statusCode, 403, "a loopback request using the external domain is still a phone request");
+  await service.setEnabled(true);
+  const challenge = service.rotateChallenge();
+  const status = (await request("/api/mobile-access", { local: true })).json();
+  const direct = status.addresses.find(item => item.kind === "direct");
+  assert.equal(direct.url, `${origin}/mobile-connect#code=${challenge.code}`);
+  assert.match((await request(`/api/mobile-access/qr?address=${direct.address}&code=${challenge.code}`, { local: true })).body, /<svg/);
+  const pair = (await request("/api/mobile-access/pair", { ...options, body: { code: challenge.code, name: "IPv6 手机" } })).json();
+  const claim = { id: pair.id, secret: pair.secret };
+  assert.equal((await request("/api/mobile-access/claim", { ...options, body: claim })).json().status, "pending");
+  service.approve(pair.id, pair.number);
+  const approved = await request("/api/mobile-access/claim", { ...options, body: claim });
+  const cookie = approved.headers["set-cookie"].split(";")[0];
+  assert.equal((await request("/api/preferences", { ...options, cookie })).passed, true);
+  assert.equal((await request("/api/preferences", { ...options, cookie, body: {}, origin: "http://evil.example" })).statusCode, 403);
+  assert.equal((await request("/api/mobile-access", { ...options, cookie, body: { action: "disable" }, adminToken: service.adminToken })).statusCode, 403);
+  assert.equal((await request("/api/preferences", { ...options, cookie, headers: { "x-forwarded-host": options.host } })).statusCode, 403);
+  const ws = { url: "/socket", socket: { remoteAddress: options.peer }, headers: { host: options.host, origin, cookie } };
+  assert.equal(canUpgrade(ws, service, undefined, origin), true);
+  await service.setEnabled(false);
+  assert.equal((await request("/api/preferences", { ...options, cookie })).statusCode, 401);
+  assert.equal(canUpgrade(ws, service, undefined, origin), false);
+  await service.setEnabled(true);
+  await service.revoke(pair.id);
+  assert.equal(canUpgrade(ws, service, undefined, origin), false);
+});
+
+test("IPv6 and external hosts are not admitted by wildcard, suffix, port or forwarded-header guesses", async t => {
+  const { request } = await fixture(t, undefined, "camp.example.test");
+  for (const host of ["evil.example:3101", "camp.example.test.evil.example:3101", "other.dynv6.net:3101", "camp.example.test:3102", "[2001:db8::1]:3101"]) {
+    assert.equal((await request("/mobile-connect", { host, peer: "2001:db8:1::5" })).statusCode, 403, host);
+  }
+  const unconfigured = await fixture(t);
+  assert.equal((await unconfigured.request("/mobile-connect", { host: "camp.example.test:3101", peer: "2001:db8:1::5" })).statusCode, 403);
+  const otherUserStatus = (await unconfigured.request("/api/mobile-access", { local: true })).json();
+  assert.equal(otherUserStatus.addresses.some(item => item.kind === "direct"), false, "a new user never inherits someone else's custom domain");
+  for (const remoteHost of ["*", ".dynv6.net", "http://camp.example.test", "user@camp.example.test"]) {
+    const invalid = await fixture(t, undefined, remoteHost);
+    assert.equal((await invalid.request("/mobile-connect", { host: "camp.example.test:3101", peer: "2001:db8:1::5" })).statusCode, 403);
+  }
+});
 
 test("private HTTPS proxy pairs with Secure cookies and can never become a local administrator", async t => {
   const root = await mkdtemp(path.join(os.tmpdir(), "kline-tailscale-http-"));

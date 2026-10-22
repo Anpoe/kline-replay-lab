@@ -8,13 +8,20 @@ const fail = (message, status = 400) => { throw Object.assign(new Error(message)
 const remoteContext = Symbol("mobile-remote-context");
 const sameOrigin = (req) => req.headers.origin === (req[remoteContext]?.origin ?? `http://${req.headers.host}`);
 const hasSafeOrigin = (req) => !req.headers.origin || sameOrigin(req);
-function classify(req, tailscale) {
+export function configuredRemoteOrigin(remoteHost, port) {
+  const host = typeof remoteHost === "string" ? remoteHost.trim().toLowerCase() : "";
+  // KLINE_REMOTE_HOST is one explicit DNS name, never a wildcard or an origin.
+  if (host.length > 253 || host.endsWith(".localhost") || !/^(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/.test(host) || !Number.isInteger(port) || port < 1 || port > 65535) return null;
+  return new URL(`http://${host}:${port}`).origin;
+}
+function classify(req, tailscale, directOrigin) {
   const remote = tailscale?.resolveRequest(req);
   if (remote?.kind === "denied") return { denied: true };
   if (remote?.kind === "tailscale") { req[remoteContext] = remote; return { local: false, remote: true }; }
   // Serve identity and forwarding headers may never grant localhost management rights.
   if (req.url?.startsWith("/__kline-tailscale/") || Object.keys(req.headers).some(key => key.startsWith("tailscale-") || key.startsWith("x-forwarded-") || key === "forwarded")) return { denied: true };
-  return { local: isLocalAdmin(req), remote: isLanRequest(req) };
+  const direct = directOrigin && req.headers.host?.toLowerCase() === new URL(directOrigin).host;
+  return { local: isLocalAdmin(req), remote: isLanRequest(req) || Boolean(direct) };
 }
 function isLanRequest(req) {
   if (!isPrivateAddress(req.socket.remoteAddress)) return false;
@@ -26,8 +33,8 @@ function isLanRequest(req) {
 function cookieToken(req) {
   return (req.headers.cookie ?? "").split(";").map((part) => part.trim()).find((part) => part.startsWith(`${mobileCookie}=`))?.slice(mobileCookie.length + 1);
 }
-export function canUpgrade(req, service, tailscale) {
-  const access = classify(req, tailscale);
+export function canUpgrade(req, service, tailscale, directOrigin) {
+  const access = classify(req, tailscale, directOrigin);
   return !access.denied && ((access.local && hasSafeOrigin(req)) || (access.remote && sameOrigin(req) && service.authorize(cookieToken(req))));
 }
 function send(res, status, value, type = "application/json; charset=utf-8") {
@@ -55,13 +62,15 @@ async function readBody(req) {
 }
 
 /** Runs before Vinext, static files and RSC so no remote path can bypass authorization. */
-export function createMobileAccessHandler({ service, interfaces, port, firewall, tailscale, theme = "" }) {
+export function createMobileAccessHandler({ service, interfaces, port, firewall, tailscale, remoteHost, theme = "" }) {
   const rates = new Map();
   const status = async () => {
     const current = service.status();
     const remote = await tailscale?.inspect();
     const fragment = current.challenge ? `#code=${current.challenge.code}` : "";
     const addresses = listLanAddresses(interfaces?.()).map(item => ({ ...item, url: `http://${item.address}:${port()}/mobile-connect${fragment}` }));
+    const direct = configuredRemoteOrigin(remoteHost, port());
+    if (direct) addresses.push({ name: "自有域名", kind: "direct", address: new URL(direct).hostname, url: `${direct}/mobile-connect${fragment}` });
     if (remote?.state === "ready") addresses.push({ name: "Tailscale", address: "tailscale", url: `${remote.url}/mobile-connect${fragment}` });
     return { ...current, tailscale: remote, adminToken: service.adminToken, firewallAvailable: process.platform === "win32", addresses };
   };
@@ -76,7 +85,7 @@ export function createMobileAccessHandler({ service, interfaces, port, firewall,
   }
   return async (req, res, next) => {
     try {
-      const access = classify(req, tailscale);
+      const access = classify(req, tailscale, configuredRemoteOrigin(remoteHost, port()));
       const local = access.local;
       if (access.denied || (!local && !access.remote)) fail("请通过电脑提供的手机连接地址访问。", 403);
       const url = new URL(req.url, `http://${req.headers.host}`);

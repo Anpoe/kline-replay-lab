@@ -13,6 +13,10 @@
 .mobile-access-modes > button { display: inline-flex; align-items: center; justify-content: center; flex: 1; gap: 7px; min-height: 32px; padding: 6px 12px; border: 1px solid transparent; border-radius: 5px; color: var(--muted); background: transparent; font-size: 12px; cursor: pointer; }
 .mobile-access-modes > button[aria-selected="true"] { color: var(--foreground); border-color: var(--line-strong); background: var(--surface-raised); }
 .mobile-access-modes > button[aria-selected="true"] > svg { color: var(--accent); }
+.mobile-access-submodes { gap: 16px; padding: 0; border: 0; border-bottom: 1px solid var(--line); border-radius: 0; background: transparent; }
+.mobile-access-submodes > button { flex: 0 1 auto; padding: 6px 2px; border: 0; border-bottom: 2px solid transparent; border-radius: 0; }
+.mobile-access-submodes > button[aria-selected="true"] { color: var(--accent); border-color: var(--accent); background: transparent; }
+.mobile-access-domain-empty { display: grid; gap: 12px; padding-block: 8px; color: var(--muted); font-size: 12px; }
 .mobile-access-connection { display: grid; gap: 14px; min-width: 0; }
 .mobile-access-pairing { display: grid; grid-template-columns: 176px minmax(0, 1fr); align-items: center; gap: 20px; }
 .mobile-access-qr { width: 176px; height: 176px; display: grid; place-items: center; overflow: hidden; border: 1px solid var(--line); border-radius: 8px; color: var(--muted); background: var(--surface-raised); font-size: 12px; }

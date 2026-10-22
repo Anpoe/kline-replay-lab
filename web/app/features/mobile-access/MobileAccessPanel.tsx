@@ -1,11 +1,25 @@
 "use client";
 
-import { useCallback, useEffect, useId, useRef, useState } from "react";
+import { useCallback, useEffect, useId, useRef, useState, type ReactNode } from "react";
 import { ChevronRight, Copy, Globe, RefreshCw, Smartphone, Wifi } from "lucide-react";
 import Image from "next/image";
 import { SettingsHelp } from "../../components/SettingsHelp";
 import type { MobileAccessStatus } from "./mobileAccessContracts";
 import { TailscaleAccessPanel } from "./TailscaleAccessPanel";
+
+function ConnectionTabs<T extends string>({ id, label, value, options, onChange, secondary = false }: {
+  id: string; label: string; value: T; options: { value: T; label: string; icon?: ReactNode }[]; onChange: (value: T) => void; secondary?: boolean;
+}) {
+  return <div className={`mobile-access-modes${secondary ? " mobile-access-submodes" : ""}`} role="tablist" aria-label={label}>
+    {options.map((option, index) => <button type="button" role="tab" id={`${id}-${option.value}`} aria-controls={`${id}-panel`} aria-selected={value === option.value} tabIndex={value === option.value ? 0 : -1} key={option.value} onClick={() => onChange(option.value)} onKeyDown={event => {
+      if (!["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) return;
+      event.preventDefault();
+      const next = event.key === "Home" ? 0 : event.key === "End" ? options.length - 1 : (index + (event.key === "ArrowLeft" ? options.length - 1 : 1)) % options.length;
+      onChange(options[next].value);
+      event.currentTarget.parentElement?.querySelectorAll<HTMLButtonElement>("[role=tab]")[next]?.focus();
+    }}>{option.icon}{option.label}</button>)}
+  </div>;
+}
 
 export function MobileAccessPanel() {
   const [state, setState] = useState<MobileAccessStatus | null>(null);
@@ -16,7 +30,8 @@ export function MobileAccessPanel() {
   const [connected, setConnected] = useState(false);
   const [busy, setBusy] = useState(false);
   const [address, setAddress] = useState("");
-  const [mode, setMode] = useState<"lan" | "tailscale">("lan");
+  const [mode, setMode] = useState<"lan" | "remote">("lan");
+  const [remoteMode, setRemoteMode] = useState<"direct" | "tailscale" | null>(null);
   const connectionId = useId();
   const mounted = useRef(false);
   const acting = useRef(false);
@@ -61,7 +76,7 @@ export function MobileAccessPanel() {
       if (!response.ok) throw new Error(body.error ?? "连接操作未完成，请重新检查后重试。");
       if (mounted.current) {
         setState(body); setConnected(true);
-        if (action === "tailscale-prepare" && body.tailscale?.state === "ready") setMode("tailscale");
+        if (action === "tailscale-prepare" && body.tailscale?.state === "ready") { setAddress("tailscale"); setRemoteMode("tailscale"); setMode("remote"); }
         if (action === "firewall") setNotice("本地网络已放行。请使用专用 Wi-Fi，在手机上重新连接。");
       }
     } catch (failure) {
@@ -71,7 +86,8 @@ export function MobileAccessPanel() {
       if (mounted.current) setBusy(false);
     }
   };
-  const addresses = state?.addresses.filter(item => mode === "tailscale" ? item.address === "tailscale" : item.address !== "tailscale") ?? [];
+  const activeRemoteMode = remoteMode ?? (state?.addresses.some(item => item.kind === "direct") ? "direct" : "tailscale");
+  const addresses = state?.addresses.filter(item => mode === "lan" ? item.address !== "tailscale" && item.kind !== "direct" : activeRemoteMode === "direct" ? item.kind === "direct" : item.address === "tailscale") ?? [];
   const selected = addresses.find(item => item.address === address) ?? addresses[0];
   const disabled = busy || !connected;
   return <section className="settings-rule settings-group mobile-access-panel" aria-labelledby="settings-group-mobile-access" data-settings-group="mobile-access">
@@ -91,17 +107,12 @@ export function MobileAccessPanel() {
         {state.pending.length > 0 && <div className="mobile-access-pending"><strong>待确认 · {state.pending.length}</strong>{state.pending.map((request) => <div className="mobile-access-device" key={request.id}><div><strong>{request.name}</strong><span>核对码 <b>{request.number}</b></span></div><div className="mobile-access-actions"><button type="button" className="primary-button" disabled={disabled} onClick={() => {
           if (window.confirm(`允许“${request.name}”（核对码 ${request.number}）连接？请确认手机显示相同核对码。允许后可读取和修改本机数据，并使用已启用的 MT4 交易功能。`)) void run("approve", { id: request.id, number: request.number });
         }}>允许连接</button><button type="button" className="ghost-button" disabled={disabled} onClick={() => void run("deny", { id: request.id })}>拒绝</button></div></div>)}</div>}
-        <div className="mobile-access-modes" role="tablist" aria-label="连接方式">
-          {(["lan", "tailscale"] as const).map((item, index) => <button type="button" role="tab" id={`${connectionId}-${item}`} aria-controls={`${connectionId}-panel`} aria-selected={mode === item} tabIndex={mode === item ? 0 : -1} key={item} onClick={() => setMode(item)} onKeyDown={event => {
-            if (!["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) return;
-            event.preventDefault();
-            const next = event.key === "Home" ? 0 : event.key === "End" ? 1 : 1 - index;
-            setMode(next === 0 ? "lan" : "tailscale");
-            event.currentTarget.parentElement?.querySelectorAll<HTMLButtonElement>("[role=tab]")[next]?.focus();
-          }}>{item === "lan" ? <Wifi size={14} aria-hidden="true" /> : <Globe size={14} aria-hidden="true" />}{item === "lan" ? "同一 Wi-Fi" : "跨网络"}</button>)}
-        </div>
+        <ConnectionTabs id={connectionId} label="连接方式" value={mode} onChange={setMode} options={[{ value: "lan", label: "同一 Wi-Fi", icon: <Wifi size={14} aria-hidden="true" /> }, { value: "remote", label: "跨网络", icon: <Globe size={14} aria-hidden="true" /> }]} />
         <div className="mobile-access-connection" role="tabpanel" id={`${connectionId}-panel`} aria-labelledby={`${connectionId}-${mode}`}>
-        {mode === "tailscale" && (state.tailscale ? <TailscaleAccessPanel state={state.tailscale} enabled={state.enabled} disabled={disabled} run={run} /> : <p className="task-error" role="alert">远程连接状态不可用，请重新检查。<button type="button" className="ghost-button" disabled={busy} onClick={() => void refresh()}>重新检查</button></p>)}
+        {mode === "remote" && <ConnectionTabs id={`${connectionId}-remote`} label="跨网络方式" value={activeRemoteMode} onChange={setRemoteMode} secondary options={[{ value: "direct", label: "自有域名" }, { value: "tailscale", label: "Tailscale" }]} />}
+        <div className="mobile-access-connection" {...(mode === "remote" ? { role: "tabpanel", id: `${connectionId}-remote-panel`, "aria-labelledby": `${connectionId}-remote-${activeRemoteMode}` } : {})}>
+        {mode === "remote" && activeRemoteMode === "tailscale" && (state.tailscale ? <TailscaleAccessPanel state={state.tailscale} enabled={state.enabled} disabled={disabled} run={run} /> : <p className="task-error" role="alert">远程连接状态不可用，请重新检查。<button type="button" className="ghost-button" disabled={busy} onClick={() => void refresh()}>重新检查</button></p>)}
+        {mode === "remote" && activeRemoteMode === "direct" && !selected && <div className="mobile-access-domain-empty"><span role="status">未配置自有域名</span><div className="mobile-access-actions"><button type="button" className="ghost-button" onClick={() => setRemoteMode("tailscale")}>使用 Tailscale</button><SettingsHelp label="自有域名说明">自有域名仅使用当前电脑已有的连接配置，不随程序分发。手机与电脑的网络需支持该地址。没有自有域名时，可以使用 Tailscale 跨网络连接。</SettingsHelp></div></div>}
         {selected ? <div className="mobile-access-pairing">
           <div className={`mobile-access-qr${state.challenge ? "" : " empty"}`}>{state.challenge ? <Image unoptimized width={176} height={176} alt="手机配对二维码" src={`/api/mobile-access/qr?address=${encodeURIComponent(selected.address)}&code=${encodeURIComponent(state.challenge.code)}`} /> : <span role="status">请刷新二维码</span>}</div>
           <div className="mobile-access-details">
@@ -115,6 +126,7 @@ export function MobileAccessPanel() {
           </div>
         </div> : mode === "lan" ? <p className="task-error" role="alert">没有找到可用的本地地址，请连接 Wi-Fi 后重新检查。<button type="button" className="ghost-button" disabled={busy} onClick={() => void refresh()}>重新检查</button></p> : null}
         {mode === "lan" && <details className="mobile-access-disclosure"><summary><ChevronRight size={14} aria-hidden="true" />连接帮助</summary><div className="mobile-access-actions"><button type="button" className="ghost-button" disabled={busy} onClick={() => void refresh()}>重新检查</button>{state.firewallAvailable && <button type="button" className="ghost-button" disabled={disabled} onClick={() => void run("firewall")}>允许本地网络连接</button>}<SettingsHelp label="手机连接故障帮助">确认手机与电脑连接同一可信 Wi-Fi，并将 Windows 当前网络设为专用网络，再选择“允许本地网络连接”并接受系统授权。此操作只放行当前程序在专用网络中的本地子网连接。访客网络或路由器的设备隔离可能阻止连接；可切换普通家庭 Wi-Fi。切换网络后重新检查地址并扫码。</SettingsHelp></div></details>}
+        </div>
         </div>
       </>}
       {state && <details className="mobile-access-disclosure mobile-access-devices"><summary><ChevronRight size={14} aria-hidden="true" />已授权设备<span className="mobile-access-count">{state.devices.length}</span></summary><div>{state.devices.length === 0 ? <span className="mobile-access-empty">尚未配对设备</span> : state.devices.map((device) => <div className="mobile-access-device" key={device.id}><div><strong>{device.name}</strong><span>{device.expired ? "授权已过期，请重新配对" : `授权至 ${new Date(device.expiresAt).toLocaleDateString("zh-CN")}`}</span></div><button type="button" className="danger-button" disabled={disabled} onClick={() => { if (window.confirm(`撤销“${device.name}”的访问授权？手机将无法继续访问，已保存数据会保留。`)) void run("revoke", { id: device.id }); }}>撤销授权</button></div>)}</div></details>}

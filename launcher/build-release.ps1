@@ -186,7 +186,7 @@ $gitRevision = 'local-build'
     if ($sevenZip) {
         Push-Location (Split-Path -Parent $OutputDirectory)
         try {
-            & $sevenZip.Source 'a' '-tzip' $zipPath (Split-Path -Leaf $OutputDirectory) | Out-Host
+            & $sevenZip.Source 'a' '-tzip' '-mcu=on' $zipPath (Split-Path -Leaf $OutputDirectory) | Out-Host
             if ($LASTEXITCODE -ne 0) { throw "7-Zip failed with exit code $LASTEXITCODE." }
         } finally {
             Pop-Location

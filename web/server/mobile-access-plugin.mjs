@@ -1,11 +1,11 @@
 import { readFile } from "node:fs/promises";
 import path from "node:path";
 import { MobileAccess } from "./mobile-access.mjs";
-import { canUpgrade, createMobileAccessHandler } from "./mobile-access-http.mjs";
+import { canUpgrade, configuredRemoteOrigin, createMobileAccessHandler } from "./mobile-access-http.mjs";
 import { allowMobileFirewall } from "./mobile-firewall.mjs";
 import { TailscaleAccess } from "./tailscale-access.mjs";
 
-export function mobileAccessPlugin() {
+export function mobileAccessPlugin({ remoteHost } = {}) {
   return {
     name: "kline-mobile-access",
     enforce: "pre",
@@ -34,13 +34,13 @@ export function mobileAccessPlugin() {
       const styles = await readFile(path.join(server.config.root, "app/globals.css"), "utf8");
       const theme = styles.match(/:root\s*\{[^}]*\}/)?.[0];
       if (!theme) throw new Error("手机连接页面缺少主题配置。");
-      const handler = createMobileAccessHandler({ service, port, firewall: allowMobileFirewall, tailscale, theme });
+      const handler = createMobileAccessHandler({ service, port, firewall: allowMobileFirewall, tailscale, remoteHost, theme });
       server.middlewares.use((req, res, next) => {
         if (req[externalHost]) req.headers.host = req[externalHost];
         return handler(req, res, next);
       });
       const guardUpgrade = (req, socket) => {
-        if (!canUpgrade(req, service, tailscale)) socket.destroy();
+        if (!canUpgrade(req, service, tailscale, configuredRemoteOrigin(remoteHost, port()))) socket.destroy();
         else normalizeIngress(req);
       };
       server.httpServer?.prependListener("upgrade", guardUpgrade);
