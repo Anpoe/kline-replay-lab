@@ -422,10 +422,13 @@ test("BaoStock incremental maintenance rechecks a rolling window and repairs a g
 
   await store.startCnMaintenance({ mode: "incremental", repairDays: 8 });
   const deadline = Date.now() + 5000;
-  while (!["completed", "failed"].includes(store.getCnMaintenanceTask()?.status) && Date.now() < deadline) {
+  // The terminal status is assigned before its final atomic write finishes.
+  // Keep the fixture alive until the background task has actually settled.
+  while ((store.maintenanceRunning || !["completed", "failed"].includes(store.getCnMaintenanceTask()?.status)) && Date.now() < deadline) {
     await new Promise((resolve) => setTimeout(resolve, 10));
   }
 
+  assert.equal(store.maintenanceRunning, false, "maintenance must finish persisting before fixture cleanup");
   assert.equal(store.getCnMaintenanceTask()?.status, "completed", store.getCnMaintenanceTask()?.error);
   assert.equal(store.getCnMaintenanceTask()?.progress.correctedBars, 1);
   assert.equal(store.getCnMaintenanceTask()?.progress.insertedBars, 1);

@@ -1,5 +1,56 @@
 @import "tailwindcss";
 
+/* Phone access reuses settings controls, semantic colors and compact status rows. */
+.mobile-access-panel { min-width: 0; }
+.mobile-access-header, .mobile-access-heading { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.mobile-access-header { justify-content: space-between; }
+.mobile-access-heading { gap: 8px; }
+.mobile-access-heading h4 { display: flex; align-items: center; gap: 6px; margin: 0; color: var(--foreground); font-size: 12px; font-weight: 650; }
+.mobile-access-status { display: inline-flex; align-items: center; gap: 5px; color: var(--muted); font-size: 10px; }
+.mobile-access-status::before { content: ""; width: 5px; height: 5px; border-radius: 50%; background: currentColor; }
+.mobile-access-status.active { color: var(--accent); }
+.mobile-access-modes { display: flex; gap: 4px; padding: 4px; border: 1px solid var(--line); border-radius: 8px; background: var(--surface); }
+.mobile-access-modes > button { display: inline-flex; align-items: center; justify-content: center; flex: 1; gap: 7px; min-height: 32px; padding: 6px 12px; border: 1px solid transparent; border-radius: 5px; color: var(--muted); background: transparent; font-size: 12px; cursor: pointer; }
+.mobile-access-modes > button[aria-selected="true"] { color: var(--foreground); border-color: var(--line-strong); background: var(--surface-raised); }
+.mobile-access-modes > button[aria-selected="true"] > svg { color: var(--accent); }
+.mobile-access-connection { display: grid; gap: 14px; min-width: 0; }
+.mobile-access-pairing { display: grid; grid-template-columns: 176px minmax(0, 1fr); align-items: center; gap: 20px; }
+.mobile-access-qr { width: 176px; height: 176px; display: grid; place-items: center; overflow: hidden; border: 1px solid var(--line); border-radius: 8px; color: var(--muted); background: var(--surface-raised); font-size: 12px; }
+.mobile-access-qr img { display: block; width: 100%; height: 100%; }
+.mobile-access-qr.empty { height: 80px; }
+.mobile-access-details { display: grid; gap: 10px; min-width: 0; }
+.mobile-access-details label { display: grid; gap: 6px; min-width: 0; color: var(--muted); font-size: 12px; }
+.mobile-access-details :is(select, input) { min-width: 0; width: 100%; height: 36px; border: 1px solid var(--line-strong); border-radius: 7px; padding: 6px 10px; background: var(--surface-raised); color: var(--foreground); }
+.mobile-access-url { display: block; overflow-wrap: anywhere; color: var(--muted); font-size: 11px; user-select: all; }
+.mobile-access-details > span, .mobile-access-devices > span { color: var(--muted); font-size: 11px; }
+.mobile-access-actions { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; }
+.mobile-access-pending { display: grid; gap: 4px; padding: 10px 12px; border: 1px solid var(--accent); border-radius: 8px; background: var(--surface); font-size: 12px; }
+.mobile-access-disclosure { min-width: 0; color: var(--muted); font-size: 11px; }
+.mobile-access-disclosure > summary { display: flex; align-items: center; gap: 6px; min-height: 30px; cursor: pointer; list-style: none; }
+.mobile-access-disclosure > summary::-webkit-details-marker { display: none; }
+.mobile-access-disclosure > summary > svg { flex-shrink: 0; transition: transform .15s; }
+.mobile-access-disclosure[open] > summary > svg { transform: rotate(90deg); }
+.mobile-access-disclosure > div { padding-top: 8px; }
+.mobile-access-devices { border-top: 1px solid var(--line); padding-top: 8px; }
+.mobile-access-count { margin-left: auto; color: var(--faint); font-variant-numeric: tabular-nums; }
+.mobile-access-empty { display: block; padding: 4px 0; color: var(--faint); }
+.mobile-access-device { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; padding: 12px 0; border-bottom: 1px solid var(--line); }
+.mobile-access-device > div:first-child { display: grid; gap: 5px; min-width: 0; overflow-wrap: anywhere; }
+.mobile-access-device span { color: var(--muted); font-size: 11px; }
+.mobile-access-device b { color: var(--foreground); font-size: 16px; font-variant-numeric: tabular-nums; letter-spacing: 2px; }
+.mobile-access-panel :is(.primary-button, .ghost-button, .danger-button) { display: inline-flex; align-items: center; justify-content: center; gap: 6px; min-height: 32px; padding: 6px 10px; font-size: 11px; }
+.mobile-access-panel :is(button, a, summary):focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
+.mobile-access-panel .danger-button { display: inline-flex; align-items: center; justify-content: center; padding: 6px 12px; color: var(--danger); background: var(--surface-raised); border: 1px solid var(--line-strong); border-radius: 7px; cursor: pointer; font-size: 12px; }
+.mobile-access-panel .danger-button:disabled { opacity: .5; cursor: default; }
+.mobile-connection-error { position: fixed; z-index: 15000; top: 8px; left: 8px; right: 8px; display: flex; align-items: center; justify-content: center; flex-wrap: wrap; gap: 8px; border: 1px solid var(--danger); border-radius: 8px; padding: 10px; background: var(--surface); color: var(--danger); font-size: 12px; }
+@media (max-width: 540px) {
+  .mobile-access-pairing { grid-template-columns: minmax(0, 1fr); }
+  .mobile-access-qr { justify-self: center; width: min(176px, 100%); height: auto; aspect-ratio: 1; }
+}
+@media (pointer: coarse) {
+  .mobile-access-panel :is(.primary-button, .ghost-button, .danger-button), .mobile-access-modes > button, .mobile-access-disclosure > summary { min-height: 44px; }
+}
+
 /* MT4 follows the training workbench: full-width chart, compact account band and trade dock. */
 .content-page.mt4-page { min-width: 0; padding: 10px 12px; display: flex; flex-direction: column; gap: 8px; background: var(--background); }
 .mt4-page .page-heading { align-items: center; gap: 12px; flex-wrap: wrap; margin: 0; min-height: 36px; }
@@ -227,6 +278,16 @@
 .mt4-table .mt4-ticket, .mt4-table .mt4-trade-time { color: var(--muted); font-size: 11px; }
 .mt4-table .mt4-order-symbol { font-weight: 650; overflow: hidden; text-overflow: ellipsis; }
 .mt4-table .mt4-unset { color: var(--faint); }
+.mt4-protection-price { display: inline-flex; align-items: center; justify-content: flex-end; gap: 5px; min-height: 28px; padding: 3px 5px; border: 1px solid transparent; border-radius: 5px; background: transparent; color: inherit; font: inherit; cursor: pointer; }
+.mt4-protection-price svg { color: var(--muted); flex: 0 0 auto; }
+.mt4-protection-price:hover:not(:disabled) { color: var(--accent); background: var(--surface-raised); border-color: var(--line-strong); }
+.mt4-protection-price:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.mt4-protection-price:disabled { cursor: default; opacity: .5; }
+.mt4-protection h3 { margin: 0 0 10px; font-size: 12px; }
+.mt4-protection-form { display: flex; flex-wrap: wrap; align-items: flex-end; gap: 10px; }
+.mt4-protection-form .mt4-fields { width: min(100%, 440px); }
+.mt4-protection.single .mt4-fields { grid-template-columns: minmax(0, 1fr); width: min(100%, 220px); }
+@media (pointer: coarse) { .mt4-protection-price { min-height: 44px; } }
 .mt4-table .mt4-order-profit { font-weight: 650; }
 .mt4-table .mt4-order-profit.up { color: var(--accent); }
 .mt4-table .mt4-order-profit.down { color: var(--danger); }
@@ -499,10 +560,111 @@ button { color: inherit; }
 .random-rule-summary { align-items: center; margin: 12px 0; background: var(--surface-soft); border-color: var(--line); }
 .random-rule-summary span { color: var(--muted); font-size: 9px; line-height: 1.5; }
 .random-rule-summary > button { margin-left: auto; flex: 0 0 auto; color: var(--accent-strong); background: var(--accent-soft); border: 1px solid rgba(32, 201, 151, .22); border-radius: 7px; padding: 7px 9px; font-size: 9px; cursor: pointer; }
-.settings-modal { width: min(720px, 100%); }
-.settings-tabs { display: grid; grid-template-columns: repeat(4, 1fr); gap: 5px; margin: 16px 0; padding: 4px; background: var(--surface-soft); border: 1px solid var(--line); border-radius: 10px; }
-.settings-tabs button { padding: 9px; color: var(--muted); background: transparent; border: 0; border-radius: 7px; cursor: pointer; font-size: 11px; }
-.settings-tabs button.active { color: var(--accent-strong); background: var(--surface-raised); box-shadow: 0 3px 12px rgba(0, 0, 0, .16); }
+.settings-modal { width: min(980px, 100%); height: min(780px, calc(100dvh - 44px)); max-height: calc(100dvh - 44px); padding: 0; display: flex; flex-direction: column; overflow: hidden; background: var(--surface); }
+.settings-modal > .task-modal-head { flex: none; align-items: center; padding: 20px 24px; }
+.settings-modal > .task-modal-head h2 { font-size: 21px; }
+.settings-modal > .task-modal-head > button { align-self: center; }
+.settings-layout { flex: 1; min-height: 0; display: grid; grid-template-columns: 200px minmax(0, 1fr); }
+.settings-sidebar { display: flex; flex-direction: column; gap: 18px; min-height: 0; padding: 20px 14px; border-right: 1px solid var(--line); background: var(--surface-soft); }
+.settings-search { display: flex; align-items: center; gap: 7px; min-width: 0; min-height: 36px; padding: 0 10px; color: var(--muted); background: var(--surface-raised); border: 1px solid var(--line-strong); border-radius: 7px; }
+.settings-search:focus-within { border-color: var(--accent); }
+.settings-modal .settings-search input:focus-visible { outline: none; }
+.settings-search > svg { flex: none; }
+.settings-modal .settings-search input { width: 100%; min-width: 0; height: 34px; border: 0; padding: 0; outline: none; color: var(--foreground); background: transparent; font-size: 12px; }
+.settings-search input::-webkit-search-cancel-button { display: none; }
+.settings-search button { display: grid; place-items: center; flex: none; padding: 0; border: 0; color: var(--muted); background: transparent; cursor: pointer; }
+.settings-navigation { display: grid; align-content: start; gap: 5px; overflow-y: auto; }
+.settings-navigation button { display: flex; align-items: center; justify-content: space-between; gap: 8px; width: 100%; min-height: 39px; padding: 9px 11px; color: var(--muted); background: transparent; border: 1px solid transparent; border-radius: 7px; text-align: left; font-size: 12px; cursor: pointer; }
+.settings-navigation button:hover { background: var(--surface-raised); color: var(--foreground); }
+.settings-navigation button.active { color: var(--accent-strong); background: var(--accent-soft); border-color: var(--line-strong); }
+.settings-navigation button > svg { opacity: .55; }
+.settings-category-count { font-size: 10px; color: var(--faint); }
+.settings-content { min-width: 0; overflow-y: auto; overscroll-behavior: contain; padding: 22px 26px 26px; }
+.settings-content-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 18px; }
+.settings-content-head h3 { margin: 0; font-size: 16px; font-weight: 650; }
+.settings-content-head > span { color: var(--muted); font-size: 11px; }
+.settings-group-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; min-height: 22px; }
+.settings-group-head > div { min-width: 0; }
+.settings-group-head h4 { margin: 0; color: var(--foreground); font-size: 12px; font-weight: 650; }
+.settings-group-category { display: block; margin-bottom: 5px; color: var(--accent); font-size: 10px; }
+.settings-modal .settings-group { gap: 13px; padding: 16px; background: var(--surface-soft); }
+.settings-modal .settings-group label { min-width: 0; display: grid; align-content: start; gap: 6px; color: var(--muted); font-size: 11px; }
+.settings-modal .settings-group input, .settings-modal .settings-group select { width: 100%; min-width: 0; height: 34px; padding: 6px 9px; border: 1px solid var(--line-strong); border-radius: 6px; color: var(--foreground); background: var(--surface-raised); font-size: 12px; }
+.settings-modal .settings-group .execution-settings-grid { gap: 14px; }
+.settings-modal .settings-group :is(.execution-settings-grid, .task-form-row) > label { grid-template-rows: minmax(16px, 1fr) auto; align-content: stretch; }
+.settings-modal .settings-group .task-start-options { margin: 0; }
+.settings-modal .settings-group .task-start-options button { min-height: 34px; }
+.settings-modal .settings-consequence { margin: 0; color: var(--muted); font-size: 10px; line-height: 1.6; }
+.settings-modal .settings-row-action strong { color: var(--foreground); font-size: 12px; }
+.settings-modal .settings-row-action > div:empty { display: none; }
+.settings-modal .settings-row-action .settings-switch { margin-left: auto; }
+.settings-modal .pretrade-field-row > div { display: flex; align-items: center; gap: 7px; }
+.settings-modal .pretrade-field-row strong { font-size: 11px; }
+.settings-provider-group { display: grid; gap: 14px; min-width: 0; }
+.settings-provider-group .settings-section-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.settings-provider-group .provider-setting-title > div > span { display: flex; align-items: center; gap: 7px; }
+.settings-provider-group .provider-setting-title > div { min-width: 0; }
+.settings-provider-group .provider-setting-title > span { overflow-wrap: anywhere; }
+.settings-provider-group .provider-secret-fields label { align-content: start; }
+.settings-provider-group .provider-secret-fields input { min-height: 34px; }
+.settings-provider-group .task-error > button { margin-left: 10px; }
+.settings-provider-feedback { position: sticky; top: 0; z-index: 2; display: grid; gap: 8px; padding: 8px 0; background: var(--surface); }
+.settings-provider-feedback :is(.task-error, .status-banner) { margin: 0; }
+.settings-shortcuts .shortcut-options { display: grid; grid-template-columns: minmax(0, 1fr) 130px auto; align-items: end; gap: 14px; }
+.settings-shortcuts .shortcut-options .settings-row-action { min-height: 34px; align-self: end; flex-direction: row; align-items: center; }
+.settings-shortcuts .shortcut-options > button { min-height: 34px; }
+.settings-shortcuts .shortcut-group h5 { margin: 4px 0 8px; color: var(--muted); font-size: 11px; font-weight: 600; }
+.shortcut-row { display: grid; grid-template-columns: minmax(0, 1fr) minmax(100px, auto) 24px; align-items: center; gap: 8px; min-height: 43px; border-top: 1px solid var(--line); }
+.shortcut-label { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; color: var(--foreground); font-size: 11px; }
+.shortcut-repeat { color: var(--faint); font-size: 9px; }
+.shortcut-binding { min-height: 30px; padding: 5px 10px; border: 1px solid var(--line-strong); border-radius: 6px; color: var(--foreground); background: var(--surface-raised); cursor: pointer; }
+.shortcut-binding kbd { font: inherit; font-size: 11px; }
+.shortcut-binding.recording { color: var(--accent); border-color: var(--accent); background: var(--accent-soft); }
+.shortcut-clear { display: grid; place-items: center; width: 24px; height: 28px; padding: 0; border: 0; border-radius: 5px; color: var(--muted); background: transparent; cursor: pointer; }
+.shortcut-clear:hover { color: var(--danger); background: var(--surface-raised); }
+.shortcut-clear:disabled { opacity: .3; cursor: default; }
+.shortcut-error { grid-column: 1 / -1; margin: 0 0 8px; color: var(--danger); font-size: 11px; line-height: 1.6; }
+@media (max-width: 760px) {
+  .settings-shortcuts .shortcut-options { grid-template-columns: minmax(0, 1fr) 130px; }
+  .settings-shortcuts .shortcut-options > button { justify-self: start; }
+}
+@media (max-width: 420px) {
+  .settings-shortcuts .shortcut-options { grid-template-columns: minmax(0, 1fr); }
+  .shortcut-row { grid-template-columns: minmax(0, 1fr) minmax(84px, auto) 24px; }
+  .shortcut-binding { max-width: 160px; padding-inline: 7px; overflow-wrap: anywhere; }
+}
+@media (pointer: coarse) {
+  .shortcut-binding, .shortcut-clear { min-height: 44px; }
+}
+.settings-empty { display: grid; justify-items: center; gap: 16px; padding: 64px 12px; color: var(--muted); font-size: 12px; }
+.settings-footer { flex: none; padding: 14px 24px; border-top: 1px solid var(--line); background: var(--surface); }
+.settings-footer .task-modal-actions { margin: 0; padding: 0; border: 0; }
+.settings-footer .task-error { margin: 0 0 12px; }
+.settings-help { display: inline-flex; flex: none; vertical-align: middle; }
+.settings-help > button { display: grid; place-items: center; width: 24px; height: 24px; padding: 0; border: 0; border-radius: 5px; background: transparent; color: var(--muted); cursor: help; }
+.settings-help > button:hover, .settings-help > button:focus-visible { color: var(--accent); background: var(--surface-raised); }
+.settings-help-popover { position: fixed; z-index: 100; display: grid; gap: 7px; width: min(340px, calc(100vw - 48px)); max-height: min(240px, calc(100dvh - 48px)); overflow-y: auto; padding: 12px 14px; color: var(--foreground); background: var(--surface-raised); border: 1px solid var(--line-strong); border-radius: 9px; box-shadow: 0 10px 30px var(--surface-soft); font-size: 11px; line-height: 1.7; }
+.settings-modal :is(button, input, select):focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+@media (min-width: 1100px) {
+  .settings-modal [data-settings-group="timezone"] .execution-settings-grid { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+}
+@media (max-width: 640px) {
+  .settings-modal { height: calc(100dvh - 24px); max-height: calc(100dvh - 24px); }
+  .settings-modal > .task-modal-head { padding: 14px 16px; }
+  .settings-layout { grid-template-columns: minmax(0, 1fr); grid-template-rows: auto minmax(0, 1fr); }
+  .settings-sidebar { gap: 10px; padding: 12px; border-right: 0; border-bottom: 1px solid var(--line); }
+  .settings-navigation { display: flex; gap: 5px; overflow-x: auto; overflow-y: hidden; padding-bottom: 2px; }
+  .settings-navigation button { flex: none; width: auto; min-height: 36px; white-space: nowrap; padding: 7px 10px; font-size: 11px; }
+  .settings-navigation button > svg { display: none; }
+  .settings-content { padding: 16px 12px; }
+  .settings-modal .settings-group { padding: 12px; }
+  .settings-modal .settings-group .execution-settings-grid { gap: 10px; }
+  .settings-footer { padding: 12px 16px; }
+}
+@media (pointer: coarse) {
+  .settings-modal .settings-group input, .settings-modal .settings-group select, .settings-modal .settings-group .task-start-options button, .settings-navigation button { min-height: 44px; }
+  .settings-help > button { width: 32px; height: 32px; }
+}
 .settings-section { display: grid; gap: 13px; min-width: 0; max-width: 100%; }
 .settings-section-head { display: grid; gap: 4px; min-width: 0; max-width: 100%; }
 .settings-section-head strong { font-size: 13px; }
@@ -766,8 +928,35 @@ button { color: inherit; }
 .watchlist-row > .up, .watchlist-row > .down { font: 10px var(--font-geist-mono), monospace; white-space: nowrap; }
 .watchlist-row-star { color: var(--accent-strong); }
 .watchlist-empty { padding: 18px 12px; color: var(--faint); font-size: 9px; line-height: 1.6; }
+.watchlist-toolbar, .watchlist-recovery { display: flex; align-items: center; gap: 5px; padding: 0 10px 8px; flex-wrap: wrap; }
+.watchlist-toolbar .ghost-button, .watchlist-recovery .ghost-button, .watchlist-management .ghost-button, .watchlist-add .ghost-button { min-height: 28px; padding: 4px 7px; font-size: 10px; }
+.watchlist-toolbar > :last-child { margin-left: auto; }
+.watchlist-management, .watchlist-add { display: grid; flex-shrink: 0; gap: 7px; padding: 8px 10px; border-bottom: 1px solid var(--line); }
+.watchlist-management form { display: flex; align-items: center; gap: 5px; }
+.watchlist-management input, .watchlist-add input, .watchlist-item-actions select { min-width: 0; width: 100%; height: 30px; padding: 0 7px; color: var(--foreground); background: var(--surface-raised); border: 1px solid var(--line); border-radius: 7px; font: inherit; font-size: 11px; }
+.watchlist-management form button { flex-shrink: 0; }
+.watchlist-panel .danger { color: var(--danger); }
+.watchlist-message { padding: 8px 10px; color: var(--danger); font-size: 11px; line-height: 1.5; }
+.watchlist-message button { padding: 4px; border: 1px solid var(--line); border-radius: 5px; color: var(--foreground); background: var(--surface-raised); cursor: pointer; }
+.watchlist-candidates { max-height: 170px; overflow: auto; }
+.watchlist-candidates > button { display: flex; align-items: center; justify-content: space-between; width: 100%; padding: 6px 2px; border: 0; border-bottom: 1px solid var(--line); color: var(--foreground); background: transparent; text-align: left; cursor: pointer; }
+.watchlist-candidates span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.watchlist-candidates small { display: block; color: var(--muted); overflow: hidden; text-overflow: ellipsis; }
+.watchlist-item-actions { display: flex; align-items: center; gap: 4px; padding: 0 10px 7px; }
+.watchlist-item-actions select { height: 27px; font-size: 10px; }
+.watchlist-item-actions button { display: grid; place-items: center; flex-shrink: 0; width: 25px; height: 27px; padding: 0; color: var(--muted); background: var(--surface-raised); border: 1px solid var(--line); border-radius: 5px; cursor: pointer; }
+.watchlist-panel button:disabled { opacity: .45; cursor: default; }
+.watchlist-quote-status { font-size: 9px; color: var(--muted); white-space: nowrap; }
+.watchlist-panel { overflow-y: auto; }
+.watchlist-panel-head, .watchlist-source-row, .watchlist-toolbar, .watchlist-recovery { flex-shrink: 0; }
+.watchlist-panel .watchlist-list { flex-shrink: 0; }
+@media (pointer: coarse) {
+  .watchlist-panel button, .watchlist-panel select, .watchlist-panel input { min-height: 44px; }
+  .watchlist-item-actions button { min-width: 32px; }
+}
 .watchlist-toggle { width: 28px; height: 28px; display: grid; place-items: center; flex: 0 0 auto; padding: 0; color: var(--muted); background: transparent; border: 1px solid var(--line); border-radius: 7px; cursor: pointer; }
 .watchlist-toggle:hover { color: var(--accent-strong); background: var(--accent-soft); border-color: rgba(32, 201, 151, .3); }
+.chart-heading .watchlist-toggle { margin-inline: -11px 11px; }
 .watch-mode-exit { flex: 0 0 auto; padding: 5px 8px; color: var(--accent-strong); background: var(--accent-soft); border: 1px solid rgba(32, 201, 151, .24); border-radius: 6px; cursor: pointer; font-size: 9px; }
 .watch-mode-exit:hover { border-color: rgba(32, 201, 151, .5); }
 .mobile-watchlist-toggle { display: none; }
@@ -1794,7 +1983,7 @@ button { color: inherit; }
   .app-shell { grid-template-columns: 1fr; padding-bottom: 64px; }
   .main-rail { position: fixed; top: auto; bottom: 0; left: 0; right: 0; width: 100%; height: 64px; flex-direction: row; padding: 7px 12px; border-right: 0; border-top: 1px solid var(--line); z-index: 50; }
   .brand-mark { display: none; }
-  .main-rail nav { width: 100%; margin: 0; display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); }
+  .main-rail nav { width: 100%; margin: 0; display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); }
   .main-rail nav button { padding: 6px; }
   .rail-bottom.pattern-entry, .rail-bottom.settings-entry { display: none; }
   .topbar { height: auto; min-height: 62px; padding: 10px 12px; flex-wrap: nowrap; }
@@ -2295,3 +2484,29 @@ button { color: inherit; }
 @keyframes mt4-toast-enter { from { opacity: 0; transform: translateY(-6px); } to { opacity: 1; transform: translateY(0); } }
 @media (max-width: 600px) { .mt4-toast { right: 12px; max-width: calc(100vw - 24px); } }
 @media (prefers-reduced-motion: reduce) { .mt4-toast { animation: none; } }
+
+/* Reuse the settings grid and semantic chart status colors. */
+.settings-tabs.with-mt4 { grid-template-columns: repeat(5, minmax(0, 1fr)); }
+.mt4-archive-row:not([aria-disabled="true"]) { cursor: pointer; }
+.mt4-archive-row:focus-visible { outline: 1px solid var(--accent); outline-offset: -1px; }
+.mt4-chart-controls > .mt4-window-status { display: inline-flex; color: var(--accent); border: 1px solid var(--line); border-radius: 6px; padding: 4px 6px; font-size: 10px; }
+@media (max-width: 760px) { .settings-tabs.with-mt4 { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+
+/* Shared decision review follows the existing training card and semantic palette. */
+.decision-chart-card { color: var(--text); background: var(--surface); border-color: var(--line); max-height: min(520px, calc(100% - 32px)); overflow: auto; }
+.decision-chart-card-head span, .decision-chart-tags span { color: var(--accent-strong); }
+.decision-chart-tags span { background: var(--accent-soft); border-color: var(--line); }
+.decision-chart-levels strong, .decision-chart-card > p { color: var(--text); }
+.decision-chart-card-head .evidence-link { font: inherit; color: inherit; line-height: inherit; padding: 0; text-align: left; }
+.decision-history { min-width: 0; }
+.decision-history > summary { cursor: pointer; color: var(--muted); font-size: 11px; padding: 10px 0; }
+.decision-history .decision-history-list { margin-top: 8px; }
+.decision-history-item .decision-chart-actions { margin-top: 10px; }
+.mt4-chart { position: relative; }
+.mt4-chart .decision-chart-card { left: 12px; top: 12px; }
+
+/* Mobile remote controls reuse settings surfaces, spacing and semantic borders. */
+.mobile-access-remote { display: grid; gap: 10px; }
+.mobile-access-remote-status { display: flex; align-items: center; justify-content: space-between; gap: 10px; color: var(--muted); font-size: 12px; }
+.mobile-access-remote-status .active { color: var(--accent); }
+.mobile-access-remote a { display: inline-flex; align-items: center; text-decoration: none; }

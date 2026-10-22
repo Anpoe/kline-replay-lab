@@ -1,5 +1,6 @@
 import vinext from "vinext";
 import { defineConfig, loadEnv } from "vite";
+import { mobileAccessPlugin } from "./server/mobile-access-plugin.mjs";
 
 const LOCAL_DATABASE_ID =
   "00000000-0000-4000-8000-000000000000";
@@ -57,6 +58,7 @@ export default defineConfig(async ({ mode }) => {
         : {}),
     },
     plugins: [
+      mobileAccessPlugin(),
       vinext(),
       cloudflare({
         inspectorPort: false,

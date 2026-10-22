@@ -1,5 +1,6 @@
 "use client";
 
+import { chartShiftPlacement } from "../lib/chartViewport.mjs";
 import { incrementalBarUpdates } from "../lib/chartBarUpdates.mjs";
 
 import {
@@ -15,6 +16,8 @@ import type { MacdSettings, MovingAverageSettings } from "../lib/chartIndicators
 import type { ProtectionLine, ProtectionPriceKind } from "../lib/tradeProtection";
 import type { TimeframeId } from "../lib/timeframeCatalog";
 import type { CorporateActionMarker } from "../lib/corporateActions";
+import type { ShortcutSettings } from "../lib/keyboardShortcuts";
+import { useKeyboardShortcuts } from "./useKeyboardShortcuts";
 
 export type { ProtectionLine, ProtectionPriceKind } from "../lib/tradeProtection";
 
@@ -82,8 +85,6 @@ const DECISION_MARKER_GROUP = "decision-markers";
 const CORPORATE_ACTION_GROUP = "corporate-action-markers";
 const PROTECTION_LINE_GROUP = "protection-lines";
 const MOBILE_CHART_QUERY = "(max-width: 600px)";
-const MOBILE_REPLAY_RIGHT_OFFSET = 16;
-const DESKTOP_REPLAY_RIGHT_OFFSET = 64;
 const MOBILE_REPLAY_BAR_SPACE = 8;
 const DESKTOP_REPLAY_BAR_SPACE = 16;
 const WHEEL_ZOOM_BASE = 1.1;
@@ -485,15 +486,6 @@ function ensureTrainingDrawingOverlays(registerOverlay: (template: OverlayTempla
     },
   });
   trainingDrawingOverlaysRegistered = true;
-}
-
-function alignLatestCandle(chart: Chart) {
-  chart.scrollToRealTime();
-  if (window.matchMedia(MOBILE_CHART_QUERY).matches) {
-    chart.setOffsetRightDistance(MOBILE_REPLAY_RIGHT_OFFSET);
-  } else {
-    chart.setOffsetRightDistance(DESKTOP_REPLAY_RIGHT_OFFSET);
-  }
 }
 
 function ensureProtectionLineOverlay(registerOverlay: (template: OverlayTemplate) => void) {
@@ -1016,6 +1008,8 @@ const periods: Record<TimeframeId, Period> = {
 };
 
 export function KLineReplayChart({
+  keyboardShortcuts,
+  shortcutsEnabled = true,
   liveUpdates = false,
   bars,
   dataIndexOffset,
@@ -1039,8 +1033,8 @@ export function KLineReplayChart({
   hidePrice,
   enableCandleContextMenu = true,
   latestCandleCountdown,
-  enableChartShift = false,
   focusTimestamp,
+  focusNonce,
   onTradeSelect,
   onDecisionSelect,
   onCorporateActionSelect,
@@ -1050,6 +1044,8 @@ export function KLineReplayChart({
   onDrawingsChange,
   onDrawingSelect,
 }: {
+  keyboardShortcuts?: ShortcutSettings;
+  shortcutsEnabled?: boolean;
   liveUpdates?: boolean;
   bars: KLineData[];
   dataIndexOffset: number;
@@ -1073,8 +1069,8 @@ export function KLineReplayChart({
   hidePrice: boolean;
   enableCandleContextMenu?: boolean;
   latestCandleCountdown?: string | null;
-  enableChartShift?: boolean;
   focusTimestamp?: number;
+  focusNonce?: number;
   onTradeSelect?: (id: string, event: "entry" | "exit") => void;
   onDecisionSelect: (id: string) => void;
   onCorporateActionSelect: (id: string) => void;
@@ -1124,32 +1120,50 @@ export function KLineReplayChart({
   const applyingViewportRef = useRef(false);
   const [shiftHandle, setShiftHandle] = useState({ x: 0, percent: 20 });
 
-  const alignViewport = useCallback((chart: Chart) => {
-    if (focusTimestamp && chart.getDataList().length && barsRef.current.some(bar => Math.abs(bar.timestamp - focusTimestamp) < 32 * 86400000)) {
-      const focusKey = `${symbol}:${timeframe}:${focusTimestamp}`;
-      const width = chart.getSize(PRICE_INDICATOR_PANE, 'main')?.width ?? 0;
-      if (width && focusAppliedRef.current !== focusKey) {
+  useKeyboardShortcuts({ settings: keyboardShortcuts, enabled: shortcutsEnabled, contextKey: `${symbol}:${timeframe}`,
+    isAvailable: action => ["chartLeft", "chartRight", "chartZoomIn", "chartZoomOut", "chartLatest"].includes(action)
+      && Boolean(chartRef.current?.getDataList().length) && !drawingActive && !priceSelectionMode,
+    onAction: action => {
+      const chart = chartRef.current;
+      if (!chart) return false;
+      if (action === "chartLeft" || action === "chartRight") {
+        followLatestRef.current = false;
+        chart.scrollByDistance(chart.getBarSpace().bar * (action === "chartLeft" ? 1 : -1), 0);
+      } else if (action === "chartZoomIn" || action === "chartZoomOut") {
+        chart.zoomAtCoordinate(action === "chartZoomIn" ? 1.15 : 1 / 1.15, undefined, 0);
+      } else if (action === "chartLatest") {
+        followLatestRef.current = true;
+        alignViewport(chart, true);
+      }
+      return true;
+    },
+  });
+
+
+  const alignViewport = useCallback((chart: Chart, forceLatest = false) => {
+    const width = chart.getSize(PRICE_INDICATOR_PANE, "main")?.width ?? 0;
+    const placement = chartShiftPlacement(width, chart.getBarSpace().bar, shiftPercentRef.current);
+    if (!placement) return;
+    setShiftHandle(previous => previous.x === placement.x && previous.percent === placement.percent ? previous : { x: placement.x, percent: placement.percent });
+    if (!forceLatest && focusTimestamp && chart.getDataList().length && barsRef.current.some(bar => Math.abs(bar.timestamp - focusTimestamp) < 32 * 86400000)) {
+      const focusKey = `${symbol}:${timeframe}:${focusTimestamp}:${focusNonce ?? 0}`;
+      if (focusAppliedRef.current !== focusKey) {
         followLatestRef.current = false; applyingViewportRef.current = true;
-        chart.scrollToTimestamp(focusTimestamp, 0); chart.scrollByDistance(-width * 0.4, 0);
+        chart.scrollToTimestamp(focusTimestamp, 0); chart.scrollByDistance(-placement.rightOffset, 0);
         focusAppliedRef.current = focusKey; applyingViewportRef.current = false;
       }
-      return;
     }
-    if (!enableChartShift) { alignLatestCandle(chart); return; }
-    const width = chart.getSize(PRICE_INDICATOR_PANE, "main")?.width ?? 0;
-    if (!width) return;
-    setShiftHandle({ x: width * (1 - shiftPercentRef.current / 100), percent: shiftPercentRef.current });
-    if (!followLatestRef.current) return;
+    if (!forceLatest && !followLatestRef.current) return;
     applyingViewportRef.current = true;
-    chart.setOffsetRightDistance(width * shiftPercentRef.current / 100);
-    chart.scrollToRealTime();
+    chart.setOffsetRightDistance(placement.rightOffset);
+    chart.scrollToRealTime(0);
     applyingViewportRef.current = false;
-  }, [enableChartShift, focusTimestamp, symbol, timeframe]);
+  }, [focusTimestamp, focusNonce, symbol, timeframe]);
 
   const changeChartShift = (percent: number) => {
     shiftPercentRef.current = Math.max(5, Math.min(50, percent));
     followLatestRef.current = true;
-    if (chartRef.current) alignViewport(chartRef.current);
+    if (chartRef.current) alignViewport(chartRef.current, true);
   };
 
   useEffect(() => {
@@ -1251,6 +1265,8 @@ export function KLineReplayChart({
       ensureCorporateActionOverlay(registerOverlay);
       ensureTrainingDrawingOverlays(registerOverlay);
       const chart = init(containerRef.current, {
+        // The application owns bindings and their enable/disable state.
+        hotkey: { enabled: false },
         locale: "zh-CN",
         timezone,
         styles: {
@@ -1316,6 +1332,7 @@ export function KLineReplayChart({
       if (!chart) return;
       chartRef.current = chart;
       focusAppliedRef.current = '';
+      followLatestRef.current = true;
       chart.setSymbol({ ticker: symbol, pricePrecision, volumePrecision: 0 });
       chart.setPeriod(periods[timeframe as TimeframeId] ?? periods["1d"]);
       chart.setDataLoader({
@@ -1373,21 +1390,35 @@ export function KLineReplayChart({
       restoreDrawings(chart, drawingsRef.current);
       const preserveCurrentZoom = () => {
         preservedBarSpaceRef.current = chart.getBarSpace().bar;
-        if (enableChartShift && !applyingViewportRef.current) followLatestRef.current = false;
+        if (!applyingViewportRef.current) { followLatestRef.current = true; alignViewport(chart, true); }
       };
-      const preserveManualScroll = () => { if (enableChartShift && !applyingViewportRef.current) followLatestRef.current = false; };
+      const preserveManualScroll = () => { if (!applyingViewportRef.current) followLatestRef.current = false; };
       chart.subscribeAction("onZoom", preserveCurrentZoom);
-      if (enableChartShift) chart.subscribeAction("onScroll", preserveManualScroll);
-      const shiftResize = enableChartShift ? new ResizeObserver(() => requestAnimationFrame(() => alignViewport(chart))) : null;
-      shiftResize?.observe(chartContainer);
+      chart.subscribeAction("onScroll", preserveManualScroll);
+      // Axis measurement and indicator layout can change the plot width without
+      // resizing its outer container. Wait for layout to settle before aligning;
+      // onScroll runs after onVisibleRangeChange and must retain manual panning.
+      let shiftLayoutFrame: number | null = null;
+      const scheduleShiftLayout = () => {
+        if (applyingViewportRef.current || shiftLayoutFrame != null) return;
+        shiftLayoutFrame = requestAnimationFrame(() => {
+          shiftLayoutFrame = null;
+          if (chartRef.current === chart) alignViewport(chart);
+        });
+      };
+      chart.subscribeAction("onVisibleRangeChange", scheduleShiftLayout);
+      const shiftResize = new ResizeObserver(scheduleShiftLayout);
+      shiftResize.observe(chartContainer);
       requestAnimationFrame(() => { applyResponsiveViewport(chart, true); syncCandleCountdown(chart, countdownRef.current); });
 
       disposeChart = () => {
         preservedBarSpaceRef.current = chart.getBarSpace().bar;
         chartContainer.removeEventListener("wheel", handleWheelZoom, { capture: true });
         chart.unsubscribeAction("onZoom", preserveCurrentZoom);
-        if (enableChartShift) chart.unsubscribeAction("onScroll", preserveManualScroll);
-        shiftResize?.disconnect();
+        chart.unsubscribeAction("onScroll", preserveManualScroll);
+        chart.unsubscribeAction("onVisibleRangeChange", scheduleShiftLayout);
+        if (shiftLayoutFrame != null) cancelAnimationFrame(shiftLayoutFrame);
+        shiftResize.disconnect();
         chart.unsubscribeAction("onCrosshairChange", handleCorporateActionCrosshair);
         onCorporateActionSelectRef.current("");
         dispose(chart);
@@ -1405,7 +1436,7 @@ export function KLineReplayChart({
       syncedCorporateActionMarkersRef.current = "";
       syncedProtectionLinesRef.current = "";
     };
-  }, [alignViewport, applyResponsiveViewport, enableChartShift, hideDate, hidePrice, pricePrecision, restoreDrawings, symbol, timeframe, timezone]);
+  }, [alignViewport, applyResponsiveViewport, hideDate, hidePrice, pricePrecision, restoreDrawings, symbol, timeframe, timezone]);
 
   useEffect(() => {
     barsRef.current = bars;
@@ -1418,7 +1449,9 @@ export function KLineReplayChart({
     const anchorIndex = Math.max(0, Math.min(previouslyApplied.length - 1, Math.floor(visibleBefore.realTo)));
     const anchorTimestamp = previouslyApplied[anchorIndex]?.timestamp;
     const restoreViewport = () => {
-      if (!enableChartShift || followLatestRef.current) { alignViewport(chart); return; }
+      // A new current candle returns to the handle; same-bar quotes preserve manual panning.
+      if (!focusTimestamp && bars.length && previouslyApplied.at(-1)?.timestamp !== bars.at(-1)?.timestamp) followLatestRef.current = true;
+      if (followLatestRef.current) { alignViewport(chart); return; }
       const nextAnchorIndex = bars.findIndex(bar => bar.timestamp === anchorTimestamp);
       if (nextAnchorIndex < 0) return;
       applyingViewportRef.current = true;
@@ -1490,7 +1523,7 @@ export function KLineReplayChart({
         restoreViewport();
       });
     });
-  }, [alignViewport, bars, enableChartShift, liveUpdates]);
+  }, [alignViewport, bars, focusTimestamp, liveUpdates]);
 
   useEffect(() => {
     movingAverageSettingsRef.current = movingAverageSettings;
@@ -1845,9 +1878,9 @@ export function KLineReplayChart({
       cancelLongPress();
       onCorporateActionSelectRef.current("");
     }}
-  />{enableChartShift && shiftHandle.x > 0 && <button className="chart-shift-handle" style={{ left: shiftHandle.x }}
+  />{shiftHandle.x > 0 && <button className="chart-shift-handle" style={{ left: shiftHandle.x }}
     role="slider" aria-label="平移图表" aria-valuemin={50} aria-valuemax={95} aria-valuenow={100 - shiftHandle.percent}
-    aria-valuetext={`右侧留白 ${Math.round(shiftHandle.percent)}%`} title="左右拖动调整右侧留白；方向键微调，双击恢复"
+    aria-valuetext={`右侧留白 ${Math.round(shiftHandle.percent)}%`} title="拖动三角设置当前 K 线位置与右侧留白；缩放和换根自动对齐，方向键微调，双击恢复"
     onPointerDown={event => { event.preventDefault(); event.currentTarget.setPointerCapture(event.pointerId); }}
     onPointerMove={event => {
       if (!event.currentTarget.hasPointerCapture(event.pointerId) || !chartRef.current || !containerRef.current) return;

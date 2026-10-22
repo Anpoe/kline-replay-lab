@@ -74,10 +74,9 @@ test("exposes the web UI on IPv4 and IPv6 while keeping remote access explicit",
 test("supports touch long-press decision backfill without disabling chart dragging", async () => {
   const chart = await readFile(new URL("app/components/KLineReplayChart.tsx", root), "utf8");
 
-  assert.match(chart, /MOBILE_REPLAY_RIGHT_OFFSET = 16/);
-  assert.match(chart, /DESKTOP_REPLAY_RIGHT_OFFSET = 64/);
-  assert.match(chart, /chart\.scrollToRealTime\(\);[\s\S]*chart\.setOffsetRightDistance\(MOBILE_REPLAY_RIGHT_OFFSET\)/);
-  assert.match(chart, /chart\.setOffsetRightDistance\(DESKTOP_REPLAY_RIGHT_OFFSET\)/);
+  assert.match(chart, /chartShiftPlacement/);
+  assert.match(chart, /setOffsetRightDistance\(placement.rightOffset\)/);
+  assert.doesNotMatch(chart, /REPLAY_RIGHT_OFFSET/);
   assert.match(chart, /matchMedia\(MOBILE_CHART_QUERY\)/);
   assert.match(chart, /event\.pointerType !== "touch"/);
   assert.match(chart, /Math\.hypot/);

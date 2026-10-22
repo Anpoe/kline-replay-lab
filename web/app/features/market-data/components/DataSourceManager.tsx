@@ -1009,7 +1009,7 @@ export function DataSourceManager({
 
   const syncUsMarket = async (mode: "initialize" | "update" | "repair") => {
     if (!configured.alpaca) {
-      setNotice("请先进入“设置 → 数据源设置”配置 Alpaca 免费账户密钥。");
+      setNotice("请先进入“设置 → 数据”配置 Alpaca 免费账户密钥。");
       return;
     }
     const message = mode === "initialize"
@@ -1340,7 +1340,7 @@ export function DataSourceManager({
       <section className="data-onboarding setup-detail advanced-setup">
         <button className="setup-back" disabled={initializationStatus === "starting"} onClick={() => setSetupView("welcome")}><ArrowLeft size={15} />退出高级自定义</button>
         <div className="setup-detail-head">
-          <div><span className="section-label">高级自定义</span><h2 title="凭证只在“设置 → 数据源设置”中管理，这里仅选择每个来源负责什么数据。" tabIndex={0} aria-describedby="initialization-source-help">建立数据初始化方案</h2><span id="initialization-source-help" className="live-sr-only">凭证只在“设置 → 数据源设置”中管理，这里仅选择每个来源负责什么数据。</span></div>
+          <div><span className="section-label">高级自定义</span><h2 title="凭证只在“设置 → 数据”中管理，这里仅选择每个来源负责什么数据。" tabIndex={0} aria-describedby="initialization-source-help">建立数据初始化方案</h2><span id="initialization-source-help" className="live-sr-only">凭证只在“设置 → 数据”中管理，这里仅选择每个来源负责什么数据。</span></div>
         </div>
         <SetupProgress step={advancedStep} />
 
@@ -1537,7 +1537,7 @@ export function DataSourceManager({
                 {advanced.usMarket && <div className={configured.alpaca ? "ready" : ""}><span className="status-dot" /><span><strong>Alpaca</strong><small>{configured.alpaca ? "本机已配置 · 支持当前周期" : "尚未配置 · 支持当前周期"}</small></span></div>}
               </div>
 
-              <button className="ghost-button source-settings-link" onClick={onOpenSettings}><Settings2 size={15} />前往数据源设置</button>
+              <button className="ghost-button source-settings-link" onClick={onOpenSettings}><Settings2 size={15} />前往数据</button>
             </div>
           )}
 
@@ -1561,7 +1561,7 @@ export function DataSourceManager({
                 <div className="setup-warning">BaoStock 初始化直接返回前复权价格，适合直接开始训练。</div>
               )}
               {advanced.cnMarket && advanced.cnInitialSource === "tdxquant" && (
-                <div className="setup-warning">{intradaySetup ? `TdxQuant ${catalogTimeframeLabel(advanced.minimumTimeframe)} 通过本机服务地址返回可复权行情；请先在“数据源设置”完成服务地址配置。全历史初始化目前支持日线数据来源。` : "TdxQuant 日线通过本机服务地址返回前复权价格；请先在“数据源设置”完成服务地址配置。全历史初始化可选择 BaoStock 或通达信日线包。"}</div>
+                <div className="setup-warning">{intradaySetup ? `TdxQuant ${catalogTimeframeLabel(advanced.minimumTimeframe)} 通过本机服务地址返回可复权行情；请先在“数据”完成服务地址配置。全历史初始化目前支持日线数据来源。` : "TdxQuant 日线通过本机服务地址返回前复权价格；请先在“数据”完成服务地址配置。全历史初始化可选择 BaoStock 或通达信日线包。"}</div>
               )}
               {supportsCorporateActions && (
                 <div className="setup-warning">
@@ -1602,7 +1602,7 @@ export function DataSourceManager({
                 });
               } else if (advanced.cnMarket) {
                 const message = advanced.cnInitialSource === "tdxquant"
-                  ? `已保留 TdxQuant ${advanced.minimumTimeframe === "1d" ? "前复权日线" : `${catalogTimeframeLabel(advanced.minimumTimeframe)} 可复权`}方案；使用前请在数据源设置中完成服务地址配置。`
+                  ? `已保留 TdxQuant ${advanced.minimumTimeframe === "1d" ? "前复权日线" : `${catalogTimeframeLabel(advanced.minimumTimeframe)} 可复权`}方案；使用前请在数据中完成服务地址配置。`
                   : "已保留该自定义方案，可在数据维护页继续执行更新。";
                 saveSetupPlan(
                   saved,

@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { dateRangeBounds, readHistoryPreferences, rememberHistoryFilter, buildMt4HistoryMarkers } from '../app/lib/mt4History.mjs';
+import { dateRangeBounds, readHistoryPreferences, rememberHistoryFilter, restoreHistorySelection, buildMt4HistoryMarkers } from '../app/lib/mt4History.mjs';
 
 test('MT4 calendar dates include both boundary days, independent of local timezone', () => {
   assert.deepEqual(dateRangeBounds('2026-10-01','2026-10-15'), { start: Date.UTC(2026,9,1)/1000, end: Date.UTC(2026,9,16)/1000 });
@@ -24,4 +24,21 @@ test('plots executions on their containing candle, never the nearer future candl
   marks=buildMt4HistoryMarkers([{...o,openTime:(base+35*60000)/1000,closeTime:(base+46*60000)/1000}],bars,15,'a'.repeat(64));
   assert.equal(marks.length,1);assert.equal(marks[0].eventKind,'exit');assert.equal(marks[0].entryPlotTimestamp,base+45*60000);
   assert.equal(buildMt4HistoryMarkers([{...o,type:2}],bars,15,'a'.repeat(64)).length,0);
+});
+
+test('initial history restoration waits for account status and does not misclassify live startup as history', () => {
+  const a='a'.repeat(64), b='b'.repeat(64), accounts=[{accountKey:a},{accountKey:b}];
+  const fresh=readHistoryPreferences(null);
+  assert.equal(restoreHistorySelection(fresh,accounts,'',false),null);
+  assert.equal(restoreHistorySelection(fresh,accounts,a,false),null);
+  assert.deepEqual(restoreHistorySelection(fresh,accounts,a,true),{accountKey:a,filter:{symbol:'',from:'',to:'',showOnChart:true}});
+  assert.equal(restoreHistorySelection(fresh,[],a,true),null);
+  const remembered=rememberHistoryFilter(fresh,b,{symbol:'',from:'',to:'',showOnChart:true});
+  assert.equal(restoreHistorySelection(remembered,accounts,'',false),null);
+  assert.deepEqual(restoreHistorySelection(remembered,accounts,a,true),{accountKey:b,filter:remembered.accounts[b]});
+  assert.deepEqual(restoreHistorySelection(remembered,accounts,b,true),{accountKey:b,filter:remembered.accounts[b]});
+  const dated=rememberHistoryFilter(fresh,a,{symbol:'XAUUSD',from:'2026-10-01',to:'2026-10-15',showOnChart:true});
+  const restored=restoreHistorySelection(dated,accounts,a,true);
+  assert.deepEqual(restored,{accountKey:a,filter:dated.accounts[a]});
+  assert.equal(Object.hasOwn(restored,'navigate'),false,'Restoring preferences must not request historical chart navigation');
 });

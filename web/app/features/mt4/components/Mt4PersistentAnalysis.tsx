@@ -11,8 +11,9 @@ export function downloadArchiveJson(value: unknown, name: string) {
   const a = document.createElement('a'); a.href = url; a.download = name; a.click(); setTimeout(() => URL.revokeObjectURL(url), 1000);
 }
 type WorkbenchProps = ComponentProps<typeof Mt4ChartWorkbench>;
-export function Mt4PersistentAnalysis({ context, seed, onNotice, ...props }: Omit<WorkbenchProps, 'initialAnalysis' | 'onPersist'> & { context: ArchiveContext; seed?: Mt4Analysis }) {
+export function Mt4PersistentAnalysis({ context, seed, onNotice, ...props }: Omit<WorkbenchProps, 'initialAnalysis' | 'onPersist' | 'persistedAnalysis' | 'accountKey'> & { context: ArchiveContext; seed?: Mt4Analysis }) {
   const [loaded, setLoaded] = useState<Mt4Analysis | null>(null), [error, setError] = useState(''), [reload, setReload] = useState(0);
+  const [persistedAnalysis, setPersistedAnalysis] = useState<Mt4Analysis | null>(null);
   const revision = useRef(0), pending = useRef<Mt4Analysis | null>(null), current = useRef<Mt4Analysis | null>(null), saving = useRef(false), conflict = useRef(false), mounted = useRef(true), timer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [identity] = useState(context), [initialSeed] = useState(seed);
   const legacyKey = props.storageKey;
@@ -31,7 +32,7 @@ export function Mt4PersistentAnalysis({ context, seed, onNotice, ...props }: Omi
             if (pending.current) localStorage.setItem(outboxKey, JSON.stringify({ revision: revision.current, data: pending.current }));
             else localStorage.removeItem(outboxKey);
           } catch { /* The server acknowledgement is authoritative. */ }
-          if (mounted.current) { setError(''); onNotice?.('标记已保存'); }
+          if (mounted.current) { setPersistedAnalysis(data); setError(''); onNotice?.('标记已保存'); }
         } catch (e) {
           pending.current ??= data; conflict.current = true;
           if (mounted.current) { setError(e instanceof Error ? e.message : '标记未保存，请保留当前内容并重试'); }
@@ -39,6 +40,12 @@ export function Mt4PersistentAnalysis({ context, seed, onNotice, ...props }: Omi
       }
     } finally { saving.current = false; }
   }, [identity, onNotice, outboxKey]);
+  const persist = useCallback((next: Mt4Analysis) => {
+    current.current = next; pending.current = structuredClone(next);
+    try { localStorage.setItem(outboxKey, JSON.stringify({ revision: revision.current, data: next })); } catch { /* The unload guard retains pending edits. */ }
+    if (timer.current) clearTimeout(timer.current);
+    timer.current = setTimeout(() => void flush(), 400);
+  }, [flush, outboxKey]);
   useEffect(() => {
     mounted.current = true; let disposed = false;
     const controller = new AbortController();
@@ -75,9 +82,9 @@ export function Mt4PersistentAnalysis({ context, seed, onNotice, ...props }: Omi
     const warn = (event: BeforeUnloadEvent) => { if (pending.current || saving.current) { event.preventDefault(); event.returnValue = ''; } };
     window.addEventListener('beforeunload', warn); return () => window.removeEventListener('beforeunload', warn);
   }, []);
-  if (props.readOnly) return <Mt4ChartWorkbench {...props} onNotice={onNotice} initialAnalysis={initialSeed ?? emptyAnalysis()} onPersist={() => {}} />;
+  if (props.readOnly) return <Mt4ChartWorkbench accountKey={identity.accountKey} {...props} onNotice={onNotice} initialAnalysis={initialSeed ?? emptyAnalysis()} onPersist={() => {}} />;
   return <>
     {error && <div className="mt4-archive-save" role="status"><span className="down" role="alert">{error}</span><button className="ghost-button" onClick={() => { conflict.current = false; if (loaded) void flush(); else setReload(n => n + 1); }}>重试</button><button className="ghost-button" onClick={() => downloadArchiveJson(current.current ?? localStorage.getItem(legacyKey) ?? '{}', 'MT4-绘图与决策.json')}>导出当前内容</button><button className="ghost-button" onClick={() => { if (window.confirm('重新读取会放弃本页未保存的编辑，请先导出当前内容。继续吗？')) { pending.current = null; localStorage.removeItem(outboxKey); setLoaded(null); setReload(n => n + 1); } }}>重新读取</button></div>}
-    {loaded && <Mt4ChartWorkbench {...props} initialAnalysis={loaded} onPersist={next => { current.current = next; pending.current = structuredClone(next); try { localStorage.setItem(outboxKey, JSON.stringify({ revision: revision.current, data: next })); } catch { /* Server save still runs; unload guard protects the pending edit. */ }  if (timer.current) clearTimeout(timer.current); timer.current = setTimeout(() => void flush(), 400); }} />}
+    {loaded && <Mt4ChartWorkbench accountKey={identity.accountKey} {...props} initialAnalysis={loaded} persistedAnalysis={persistedAnalysis} onPersist={persist} />}
   </>;
 }

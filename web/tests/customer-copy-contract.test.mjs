@@ -19,9 +19,11 @@ test("数据功能提供从入口到配置和恢复的首次使用引导", async
   ]);
   assert.match(dataManager, /首次数据初始化/);
   assert.match(dataManager, /查看推荐方案/);
-  assert.match(dataManager, /设置 → 数据源设置/);
+  assert.match(dataManager, /设置 → 数据/);
   assert.match(dataManager, /请检查本机数据服务状态后重试/);
-  assert.match(providerSettings, /首次使用：先确认数据服务状态/);
+  assert.match(providerSettings, /首次使用时，先完成数据连接设置，再到“数据”页面建立训练数据/);
+  assert.match(providerSettings, /连接设置读取失败，请检查数据服务后重试/);
+  assert.match(providerSettings, /重新读取/);
   assert.match(providerSettings, /保存 Tushare/);
   assert.match(providerSettings, /保存 Alpaca/);
 });

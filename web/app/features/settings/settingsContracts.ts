@@ -1,3 +1,5 @@
+import { DEFAULT_MT4_CHART_MOTION, normalizeMt4ChartMotion, type Mt4ChartMotionSettings } from "../../lib/mt4ChartWindow.mjs";
+import { defaultShortcutSettings, normalizeShortcutSettings, type ShortcutSettings } from "../../lib/keyboardShortcuts.ts";
 import { marketRuleCode, marketSelectionLabel, type DataMarket } from "../../lib/dataMarkets.ts";
 import {
   DEFAULT_EXECUTION_COST_PROFILE,
@@ -44,7 +46,7 @@ export type PositionSizeMode = "fixed" | "risk-percent";
 export type MarketOrderQtySettings = Record<DataMarket, number>;
 export type ChartTimeZonePreference = "market" | "Asia/Shanghai" | "America/New_York" | "Europe/London" | "UTC";
 export type ChartTimeZoneSettings = Record<DataMarket, ChartTimeZonePreference>;
-export type SettingsTab = "basic" | "training" | "discipline" | "data";
+export type SettingsTab = "basic" | "training" | "accounts" | "orders" | "discipline" | "data" | "connections" | "mt4" | "storage" | "shortcuts";
 export type LiveAccountMarket = "CN" | "US";
 
 export type TrainingAccountDefaults = {
@@ -121,7 +123,9 @@ export const marketOrderQuantityFields: Array<{
 ];
 
 export type AppSettings = {
+  shortcuts: ShortcutSettings;
   mt4Enabled: boolean;
+  mt4ChartMotion: Mt4ChartMotionSettings;
   defaultInstrumentId: string;
   defaultTimeframe: string;
   defaultOrderQty: number;
@@ -183,7 +187,9 @@ const defaultLiveAccount: LiveAccountDefaults = {
 };
 
 export const defaultAppSettings: AppSettings = {
+  shortcuts: normalizeShortcutSettings(defaultShortcutSettings),
   mt4Enabled: false,
+  mt4ChartMotion: { ...DEFAULT_MT4_CHART_MOTION },
   defaultInstrumentId: "600519.SH",
   defaultTimeframe: "1d",
   defaultOrderQty: 100,
@@ -416,7 +422,9 @@ export function normalizeSettings(value: Partial<AppSettings>): AppSettings {
   });
   return {
     ...merged,
+    shortcuts: normalizeShortcutSettings(merged.shortcuts),
     mt4Enabled: merged.mt4Enabled === true,
+    mt4ChartMotion: normalizeMt4ChartMotion(merged.mt4ChartMotion),
     defaultInstrumentId: typeof merged.defaultInstrumentId === "string" && merged.defaultInstrumentId
       ? merged.defaultInstrumentId
       : defaultAppSettings.defaultInstrumentId,

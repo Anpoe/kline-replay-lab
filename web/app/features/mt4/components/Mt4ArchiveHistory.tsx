@@ -6,13 +6,13 @@ import { requestMt4Archive } from '../mt4Gateway';
 import type { ArchiveAccount, ArchiveOrder, ArchiveTrade, HistoryFilter, HistoryFilterSelection, HistoryRecords, HistoryChartSelection } from '../mt4ArchiveContracts';
 import type { Mt4Status } from '../mt4Contracts';
 import { downloadArchiveJson } from './Mt4PersistentAnalysis';
-import { dateRangeBounds, readHistoryPreferences, rememberHistoryFilter } from '../../../lib/mt4History.mjs';
+import { dateRangeBounds, readHistoryPreferences, rememberHistoryFilter, restoreHistorySelection } from '../../../lib/mt4History.mjs';
 import { readAnalysis } from '../mt4Analysis';
 
-export function Mt4ArchiveHistory({ activeAccountKey, refreshAt, archiveStatus, onSelect, selected, chartSymbol, onFiltersChange, onRecords, chartSelection, onNotice }: {
+export function Mt4ArchiveHistory({ activeAccountKey, accountStatusReady, refreshAt, archiveStatus, onSelect, selected, chartSymbol, onFiltersChange, onRecords, chartSelection, onNotice }: {
   onNotice: (message: string) => void;
   chartSymbol: string; onFiltersChange: (selection: HistoryFilterSelection) => void; onRecords: (records: HistoryRecords) => void; chartSelection?: HistoryChartSelection | null;
-  activeAccountKey: string; refreshAt: number; archiveStatus?: Mt4Status['archive']; onSelect: (trade: ArchiveTrade, account: ArchiveAccount, focus?: number, evidence?: ArchiveTrade['events'][number]) => void; selected?: ArchiveTrade | null;
+  activeAccountKey: string; accountStatusReady: boolean; refreshAt: number; archiveStatus?: Mt4Status['archive']; onSelect: (trade: ArchiveTrade, account: ArchiveAccount, focus?: number, evidence?: ArchiveTrade['events'][number]) => void; selected?: ArchiveTrade | null;
 }) {
   const [storedPreferences] = useState(() => {
     try { return { data: readHistoryPreferences(typeof window === 'undefined' ? null : localStorage.getItem('kline.mt4.history-filters.v1')), error: '' }; }
@@ -33,13 +33,12 @@ export function Mt4ArchiveHistory({ activeAccountKey, refreshAt, archiveStatus, 
     void requestMt4Archive<{ accounts: ArchiveAccount[] }>({ action: 'accounts' }, undefined, controller.signal).then(async result => {
       if (controller.signal.aborted) return;
       setAccounts(result.accounts);
-      if (!initialized.current && result.accounts.length) {
+      const restored = !initialized.current ? restoreHistorySelection(preferenceRef.current, result.accounts, activeAccountKey, accountStatusReady) : null;
+      if (restored) {
         initialized.current = true;
-        const key = [preferenceRef.current.accountKey, activeAccountKey].find(key => result.accounts.some(a => a.accountKey === key)) ?? result.accounts[0].accountKey;
-        const saved = preferenceRef.current.accounts[key];
-        if (saved) setFilter(saved);
-        navigate.current = key !== activeAccountKey || !!saved?.from || !!saved?.to || !!saved?.symbol;
-        setAccountKey(key);
+        setFilter(restored.filter);
+        navigate.current = false;
+        setAccountKey(restored.accountKey);
       }
       if (!result.accounts.length) setLoading(false);
       for (let i = 0; i < localStorage.length && !controller.signal.aborted; i++) {
@@ -55,7 +54,7 @@ export function Mt4ArchiveHistory({ activeAccountKey, refreshAt, archiveStatus, 
       }
     }).catch(e => { if (!controller.signal.aborted) { setError(e instanceof Error ? e.message : '账户档案读取失败'); setLoading(false); } });
     return () => controller.abort();
-  }, [activeAccountKey, refreshAt, refresh]);
+  }, [activeAccountKey, accountStatusReady, refreshAt, refresh]);
   let dateError = '';
   try { dateRangeBounds(from, to); } catch(e) { dateError = e instanceof Error ? e.message : '日期无效'; }
   const effectiveChartSymbol = symbol || chartSymbol || account?.symbols[0] || '';
@@ -134,7 +133,10 @@ export function Mt4ArchiveHistory({ activeAccountKey, refreshAt, archiveStatus, 
     {preferenceError && <div className="mt4-error" role="alert">{preferenceError}</div>}
     {dateError && <div className="mt4-error" role="alert">{dateError}</div>}
     {error && <div className="mt4-error" role="alert">{error}<button className="ghost-button" onClick={() => setRefresh(n => n + 1)}>重试读取</button></div>}
-    {!orders.length ? <div className="mt4-table-empty" role="status">{loading ? '正在读取历史档案' : accountKey ? '这个账户和品种下暂无已归档交易' : '连接 MT4 后自动建立账户档案，也可以恢复已有备份'}</div> : <div className="mt4-table-wrap" role="region" aria-label="历史交易档案" tabIndex={0}><table className="mt4-table mt4-archive-table"><colgroup>{[12,11,10,6,11,11,11,16,12].map((width,i) => <col key={i} style={{ width: `${width}%` }} />)}</colgroup><thead><tr><th>订单号</th><th>品种</th><th>方向</th><th className="mt4-number">手数</th><th className="mt4-number">开仓价</th><th className="mt4-number">平仓价</th><th className="mt4-number">净盈亏 <span className="mt4-table-currency">{account?.currency}</span></th><th>交易时间</th><th className="mt4-row-action">回看</th></tr></thead><tbody>{orders.map(o => <tr key={`${accountKey}:${o.symbol}:${o.ticket}`} aria-selected={selected?.accountKey === accountKey && selected.symbol === o.symbol && selected.order.ticket === o.ticket}>
+    <span id="mt4-archive-row-help" className="live-sr-only">点击交易行，或聚焦后按 Enter、空格回看开仓位置；行内按钮分别定位开仓和平仓。</span>
+    {!orders.length ? <div className="mt4-table-empty" role="status">{loading ? '正在读取历史档案' : accountKey ? '这个账户和品种下暂无已归档交易' : '连接 MT4 后自动建立账户档案，也可以恢复已有备份'}</div> : <div className="mt4-table-wrap" role="region" aria-label="历史交易档案" tabIndex={0}><table className="mt4-table mt4-archive-table"><colgroup>{[12,11,10,6,11,11,11,16,12].map((width,i) => <col key={i} style={{ width: `${width}%` }} />)}</colgroup><thead><tr><th>订单号</th><th>品种</th><th>方向</th><th className="mt4-number">手数</th><th className="mt4-number">开仓价</th><th className="mt4-number">平仓价</th><th className="mt4-number">净盈亏 <span className="mt4-table-currency">{account?.currency}</span></th><th>交易时间</th><th className="mt4-row-action">回看</th></tr></thead><tbody>{orders.map(o => <tr key={`${accountKey}:${o.symbol}:${o.ticket}`} className="mt4-archive-row" aria-describedby="mt4-archive-row-help" tabIndex={busy ? -1 : 0} aria-disabled={busy} title="点击回看开仓位置"
+      onClick={event => { if (!busy && !(event.target as Element).closest('button, a, input, select, textarea, summary') && !window.getSelection()?.toString()) void readTrade(o); }}
+      onKeyDown={event => { if (event.target === event.currentTarget && !busy && (event.key === 'Enter' || event.key === ' ')) { event.preventDefault(); event.stopPropagation(); void readTrade(o); } }} aria-selected={selected?.accountKey === accountKey && selected.symbol === o.symbol && selected.order.ticket === o.ticket}>
       <td className="mt4-ticket"><button className="mt4-archive-ticket" disabled={busy} onClick={() => void readTrade(o)} title="在当前图表定位这笔交易">#{o.ticket}</button></td><td className="mt4-order-symbol">{o.symbol}</td><td><span className={`mt4-order-side ${o.type % 2 === 0 ? 'buy' : 'sell'}`}>{['买入','卖出','买入限价','卖出限价','买入止损','卖出止损'][o.type]}</span></td><td className="mt4-number">{o.lots}</td><td className="mt4-number">{price(o.openPrice)}</td><td className={`mt4-number ${o.closeTime ? '' : 'mt4-unset'}`}>{o.closeTime ? price(o.closePrice) : '—'}</td><td className={`mt4-number mt4-order-profit ${o.profit + o.swap + o.commission > 0 ? 'up' : o.profit + o.swap + o.commission < 0 ? 'down' : ''}`} title={`手续费 ${o.commission}；隔夜费 ${o.swap}；${account?.currency ?? ''}`}>{o.profit + o.swap + o.commission > 0 ? '+' : ''}{(o.profit + o.swap + o.commission).toFixed(2)}</td><td className="mt4-trade-time"><time title={`MT4 服务器时间 ${time(o.closeTime || o.openTime)}`}>{time(o.closeTime || o.openTime)}</time>{!o.closeTime && <span className="mt4-archive-open-order">未结束</span>}</td><td className="mt4-row-action"><div className="mt4-actions"><button className="ghost-button" disabled={busy} title="定位开仓时的图表" onClick={() => void readTrade(o)}>开仓</button>{o.closeTime > 0 && <button className="ghost-button" disabled={busy} title="定位平仓时的图表" onClick={() => void readTrade(o, o.closeTime * 1000)}>平仓</button>}</div></td>
     </tr>)}</tbody></table></div>}
     {total > 0 && <div className="mt4-archive-pagination"><span className="mt4-archive-range">显示 {range} 笔，共 {total} 笔</span><div className="mt4-archive-page-controls"><button className="ghost-button" aria-label="上一页" title="上一页" disabled={!page || busy} onClick={() => setPage(p => p - 1)}><ChevronLeft size={14} /></button><span>第 {page + 1} / {pageCount} 页</span><button className="ghost-button" aria-label="下一页" title="下一页" disabled={(page + 1) * 50 >= total || busy} onClick={() => setPage(p => p + 1)}><ChevronRight size={14} /></button></div></div>}

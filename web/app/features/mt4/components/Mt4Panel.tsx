@@ -1,8 +1,10 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
-import { CircleStop, MousePointer2, Settings2 } from "lucide-react";
+import { CircleStop, MousePointer2, Pencil, Settings2 } from "lucide-react";
 import { OrderEntryControls, OrderEntryActions } from "../../../components/OrderEntryControls";
+import { useKeyboardShortcuts } from "../../../components/useKeyboardShortcuts";
+import type { ShortcutAction, ShortcutSettings } from "../../../lib/keyboardShortcuts";
 import { Mt4PersistentAnalysis } from "./Mt4PersistentAnalysis";
 import { Mt4Toast } from "./Mt4Toast";
 import { Mt4ArchiveHistory } from "./Mt4ArchiveHistory";
@@ -11,21 +13,31 @@ import { Mt4SymbolPicker } from "./Mt4SymbolPicker";
 import { ChartTimeframePicker } from "../../../components/ChartTimeframePicker";
 import { ChartIndicatorMenu } from "../../../components/ChartIndicatorMenu";
 import { defaultMovingAverageSettings, defaultMacdSettings, normalizeMovingAverageSettings, normalizeMacdSettings, type MovingAverageSettings, type MacdSettings } from "../../../lib/chartIndicators";
+import { latestEntryDecisionRecord, decisionProtectionMatches, decisionForEntry } from "../../../lib/decisionWorkflow";
+import { decisionPlanScore } from "../../../lib/decisionPlan";
+import { deriveSopInstrumentContext } from "../../../lib/performanceSop";
+import { evaluateDisciplineGate, type DisciplineGateInput } from "../../sop/sopController";
+import { decisionValue, decisionRecord, mt4Draft, type Mt4Analysis, type Mt4EntryReceipt } from "../mt4Analysis";
 import { analysisKey } from "../mt4Analysis";
 import { downloadMt4Config, Mt4RequestError, requestMt4, requestMt4Archive } from "../mt4Gateway";
+import { synchronizeMt4Clock, type Mt4ClockState } from "../../../lib/mt4Clock.mjs";
+import { prepareMt4Protection, type Mt4ProtectionEdit, type Mt4ProtectionField } from "../mt4Protection.mjs";
+import { useMt4ChartWindow } from "../useMt4ChartWindow";
+import { mt4FloatingOrderKey, type Mt4ChartMotionSettings } from "../../../lib/mt4ChartWindow.mjs";
 import type { Mt4CommandInput, Mt4Order, Mt4Status } from "../mt4Contracts";
 import type { PriceSelectionMode } from "../../../components/KLineReplayChart";
 import { buildMt4HistoryMarkers } from "../../../lib/mt4History.mjs";
 import { riskSizedMt4Lots, checkMt4OpeningGap } from "../../../lib/mt4OrderRules.mjs";
 import { captureCloseAllPlan, runCloseAll, type CloseAllPlan, type CloseAllProgress, type CloseAllResult } from "../mt4CloseAll";
+import { mt4LotPreferenceKey, readMt4Lots, saveMt4Lots } from "../mt4LotPreferences";
 
 const timeframeMinutes: Record<string, number> = { "1m": 1, "5m": 5, "15m": 15, "30m": 30, "1h": 60, "4h": 240, "1d": 1440, "1w": 10080, "1mo": 43200 };
 const chartPeriods: Record<number, string> = { 1: "1m", 5: "5m", 15: "15m", 30: "30m", 60: "1h", 240: "4h", 1440: "1d", 10080: "1w", 43200: "1mo" };
 const orderTypes = ["买入", "卖出", "买入限价", "卖出限价", "买入止损", "卖出止损"];
-const commandLabels = { queued: "待发送", sent: "等待回报", unknown: "待核对", succeeded: "已执行", failed: "已拒绝", cancelled: "已结束", resolved: "已核对" };
 const commandTypes = { open: "开仓", close: "平仓", cancel: "撤单", protect: "修改保护价" };
 const connectionLabels = { unpaired: "未配置", waiting: "等待 MT4", connected: "已连接", offline: "已断开" };
 function formatTime(value: number) { return value ? new Date(value).toLocaleTimeString("zh-CN", { hour12: false }) : "—"; }
+const lotStorage = { getItem: (key: string) => localStorage.getItem(key), setItem: (key: string, value: string) => localStorage.setItem(key, value) };
 function loadIndicators() {
   try {
     const stored = typeof window === "undefined" ? {} : JSON.parse(localStorage.getItem("kline.mt4.indicators.v1") ?? "{}");
@@ -33,8 +45,9 @@ function loadIndicators() {
   } catch { return { ma: defaultMovingAverageSettings, macd: defaultMacdSettings, error: "指标设置未能读取，修改指标后可重新保存。" }; }
 }
 
-export function Mt4Panel() {
+export function Mt4Panel({ chartMotion, disciplineSettings, sharedReasonTags, onReasonTagsChange, keyboardShortcuts, shortcutsEnabled = true }: { chartMotion: Mt4ChartMotionSettings; disciplineSettings: Pick<DisciplineGateInput, "strictModeEnabled" | "requirePretradePlan" | "requiredPretradeFields" | "sopCheckEnabled" | "personalSopCheckEnabled" | "activePersonalSopRule">; sharedReasonTags: string[]; onReasonTagsChange: (tags: string[]) => void; keyboardShortcuts?: ShortcutSettings; shortcutsEnabled?: boolean }) {
   const [state, setState] = useState<Mt4Status | null>(null);
+  const [candleClockState, setCandleClockState] = useState<Mt4ClockState | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
   const [readError, setReadError] = useState("");
@@ -58,6 +71,8 @@ export function Mt4Panel() {
   const [accountConfirmation, setAccountConfirmation] = useState("");
   const [acceptReal, setAcceptReal] = useState(false);
   const [lots, setLots] = useState("0.01");
+  const [lotsError, setLotsError] = useState("");
+  const lotsScope = useRef("");
   const [sizingMode, setSizingMode] = useState<"fixed" | "risk-percent">("fixed");
   const [riskPercent, setRiskPercent] = useState("1");
   const [gapMode, setGapMode] = useState<"off" | "high" | "low">("off");
@@ -69,7 +84,18 @@ export function Mt4Panel() {
   const [sl, setSl] = useState("");
   const [tp, setTp] = useState("");
   const [slippage, setSlippage] = useState("20");
-  const [protection, setProtection] = useState<Mt4Order | null>(null);
+  const [protection, setProtection] = useState<Mt4ProtectionEdit | null>(null);
+  const [protectionError, setProtectionError] = useState("");
+  const protectionInput = useRef<HTMLInputElement>(null);
+  const protectionOpener = useRef<HTMLButtonElement | null>(null);
+  const protectionIdentity = protection ? JSON.stringify([protection.accountKey, protection.order.ticket, protection.order.symbol, protection.field]) : "";
+  useEffect(() => {
+    if (protectionIdentity) {
+      const frame = requestAnimationFrame(() => { protectionInput.current?.focus(); protectionInput.current?.select(); });
+      return () => cancelAnimationFrame(frame);
+    }
+    if (protectionOpener.current?.isConnected) protectionOpener.current.focus({ preventScroll: true });
+  }, [protectionIdentity]);
   const [protectSl, setProtectSl] = useState("");
   const [protectTp, setProtectTp] = useState("");
   const [pending, setPending] = useState<Mt4CommandInput | null>(null);
@@ -104,6 +130,16 @@ export function Mt4Panel() {
   const closeAllStop = useRef(false);
   const latestState = useRef<Mt4Status | null>(null);
   const lock = useRef(false);
+  const activeAnalysis = useRef<{ key: string; value: Mt4Analysis } | null>(null);
+  const [analysisReadyKey, setAnalysisReadyKey] = useState('');
+  const onAnalysisChange = useCallback((key: string, value: Mt4Analysis | null) => {
+    activeAnalysis.current = value ? { key, value } : null;
+    setAnalysisReadyKey(value ? key : '');
+  }, []);
+  type EntryIntent = Omit<Mt4EntryReceipt, 'ticket' | 'openTime'>;
+  const entryIntents = useRef(new Map<string, EntryIntent>());
+  const [executedEntries, setExecutedEntries] = useState<Array<EntryIntent & { ticket: number }>>([]);
+  const trackedCommands = useRef(new Set<string>());
   const accountKeyRef = useRef("");
   const pendingRef = useRef<Mt4CommandInput | null>(null);
   const pollRef = useRef<AbortController | null>(null);
@@ -123,12 +159,36 @@ export function Mt4Panel() {
   useEffect(() => () => { closeAllController.current?.abort(); }, []);
 
   const apply = useCallback((next: Mt4Status) => {
+    const lotSymbol = next.snapshot?.symbols.find(item => item.symbol === next.selection.symbol);
+    const nextLotsScope = mt4LotPreferenceKey(next.accountKey, lotSymbol);
+    if (nextLotsScope !== lotsScope.current) {
+      const remembered = readMt4Lots(lotStorage, next.accountKey, lotSymbol);
+      lotsScope.current = nextLotsScope;
+      setLots(remembered.value); setLotsError(remembered.error);
+    }
+    const now = Date.now(), monotonicNow = performance.now();
+    setCandleClockState(previous => synchronizeMt4Clock(previous, {
+      scope: JSON.stringify([next.accountKey, next.snapshot?.sessionId]),
+      serverTime: next.snapshot?.serverUtcOffset == null ? undefined : next.snapshot.capturedAt + next.snapshot.serverUtcOffset,
+      receivedAt: next.lastSeen ?? 0, connected: next.connection === "connected" && Boolean(next.snapshot?.account.connected), now, monotonicNow,
+    }));
     if (next.accountKey !== accountKeyRef.current) {
       accountKeyRef.current = next.accountKey; setAccountConfirmation(""); setAcceptReal(false); setProtection(null);
     }
     if (pendingRef.current && next.commands.some(c => c.id === pendingRef.current?.id)) { pendingRef.current = null; setPending(null); }
+    for (const command of next.commands) {
+      if (!trackedCommands.current.has(command.id)) continue;
+      if (command.status === "succeeded") {
+        const intent = entryIntents.current.get(command.id);
+        if (intent && command.type === "open" && command.ticket > 0) { setExecutedEntries(items => [...items.filter(item => item.commandId !== intent.commandId), { ...intent, ticket: command.ticket }]); entryIntents.current.delete(command.id); }
+        notify(`${commandTypes[command.type]}已执行 · ${command.symbol}${command.ticket ? ` · #${command.ticket}` : ""}`);
+        if (command.type === "protect") setProtection(current => current?.commandId === command.id ? null : current);
+      }
+      else if (command.status === "failed") { entryIntents.current.delete(command.id); setError(command.error || `${commandTypes[command.type]}未执行，请核对 MT4 后重试`); }
+      if (["succeeded", "failed", "cancelled", "resolved"].includes(command.status)) trackedCommands.current.delete(command.id);
+    }
     latestState.current = next; setState(next);
-  }, []);
+  }, [notify]);
   const refresh = useCallback(async () => {
     if (lock.current) return;
     pollRef.current?.abort();
@@ -159,12 +219,14 @@ export function Mt4Panel() {
   const submit = async (command: Mt4CommandInput) => {
     if (lock.current) return;
     lock.current = true; setBusy(true); pollRef.current?.abort(); setError(""); notify("");
+    trackedCommands.current.add(command.id);
     pendingRef.current = command; setPending(command);
     try {
       const next = await requestMt4({ action: "command", command }, AbortSignal.timeout(7000)); apply(next);
-      notify("指令已提交，请查看 MT4 执行回报");
+      const receipt = next.commands.find(c => c.id === command.id);
+      if (!receipt || receipt.status === "queued" || receipt.status === "sent") notify("指令已提交，等待 MT4 确认");
     } catch (e) {
-      if (e instanceof Mt4RequestError && e.definite) { pendingRef.current = null; setPending(null); }
+      if (e instanceof Mt4RequestError && e.definite) { trackedCommands.current.delete(command.id); pendingRef.current = null; setPending(null); }
       setError(e instanceof Error ? e.message : "提交结果尚未确认，请核对提交结果");
     } finally { lock.current = false; setBusy(false); }
   };
@@ -173,15 +235,23 @@ export function Mt4Panel() {
   const symbol = snapshot?.symbols.find(s => s.symbol === state?.selection.symbol);
   const connected = state?.connection === "connected" && !loading && !readError;
   const quoteFresh = symbol && symbol.bid > 0 && symbol.ask > 0 && symbol.quoteTime > 0 && snapshot && snapshot.capturedAt - symbol.quoteTime <= 30;
-  const canTrade = Boolean(!historical && connected && state?.enabled && account?.tradeAllowed && quoteFresh && !state?.unresolved && !busy && !pending);
+  const protectionBlocked = !connected || !account?.connected || !account?.tradeAllowed || !state?.enabled || !!state?.unresolved || busy || !!pending;
+  const canTrade = Boolean(!historical && connected && state?.enabled && account?.tradeAllowed && quoteFresh && !state?.unresolved && !busy && !pending && analysisReadyKey === analysisKey(state.accountKey, state.selection.symbol, state.selection.timeframe));
   const chartReady = snapshot && snapshot.chart.symbol === state?.selection.symbol && snapshot.chart.timeframe === state?.selection.timeframe;
   const chartBars = chartReady ? snapshot.chart.bars : [];
   const latestBar = chartBars.at(-1);
   const displaySymbol = review?.trade.symbol ?? historyChart?.symbol ?? state?.selection.symbol ?? '';
   const displayTimeframe = review?.trade.timeframe ?? historyChart?.timeframe ?? state?.selection.timeframe ?? 5;
-  const displayBars = review?.evidence?.evidence.chart?.bars ?? review?.trade.bars ?? (historyChart ? historyData?.bars ?? [] : chartBars);
+  const sourceBars = review?.evidence?.evidence.chart?.bars ?? review?.trade.bars ?? (historyChart ? historyData?.bars ?? [] : chartBars);
   const displayDigits = review?.trade.digits ?? historyData?.digits ?? symbol?.digits ?? 5;
   const displayAccount = review?.trade.accountKey ?? historyChart?.account.accountKey ?? state?.accountKey ?? '';
+  // Candle time follows terminal heartbeats; stale quotes and read errors still block trading.
+  const chartClock = { anchor: candleClockState?.anchor, serverTime: snapshot?.serverUtcOffset == null ? undefined : snapshot.capturedAt + snapshot.serverUtcOffset, receivedAt: state?.lastSeen ?? 0, connected: Boolean(!historical && state?.connection === "connected" && !loading && account?.connected), timeframe: displayTimeframe };
+  const chartView = useMt4ChartWindow(sourceBars, JSON.stringify([displayAccount, displaySymbol, displayTimeframe, historical ? 'history' : snapshot?.sessionId ?? '']), historical ? { ...chartMotion, enabled: false } : chartMotion, chartClock, { profit: account?.profit ?? 0, orders: snapshot?.orders ?? [] });
+  const displayBars = chartView.bars;
+  const displayedAccount = account ? { ...account, profit: chartView.floating.profit, equity: account.equity - account.profit + chartView.floating.profit, freeMargin: account.freeMargin - account.profit + chartView.floating.profit } : undefined;
+  const displayedBar = displayBars.at(-1);
+  const unresolvedCommands = state?.commands.filter(c => c.status === "unknown") ?? [];
   const markerOrders = historyRecords?.accountKey === displayAccount && historyRecords.chartSymbol === displaySymbol && historyRecords.showOnChart ? historyRecords.orders : [];
   const tradeMarkers = buildMt4HistoryMarkers(markerOrders, displayBars, displayTimeframe, displayAccount);
   const onTradeSelect = (id: string, event: 'entry' | 'exit') => {
@@ -189,6 +259,10 @@ export function Mt4Panel() {
     const order = marker && markerOrders.find(order => order.ticket === marker.ticket && order.symbol === marker.symbol);
     if (order) setChartSelection({ accountKey: displayAccount, order: { ...order, timeframe: displayTimeframe }, focus: (event === 'exit' ? order.closeTime : order.openTime) * 1000, nonce: Date.now() });
   };
+  const relatedOrders = [...new Map([...(displayAccount === state?.accountKey ? snapshot?.orders ?? [] : []), ...(displayAccount === state?.accountKey ? snapshot?.history ?? [] : []), ...markerOrders, ...(review ? [review.trade.order] : [])].filter(order => order.symbol === displaySymbol).map(order => [order.ticket, order])).values()];
+  const receiptIntent = executedEntries.findLast(intent => intent.accountKey === displayAccount && intent.symbol === displaySymbol && intent.timeframe === displayTimeframe && relatedOrders.some(order => order.ticket === intent.ticket));
+  const receiptOrder = receiptIntent && relatedOrders.find(order => order.ticket === receiptIntent.ticket);
+  const entryReceipt = receiptIntent && receiptOrder ? { ...receiptIntent, openTime: receiptOrder.openTime } : undefined;
   const displayScope = review ? `trade:${review.trade.order.ticket}` : 'chart';
   const displayKey = `${analysisKey(displayAccount, displaySymbol, displayTimeframe)}:${displayScope}:${review?.evidence?.id ?? 0}`;
   const reviewSeed = review?.evidence?.evidence.analysis?.data ?? review?.trade.events.find(event => event.source === 'observed' && event.evidence.chart?.timeframe === displayTimeframe && event.evidence.analysis?.data)?.evidence.analysis?.data ?? undefined;
@@ -235,8 +309,12 @@ export function Mt4Panel() {
   };
   const select = (nextSymbol: string, timeframe: number) => {
     setOrderPriceSelection(null); setPrice(""); setSl(""); setTp("");
-    const spec = snapshot?.symbols.find(s => s.symbol === nextSymbol); if (spec?.minLot) setLots(String(spec.minLot));
     void act({ action: "select", symbol: nextSymbol, timeframe });
+  };
+  const rememberLots = (value: string, retry = false) => {
+    setLots(value);
+    const result = saveMt4Lots(lotStorage, state?.accountKey ?? "", symbol, value);
+    setLotsError(result.error || (retry && !result.saved ? "请填写符合当前合约的手数后重试。" : ""));
   };
   const openOrder = (side: "buy" | "sell") => {
     if (!state || !symbol || !canTrade) return;
@@ -245,16 +323,45 @@ export function Mt4Panel() {
       const plannedLots = sizingMode === "risk-percent" ? riskSizedMt4Lots({ balance: account?.balance ?? 0, riskPercent: Number(riskPercent), entryPrice, stopLoss: Number(sl), symbol }).lots : Number(lots);
       const gapActive = side === "buy" && gapMode !== "off";
       if (gapActive) checkMt4OpeningGap({ previousClose: chartBars.at(-2)?.close ?? 0, openingPrice: latestBar?.open ?? 0, mode: gapMode, unit: gapUnit, threshold: Number(gapThreshold) });
-      void submit({ id: crypto.randomUUID(), accountKey: state.accountKey, type: "open", symbol: symbol.symbol, side, orderType,
+      const decisionContextKey = analysisKey(state.accountKey, symbol.symbol, state.selection.timeframe);
+      if (activeAnalysis.current?.key !== decisionContextKey) throw new Error('决策记录正在读取，请稍后再下单。');
+      const capturedAnalysis = activeAnalysis.current.value;
+      const plannedDecision = { ...decisionForEntry(decisionValue(capturedAnalysis.draft), capturedAnalysis.decisions.map(decisionRecord), latestBar?.timestamp ?? 0), stop: sl, target: tp };
+      const market = /^(XAU|XAG|GOLD|SILVER)/i.test(symbol.symbol) ? 'GOLD' : 'FX';
+      const risk = Number(sl) > 0 ? Math.abs(entryPrice - Number(sl)) : 0;
+      const reward = Number(tp) > 0 ? Math.abs(Number(tp) - entryPrice) : 0;
+      const gate = evaluateDisciplineGate({ ...disciplineSettings, scope: { market, timeframe: chartPeriods[state.selection.timeframe], instrumentId: symbol.symbol }, decision: { ...plannedDecision, score: decisionPlanScore(plannedDecision) }, patterns: [], instrument: deriveSopInstrumentContext(chartBars, chartBars.length - 1, 'UTC', chartPeriods[state.selection.timeframe], { market, entryPrice }), riskReward: risk > 0 && reward > 0 ? reward / risk : undefined });
+      if (!gate.allowed) throw new Error(gate.checks.filter(check => check.status === 'blocked').map(check => check.message).join('；'));
+      const id = crypto.randomUUID();
+      const currentManual = capturedAnalysis.decisions.find(record => !record.backfilled && !record.autoGenerated && record.candleTimestamp === latestBar?.timestamp && decisionProtectionMatches(decisionValue(record.draft), sl, tp));
+      const latestManual = latestEntryDecisionRecord(capturedAnalysis.decisions.map(decisionRecord), latestBar?.timestamp ?? 0);
+      entryIntents.current.set(id, { commandId: id, accountKey: state.accountKey, symbol: symbol.symbol, timeframe: state.selection.timeframe, candleTimestamp: latestBar?.timestamp ?? 0, referencePrice: latestBar?.close ?? entryPrice, draft: mt4Draft(plannedDecision), decisionId: currentManual?.id ?? (!sl && !tp ? latestManual?.id : undefined) });
+      void submit({ id, accountKey: state.accountKey, type: "open", symbol: symbol.symbol, side, orderType,
         lots: plannedLots, price: orderType === "market" ? 0 : Number(price), stopLoss: Number(sl), takeProfit: Number(tp), slippage: Number(slippage),
         ...(sizingMode === "risk-percent" ? { sizingMode, riskPercent: Number(riskPercent) } : {}),
         ...(gapActive ? { gapMode, gapUnit, gapThreshold: Number(gapThreshold), gapTimeframe: state.selection.timeframe, gapBarTime: latestBar?.timestamp ?? 0 } : {}) });
     } catch (e) { setError(e instanceof Error ? e.message : "下单参数无效，请调整后重试。"); }
   };
-  const orderAction = (order: Mt4Order, type: "close" | "cancel" | "protect") => {
+  const orderAction = (order: Mt4Order, type: "close" | "cancel") => {
     if (!state) return;
     void submit({ id: crypto.randomUUID(), accountKey: state.accountKey, type, symbol: order.symbol, ticket: order.ticket,
-      stopLoss: type === "protect" ? Number(protectSl) : 0, takeProfit: type === "protect" ? Number(protectTp) : 0, slippage: Number(slippage) });
+      stopLoss: 0, takeProfit: 0, slippage: Number(slippage) });
+  };
+  const openProtection = (order: Mt4Order, field: Mt4ProtectionEdit["field"], opener: HTMLButtonElement) => {
+    if (!state || protectionBlocked) return;
+    protectionOpener.current = opener; setProtectionError(""); setError("");
+    setProtection({ accountKey: state.accountKey, order: { ...order }, field });
+    setProtectSl(order.stopLoss ? String(order.stopLoss) : ""); setProtectTp(order.takeProfit ? String(order.takeProfit) : "");
+  };
+  const saveProtection = (remove?: Mt4ProtectionField) => {
+    if (!protection || protectionBlocked || lock.current || pendingRef.current) return;
+    try {
+      const command = prepareMt4Protection({ state: latestState.current, edit: protection, values: { stopLoss: protectSl, takeProfit: protectTp }, remove, id: crypto.randomUUID() });
+      setProtectionError("");
+      if (!command) { notify("保护价未改变"); setProtection(null); return; }
+      setProtection(current => current ? { ...current, commandId: command.id } : current);
+      void submit(command);
+    } catch(e) { setProtectionError(e instanceof Error ? e.message : "保护价未能提交，请重新读取订单后修改。"); }
   };
   const openCloseAll = () => {
     if (lock.current || !state) return;
@@ -296,29 +403,68 @@ export function Mt4Panel() {
         <tbody>{orders.map(o => {
           const digits = snapshot?.symbols.find(s => s.symbol === o.symbol)?.digits;
           const priceText = (price: number) => digits == null ? String(price) : price.toFixed(digits);
-          const profit = o.profit + o.swap + o.commission;
+          const profit = !history && o.type < 2 ? chartView.floating.orderProfits[mt4FloatingOrderKey(o)] ?? o.profit + o.swap + o.commission : o.profit + o.swap + o.commission;
           return <tr key={o.ticket}>
             <td className="mt4-ticket">{o.ticket}</td><td className="mt4-order-symbol" title={o.symbol}>{o.symbol}</td>
             <td><span className={`mt4-order-side ${o.type % 2 === 0 ? "buy" : "sell"}`}>{orderTypes[o.type]}</span></td>
             <td className="mt4-number">{o.lots.toLocaleString("zh-CN", { minimumFractionDigits: 2, maximumFractionDigits: 8 })}</td>
-            <td className="mt4-number">{priceText(o.openPrice)}</td><td className={`mt4-number${o.stopLoss ? "" : " mt4-unset"}`}>{o.stopLoss ? priceText(o.stopLoss) : "—"}</td><td className={`mt4-number${o.takeProfit ? "" : " mt4-unset"}`}>{o.takeProfit ? priceText(o.takeProfit) : "—"}</td>
+            <td className="mt4-number">{priceText(o.openPrice)}</td>
+            {(["stopLoss", "takeProfit"] as const).map(field => {
+              const label = field === "stopLoss" ? "止损" : "止盈", value = o[field] ? priceText(o[field]) : "—";
+              return <td key={field} className={`mt4-number${o[field] ? "" : " mt4-unset"}`}>{history ? value : <button type="button" className="mt4-protection-price" disabled={protectionBlocked} title={`点击设置、修改或取消${label}`} aria-label={`订单 ${o.ticket} ${o.symbol} ${label} ${o[field] ? value : "未设置"}，点击修改`} onClick={event => openProtection(o, field, event.currentTarget)}><span>{value}</span><Pencil size={11} aria-hidden="true" /></button>}</td>;
+            })}
             <td className={`mt4-number mt4-order-profit ${profit < 0 ? "down" : profit > 0 ? "up" : ""}`}>{profit > 0 ? "+" : ""}{profit.toLocaleString("zh-CN", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</td>
             {history ? <td className="mt4-row-action mt4-trade-time" title={o.closeTime ? new Date(o.closeTime * 1000).toLocaleString("zh-CN", { hour12: false }) : undefined}>{formatTime(o.closeTime * 1000)}</td> : <td className="mt4-row-action"><div className="mt4-actions"><button className="ghost-button" disabled={!connected || !state?.enabled || !!state?.unresolved || busy || !!pending} onClick={() => orderAction(o, o.type < 2 ? "close" : "cancel")}>{o.type < 2 ? "平仓" : "撤单"}</button>
-              <button className="ghost-button" disabled={!connected || !state?.enabled || !!state?.unresolved || busy || !!pending} onClick={() => { setProtection(o); setProtectSl(o.stopLoss ? String(o.stopLoss) : ""); setProtectTp(o.takeProfit ? String(o.takeProfit) : ""); }}>保护价</button></div></td>}
+              <button className="ghost-button" disabled={protectionBlocked} onClick={event => openProtection(o, "both", event.currentTarget)}>保护价</button></div></td>}
           </tr>;
         })}</tbody>
       </table>
     </div>
   );
 
+  const changeShortcutTimeframe = (next: string) => {
+    if (review) void readReview(timeframeMinutes[next]).catch(e => setError(e instanceof Error ? e.message : "历史周期读取失败"));
+    else if (historyChart) { setHistoryData(null); setHistoryChart({ ...historyChart, timeframe: timeframeMinutes[next] }); }
+    else select(state?.selection.symbol ?? "", timeframeMinutes[next]);
+  };
+  const cycleShortcutTimeframe = (direction: number) => {
+    const periods = Object.keys(timeframeMinutes);
+    const index = Math.max(0, periods.indexOf(chartPeriods[displayTimeframe]));
+    changeShortcutTimeframe(periods[(index + direction + periods.length) % periods.length]);
+  };
+  const canOpenShortcutOrder = Boolean(canTrade && symbol?.tradeAllowed && Number(lots) > 0 && (orderType === "market" || Number(price) > 0));
+  const shortcutHandlers: Partial<Record<ShortcutAction, { enabled: boolean; run: () => void }>> = {
+    tradeBuy: { enabled: canOpenShortcutOrder, run: () => openOrder("buy") },
+    tradeSell: { enabled: canOpenShortcutOrder, run: () => openOrder("sell") },
+    tradeCloseAll: { enabled: Boolean(!historical && connected && account?.connected && account.tradeAllowed && state?.enabled && !busy && !state?.unresolved && !pending && snapshot && snapshot.orderCount <= snapshot.orders.length && snapshot.orders.some(order => order.type < 2)), run: openCloseAll },
+    tradeStopLoss: { enabled: !historical && chartBars.length > 0, run: () => setOrderPriceSelection(current => current === "stop-loss" ? null : "stop-loss") },
+    tradeTakeProfit: { enabled: !historical && chartBars.length > 0, run: () => setOrderPriceSelection(current => current === "take-profit" ? null : "take-profit") },
+    timeframePrevious: { enabled: !busy && !review?.evidence && (historical || connected), run: () => cycleShortcutTimeframe(-1) },
+    timeframeNext: { enabled: !busy && !review?.evidence && (historical || connected), run: () => cycleShortcutTimeframe(1) },
+    indicators: { enabled: displayBars.length > 0, run: () => setIndicatorMenuOpen(open => !open) },
+  };
+  useKeyboardShortcuts({ settings: keyboardShortcuts, enabled: shortcutsEnabled, contextKey: displayKey,
+    isAvailable: action => Boolean(shortcutHandlers[action]?.enabled),
+    onAction: action => { const handler = shortcutHandlers[action]; if (!handler?.enabled) return false; handler.run(); return true; },
+  });
+
   return <section className="content-page mt4-page">
     <header className="page-heading"><h1>MT4 交易</h1><div className="mt4-actions">
       <span className={connected ? "up" : ""} role="status">{loading ? "正在读取" : state ? connectionLabels[state.connection] : "连接不可用"}</span>
+      {state?.commands.some(c => c.status === "queued" || c.status === "sent") && <span role="status">交易处理中</span>}
       <button className="ghost-button" disabled={busy} onClick={() => void refresh()}>验证连接</button>
       <button className="ghost-button" disabled={!snapshot} aria-expanded={decisionOpen} aria-controls="mt4-decision-card" onClick={() => setDecisionOpen(v => !v)}>事前决策</button>
       <button className="ghost-button" aria-expanded={helpOpen} onClick={() => setHelpOpen(v => !v)}>连接设置</button>
     </div></header>
     {(error || readError) && <div className="mt4-error" role="alert">{error || readError}<button className="ghost-button" disabled={busy} onClick={() => { setError(""); void refresh(); }}>重新读取</button></div>}
+    {pending && !busy && <div className="mt4-error" role="alert">提交结果尚未确认，请核对后继续。<button className="ghost-button" disabled={busy} onClick={() => void submit(pending)}>核对提交结果</button></div>}
+    {unresolvedCommands.map(command => <div className="mt4-error" role="alert" key={command.id}>
+      <span>{commandTypes[command.type]} · {command.symbol} · 账号 {command.login} 待核对{command.error ? `：${command.error}` : ""}</span>
+      <button className="ghost-button" disabled={busy} onClick={() => {
+        const login = window.prompt(`请在 MT4 核对账号 ${command.login} 的持仓、挂单和历史记录。确认后输入该账号；此操作只结束待核对状态，不会撤销或再次发送订单。`);
+        if (login) void act({ action: "resolve", id: command.id, confirmation: login }, "待核对状态已结束");
+      }}>已在 MT4 核对</button>
+    </div>)}
     {state?.transportError && <div className="mt4-error" role="alert">{state.transportError}</div>}
     {notice && <Mt4Toast key={notice.id} message={notice.message} onDismiss={dismissNotice} />}
     {(helpOpen || !state?.paired || state.connection === "waiting") && <section className="mt4-card">
@@ -355,36 +501,46 @@ export function Mt4Panel() {
       <div className="mt4-trading-grid"><section id="mt4-chart-workspace" className="mt4-card mt4-chart-card" aria-label="MT4 行情图表">
         {review && <div className="mt4-archive-review" role="status"><strong>{review.evidence ? review.evidence.source === 'observed' ? '当时证据 · 只读' : '导入时证据 · 只读' : '交易回看'}</strong><span>{review.account.login} · {review.account.server} · {review.trade.symbol} · #{review.trade.order.ticket}</span><time>{new Date(review.focus).toLocaleString('zh-CN', { timeZone: 'UTC', hour12: false })} · MT4 时间</time><button className="ghost-button" disabled={chartFetch || !!review.evidence} onClick={() => void fetchReviewChart()}>补取行情</button>{review.evidence && <button className="ghost-button" onClick={() => setReview(current => current ? { ...current, focus: current.returnFocus ?? current.trade.order.openTime * 1000, evidence: undefined } : current)}>返回复盘</button>}<button className="ghost-button" onClick={() => { setReview(null); setHistoryChart(null); setHistoryData(null); setOrderPriceSelection(null); }}>返回实时</button></div>}
         {historyChart && !review && <div className="mt4-archive-review" role="status"><strong>历史筛选</strong><span>{historyChart.account.login} · {historyChart.account.server} · {historyChart.symbol}</span><span>{historyChart.filter.from || '最早'} — {historyChart.filter.to || '最新'}</span><button className="ghost-button" onClick={() => { setHistoryChart(null); setHistoryData(null); }}>返回实时</button></div>}
+        {!historical && chartMotion.enabled && chartView.window === "clock" && <div className="mt4-error" role="alert">
+          MT4 时钟尚未就绪，请验证连接；仍未恢复时，请更新并重新加载连接 EA。可先在 MT4 设置关闭波动窗口，恢复全天实时图表。
+          <button className="ghost-button" onClick={() => setHelpOpen(true)}>检查连接</button>
+        </div>}
         {historyError && <div className="mt4-error" role="alert">{historyError}<button className="ghost-button" onClick={() => setArchiveRefresh(n => n+1)}>重试读取</button></div>}
         {historyRecords?.limited && <div className="mt4-analysis-notice">图表最多显示 2000 笔交易标记，请缩小时间范围；列表保留全部结果。</div>}
         {historyChart && historyData?.limited && <div className="mt4-analysis-notice">当前显示最近 5000 根已归档 K 线，请缩小时间范围查看更早行情。</div>}
         <div className="mt4-chart-controls"><Mt4SymbolPicker symbols={snapshot?.symbols ?? []} value={displaySymbol} disabled={historical || busy || !connected} onChange={next => select(next, state?.selection.timeframe ?? 5)} />
-          <ChartTimeframePicker value={chartPeriods[displayTimeframe]} disabled={busy || !!review?.evidence || (!historical && !connected)} onChange={next => { if (review) void readReview(timeframeMinutes[next]).catch(e => setError(e instanceof Error ? e.message : '历史周期读取失败')); else if (historyChart) { setHistoryData(null); setHistoryChart({ ...historyChart, timeframe: timeframeMinutes[next] }); } else select(state?.selection.symbol ?? "", timeframeMinutes[next]); }} />
+          <ChartTimeframePicker value={chartPeriods[displayTimeframe]} disabled={busy || !!review?.evidence || (!historical && !connected)} onChange={changeShortcutTimeframe} />
           <ChartIndicatorMenu settings={movingAverageSettings} onChange={next => saveIndicators(next, macdSettings)} macdSettings={macdSettings} onMacdChange={next => saveIndicators(movingAverageSettings, next)} open={indicatorMenuOpen} onOpenChange={setIndicatorMenuOpen} />
           <span tabIndex={0} title="K 线时间沿用 MT4 服务器时钟，成交量为 tick 数；最新一根尚未收盘" aria-label="MT4 服务器时间，成交量为 tick 数，最新一根尚未收盘">MT4 时间</span>
           {markerOrders.length > 0 && <span tabIndex={0} title="显示当前账户与图表品种的筛选交易；行情尚未归档时，点击列表中的开仓或平仓后补取行情" aria-label={`已定位 ${tradeMarkers.length} 笔筛选交易，共 ${markerOrders.length} 笔；未定位交易可从列表回看并补取行情`}>交易标记 {tradeMarkers.length} / {markerOrders.length}{tradeMarkers.length < markerOrders.length ? ' · 待补行情' : ''}</span>}
-          {!historical && latestBar && <div className="mt4-ohlc" aria-label="最新 K 线价格">{[["开", latestBar.open], ["高", latestBar.high], ["低", latestBar.low], ["收", latestBar.close]].map(([label, value]) => <span key={label}>{label} <strong>{Number(value).toFixed(symbol?.digits ?? 5)}</strong></span>)}</div>}</div>
+          {!historical && chartMotion.enabled && <span className="mt4-window-status" role="status" tabIndex={0} title={`开盘后 ${chartMotion.startSeconds} 秒、收盘前 ${chartMotion.endSeconds} 秒更新图表；其他时间冻结图表和浮动盈亏；报价、持仓变动与交易继续实时更新。`} aria-label={`图表波动窗口：${chartView.window === "live" ? "窗口内实时更新" : chartView.window === "clock" ? "等待 MT4 时钟" : chartView.window === "paused" ? "行情已暂停" : chartView.window === "waiting" ? "等待最新 K 线" : "图表冻结"}`}>{chartView.window === "live" ? "窗口内实时" : chartView.window === "clock" ? "等待时钟" : chartView.window === "paused" ? "行情已暂停" : chartView.window === "waiting" ? "等待新 K 线" : "图表冻结"}</span>}
+          {!historical && displayedBar && <div className="mt4-ohlc" aria-label="最新 K 线价格">{[["开", displayedBar.open], ["高", displayedBar.high], ["低", displayedBar.low], ["收", displayedBar.close]].map(([label, value]) => <span key={label}>{label} <strong>{Number(value).toFixed(symbol?.digits ?? 5)}</strong></span>)}</div>}</div>
         {review && !review.evidence && review.trade.focusCovered === false && review.trade.bars.length > 0 && <div className="mt4-error">交易发生时段的行情尚不完整，请连接对应账户后补取行情。</div>}
         {indicatorError && <div className="mt4-error" role="alert">{indicatorError}</div>}
         <Mt4PersistentAnalysis onNotice={notify} key={displayKey} storageKey={analysisKey(displayAccount, displaySymbol, displayTimeframe)} readOnly={!!review?.evidence} context={{ accountKey: displayAccount, symbol: displaySymbol, timeframe: displayTimeframe, scope: displayScope }} seed={reviewSeed}
           focusTimestamp={review?.focus ?? (historyChart && markerOrders.length ? (markerOrders[0].closeTime || markerOrders[0].openTime) * 1000 : undefined)} tradeMarkers={tradeMarkers} onTradeSelect={review?.evidence ? undefined : onTradeSelect}
           bars={displayBars} symbol={displaySymbol} timeframe={chartPeriods[displayTimeframe]} digits={displayDigits} decisionOpen={decisionOpen} onOpenDecision={() => setDecisionOpen(true)}
+          syncOrderPrices={!historical} sharedReasonTags={sharedReasonTags} onReasonTagsChange={onReasonTagsChange} onAnalysisChange={historical ? undefined : onAnalysisChange} entryReceipt={historical ? undefined : entryReceipt}
+          relatedOrders={relatedOrders} onRelatedTradeSelect={(order, event) => setChartSelection({ accountKey: displayAccount, order: { ...order, timeframe: displayTimeframe, firstSeen: 0, lastSeen: 0 }, focus: (event === "exit" ? order.closeTime : order.openTime) * 1000, nonce: Date.now() })}
+          keyboardShortcuts={keyboardShortcuts} shortcutsEnabled={shortcutsEnabled}
           movingAverageSettings={movingAverageSettings} macdSettings={macdSettings}
-          candleClock={{ serverTime: snapshot?.serverUtcOffset == null ? undefined : snapshot.capturedAt + snapshot.serverUtcOffset, receivedAt: state?.lastSeen ?? 0, connected: Boolean(!historical && connected && account?.connected && quoteFresh), timeframe: displayTimeframe }}
+          candleClock={historical ? undefined : chartClock}
           orderPriceSelection={historical ? null : orderPriceSelection} onOrderPriceSelect={onOrderPriceSelect} onPlanProtectionChange={onPlanProtectionChange} orderPrices={historical ? { stopLoss: 0, takeProfit: 0, entry: 0 } : { stopLoss: Number(sl), takeProfit: Number(tp), entry: orderType === "market" ? 0 : Number(price) }} onCancelOrderPriceSelection={() => setOrderPriceSelection(null)}
           emptyMessage={historical ? '该时段行情尚未归档，请连接对应账户后补取行情' : chartReady ? "MT4 暂无该周期 K 线，请在 MT4 打开对应图表后重试" : "正在等待 MT4 返回所选图表"} />
       </section>{snapshot && !historical && <section className="mt4-card mt4-order-dock trade-dock" aria-label="MT4 下单">
         <div className="trade-stats" aria-label="MT4 账户指标">
-          {[["账户余额", account?.balance], ["账户权益", account?.equity], ["已用保证金", account?.margin], ["可用保证金", account?.freeMargin]].map(([label,value]) => <span key={String(label)} title={`单位：${account?.currency ?? "账户币种"}`}>{label}<strong>{typeof value === "number" ? value.toLocaleString("zh-CN", { minimumFractionDigits: 2, maximumFractionDigits: 2 }) : "—"}</strong></span>)}
-          <span title="账户权益 ÷ 已用保证金；未占用保证金时不显示比例">保证金水平<strong>{account && account.margin > 0 ? `${(account.equity / account.margin * 100).toFixed(1)}%` : "—"}</strong></span>
-          <span title={`MT4 账户当前浮动盈亏；单位 ${account?.currency ?? "账户币种"}`}>浮动盈亏<strong className={account && account.profit < 0 ? "down" : account && account.profit > 0 ? "up" : ""}>{account ? `${account.profit > 0 ? "+" : ""}${account.profit.toLocaleString("zh-CN", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}` : "—"}</strong></span>
+          {[["账户余额", account?.balance], ["账户权益", displayedAccount?.equity], ["已用保证金", account?.margin], ["可用保证金", displayedAccount?.freeMargin]].map(([label,value]) => <span key={String(label)} title={`单位：${account?.currency ?? "账户币种"}`}>{label}<strong>{typeof value === "number" ? value.toLocaleString("zh-CN", { minimumFractionDigits: 2, maximumFractionDigits: 2 }) : "—"}</strong></span>)}
+          <span title="账户权益 ÷ 已用保证金；未占用保证金时不显示比例">保证金水平<strong>{displayedAccount && displayedAccount.margin > 0 ? `${(displayedAccount.equity / displayedAccount.margin * 100).toFixed(1)}%` : "—"}</strong></span>
+          <span title={`MT4 账户当前浮动盈亏；单位 ${account?.currency ?? "账户币种"}`}>浮动盈亏<strong className={displayedAccount && displayedAccount.profit < 0 ? "down" : displayedAccount && displayedAccount.profit > 0 ? "up" : ""}>{displayedAccount ? `${displayedAccount.profit > 0 ? "+" : ""}${displayedAccount.profit.toLocaleString("zh-CN", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}` : "—"}</strong></span>
         </div>
         <OrderEntryActions
-          quantity={<label title={sizingMode === "risk-percent" ? "按当前买入价格预估；卖出按对应报价计算，MT4 会在执行前重新计算" : `最小 ${symbol?.minLot ?? "—"} 手，步长 ${symbol?.lotStep ?? "—"}，最大 ${symbol?.maxLot ?? "—"} 手`}><span>{sizingMode === "risk-percent" ? "风险手数" : "手数"}</span><input type="number" min={symbol?.minLot} max={symbol?.maxLot} step={symbol?.lotStep} readOnly={sizingMode === "risk-percent"} value={sizingMode === "risk-percent" ? previewLots : lots} placeholder={sizingMode === "risk-percent" ? "先选止损" : undefined} onChange={e => setLots(e.target.value)} aria-label={sizingMode === "risk-percent" ? "预估买入手数" : `手数，最小 ${symbol?.minLot ?? "未知"}，步长 ${symbol?.lotStep ?? "未知"}`} /></label>}
+          quantity={<label title={sizingMode === "risk-percent" ? "按当前买入价格预估；卖出按对应报价计算，MT4 会在执行前重新计算" : `最小 ${symbol?.minLot ?? "—"} 手，步长 ${symbol?.lotStep ?? "—"}，最大 ${symbol?.maxLot ?? "—"} 手；按账户和品种记住最近有效手数`}><span>{sizingMode === "risk-percent" ? "风险手数" : "手数"}</span><input type="number" min={symbol?.minLot} max={symbol?.maxLot} step={symbol?.lotStep} readOnly={sizingMode === "risk-percent"} value={sizingMode === "risk-percent" ? previewLots : lots} placeholder={sizingMode === "risk-percent" ? "先选止损" : undefined} onChange={e => rememberLots(e.target.value)} aria-describedby="mt4-lots-help" disabled={!symbol || !state?.accountKey} aria-label={sizingMode === "risk-percent" ? "预估买入手数" : `手数，最小 ${symbol?.minLot ?? "未知"}，步长 ${symbol?.lotStep ?? "未知"}`} /></label>}
           sell={{ label: "卖出开仓", mobileLabel: "卖出", disabled: !canTrade || !symbol?.tradeAllowed || Number(lots) <= 0 || (orderType !== "market" && Number(price) <= 0), onClick: () => openOrder("sell") }}
           buy={{ label: "买入开仓", mobileLabel: "买入", disabled: !canTrade || !symbol?.tradeAllowed || Number(lots) <= 0 || (orderType !== "market" && Number(price) <= 0), onClick: () => openOrder("buy") }}>
           <button type="button" className="flat-button" disabled={!connected || !account?.connected || !account.tradeAllowed || !state?.enabled || busy || !!state?.unresolved || !!pending || snapshot.orderCount > snapshot.orders.length || !snapshot.orders.some(o => o.type < 2)} title="立即平掉当前账户全部品种持仓（含手动及其他 EA）；挂单保留" onClick={openCloseAll}><CircleStop size={16} /><span className="desktop-order-label">全部平仓</span><span className="mobile-order-label">全平</span></button>
         </OrderEntryActions>
+        <span id="mt4-lots-help" className="live-sr-only">按账户和品种记住最近填写的有效固定手数；切换周期保留，风险计算的预估手数不覆盖此值。</span>
+        {lotsError && <div className="mt4-preference-error" role="alert">{lotsError}<button type="button" className="ghost-button" onClick={() => rememberLots(lots, true)}>重试保存手数</button></div>}
         <OrderEntryControls
           sizing={{ value: sizingMode, options: [{ value: "fixed", label: "固定手数" }, { value: "risk-percent", label: "按止损风险（余额%）", disabled: !advancedReady }], onChange: next => setSizingMode(next as typeof sizingMode) }}
           order={{ value: orderType, options: [{ value: "market", label: "市价 · 即时报价" }, { value: "limit", label: "限价单（Limit Order）" }, { value: "stop", label: "突破单（Stop Order）" }], onChange: next => { setOrderType(next as typeof orderType); if (next !== "market") setGapMode("off"); } }}
@@ -415,18 +571,26 @@ export function Mt4Panel() {
         <header className="mt4-orders-heading"><h2>持仓与挂单</h2><div className="mt4-order-counts"><span>持仓 <strong>{snapshot.orders.filter(o => o.type < 2).length}</strong></span><span>挂单 <strong>{snapshot.orders.filter(o => o.type >= 2).length}</strong></span></div></header>
         {snapshot.orderCount > snapshot.orders.length && <div className="mt4-error">当前显示 {snapshot.orders.length} / {snapshot.orderCount} 笔订单，其余订单请在 MT4 查看。</div>}
         {renderOrders(snapshot.orders)}
-        {protection && <div className="mt4-protection"><h3>订单 {protection.ticket} · 保护价</h3><div className="mt4-fields"><label title="留空会移除原止损">止损<input type="number" min={0} value={protectSl} onChange={e => setProtectSl(e.target.value)} aria-label="修改止损，留空会移除原止损" /></label><label title="留空会移除原止盈">止盈<input type="number" min={0} value={protectTp} onChange={e => setProtectTp(e.target.value)} aria-label="修改止盈，留空会移除原止盈" /></label></div>
-          <div className="mt4-actions"><button className="primary-button" disabled={!connected || !state?.enabled || busy || !!state?.unresolved || !!pending} onClick={() => orderAction(protection, "protect")}>确认修改</button><button className="ghost-button" onClick={() => setProtection(null)}>关闭</button></div></div>}
+        {protection && <section className={`mt4-protection${protection.field === "both" ? "" : " single"}`} aria-label="订单保护价编辑" onKeyDown={event => { if (event.key === "Escape") { event.stopPropagation(); setProtection(null); } }}>
+          <h3>#{protection.order.ticket} · {protection.order.symbol} · {protection.field === "both" ? "保护价" : protection.field === "stopLoss" ? "止损" : "止盈"}</h3>
+          <form className="mt4-protection-form" noValidate onSubmit={event => { event.preventDefault(); if (!event.currentTarget.checkValidity()) { setProtectionError("请填写有效的保护价格，或使用取消按钮移除保护。"); return; } saveProtection(); }}>
+            <div className="mt4-fields">
+              {protection.field !== "takeProfit" && <label title="填写新价格；留空或填 0 会取消这笔订单的止损">止损<input ref={protectionInput} type="number" min={0} step={snapshot.symbols.find(s => s.symbol === protection.order.symbol)?.point ?? "any"} value={protectSl} disabled={protectionBlocked} onChange={e => { setProtectSl(e.target.value); setProtectionError(""); }} aria-label="修改止损价格" aria-describedby="mt4-protection-help" /></label>}
+              {protection.field !== "stopLoss" && <label title="填写新价格；留空或填 0 会取消这笔订单的止盈">止盈<input ref={protection.field === "takeProfit" ? protectionInput : undefined} type="number" min={0} step={snapshot.symbols.find(s => s.symbol === protection.order.symbol)?.point ?? "any"} value={protectTp} disabled={protectionBlocked} onChange={e => { setProtectTp(e.target.value); setProtectionError(""); }} aria-label="修改止盈价格" aria-describedby="mt4-protection-help" /></label>}
+            </div>
+            <span className="live-sr-only" id="mt4-protection-help">保存或取消保护会发送到 MT4，仅影响标题中的订单；留空或填 0 表示取消对应保护。按 Escape 关闭编辑。</span>
+            <div className="mt4-actions">
+              <button type="submit" className="primary-button" disabled={protectionBlocked}>{protection.field === "both" ? "保存保护价" : protection.field === "stopLoss" ? "保存止损" : "保存止盈"}</button>
+              {protection.field !== "takeProfit" && <button type="button" className="ghost-button danger" disabled={protectionBlocked || !protection.order.stopLoss} onClick={() => saveProtection("stopLoss")}>取消止损</button>}
+              {protection.field !== "stopLoss" && <button type="button" className="ghost-button danger" disabled={protectionBlocked || !protection.order.takeProfit} onClick={() => saveProtection("takeProfit")}>取消止盈</button>}
+              <button type="button" className="ghost-button" onClick={() => setProtection(null)}>关闭</button>
+            </div>
+          </form>
+          {(protectionError || error || readError) && <div className="mt4-error" role="alert">{protectionError || error || readError}</div>}
+          {protection.commandId && (busy || !!pending || !!state?.unresolved) && <span role="status">正在等待 MT4 确认</span>}
+        </section>}
         </>}
-        <Mt4ArchiveHistory onNotice={notify} activeAccountKey={state?.accountKey ?? ''} refreshAt={Math.floor((state?.lastSeen ?? 0) / 2000) + archiveRefresh} archiveStatus={state?.archive} selected={review?.trade} chartSymbol={displaySymbol} onFiltersChange={onHistoryFilters} onRecords={onHistoryRecords} chartSelection={chartSelection} onSelect={onHistorySelect} />
+        <Mt4ArchiveHistory onNotice={notify} accountStatusReady={!loading} activeAccountKey={state?.accountKey ?? ''} refreshAt={Math.floor((state?.lastSeen ?? 0) / 2000) + archiveRefresh} archiveStatus={state?.archive} selected={review?.trade} chartSymbol={displaySymbol} onFiltersChange={onHistoryFilters} onRecords={onHistoryRecords} chartSelection={chartSelection} onSelect={onHistorySelect} />
       </section>
-    {(pending || !!state?.commands.length) && <section className="mt4-card"><h2>执行回报</h2>
-      {pending && <div className="mt4-error">提交结果尚未确认。核对会使用同一指令标识，避免重复下单。<button className="ghost-button" disabled={busy} onClick={() => void submit(pending)}>核对提交结果</button></div>}
-      <div className="mt4-command-list">{state?.commands.map(c => <div key={c.id} className="mt4-command"><div><strong>{commandTypes[c.type]} · {c.symbol}</strong><span>{c.login} · {formatTime(c.createdAt)}{c.ticket ? ` · #${c.ticket}` : ""}</span></div><span className={c.status === "failed" || c.status === "unknown" ? "down" : ""}>{commandLabels[c.status]}</span>{c.error && <p>{c.error}</p>}
-        {c.status === "unknown" && <button className="ghost-button" disabled={busy} onClick={() => {
-          const login = window.prompt(`请在 MT4 核对账号 ${c.login} 的持仓、挂单和历史记录。确认后输入该账号；此操作只结束待核对状态，不会撤销或再次发送订单。`);
-          if (login) void act({ action: "resolve", id: c.id, confirmation: login });
-        }}>已在 MT4 核对</button>}</div>)}</div>
-    </section>}
   </section>;
 }

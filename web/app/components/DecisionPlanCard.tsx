@@ -1,6 +1,7 @@
 "use client";
 import type { ReactNode, Ref } from "react";
 import { ListChecks, Pencil, Save, Sparkles, Trash2, TrendingUp, X } from "lucide-react";
+import { decisionPlanStatus } from "../lib/decisionWorkflow";
 import { decisionPlanScore, type DecisionPlanValue } from "../lib/decisionPlan";
 
 export type ReasonTagEditorControls = {
@@ -40,7 +41,7 @@ export function DecisionPlanCard({ value, onChange, reasonTags, reasonEditor, ti
       <button key={p.key} type="button" disabled={drawingDisabled} aria-pressed={selectedPrice === p.kind} className={`decision-price-level${selectedPrice === p.kind ? " active" : ""}`} onClick={() => onPickPrice(p.kind)}><span>{p.label}</span><strong>{hidePrice ? "已隐藏" : value[p.key] || "点击图表取点"}</strong></button>)}
       <button type="button" disabled={drawingDisabled} aria-pressed={hasPosition} className={`decision-position-draw${hasPosition ? " active" : ""}`} onClick={onDrawPosition}><TrendingUp size={14} />在图表绘制止损 / 目标</button></div>
     <label className="decision-plan-note">计划说明<textarea aria-label="计划说明" maxLength={4000} rows={4} placeholder="我在等待什么？什么情况放弃？" value={value.note} onChange={e => onChange({ note: e.target.value })} /></label>
-    <div className="discipline-card" title="评分关注填写与计划过程，不代表胜率，不用结果倒推理由"><Sparkles size={18} /><strong>{value.reasons.length >= 2 ? "条件已成形" : "再找一个独立理由"}</strong></div>
+    <div className="discipline-card" title="评分关注填写与计划过程，不代表胜率，不用结果倒推理由"><Sparkles size={18} /><strong>{decisionPlanStatus(value)}</strong></div>
     {status}{footer}
     <button type="button" className="commit-plan" disabled={submitDisabled} onClick={onSubmit}><ListChecks size={17} />{submitLabel}</button>
     {history}

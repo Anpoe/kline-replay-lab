@@ -2,6 +2,7 @@
 
 import { Clock, KeyRound, Link2, RefreshCw, Save, Trash2 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { SettingsHelp } from "../../../components/SettingsHelp";
 import { createMarketDataGateway } from "../marketDataGateway";
 import { DEFAULT_DATA_AUTO_UPDATE_SCHEDULE_TIME } from "../../../lib/dataAutoUpdateSettings";
 
@@ -47,7 +48,12 @@ function sourceLabel(source: ProviderState["source"]) {
   return "尚未配置";
 }
 
-export function ProviderSettingsPanel() {
+export function ProviderSettingsPanel({ searchQuery = "" }: { searchQuery?: string }) {
+  const searchTerms = searchQuery.normalize("NFKC").toLowerCase().trim().split(/\s+/).filter(Boolean);
+  const matchesSection = (text: string) => {
+    const searchable = ("数据 行情更新与数据连接 连接凭证 " + text).normalize("NFKC").toLowerCase().replace(/\s+/g, "");
+    return searchTerms.every((term) => searchable.includes(term));
+  };
   const [status, setStatus] = useState(emptyStatus);
   const [tushareToken, setTushareToken] = useState("");
   const [alpacaKeyId, setAlpacaKeyId] = useState("");
@@ -62,6 +68,7 @@ export function ProviderSettingsPanel() {
   const [autoUpdateStatus, setAutoUpdateStatus] = useState<ProviderSettingsResponse["autoUpdate"]>();
   const [autoUpdateSaving, setAutoUpdateSaving] = useState(false);
   const [statusLoaded, setStatusLoaded] = useState(false);
+  const [statusError, setStatusError] = useState(false);
   const autoUpdateScheduleTimeDirtyRef = useRef(false);
   const marketDataGateway = useMemo(
     () => createMarketDataGateway((input, init) => fetch(input, init)),
@@ -79,11 +86,13 @@ export function ProviderSettingsPanel() {
       }
       setAutoUpdateStatus(data.autoUpdate);
       setStatusLoaded(true);
+      setStatusError(false);
       if (data.providers.tdxquant.endpoint) setTdxQuantEndpoint(data.providers.tdxquant.endpoint);
       setDukascopyEndpoint(data.providers.dukascopy.endpoint ?? "");
       return true;
     } catch {
       setStatusLoaded(false);
+      setStatusError(true);
       return false;
     }
   }, [marketDataGateway]);
@@ -165,8 +174,8 @@ export function ProviderSettingsPanel() {
         : provider === "alpaca"
           ? { provider, alpacaKeyId, alpacaSecretKey }
           : provider === "tdxquant"
-          ? { provider, tdxQuantEndpoint }
-          : { provider, dukascopyEndpoint });
+            ? { provider, tdxQuantEndpoint }
+            : { provider, dukascopyEndpoint });
       setAlpacaKeyId("");
       setAlpacaSecretKey("");
       setTushareToken("");
@@ -175,8 +184,8 @@ export function ProviderSettingsPanel() {
       setNotice(provider === "tushare"
         ? "Tushare 服务密钥已保存在本机；日线价格保持不复权。"
         : provider === "tdxquant"
-        ? "TdxQuant 服务地址已保存；可按服务地址选择复权口径，使用分钟数据前请完成行情终端连接。"
-        : provider === "dukascopy"
+          ? "TdxQuant 服务地址已保存；可按服务地址选择复权口径，使用分钟数据前请完成行情终端连接。"
+          : provider === "dukascopy"
             ? "Dukascopy 自定义 CSV 地址已保存在本机。"
             : "Alpaca 凭证已保存在本机。");
     } catch (error) {
@@ -207,13 +216,19 @@ export function ProviderSettingsPanel() {
   return (
     <div className="settings-section provider-settings-section">
       <div className="settings-section-head">
-        <strong>历史行情数据源</strong>
-        <span>首次使用：先确认数据服务状态，再到“数据”页面建立训练数据。连接凭证只保存在本机，页面不会显示完整内容。</span>
+        <strong>行情更新与数据连接</strong>
+        <SettingsHelp label="数据连接使用说明">首次使用时，先完成数据连接设置，再到“数据”页面建立训练数据。连接凭证只保存在本机。</SettingsHelp>
       </div>
 
-      <article className="provider-setting-card auto-update-setting-card">
+      {(!statusLoaded || notice) && <div className="settings-provider-feedback">
+        {!statusLoaded && !statusError && <div role="status" className="settings-consequence">正在读取连接设置…</div>}
+        {statusError && <div className="task-error" role="alert">连接设置读取失败，请检查数据服务后重试。<button type="button" className="ghost-button" onClick={() => void loadStatus()}>重新读取</button></div>}
+        {notice && <div className="status-banner" role="status">{notice}</div>}
+      </div>}
+
+      {matchesSection("启动自动更新 每日启动自动检查更新 A股 美股 外汇 黄金") && (<article data-provider-section="0" className="provider-setting-card auto-update-setting-card">
         <div className="provider-setting-title">
-          <div><RefreshCw size={17} /><span><strong>每日启动自动检查更新</strong><small>只处理已经存在历史数据的市场</small></span></div>
+          <div><RefreshCw size={17} /><span><strong>每日启动自动检查更新</strong><SettingsHelp label="启动自动更新说明"><span>只处理已经存在历史数据的市场</span><span>启动后先检查 A 股、美股和外汇的最新已收盘数据；已经是最新就跳过，不会为没有历史数据的市场创建初始化任务。</span></SettingsHelp></span></div>
           <button
             type="button"
             className="indicator-switch"
@@ -224,17 +239,17 @@ export function ProviderSettingsPanel() {
             onClick={() => void saveAutoUpdate(!autoUpdateEnabled)}
           ><span /></button>
         </div>
-        <p className="provider-setting-help">启动后先检查 A 股、美股和外汇的最新已收盘数据；已经是最新就跳过，不会为没有历史数据的市场创建初始化任务。</p>
+
         <small className="auto-update-setting-status">
           {autoUpdateStatus?.lastCheckDate
             ? `上次检查：${autoUpdateStatus.lastCheckDate} · ${autoUpdateStatus.lastMessage || "已完成"}`
             : "尚未执行过自动检查"}
         </small>
-      </article>
+      </article>)}
 
-      <article className="provider-setting-card auto-update-setting-card">
+      {matchesSection("定时更新 每日定时检查更新 每日检查时间 系统时间 A股 美股 外汇 黄金") && (<article data-provider-section="1" className="provider-setting-card auto-update-setting-card">
         <div className="provider-setting-title">
-          <div><Clock size={17} /><span><strong>每日定时检查更新</strong><small>错过时间启动时会立即检查</small></span></div>
+          <div><Clock size={17} /><span><strong>每日定时检查更新</strong><SettingsHelp label="定时更新说明"><span>错过时间启动时会立即检查</span><span>后台任务会在每天到达此时间后检查 A 股、美股和外汇；软件在此时间之后启动则立即执行，全天只执行一次。</span></SettingsHelp></span></div>
           <button
             type="button"
             className="indicator-switch"
@@ -264,17 +279,17 @@ export function ProviderSettingsPanel() {
             onClick={() => void saveAutoUpdateSchedule({ time: autoUpdateScheduleTime })}
           >保存时间</button>
         </div>
-        <p className="provider-setting-help">后台任务会在每天到达此时间后检查 A 股、美股和外汇；软件在此时间之后启动则立即执行，全天只执行一次。</p>
+
         <small className="auto-update-setting-status">
           {autoUpdateScheduledEnabled
             ? `当前计划：每天 ${autoUpdateScheduleTime}（系统时间）`
             : "定时检查未开启"}
         </small>
-      </article>
+      </article>)}
 
-      <article className="provider-setting-card">
+      {matchesSection("Tushare Pro 服务密钥 A股 日线 不复权") && (<article data-provider-section="2" className="provider-setting-card">
         <div className="provider-setting-title">
-          <div><KeyRound size={17} /><span><strong>Tushare Pro</strong><small>A 股日线数据（不复权）</small></span></div>
+          <div><KeyRound size={17} /><span><strong>Tushare Pro</strong><SettingsHelp label="Tushare Pro说明"><span>A 股日线数据（不复权）</span><span>Tushare 日线使用不复权价格。需要复权时，可选择 BaoStock 或已配置的 TdxQuant。</span></SettingsHelp></span></div>
           <span className={status.tushare.configured ? "configured" : ""}>
             {statusLoaded ? sourceLabel(status.tushare.source) : "正在读取本机凭证状态…"}
             {statusLoaded && status.tushare.hint ? ` · ${status.tushare.hint}` : ""}
@@ -285,16 +300,16 @@ export function ProviderSettingsPanel() {
             <input type="password" autoComplete="new-password" value={tushareToken} onChange={(event) => setTushareToken(event.target.value)} placeholder={status.tushare.configured ? "输入新值可替换现有密钥" : "填写 Tushare 服务密钥"} />
           </label>
         </div>
-        <p className="provider-setting-help">保留原有逐批日线和维护入口；Tushare daily 返回的是不复权价格。需要复权时，优先选择 BaoStock，或使用已配置的 TdxQuant 复权服务。</p>
+
         <div className="provider-setting-actions">
           {status.tushare.source === "settings" && <button className="delete-session" onClick={() => clearProvider("tushare")}><Trash2 size={13} />清除本机凭证</button>}
           <button className="primary-button" disabled={saving === "tushare"} onClick={() => saveProvider("tushare")}><Save size={14} />保存 Tushare</button>
         </div>
-      </article>
+      </article>)}
 
-      <article className="provider-setting-card">
+      {matchesSection("Alpaca 访问密钥 ID 美股 历史 K线") && (<article data-provider-section="3" className="provider-setting-card">
         <div className="provider-setting-title">
-          <div><KeyRound size={17} /><span><strong>Alpaca</strong><small>美股历史 K 线</small></span></div>
+          <div><KeyRound size={17} /><span><strong>Alpaca</strong><SettingsHelp label="Alpaca说明"><span>美股历史 K 线</span></SettingsHelp></span></div>
           <span className={status.alpaca.configured ? "configured" : ""}>
             {statusLoaded ? sourceLabel(status.alpaca.source) : "正在读取本机凭证状态…"}
             {statusLoaded && status.alpaca.keyIdHint ? ` · ${status.alpaca.keyIdHint}` : ""}
@@ -312,11 +327,11 @@ export function ProviderSettingsPanel() {
           {status.alpaca.source === "settings" && <button className="delete-session" onClick={() => clearProvider("alpaca")}><Trash2 size={13} />清除本机凭证</button>}
           <button className="primary-button" disabled={saving === "alpaca"} onClick={() => saveProvider("alpaca")}><Save size={14} />保存 Alpaca</button>
         </div>
-      </article>
+      </article>)}
 
-      <article className="provider-setting-card">
+      {matchesSection("TdxQuant 本地服务地址 A股 分钟 增强数据 可复权") && (<article data-provider-section="4" className="provider-setting-card">
         <div className="provider-setting-title">
-          <div><Link2 size={17} /><span><strong>TdxQuant</strong><small>A 股分钟 / 增强数据（可复权）</small></span></div>
+          <div><Link2 size={17} /><span><strong>TdxQuant</strong><SettingsHelp label="TdxQuant说明"><span>A 股分钟 / 增强数据（可复权）</span><span>使用前请完成本机行情终端连接。该服务地址支持复权数据，具体口径由服务提供方决定；这里只保存本机地址。</span></SettingsHelp></span></div>
           <span className={status.tdxquant.configured ? "configured" : ""}>
             {statusLoaded ? sourceLabel(status.tdxquant.source) : "正在读取本机配置…"}
           </span>
@@ -326,26 +341,26 @@ export function ProviderSettingsPanel() {
             <input value={tdxQuantEndpoint} onChange={(event) => setTdxQuantEndpoint(event.target.value)} placeholder="http://127.0.0.1:17709" />
           </label>
         </div>
-        <p className="provider-setting-help">使用前请完成本机行情终端连接。该服务地址支持复权数据，具体口径由服务提供方决定；这里只保存本机地址。</p>
+
         <div className="provider-setting-actions">
           {status.tdxquant.source === "settings" && <button className="delete-session" onClick={() => clearProvider("tdxquant")}><Trash2 size={13} />清除本机配置</button>}
           <button className="primary-button" disabled={saving === "tdxquant"} onClick={() => saveProvider("tdxquant")}><Save size={14} />保存 TdxQuant</button>
         </div>
-      </article>
+      </article>)}
 
-      <article className="provider-setting-card">
+      {matchesSection("BaoStock A股 前复权 日线 内置 免费") && (<article data-provider-section="5" className="provider-setting-card">
         <div className="provider-setting-title">
-          <div><KeyRound size={17} /><span><strong>BaoStock</strong><small>A 股前复权日线（内置免费数据源）</small></span></div>
+          <div><KeyRound size={17} /><span><strong>BaoStock</strong><SettingsHelp label="BaoStock说明"><span>A 股前复权日线（内置免费数据源）</span><span>BaoStock 是默认 A 股历史日线来源，直接返回前复权价格；需要不复权日线或其他复权口径时，可在高级自定义中选择相应来源。</span></SettingsHelp></span></div>
           <span className={status.baostock.configured ? "configured" : ""}>
             {statusLoaded ? "内置数据源" : "正在读取本机状态…"}
           </span>
         </div>
-          <p className="provider-setting-help">BaoStock 是默认 A 股历史日线来源，直接返回前复权价格；需要不复权日线或其他复权口径时，可在高级自定义中选择相应来源。</p>
-      </article>
 
-      <article className="provider-setting-card">
+      </article>)}
+
+      {matchesSection("Dukascopy CSV 自定义 CSV 服务地址 外汇 黄金 历史基准导入") && (<article data-provider-section="6" className="provider-setting-card">
         <div className="provider-setting-title">
-          <div><Link2 size={17} /><span><strong>Dukascopy CSV</strong><small>外汇与黄金历史基准导入</small></span></div>
+          <div><Link2 size={17} /><span><strong>Dukascopy CSV</strong><SettingsHelp label="Dukascopy CSV说明"><span>外汇与黄金历史基准导入</span><span>默认即可使用；外汇和黄金的历史、每日增量、缺口修复都走 Dukascopy。需要指定代理时，再填写自定义服务地址。</span></SettingsHelp></span></div>
           <span className={status.dukascopy.configured ? "configured" : ""}>
             {statusLoaded ? sourceLabel(status.dukascopy.source) : "正在读取本机配置…"}
           </span>
@@ -355,14 +370,13 @@ export function ProviderSettingsPanel() {
             <input value={dukascopyEndpoint} onChange={(event) => setDukascopyEndpoint(event.target.value)} placeholder="留空即可使用官方内置适配器" />
           </label>
         </div>
-        <p className="provider-setting-help">默认即可使用；外汇和黄金的历史、每日增量、缺口修复都走 Dukascopy。需要指定代理时，再填写自定义服务地址。</p>
+
         <div className="provider-setting-actions">
           {status.dukascopy.source === "settings" && <button className="delete-session" onClick={() => clearProvider("dukascopy")}><Trash2 size={13} />清除本机配置</button>}
           {dukascopyEndpoint.trim() && <button className="primary-button" disabled={saving === "dukascopy"} onClick={() => saveProvider("dukascopy")}><Save size={14} />保存自定义地址</button>}
         </div>
-      </article>
+      </article>)}
 
-      {notice && <div className="status-banner">{notice}</div>}
     </div>
   );
 }

@@ -232,3 +232,21 @@ test("MT4 visibility survives normalized save and reload, independently of tradi
     assert.deepEqual(reloaded.executionProfile, defaultAppSettings.executionProfile);
   }
 });
+
+test("persists MT4 chart windows independently and keeps old settings live", async () => {
+  assert.equal(normalizeSettings({}).mt4ChartMotion.enabled, false);
+  let saved;
+  const result = await persistSettingsSave({ ...defaultAppSettings, mt4Enabled: true, mt4ChartMotion: { enabled: true, startSeconds: 12, endSeconds: 18 } }, { write: value => { saved = JSON.stringify(value); } });
+  assert.equal(result.ok, true);
+  assert.deepEqual(normalizeSettings(JSON.parse(saved)).mt4ChartMotion, { enabled: true, startSeconds: 12, endSeconds: 18 });
+  assert.deepEqual(normalizeSettings({ mt4ChartMotion: { enabled: true, startSeconds: 'bad', endSeconds: 18 } }).mt4ChartMotion, { enabled: true, startSeconds: 10, endSeconds: 18 });
+});
+
+test("invalid active MT4 windows do not reach persistence", async () => {
+  for (const seconds of [0, -1, 2.5, Infinity, NaN, 86401]) {
+    let writes = 0;
+    const result = await persistSettingsSave({ ...defaultAppSettings, mt4Enabled: true, mt4ChartMotion: { enabled: true, startSeconds: seconds, endSeconds: 10 } }, { write: () => { writes++; } });
+    assert.equal(result.ok, false);
+    assert.equal(writes, 0);
+  }
+});

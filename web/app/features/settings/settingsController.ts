@@ -3,6 +3,7 @@ import {
   type AppSettings,
 } from "./settingsContracts.ts";
 import { isTradingSessionTime } from "../../lib/replayTradingSession.ts";
+import { validateShortcutSettings } from "../../lib/keyboardShortcuts.ts";
 
 export type SettingsSaveResult =
   | { ok: true; settings: AppSettings }
@@ -14,6 +15,12 @@ export type SettingsPersistence = {
 
 /** Validate the settings boundary before the shell applies side effects. */
 export function prepareSettingsSave(draft: Partial<AppSettings>): SettingsSaveResult {
+  const shortcutError = validateShortcutSettings(draft.shortcuts);
+  if (shortcutError) return { ok: false, error: shortcutError };
+  const motion = draft.mt4ChartMotion;
+  if (draft.mt4Enabled && motion?.enabled && [motion.startSeconds, motion.endSeconds].some(value => !Number.isInteger(value) || value < 1 || value > 86400)) {
+    return { ok: false, error: "MT4 波动窗口需要填写 1–86400 的整数秒数。" };
+  }
   const session = draft.replayTradingSession;
   if (session?.enabled) {
     if (!isTradingSessionTime(session.startTime) || !isTradingSessionTime(session.endTime)) {

@@ -27,6 +27,14 @@ export function readHistoryPreferences(raw) {
 export function rememberHistoryFilter(preferences, accountKey, filter) {
   return { version:1, accountKey, accounts:{...preferences.accounts,[accountKey]:{...empty(),...filter}} };
 }
+export function restoreHistorySelection(preferences, accounts, activeAccountKey, accountStatusReady) {
+  // Restore list preferences only. Chart navigation requires a user action.
+  // Wait for terminal status before choosing the default account.
+  if (!accountStatusReady || !accounts.length) return null;
+  const accountKey = [preferences.accountKey, activeAccountKey].find(key => accounts.some(account => account.accountKey === key)) ?? accounts[0].accountKey;
+  const filter = preferences.accounts[accountKey] ?? empty();
+  return { accountKey, filter };
+}
 export function mt4PeriodEnd(timestamp, timeframe) {
   if (timeframe !== 43200) return timestamp + timeframe * 60000;
   const date = new Date(timestamp); date.setUTCMonth(date.getUTCMonth()+1); return date.getTime();

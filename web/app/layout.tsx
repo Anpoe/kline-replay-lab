@@ -1,6 +1,7 @@
 import type { Metadata } from "next";
 import { headers } from "next/headers";
 import "./globals.css";
+import { MobileSessionGuard } from "./features/mobile-access/MobileSessionGuard";
 
 const resizeObserverErrorGuard = `
 (() => {
@@ -37,7 +38,7 @@ export default function RootLayout({ children }: Readonly<{ children: React.Reac
   return (
     <html lang="zh-CN">
       <head><script dangerouslySetInnerHTML={{ __html: resizeObserverErrorGuard }} /></head>
-      <body>{children}</body>
+      <body><MobileSessionGuard />{children}</body>
     </html>
   );
 }

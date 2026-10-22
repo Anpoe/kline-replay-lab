@@ -5,5 +5,6 @@ export type HistoryPreferences = { version:1; accountKey:string; accounts:Record
 export function dateRangeBounds(from?:string,to?:string):{start:number|null;end:number|null};
 export function readHistoryPreferences(raw:string|null):HistoryPreferences;
 export function rememberHistoryFilter(preferences:HistoryPreferences,accountKey:string,filter:HistoryFilter):HistoryPreferences;
+export function restoreHistorySelection(preferences:HistoryPreferences,accounts:ReadonlyArray<{accountKey:string}>,activeAccountKey:string,accountStatusReady:boolean):{accountKey:string;filter:HistoryFilter}|null;
 export function mt4PeriodEnd(timestamp:number,timeframe:number):number;
 export function buildMt4HistoryMarkers(orders:Mt4Order[],bars:{timestamp:number}[],timeframe:number,accountKey:string):Array<TradeMarker & { accountKey:string;symbol:string;ticket:number }>;
