@@ -200,7 +200,8 @@ test("ships the K-line training workbench instead of the starter", async () => {
   assert.doesNotMatch(dataSourceManager, /usDownloadConcurrency/);
   assert.match(downloadRunner, /rowsPerStatement = 8/);
   assert.match(downloadRunner, /candle_coverage/);
-  assert.match(workbench, /Keeping intraday snapshots bounded prevents multi-million-bar/);
+  assert.match(workbench, /replayWindow: newTaskRequest/);
+  assert.doesNotMatch(snapshotsRoute, /MAX_REPLAY_FUTURE_BARS|DEFAULT_REPLAY_FUTURE_BARS/);
   assert.match(workbench, /const rewindLocked = Boolean\(trainingTask\?\.randomRun\)/);
   assert.match(workbench, /随机训练为单向揭示，不允许查看上一根/);
   assert.match(settingsPanel, /收益率模式/);
@@ -227,7 +228,7 @@ test("ships the K-line training workbench instead of the starter", async () => {
   assert.match(replayChart, /subscribeBar/);
   assert.match(replayChart, /chartBars\.length !== bars\.length/);
   assert.match(replayChart, /chart\.resetData\(\)/);
-  assert.match(replayChart, /AUTHORITATIVE_REPLAY_RESET_BAR_LIMIT/);
+  assert.match(replayChart, /incrementalBarUpdates\(previouslyApplied, bars\)/);
   assert.match(replayChart, /chart\.resize\(\)/);
   assert.match(replayChart, /wheelZoomScale/);
   assert.match(replayChart, /tradeMarkerSignature/);
@@ -244,8 +245,7 @@ test("ships the K-line training workbench instead of the starter", async () => {
   assert.match(snapshotsRoute, /storageMode/);
   assert.match(snapshotsRoute, /randomWindow/);
   assert.match(snapshotsRoute, /replayWindow/);
-  assert.match(snapshotsRoute, /DEFAULT_REPLAY_FUTURE_BARS = 5_000/);
-  assert.match(snapshotsRoute, /MAX_REPLAY_FUTURE_BARS = 10_000/);
+  assert.match(snapshotsRoute, /replayRangeEndIndex\(sourceStartIndex, lastIndex, request\.length\)/);
   assert.match(snapshotsRoute, /selectDatabaseReplayWindow/);
   assert.match(snapshotsRoute, /ORDER BY timestamp ASC LIMIT \? OFFSET \?/);
   assert.match(snapshotsRoute, /patternPresets/);

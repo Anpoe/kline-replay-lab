@@ -3,6 +3,7 @@ import { readFileSync } from "node:fs";
 import test from "node:test";
 import ts from "typescript";
 import * as adjustments from "../app/lib/marketAdjustments.ts";
+import * as replayRange from "../app/lib/replayRange.ts";
 
 const source = ts.transpileModule(readFileSync(new URL("../app/api/snapshots/route.ts", import.meta.url), "utf8"), {
   compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 },
@@ -18,6 +19,7 @@ function fixture(actualBasis) {
     if (id === "../../../db/runtime") return { getRawDb: () => db, ensureSchema: async () => {} };
     if (id === "../../lib/localDataService") return { readLocalDataJson: async () => ({ instrument, candles, adjustmentType: actualBasis, source: "tdx-official" }) };
     if (id === "../../lib/marketAdjustments") return adjustments;
+    if (id === "../../lib/replayRange") return replayRange;
     if (id === "../../lib/timeframeCatalog") return { TIMEFRAME_IDS: ["1d"], isSupportedTimeframe: () => true };
     if (id === "../../lib/snapshotStorage") return {
       buildSnapshotChunks: async () => [{ chunkHash: "chunk" }], canonicalStringify: JSON.stringify,

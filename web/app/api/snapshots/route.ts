@@ -27,8 +27,10 @@ import {
 } from "../../lib/timeframeAggregation";
 import {
   buildTimeframeViewSourceMetadata,
+  replayTimeframeEnd,
   type TimeframeViewSourceMode,
 } from "../../lib/timeframeView";
+import { replayRangeEndIndex } from "../../lib/replayRange";
 import {
   buildSnapshotChunks,
   buildSnapshotContentHash,
@@ -64,8 +66,6 @@ type SnapshotDatabase = ReturnType<typeof getRawDb>;
 type SnapshotPreparedStatement = ReturnType<SnapshotDatabase["prepare"]>;
 const PATTERN_SCAN_BLOCK_BARS = 2_048;
 const PATTERN_SCAN_MAX_BLOCKS = 8;
-const DEFAULT_REPLAY_FUTURE_BARS = 5_000;
-const MAX_REPLAY_FUTURE_BARS = 10_000;
 
 type RandomWindowRequest = {
   length?: number;
@@ -172,11 +172,11 @@ function selectLocalRandomWindow(
   timezone: string,
   request: RandomWindowRequest,
 ): RandomWindowResult | null {
-  const length = boundedInteger(request.length, 25, 1, 5000);
+  const length = boundedInteger(request.length, 0, 0, Number.MAX_SAFE_INTEGER);
   const historyBars = boundedInteger(request.historyBars, 100, 0, 5000);
   const startDate = validDateKey(request.startDate);
   const endDate = validDateKey(request.endDate);
-  const maximumStart = sourceCandles.length - 1 - length;
+  const maximumStart = sourceCandles.length - 1 - Math.max(1, length);
   const candidates: number[] = [];
   for (let index = 40; index <= maximumStart; index += 1) {
     const date = tradingDate(sourceCandles[index].timestamp, timezone);
@@ -206,7 +206,7 @@ function selectLocalRandomWindow(
     break;
   }
   if (sourceStartIndex == null) return null;
-  const sourceEndIndex = sourceStartIndex + length;
+  const sourceEndIndex = replayRangeEndIndex(sourceStartIndex, sourceCandles.length - 1, length);
   const windowStartIndex = Math.max(0, sourceStartIndex - historyBars);
   return {
     candles: sourceCandles.slice(windowStartIndex, sourceEndIndex + 1),
@@ -219,13 +219,6 @@ function selectLocalRandomWindow(
     } satisfies RandomWindowSelection,
     patternMatch,
   };
-}
-
-function replayFutureBars(value: unknown) {
-  const parsed = Number(value);
-  return Number.isFinite(parsed) && parsed > 0
-    ? Math.min(MAX_REPLAY_FUTURE_BARS, Math.max(1, Math.round(parsed)))
-    : DEFAULT_REPLAY_FUTURE_BARS;
 }
 
 function selectLocalReplayWindow(
@@ -249,7 +242,7 @@ function selectLocalReplayWindow(
     sourceStartIndex = Math.min(lastIndex, Math.max(0, Math.floor(sourceBarCount * 0.68)));
   }
 
-  let requestedEndIndex = sourceStartIndex + replayFutureBars(request.length);
+  let requestedEndIndex = replayRangeEndIndex(sourceStartIndex, lastIndex, request.length);
   if (request.mode === "range" && endDate) {
     requestedEndIndex = sourceStartIndex;
     for (let index = lastIndex; index >= sourceStartIndex; index -= 1) {
@@ -260,10 +253,8 @@ function selectLocalReplayWindow(
     }
   }
   if (requestedEndIndex < sourceStartIndex) return null;
-  const sourceEndIndex = Math.min(lastIndex, sourceStartIndex + MAX_REPLAY_FUTURE_BARS, requestedEndIndex);
+  const sourceEndIndex = Math.min(lastIndex, requestedEndIndex);
   const windowStartIndex = Math.max(0, sourceStartIndex - historyBars);
-  const requestedLength = Number(request.length);
-  const unboundedLength = !Number.isFinite(requestedLength) || requestedLength <= 0;
   return {
     candles: sourceCandles.slice(windowStartIndex, sourceEndIndex + 1),
     selection: {
@@ -272,8 +263,7 @@ function selectLocalReplayWindow(
       sourceStartIndex,
       sourceEndIndex,
       sourceBarCount,
-      truncated: requestedEndIndex > sourceEndIndex
-        || (request.mode !== "range" && unboundedLength && sourceEndIndex < lastIndex),
+      truncated: requestedEndIndex > sourceEndIndex,
     },
     patternMatch: null,
   };
@@ -337,13 +327,13 @@ async function selectDatabaseReplayWindow(
     sourceStartIndex = Math.min(lastIndex, Math.max(0, Math.floor(sourceBarCount * 0.68)));
   }
 
-  let requestedEndIndex = sourceStartIndex + replayFutureBars(request.length);
+  let requestedEndIndex = replayRangeEndIndex(sourceStartIndex, lastIndex, request.length);
   if (request.mode === "range" && endDate) {
     const found = await dateBoundaryIndex(db, instrumentId, timeframe, adjustmentType, timezone, endDate, "end");
     if (found == null) return { sourceBarCount, window: null };
     requestedEndIndex = Math.max(sourceStartIndex, found);
   }
-  const sourceEndIndex = Math.min(lastIndex, sourceStartIndex + MAX_REPLAY_FUTURE_BARS, requestedEndIndex);
+  const sourceEndIndex = Math.min(lastIndex, requestedEndIndex);
   const windowStartIndex = Math.max(0, sourceStartIndex - historyBars);
   const queryBarCount = sourceEndIndex - windowStartIndex + 1;
   const result = await db.prepare(`SELECT timestamp, open, high, low, close, volume, turnover, source
@@ -352,8 +342,6 @@ async function selectDatabaseReplayWindow(
     .bind(instrumentId, timeframe, adjustmentType, queryBarCount, windowStartIndex)
     .all<SourceCoverageRow>();
   if (result.results.length !== queryBarCount) return { sourceBarCount, window: null };
-  const requestedLength = Number(request.length);
-  const unboundedLength = !Number.isFinite(requestedLength) || requestedLength <= 0;
   return {
     sourceBarCount,
     window: {
@@ -364,8 +352,7 @@ async function selectDatabaseReplayWindow(
         sourceStartIndex,
         sourceEndIndex,
         sourceBarCount,
-        truncated: requestedEndIndex > sourceEndIndex
-          || (request.mode !== "range" && unboundedLength && sourceEndIndex < lastIndex),
+        truncated: requestedEndIndex > sourceEndIndex,
       },
       patternMatch: null,
     },
@@ -385,10 +372,10 @@ async function selectDatabaseRandomWindow(
     .bind(instrumentId, timeframe, adjustmentType)
     .first<{ count: number }>();
   const sourceBarCount = Number(count?.count ?? 0);
-  const length = boundedInteger(request.length, 25, 1, 5000);
+  const length = boundedInteger(request.length, 0, 0, Number.MAX_SAFE_INTEGER);
   const historyBars = boundedInteger(request.historyBars, 100, 0, 5000);
   let minimumStart = 40;
-  let maximumStart = sourceBarCount - 1 - length;
+  let maximumStart = sourceBarCount - 1 - Math.max(1, length);
   const startDate = validDateKey(request.startDate);
   const endDate = validDateKey(request.endDate);
   if (startDate) {
@@ -434,7 +421,7 @@ async function selectDatabaseRandomWindow(
     const outputStartIndex = Math.max(0, blockStartIndex - historyBars);
     const scanStartIndex = presets.length ? Math.max(0, blockStartIndex - patternHistory) : outputStartIndex;
     const queryStartIndex = Math.min(outputStartIndex, scanStartIndex);
-    const queryEndIndex = blockEndIndex + length;
+    const queryEndIndex = length > 0 ? blockEndIndex + length : sourceBarCount - 1;
     const queryBarCount = queryEndIndex - queryStartIndex + 1;
     const result = await db.prepare(`SELECT timestamp, open, high, low, close, volume, turnover, source
       FROM candles WHERE instrument_id = ? AND timeframe = ? AND adjustment_type = ?
@@ -461,7 +448,7 @@ async function selectDatabaseRandomWindow(
     sourceStartIndex = hit.sourceIndex;
     patternMatch = presets.length ? hit.match : null;
     const selectedWindowStart = Math.max(0, sourceStartIndex - historyBars);
-    const selectedWindowEnd = sourceStartIndex + length;
+    const selectedWindowEnd = replayRangeEndIndex(sourceStartIndex, sourceBarCount - 1, length);
     selectedCandles = result.results.slice(
       selectedWindowStart - queryStartIndex,
       selectedWindowEnd - queryStartIndex + 1,
@@ -469,7 +456,7 @@ async function selectDatabaseRandomWindow(
     break;
   }
   if (sourceStartIndex == null || !selectedCandles) return { sourceBarCount, window: null };
-  const sourceEndIndex = sourceStartIndex + length;
+  const sourceEndIndex = replayRangeEndIndex(sourceStartIndex, sourceBarCount - 1, length);
   const windowStartIndex = Math.max(0, sourceStartIndex - historyBars);
   return {
     sourceBarCount,
@@ -906,7 +893,10 @@ export async function POST(request: Request) {
     try {
       instrument = JSON.parse(sourceViewRow.instrumentJson) as Record<string, unknown>;
       const firstTimestamp = Number(sourceViewRow.firstTimestamp);
-      const lastTimestamp = Number(sourceViewRow.lastTimestamp);
+      const lastTimestamp = canAggregateTimeframe(payload.timeframe, sourceViewRow.timeframe)
+        ? replayTimeframeEnd(Number(sourceViewRow.lastTimestamp), sourceViewRow.timeframe,
+            String(instrument.timezone ?? "UTC"), String(instrument.market).toUpperCase() === "FX" || /\.FX$/i.test(payload.instrumentId)) - 1
+        : Number(sourceViewRow.lastTimestamp);
       const aggregateMetadata = canAggregateTimeframe(sourceViewRow.timeframe, payload.timeframe)
         ? buildTimeframeViewSourceMetadata({
             sourceSnapshotId: sourceViewRow.id,

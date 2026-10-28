@@ -2,11 +2,14 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
   advanceReplayCursor,
+  rewindReplayCursor,
   firstReplaySkippedBarIndex,
   isReplayOrderDueAtBar,
   isReplayTradingSessionBar,
   normalizeReplayTradingSession,
 } from "../app/lib/replayTradingSession.ts";
+import { timeframeBucketKey } from "../app/lib/timeframeAggregation.ts";
+import { bucketStartTimestamp } from "../app/lib/fx/dukascopyAggregation.ts";
 import { executeBarStep, DEFAULT_EXECUTION_COST_PROFILE } from "../app/lib/executionEngine.ts";
 
 const session = { enabled: true, startTime: "07:00", endTime: "18:00", skipWeekends: false };
@@ -22,6 +25,68 @@ const bars = [
 const advance = (options = {}) => advanceReplayCursor({
   bars, cursor: 0, requestedCount: 1, endCursor: bars.length - 1,
   session, timeframe: "5m", timezone: "Asia/Shanghai", ...options,
+});
+
+const minuteBars = Array.from({ length: 41 }, (_, index) => bar(
+  new Date(Date.parse("2026-09-07T10:00:00Z") + index * 60_000).toISOString(),
+));
+const chartStep = (options = {}) => advanceReplayCursor({
+  bars: minuteBars, cursor: 4, requestedCount: 1, timeframe: "1m", timezone: "UTC",
+  stepBucketKey: timestamp => timeframeBucketKey(timestamp, "5m", "UTC"),
+  ...options,
+});
+
+test("steps by the selected chart candle while keeping the execution timeline unchanged", () => {
+  assert.equal(chartStep(), 9);
+  assert.equal(chartStep({ cursor: 2 }), 9);
+  assert.equal(chartStep({ requestedCount: 5 }), 29);
+  assert.equal(chartStep({ stepBucketKey: undefined }), 5);
+  assert.equal(chartStep({ stepBucketKey: timestamp => timeframeBucketKey(timestamp, "15m", "UTC") }), 29);
+  assert.equal(chartStep({ endCursor: 7 }), 7);
+  assert.equal(chartStep({ cursor: 39 }), 40);
+  assert.equal(chartStep({ cursor: 40 }), 40);
+  assert.equal(minuteBars.length, 41);
+});
+
+test("rewinds one chart candle and respects the training start even inside a candle", () => {
+  const options = { bars: minuteBars, cursor: 14, startCursor: 0,
+    stepBucketKey: timestamp => timeframeBucketKey(timestamp, "5m", "UTC") };
+  assert.equal(rewindReplayCursor(options), 9);
+  assert.equal(rewindReplayCursor({ ...options, cursor: 12 }), 9);
+  assert.equal(rewindReplayCursor({ ...options, cursor: 9, startCursor: 7 }), 7);
+  assert.equal(rewindReplayCursor({ ...options, cursor: 8, startCursor: 7 }), 7);
+  assert.equal(rewindReplayCursor({ ...options, cursor: 7, startCursor: 7 }), 7);
+  assert.equal(rewindReplayCursor({ ...options, stepBucketKey: undefined }), 13);
+});
+
+test("chart stepping counts trading-session candles and retains the scheduled-order pause", () => {
+  assert.equal(chartStep({ cursor: 4, session: { ...session, startTime: "10:10", endTime: "10:17" } }), 14);
+  assert.equal(chartStep({ cursor: 14, session: { ...session, startTime: "10:10", endTime: "10:17" } }), 16);
+  assert.equal(chartStep({ scheduledOrderTimestamps: [minuteBars[8].timestamp] }), 7);
+  assert.equal(chartStep({ cursor: 7, scheduledOrderTimestamps: [minuteBars[8].timestamp] }), 14);
+});
+
+test("calendar chart steps use actual buckets across missing dates and unequal months", () => {
+  const calendarBars = ["01-30", "01-31", "02-02", "02-27", "02-28", "03-02", "03-31", "04-01"]
+    .map(date => bar(`2026-${date}T12:00:00Z`));
+  const options = { bars: calendarBars, cursor: 1, requestedCount: 1, timeframe: "1d", timezone: "UTC",
+    stepBucketKey: timestamp => timeframeBucketKey(timestamp, "1mo", "UTC") };
+  assert.equal(advanceReplayCursor(options), 4);
+  assert.equal(advanceReplayCursor({ ...options, cursor: 4 }), 6);
+  assert.equal(advanceReplayCursor({ ...options, requestedCount: 2 }), 6);
+  assert.equal(rewindReplayCursor({ ...options, cursor: 6 }), 4);
+});
+
+test("FX chart steps reuse the session rollover and historical DST buckets", () => {
+  const fxBars = ["03-06T21:55", "03-06T22:00", "03-06T22:05", "03-08T21:00", "03-08T21:05", "03-09T21:00"]
+    .map(time => bar(`2026-${time}:00Z`));
+  const options = { bars: fxBars, cursor: 0, requestedCount: 1, timeframe: "5m", timezone: "America/New_York",
+    stepBucketKey: timestamp => String(bucketStartTimestamp(timestamp, "1d", {
+      timeZone: "America/New_York", sessionStartHour: 17, sessionStartMinute: 0, weekStartsOn: 0,
+    })) };
+  assert.equal(advanceReplayCursor(options), 2);
+  assert.equal(advanceReplayCursor({ ...options, cursor: 2 }), 4);
+  assert.equal(rewindReplayCursor({ ...options, cursor: 4 }), 2);
 });
 
 test("skips from the exclusive session end to its inclusive start without removing history", () => {

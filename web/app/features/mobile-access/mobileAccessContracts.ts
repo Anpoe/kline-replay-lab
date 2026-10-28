@@ -7,7 +7,7 @@ export type MobileAccessStatus = {
   challenge: { code: string; expiresAt: number } | null;
   addresses: { name: string; kind?: "direct"; address: string; url: string }[];
   pending: { id: string; name: string; number: string; expiresAt: number }[];
-  devices: { id: string; name: string; createdAt: number; expiresAt: number; expired: boolean }[];
+  devices: { id: string; name: string; createdAt: number; expiresAt: number | null; expired: boolean }[];
 };
 
 export type TailscaleAccessStatus = {

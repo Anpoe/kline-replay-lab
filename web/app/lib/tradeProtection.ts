@@ -13,8 +13,9 @@ export type ProtectionLine = {
   price: number;
   timestamp: number;
   label: string;
+  hint?: string;
   movable: boolean;
-  source: "draft" | "position" | "rule";
+  source: "draft" | "position" | "rule" | "plan";
   positionId?: string;
   side?: "long" | "short";
 };

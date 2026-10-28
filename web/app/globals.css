@@ -1,5 +1,11 @@
 @import "tailwindcss";
 
+/* Chart visibility uses the same compact checkbox in training, review and MT4. */
+.chart-marker-toggle { display: inline-flex; align-items: center; gap: 6px; min-height: 32px; color: var(--muted); font-size: 11px; white-space: nowrap; cursor: pointer; }
+.chart-marker-toggle > input { flex-shrink: 0; accent-color: var(--accent); }
+.chart-marker-toggle:focus-within { color: var(--foreground); }
+@media (pointer: coarse) { .chart-marker-toggle { min-height: 44px; } }
+
 /* Phone access reuses settings controls, semantic colors and compact status rows. */
 .mobile-access-panel { min-width: 0; }
 .mobile-access-header, .mobile-access-heading { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
@@ -73,23 +79,33 @@
 .mt4-card summary { cursor: pointer; margin-bottom: 6px; }
 .mt4-card details p { line-height: 1.6; }
 .mt4-error { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; margin: 0; padding: 8px 10px; border: 1px solid var(--danger); border-radius: 6px; color: var(--danger); background: var(--surface-soft); font-size: 12px; }
-.mt4-account-band { display: grid; grid-template-columns: minmax(160px, .7fr) minmax(320px, 1.5fr) auto; align-items: center; gap: 12px; }
-.mt4-account-identity { min-width: 0; display: grid; gap: 4px; }
+.mt4-account-band { display: grid; grid-template-columns: minmax(240px, 1fr) auto; align-items: center; gap: 10px 24px; }
+.mt4-account-identity { min-width: 0; display: grid; gap: 6px; }
+.mt4-account-heading { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; }
 .mt4-account-identity h2 { margin: 0; }
-.mt4-account-identity > span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--muted); font-size: 10px; }
-.mt4-account-band > .mt4-error { grid-column: 1 / -1; }
-.mt4-account-controls { display: flex; align-items: center; gap: 10px; }
-.mt4-account-status { display: grid; gap: 4px; color: var(--muted); font-size: 10px; }
+.mt4-account-meta { display: flex; align-items: center; flex-wrap: wrap; gap: 4px 14px; color: var(--muted); font-size: 10px; }
+.mt4-account-meta > span { min-width: 0; overflow-wrap: anywhere; }
+.mt4-account-controls { min-width: 0; display: flex; align-items: center; justify-content: flex-end; gap: 10px; }
+.mt4-account-status { display: inline-flex; align-items: center; gap: 5px; padding: 3px 7px; border-radius: 5px; color: var(--muted); background: var(--surface-raised); font-size: 10px; white-space: nowrap; }
+.mt4-account-status::before { content: ""; width: 5px; height: 5px; border-radius: 50%; background: currentColor; }
+.mt4-account-status.active { color: var(--accent); background: var(--accent-soft); }
+.mt4-account-risk { display: flex; align-items: center; gap: 5px; margin: 0; color: var(--danger); font-size: 11px; }
+.mt4-account-risk > svg { flex-shrink: 0; }
+.mt4-account-notices { grid-column: 1 / -1; display: grid; gap: 4px; padding-top: 8px; border-top: 1px solid var(--line); color: var(--danger); font-size: 11px; line-height: 1.6; }
+.mt4-account-notices > p { margin: 0; overflow-wrap: anywhere; }
 .mt4-metrics { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 10px; margin: 0; }
 .mt4-metrics span, .mt4-quotes span { display: block; color: var(--muted); font-size: 10px; margin-bottom: 4px; }
 .mt4-metrics strong, .mt4-quotes strong { font-family: var(--font-geist-mono); font-size: 14px; font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
 .mt4-fields { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; margin: 0; }
-.mt4-fields label, .mt4-enable > label:not(.mt4-check) { display: grid; gap: 4px; color: var(--muted); font-size: 10px; min-width: 0; }
+.mt4-fields label { display: grid; gap: 4px; color: var(--muted); font-size: 10px; min-width: 0; }
 .mt4-fields input, .mt4-fields select, .mt4-enable input:not([type="checkbox"]) { width: 100%; min-width: 0; height: 32px; padding: 5px 8px; border: 1px solid var(--line-strong); border-radius: 6px; color: var(--foreground); background: var(--surface-raised); font-size: 12px; }
 .mt4-page input:focus, .mt4-page select:focus { outline: 1px solid var(--accent); }
-.mt4-enable { display: flex; flex-wrap: wrap; align-items: end; gap: 8px; }
-.mt4-enable > label:not(.mt4-check) { width: 110px; }
+.mt4-enable { min-width: 0; display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; }
+.mt4-enable > label:not(.mt4-check) { display: flex; align-items: center; gap: 8px; min-width: 0; color: var(--muted); font-size: 11px; white-space: nowrap; }
+.mt4-enable input:not([type="checkbox"]) { width: 110px; }
 .mt4-check { display: flex; align-items: center; gap: 6px; min-height: 32px; font-size: 12px; }
+.mt4-check > input { accent-color: var(--accent); flex-shrink: 0; }
+.mt4-account-controls button { flex-shrink: 0; }
 .mt4-trading-grid { display: grid; grid-template-columns: minmax(0, 1fr); gap: 0; }
 .mt4-chart-card { padding: 0; border-radius: 8px 8px 0 0; overflow: hidden; }
 .mt4-chart-controls { align-items: center; padding: 8px 10px; border-bottom: 1px solid var(--line); background: var(--surface-soft); }
@@ -110,29 +126,53 @@
 .mt4-order-pickers { gap: 6px; }
 .mt4-gap-threshold { display: grid; grid-template-columns: minmax(0, 1fr) 64px; gap: 4px; }
 /* MT4 uses the training order dock and shared controls; only its live quote/settings layout differs. */
-.mt4-page .mt4-account-band { grid-template-columns: minmax(0, 1fr) auto; }
-.mt4-account-controls { justify-content: flex-end; }
-.mt4-order-dock.trade-dock { flex: none; padding: 8px 12px; grid-template-columns: minmax(0, 1fr) auto; gap: 7px 18px; overflow: visible; background: var(--surface-soft); }
+.mt4-order-dock.trade-dock { flex: none; padding: 12px 14px 10px; grid-template-columns: minmax(0, 1fr) auto; gap: 12px 20px; overflow: visible; background: var(--surface-soft); }
 .mt4-order-dock .trade-stats { min-width: 0; }
 .mt4-order-dock .trade-stats strong { font-variant-numeric: tabular-nums; }
 .mt4-order-dock .order-entry { min-width: 0; }
-.mt4-order-dock .order-entry button { min-height: 36px; }
-.mt4-order-dock .execution-order-controls { min-width: 0; }
-.mt4-order-dock .execution-order-controls > label { min-width: 0; }
-.mt4-order-dock .execution-order-controls > label > select { width: 142px; font-size: 10px; }
+.mt4-order-dock .order-entry button { min-height: 36px; padding-inline: 14px; font-size: 12px; }
+.mt4-order-dock .order-entry button:disabled { opacity: .55; }
+.mt4-order-dock .order-entry input { height: 36px; }
+.mt4-order-dock .execution-order-controls { min-width: 0; gap: 10px 12px; padding: 12px; background: var(--surface); border-radius: 10px; }
+.mt4-order-dock .execution-order-controls > label { min-width: 0; color: var(--muted); font-size: 10px; }
+.mt4-order-dock .execution-order-controls > label > select { width: 146px; height: 34px; font-size: 11px; }
+.mt4-order-dock .execution-order-controls > label > input, .mt4-order-dock .execution-order-controls .opening-gap-mode-button { height: 34px; }
 .mt4-order-dock .execution-order-controls .protection-picker-control { width: 132px; }
+.mt4-order-dock .execution-order-controls :is(.entry-trigger-control, .protection-picker-control), .mt4-order-dock .execution-order-controls :is(.entry-trigger-control, .protection-picker-control) > button { height: 34px; }
 .execution-order-controls .protection-picker-control > button:first-child:not(:last-child) { padding-right: 28px; }
-.mt4-order-settings-control { display: grid; gap: 4px; color: var(--faint); font-size: 9px; }
+.mt4-order-settings-control { display: grid; gap: 4px; color: var(--faint); font-size: 10px; }
 .mt4-order-dock .mt4-order-settings { position: relative; margin: 0; }
-.mt4-order-dock .mt4-order-settings > summary { display: flex; align-items: center; justify-content: center; gap: 5px; height: 30px; margin: 0; padding: 5px 8px; color: var(--muted); background: var(--surface-raised); border: 1px solid var(--line); border-radius: 7px; list-style: none; }
+.mt4-order-dock .mt4-order-settings > summary { display: flex; align-items: center; justify-content: center; gap: 5px; height: 34px; margin: 0; padding: 5px 10px; color: var(--muted); background: var(--surface-raised); border: 1px solid var(--line); border-radius: 7px; list-style: none; }
 .mt4-order-settings > summary::-webkit-details-marker { display: none; }
 .mt4-order-settings[open] > summary { color: var(--accent); border-color: var(--accent); }
 .execution-order-controls:has(.mt4-order-settings[open]) .mt4-order-settings-control { flex-basis: 100%; grid-column: 1 / -1; }
 .mt4-order-dock .mt4-order-settings[open] { display: grid; grid-template-columns: auto minmax(0, 360px); align-items: end; justify-content: start; gap: 10px; }
 .mt4-order-settings-fields { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; min-width: 0; color: var(--foreground); }
+.mt4-batch-orders { flex: 0 0 100%; grid-column: 1 / -1; min-width: 0; width: 100%; margin-top: 2px; padding-top: 12px; border-top: 1px solid var(--line); }
+.mt4-batch-orders > header, .mt4-batch-orders > .mt4-batch-order-grid { width: 100%; max-width: 1280px; }
+.mt4-batch-orders > header, .mt4-batch-orders > header > div { display: flex; align-items: center; gap: 8px; }
+.mt4-batch-orders > header { justify-content: space-between; margin-bottom: 10px; color: var(--foreground); font-size: 12px; }
+.mt4-batch-count { padding: 2px 6px; border-radius: 5px; color: var(--muted); background: var(--surface-raised); font-size: 10px; font-weight: 500; }
+.mt4-batch-memory { display: inline-flex; align-items: center; gap: 4px; color: var(--muted); font-size: 10px; }
+.mt4-batch-memory > svg { color: var(--accent); }
+.mt4-batch-order-grid { display: grid; grid-template-columns: 36px 104px repeat(3, minmax(0, 1fr)); align-items: center; gap: 12px; padding: 6px 10px; border: 1px solid transparent; border-radius: 8px; }
+.mt4-batch-order-grid:not(.mt4-batch-order-head) { margin-top: 4px; background: color-mix(in srgb, var(--surface-raised) 38%, transparent); }
+.mt4-batch-order-grid:not(.mt4-batch-order-head):focus-within { border-color: var(--line-strong); background: var(--surface-soft); }
+.mt4-batch-order-head { padding-top: 0; padding-bottom: 2px; color: var(--muted); font-size: 10px; }
+.mt4-batch-row-number { display: grid; place-items: center; width: 26px; height: 26px; border: 1px solid var(--line); border-radius: 7px; color: var(--muted); background: var(--surface); font: 11px var(--font-geist-mono), monospace; }
+.mt4-batch-order-grid label, .mt4-batch-order-grid input, .mt4-batch-order-grid .entry-trigger-control { min-width: 0; width: 100%; }
+.mt4-batch-orders .mt4-batch-order-grid > label > input { min-width: 0; width: 100%; height: 34px; font: 12px var(--font-geist-mono), monospace; font-variant-numeric: tabular-nums; }
+.mt4-batch-orders .entry-trigger-control.compact { position: relative; height: 34px; gap: 0; border: 1px solid var(--line); border-radius: 7px; background: var(--surface-raised); }
+.mt4-batch-orders .entry-trigger-control.compact:focus-within, .mt4-batch-orders .entry-trigger-control.compact:has(button.active) { border-color: var(--accent); box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent) 10%, transparent); }
+.mt4-batch-orders .entry-trigger-control.compact > input { width: 100%; height: 32px; padding: 5px 38px 5px 10px; border: 0; outline: none; box-shadow: none; background: transparent; font: 12px var(--font-geist-mono), monospace; font-variant-numeric: tabular-nums; }
+.mt4-batch-orders .entry-trigger-control.compact > input::placeholder { color: var(--faint); font-family: inherit; font-size: 10px; }
+.mt4-batch-orders .entry-trigger-control.compact > button { position: absolute; right: 3px; top: 3px; min-width: 26px; width: 26px; height: 26px; padding: 0; border: 0; border-radius: 5px; color: var(--muted); background: transparent; }
+.mt4-batch-orders .entry-trigger-control.compact > button:hover:not(:disabled), .mt4-batch-orders .entry-trigger-control.compact > button.active { color: var(--accent-strong); background: var(--surface-soft); box-shadow: none; }
+.mt4-batch-orders .entry-trigger-control.compact > input::-webkit-inner-spin-button { appearance: none; }
+.mt4-batch-market-price { display: flex; height: 34px; align-items: center; padding-left: 10px; color: var(--muted); font-size: 11px; }
 .mt4-order-dock .mt4-order-settings-fields input { min-width: 0; width: 100%; font-size: 11px; }
-.mt4-order-quote { grid-column: 1 / -1; display: flex; align-items: center; flex-wrap: wrap; gap: 12px; color: var(--faint); font-size: 9px; }
-.mt4-order-quote strong { color: var(--muted); font: 10px var(--font-geist-mono), monospace; }
+.mt4-order-quote { grid-column: 1 / -1; display: flex; align-items: center; flex-wrap: wrap; gap: 18px; padding-inline: 2px; color: var(--faint); font-size: 10px; }
+.mt4-order-quote strong { margin-left: 3px; color: var(--muted); font: 11px var(--font-geist-mono), monospace; }
 .mt4-dock-notice { grid-column: 1 / -1; }
 .mt4-batch-progress { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; padding: 8px 10px; border: 1px solid var(--line); border-radius: 7px; color: var(--muted); background: var(--surface-raised); font-size: 11px; }
 .mt4-batch-progress > span { flex: 1; min-width: 160px; }
@@ -146,7 +186,6 @@
   .mt4-order-dock .execution-order-controls { grid-row: 3; }
 }
 @media (max-width: 600px) {
-  .mt4-page .mt4-account-band { grid-template-columns: minmax(0, 1fr); }
   .mt4-order-dock .trade-stats { grid-auto-flow: row; grid-template-columns: repeat(3, minmax(0, 1fr)); row-gap: 8px; }
   .mt4-order-dock .order-entry { grid-template-columns: 70px repeat(3, minmax(0, 1fr)); }
   .mt4-order-dock .execution-order-controls > label > select { width: 100%; }
@@ -322,9 +361,8 @@
 .mt4-confirm p { font-size: 14px; line-height: 1.6; }
 .mt4-page button:disabled, .mt4-page input:disabled { opacity: .45; cursor: not-allowed; }
 @media (max-width: 1200px) {
-  .mt4-account-band { grid-template-columns: minmax(160px, .6fr) minmax(0, 1.4fr); }
-  .mt4-account-controls { grid-column: 1 / -1; justify-content: space-between; }
-  .mt4-account-status { display: flex; flex-wrap: wrap; gap: 10px; }
+  .mt4-account-band { grid-template-columns: minmax(0, 1fr); }
+  .mt4-account-controls { justify-content: flex-start; }
 }
 @media (max-width: 600px) {
   .content-page.mt4-page { padding: 8px; }
@@ -332,6 +370,10 @@
   .mt4-chart-card { padding: 0; }
   .mt4-account-band { grid-template-columns: minmax(0, 1fr); gap: 8px; }
   .mt4-account-controls { flex-wrap: wrap; }
+  .mt4-enable { width: 100%; }
+  .mt4-enable > label:not(.mt4-check) { flex: 1 1 100%; }
+  .mt4-enable input:not([type="checkbox"]) { flex: 1; width: auto; }
+  .mt4-enable > .mt4-check { flex: 1; }
   .mt4-metrics { grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; }
   .mt4-chart-controls { grid-template-columns: minmax(0, 1fr) 112px; gap: 6px; }
   .mt4-chart-controls > span { display: none; }
@@ -1999,8 +2041,12 @@ button { color: inherit; }
   .watchlist-list { max-height: 190px; }
   .live-scan-navigator { grid-template-columns: auto minmax(76px, 1fr) auto auto auto; min-width: 280px; max-width: calc(100vw - 20px); }
   .chart-stage { max-height: none; overflow: visible; border-right: 0; }
-  .chart-area, .chart-stage.chart-height-adjusted .chart-area { height: 54vh; min-height: 340px; flex: 0 0 auto; }
-  .chart-resize-handle { display: none; }
+  .chart-area { height: 54vh; min-height: 340px; flex: 0 0 auto; }
+  .chart-stage.chart-height-adjusted .chart-area { height: var(--chart-height, 520px); min-height: 240px; flex: 0 0 auto; }
+  .chart-resize-handle { flex-basis: 12px; user-select: none; }
+  .chart-resize-handle::before { content: ""; position: absolute; inset: -8px 0; }
+  .chart-resize-handle::after { top: 50%; height: 3px; transform: translate(-50%, -50%); }
+  .chart-resize-handle:active::after { background: var(--accent-strong); }
   .trade-dock, .chart-stage.chart-height-adjusted .trade-dock { flex: none; overflow: visible; }
   .orders-table-wrap { min-height: 0; }
   .decision-panel { max-height: none; overflow: visible; border-top: 1px solid var(--line); }
@@ -2144,7 +2190,7 @@ button { color: inherit; }
   .duplicate-training-preview > svg { display: none; }
   .duplicate-training-preview span { white-space: normal; line-height: 1.35; }
   .duplicate-training-preview-actions { grid-column: 2; justify-content: flex-start; }
-  .chart-area, .chart-stage.chart-height-adjusted .chart-area { grid-template-columns: 36px minmax(0, 1fr); height: clamp(380px, 52svh, 500px); min-height: 380px; }
+  .chart-area { grid-template-columns: 36px minmax(0, 1fr); height: clamp(380px, 52svh, 500px); min-height: 380px; }
   .drawing-rail { gap: 3px; padding: 6px 3px; overflow-y: auto; scrollbar-width: none; }
   .drawing-rail::-webkit-scrollbar { display: none; }
   .drawing-rail button { width: 28px; height: 28px; }

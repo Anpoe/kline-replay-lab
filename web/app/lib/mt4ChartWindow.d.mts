@@ -1,11 +1,13 @@
 import type { Mt4ClockAnchor } from './mt4Clock.mjs';
 import type { KLineData } from 'klinecharts';
-export type Mt4ChartMotionSettings = { enabled: boolean; startSeconds: number; endSeconds: number };
+export type Mt4ChartMotionSettings = { enabled: boolean; startSeconds: number; endSeconds: number; soundEnabled: boolean };
 export type Mt4ChartWindowState = 'live' | 'frozen' | 'paused' | 'clock' | 'waiting';
 export type Mt4CandleClock = { serverTime?: number; receivedAt: number; connected: boolean; timeframe: number; anchor?: Mt4ClockAnchor };
 export type Mt4ChartFrame<T extends KLineData> = { scope: string; bars: T[] };
 export const DEFAULT_MT4_CHART_MOTION: Readonly<Mt4ChartMotionSettings>;
 export function normalizeMt4ChartMotion(value: unknown): Mt4ChartMotionSettings;
+export type Mt4WindowSoundFrame = { scope: string; window: Mt4ChartWindowState; settings: Mt4ChartMotionSettings };
+export function shouldPlayMt4WindowSound(previous: Mt4WindowSoundFrame | null, next: Mt4WindowSoundFrame): boolean;
 export function mt4ChartWindow(input: Mt4CandleClock & { settings: Mt4ChartMotionSettings; openTime: number; now: number; monotonicNow?: number }): Mt4ChartWindowState;
 export function selectMt4ChartFrame<T extends KLineData>(previous: Mt4ChartFrame<T> | null, next: { scope: string; bars: T[]; window: Mt4ChartWindowState }): Mt4ChartFrame<T>;
 

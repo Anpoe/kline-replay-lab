@@ -66,8 +66,8 @@ test('takes an honest initial snapshot and updates the baseline on rollover or i
 
 test('normalizes saved windows safely, independently and without enabling old settings', () => {
   for (const input of [undefined, null, [], 'bad', { enabled: 'true' }]) assert.equal(normalizeMt4ChartMotion(input).enabled, false);
-  assert.deepEqual(normalizeMt4ChartMotion({ enabled: true, startSeconds: 0, endSeconds: Infinity }), { enabled: true, startSeconds: 1, endSeconds: 10 });
-  assert.deepEqual(normalizeMt4ChartMotion({ enabled: true, startSeconds: 100000, endSeconds: 20.8 }), { enabled: true, startSeconds: 86400, endSeconds: 21 });
+  assert.deepEqual(normalizeMt4ChartMotion({ enabled: true, startSeconds: 0, endSeconds: Infinity }), { enabled: true, startSeconds: 1, endSeconds: 10, soundEnabled: false });
+  assert.deepEqual(normalizeMt4ChartMotion({ enabled: true, startSeconds: 100000, endSeconds: 20.8 }), { enabled: true, startSeconds: 86400, endSeconds: 21, soundEnabled: false });
 });
 
 test('keeps an empty waiting frame stable across renders', () => {

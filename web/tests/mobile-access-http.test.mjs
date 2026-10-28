@@ -47,7 +47,7 @@ test("the configured IPv6 domain reuses pairing, QR, business access and revocat
   const pair = (await request("/api/mobile-access/pair", { ...options, body: { code: challenge.code, name: "IPv6 手机" } })).json();
   const claim = { id: pair.id, secret: pair.secret };
   assert.equal((await request("/api/mobile-access/claim", { ...options, body: claim })).json().status, "pending");
-  service.approve(pair.id, pair.number);
+  await service.approve(pair.id, pair.number);
   const approved = await request("/api/mobile-access/claim", { ...options, body: claim });
   const cookie = approved.headers["set-cookie"].split(";")[0];
   assert.equal((await request("/api/preferences", { ...options, cookie })).passed, true);
@@ -79,6 +79,43 @@ test("IPv6 and external hosts are not admitted by wildcard, suffix, port or forw
   }
 });
 
+test("opening the configured domain requests one approval without scanning, then retains and renews access", async t => {
+  const { service, request } = await fixture(t, undefined, "camp.example.test");
+  const options = { peer: "2001:db8:1::5", host: "camp.example.test:3101" };
+  await service.setEnabled(true);
+  const challenge = service.rotateChallenge();
+  assert.equal((await request("/api/mobile-access/session", options)).json().canRequestPairing, true);
+  assert.equal((await request("/api/mobile-access/pair", { ...options, body: { name: "Phone" }, origin: "http://evil.example" })).statusCode, 403);
+  assert.equal((await request("/api/mobile-access/pair", { ...options, body: { name: "Phone" }, headers: { origin: undefined } })).statusCode, 403);
+  const response = await request("/api/mobile-access/pair", { ...options, body: { name: "Phone" } });
+  assert.equal(response.statusCode, 200);
+  const pair = response.json();
+  assert.equal(service.status().challenge.code, challenge.code, "a domain request does not consume a QR for another phone");
+  assert.equal((await request("/api/preferences", options)).statusCode, 401);
+  const claim = { id: pair.id, secret: pair.secret };
+  const pending = await request("/api/mobile-access/claim", { ...options, body: claim });
+  assert.equal(pending.json().status, "pending");
+  assert.equal(pending.headers["set-cookie"], undefined);
+  await service.approve(pair.id, pair.number);
+  const approved = await request("/api/mobile-access/claim", { ...options, body: claim });
+  assert.match(approved.headers["set-cookie"], /Max-Age=34560000/);
+  assert.match(approved.headers["set-cookie"], /HttpOnly; SameSite=Lax/);
+  const cookie = approved.headers["set-cookie"].split(";")[0];
+  const session = await request("/api/mobile-access/session", { ...options, cookie });
+  assert.equal(session.json().authorized, true);
+  assert.equal(session.headers["set-cookie"].split(";")[0], cookie, "renewal retains the same credential across concurrent tabs");
+  assert.equal((await request("/", { ...options, cookie, headers: { accept: "text/html" } })).passed, true);
+  assert.equal((await request("/mobile-connect", { ...options, cookie })).headers.location, "/");
+  assert.equal((await request("/api/mobile-access", { ...options, cookie })).statusCode, 403);
+  assert.equal((await request("/api/mobile-access/session")).json().canRequestPairing, false);
+  assert.equal((await request("/api/mobile-access/pair", { body: { name: "LAN" } })).statusCode, 410);
+  assert.equal((await request("/api/mobile-access/pair", { ...options, body: { name: "Wrong QR", code: "wrong" } })).statusCode, 410);
+  await service.revoke(pair.id);
+  const revoked = await request("/api/mobile-access/session", { ...options, cookie });
+  assert.equal(revoked.json().authorized, false);
+  assert.equal(revoked.headers["set-cookie"], undefined);
+});
+
 test("private HTTPS proxy pairs with Secure cookies and can never become a local administrator", async t => {
   const root = await mkdtemp(path.join(os.tmpdir(), "kline-tailscale-http-"));
   t.after(() => rm(root, { recursive: true, force: true }));
@@ -95,7 +132,7 @@ test("private HTTPS proxy pairs with Secure cookies and can never become a local
   assert.equal((await request("/api/mobile-access", { local: true, headers: options.headers })).statusCode, 403, "misconfigured proxy must not inherit loopback admin");
   await service.setEnabled(true);
   const pair = (await request(`${gateway}/api/mobile-access/pair`, { ...options, body: { code: service.rotateChallenge().code, name: "远程手机" } })).json();
-  service.approve(pair.id, pair.number);
+  await service.approve(pair.id, pair.number);
   const claim = await request(`${gateway}/api/mobile-access/claim`, { ...options, body: { id: pair.id, secret: pair.secret } });
   assert.match(claim.headers["set-cookie"], /; Secure/);
   const cookie = claim.headers["set-cookie"].split(";")[0];
@@ -139,9 +176,9 @@ test("HTTP pairing issues HttpOnly cookies only after approval and revocation bl
   const pairing = (await request("/api/mobile-access/pair", { body: { code, name: "我的手机" } })).json();
   const claim = { id: pairing.id, secret: pairing.secret };
   assert.equal((await request("/api/mobile-access/claim", { body: claim })).json().status, "pending");
-  service.approve(pairing.id, pairing.number);
+  await service.approve(pairing.id, pairing.number);
   const approved = await request("/api/mobile-access/claim", { body: claim });
-  assert.match(approved.headers["set-cookie"], /HttpOnly; SameSite=Strict/);
+  assert.match(approved.headers["set-cookie"], /HttpOnly; SameSite=Lax/);
   assert.ok(!approved.body.includes(pairing.secret));
   const cookie = approved.headers["set-cookie"].split(";")[0];
   assert.equal((await request("/api/preferences", { cookie })).passed, true);

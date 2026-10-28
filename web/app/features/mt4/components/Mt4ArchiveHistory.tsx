@@ -8,6 +8,7 @@ import type { Mt4Status } from '../mt4Contracts';
 import { downloadArchiveJson } from './Mt4PersistentAnalysis';
 import { dateRangeBounds, readHistoryPreferences, rememberHistoryFilter, restoreHistorySelection } from '../../../lib/mt4History.mjs';
 import { readAnalysis } from '../mt4Analysis';
+import { ChartMarkerToggle } from '../../../components/DecisionReview';
 
 export function Mt4ArchiveHistory({ activeAccountKey, accountStatusReady, refreshAt, archiveStatus, onSelect, selected, chartSymbol, onFiltersChange, onRecords, chartSelection, onNotice }: {
   onNotice: (message: string) => void;
@@ -119,7 +120,7 @@ export function Mt4ArchiveHistory({ activeAccountKey, accountStatusReady, refres
         <label className="mt4-archive-date-filter" title="按 MT4 服务器日期筛选：已结束交易按平仓时间，未结束交易按开仓时间"><span>开始</span><input type="date" aria-label="历史开始日期，MT4 服务器日期" value={from} onChange={e => changeFilter({ from: e.target.value })} /></label>
         <label className="mt4-archive-date-filter" title="包含结束日期当天，按 MT4 服务器日期"><span>结束</span><input type="date" aria-label="历史结束日期，包含当天" value={to} onChange={e => changeFilter({ to: e.target.value })} /></label>
         {(from || to) && <button className="ghost-button" aria-label="清除时间筛选" onClick={() => changeFilter({ from:'', to:'' })}>清除</button>}
-        <label className="mt4-archive-chart-toggle" title="显示当前图表品种在筛选范围内的开平仓标记，点击标记可回看交易"><input type="checkbox" checked={showOnChart} onChange={e => changeFilter({ showOnChart: e.target.checked })} /><span>图表标记</span></label>
+        <ChartMarkerToggle className="mt4-archive-chart-toggle" checked={showOnChart} onChange={showOnChart => changeFilter({ showOnChart })} />
       </div>
       <div className="mt4-actions mt4-archive-actions"><button className="ghost-button mt4-archive-refresh" aria-label="刷新" title="刷新档案列表" disabled={busy} onClick={() => setRefresh(n => n + 1)}><RefreshCw size={14} /></button><button className="ghost-button mt4-archive-sync" disabled={busy || !accountKey || accountKey !== activeAccountKey} title="重新读取当前账户已加载的全部历史，并重试缺失行情" onClick={() => void action(async () => { await requestMt4Archive({}, { action: 'rescan', accountKey }); onNotice('已开始同步终端当前加载的历史'); })}><RefreshCw size={13} />同步历史</button><span className="mt4-archive-action-divider" aria-hidden="true" /><button className="ghost-button" disabled={busy} title="备份所有账户的交易、行情、分析和修订记录，不包含连接凭证" onClick={() => void action(async () => { const backup = await requestMt4Archive({ action: 'backup' }, undefined, AbortSignal.timeout(60000)); downloadArchiveJson(backup, `MT4-历史档案-${new Date().toISOString().slice(0,10)}.json`); onNotice('备份已下载'); })}><Download size={13} />备份</button><button className="ghost-button" disabled={busy} title="恢复到空档案或补回一致记录；存在不同版本时保留当前档案并停止恢复" onClick={() => importRef.current?.click()}><Upload size={13} />恢复</button><input hidden type="file" accept="application/json,.json" ref={importRef} aria-label="选择历史档案备份" onChange={e => { const file = e.target.files?.[0]; e.target.value = ''; if (file) void action(async () => { if (file.size > 128 * 1024 * 1024) throw new Error('备份文件过大'); const backup: unknown = JSON.parse(await file.text()); await requestMt4Archive({}, { action: 'restore', backup }, AbortSignal.timeout(60000)); onNotice('档案已恢复'); }); }} /></div>
     </div>

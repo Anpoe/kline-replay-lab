@@ -1,6 +1,6 @@
 "use client";
 
-import { chartShiftPlacement } from "../lib/chartViewport.mjs";
+import { chartShiftPlacement, isCandleInViewport } from "../lib/chartViewport.mjs";
 import { incrementalBarUpdates } from "../lib/chartBarUpdates.mjs";
 
 import {
@@ -88,10 +88,6 @@ const MOBILE_CHART_QUERY = "(max-width: 600px)";
 const MOBILE_REPLAY_BAR_SPACE = 8;
 const DESKTOP_REPLAY_BAR_SPACE = 16;
 const WHEEL_ZOOM_BASE = 1.1;
-// Replay windows are intentionally small. Reloading the bounded window avoids
-// a Chromium canvas invalidation race where overlays repaint but candles stay
-// visually stale after a trade. Large free-training datasets stay incremental.
-const AUTHORITATIVE_REPLAY_RESET_BAR_LIMIT = 1_000;
 const PRICE_INDICATOR_PANE = "candle_pane";
 const PRICE_INDICATOR_STYLES = {
   MA: ["#f2a93b", "#8f6ee8", "#2f80ed", "#20c997", "#ef6a68", "#e1c57f"],
@@ -498,7 +494,7 @@ function ensureProtectionLineOverlay(registerOverlay: (template: OverlayTemplate
     needDefaultYAxisFigure: false,
     createPointFigures: ({ overlay, coordinates, bounding }) => {
       const point = coordinates[0];
-      const data = overlay.extendData as ProtectionLine | null;
+      const data = overlay.extendData as (ProtectionLine & { hovered?: boolean }) | null;
       if (!point || !data) return [];
       const stop = data.kind === "stop-loss";
       const color = data.kind === "opening-gap-threshold"
@@ -510,9 +506,17 @@ function ensureProtectionLineOverlay(registerOverlay: (template: OverlayTemplate
         styles: { color, size: data.source === "position" ? 1.6 : 1.2, style: "dashed", dashedValue: [6, 4] },
       }, {
         type: "text",
-        attrs: { x: 8, y: point.y - 5, text: data.label, align: "left", baseline: "bottom" },
+        attrs: { x: 8, y: point.y - 5, text: data.hovered && data.hint ? `${data.label} · ${data.hint}` : data.label, align: "left", baseline: "bottom" },
         styles: { color, size: 11, weight: 650, backgroundColor: "rgba(8, 16, 18, .82)", paddingLeft: 4, paddingRight: 4, paddingTop: 2, paddingBottom: 2 },
       }];
+    },
+    onMouseEnter: ({ chart, overlay }) => {
+      const data = overlay.extendData as (ProtectionLine & { hovered?: boolean }) | null;
+      if (data?.hint && !data.hovered) chart.overrideOverlay({ id: overlay.id, extendData: { ...data, hovered: true } });
+    },
+    onMouseLeave: ({ chart, overlay }) => {
+      const data = overlay.extendData as (ProtectionLine & { hovered?: boolean }) | null;
+      if (data?.hovered) chart.overrideOverlay({ id: overlay.id, extendData: { ...data, hovered: false } });
     },
   });
   protectionLineOverlayRegistered = true;
@@ -853,13 +857,15 @@ function syncProtectionLines(
       points: [{ timestamp: line.timestamp, value: line.price }],
       extendData: line,
       lock: !line.movable,
-      zLevel: 29,
+      zLevel: line.source === 'position' ? 30 : 29,
       onPressedMoveEnd: ({ chart: eventChart, overlay }) => {
         const nextPrice = Number(overlay.points[0]?.value);
         if (Number.isFinite(nextPrice) && nextPrice > 0 && onMove(line, nextPrice)) return;
+        const current = eventChart.getOverlays({ id: overlay.id })[0]?.extendData as ProtectionLine | undefined;
+        if (!current) return;
         eventChart.overrideOverlay({
           id: overlay.id,
-          points: [{ timestamp: line.timestamp, value: line.price }],
+          points: [{ timestamp: current.timestamp, value: current.price }],
         });
       },
     });
@@ -1035,6 +1041,7 @@ export function KLineReplayChart({
   latestCandleCountdown,
   focusTimestamp,
   focusNonce,
+  onHistoryRange,
   onTradeSelect,
   onDecisionSelect,
   onCorporateActionSelect,
@@ -1071,6 +1078,7 @@ export function KLineReplayChart({
   latestCandleCountdown?: string | null;
   focusTimestamp?: number;
   focusNonce?: number;
+  onHistoryRange?: (range: { before: boolean; after: boolean }) => void;
   onTradeSelect?: (id: string, event: "entry" | "exit") => void;
   onDecisionSelect: (id: string) => void;
   onCorporateActionSelect: (id: string) => void;
@@ -1086,6 +1094,8 @@ export function KLineReplayChart({
   const preservedBarSpaceRef = useRef<number | null>(null);
   const refreshZoomAppliedRef = useRef(false);
   const barsRef = useRef<KLineData[]>(bars);
+  const historyRangeRef = useRef(onHistoryRange);
+  useEffect(() => { historyRangeRef.current = onHistoryRange; }, [onHistoryRange]);
   const countdownRef = useRef(latestCandleCountdown);
   const appliedBarsRef = useRef<KLineData[]>([]);
   const updateBarRef = useRef<((bar: KLineData) => void) | null>(null);
@@ -1194,10 +1204,10 @@ export function KLineReplayChart({
     name: drawing.name,
     groupId: USER_DRAWING_GROUP,
     paneId: drawing.paneId,
-    points: drawing.points.map((point) => ({
-      ...point,
-      dataIndex: point.dataIndex == null ? undefined : point.dataIndex - dataIndexOffsetRef.current,
-    })),
+    points: drawing.points.map(point => {
+      const index = point.timestamp == null ? -1 : chart.getDataList().findIndex(bar => bar.timestamp === point.timestamp);
+      return { ...point, dataIndex: index >= 0 ? index : point.dataIndex == null ? undefined : point.dataIndex - dataIndexOffsetRef.current };
+    }),
     needDefaultPointFigure: drawing.name === "trainingTextBox"
       ? drawing.id === selectedTrainingTextId
       : undefined,
@@ -1338,7 +1348,9 @@ export function KLineReplayChart({
       chart.setDataLoader({
         getBars: ({ callback }) => {
           const currentBars = [...barsRef.current];
-          appliedBarsRef.current = currentBars;
+          // The chart mutates its input list when it appends a live candle.
+          // Keep the previous application frame independent for rollover detection.
+          appliedBarsRef.current = [...currentBars];
           callback(currentBars, false);
         },
         subscribeBar: ({ callback }) => {
@@ -1388,11 +1400,30 @@ export function KLineReplayChart({
       syncProtectionLines(chart, protectionLinesRef.current, (line, price) => onProtectionLineMoveRef.current(line, price));
       syncedProtectionLinesRef.current = protectionLineSignature(protectionLinesRef.current);
       restoreDrawings(chart, drawingsRef.current);
+      const latestCandleVisible = () => {
+        const last = chart.getDataList().at(-1);
+        const width = chart.getSize(PRICE_INDICATOR_PANE, "main")?.width ?? 0;
+        const point = last ? chart.convertToPixel({ timestamp: last.timestamp, value: last.close }, { paneId: PRICE_INDICATOR_PANE }) : undefined;
+        const coordinate = Array.isArray(point) ? point[0] : point;
+        return isCandleInViewport(coordinate?.x, width, chart.getBarSpace().gapBar);
+      };
+      // Visible-range changes precede onZoom. Keep the settled pre-zoom state;
+      // a zoom that reveals the latest candle must not also jump to it.
+      let latestVisibleBeforeZoom = latestCandleVisible();
+      let historyRangePending = false;
       const preserveCurrentZoom = () => {
         preservedBarSpaceRef.current = chart.getBarSpace().bar;
-        if (!applyingViewportRef.current) { followLatestRef.current = true; alignViewport(chart, true); }
+        if (!applyingViewportRef.current) {
+          historyRangePending = true;
+          followLatestRef.current = latestVisibleBeforeZoom;
+          if (latestVisibleBeforeZoom) alignViewport(chart, true);
+        }
+        latestVisibleBeforeZoom = latestCandleVisible();
       };
-      const preserveManualScroll = () => { if (!applyingViewportRef.current) followLatestRef.current = false; };
+      const preserveManualScroll = () => {
+        if (!applyingViewportRef.current) { followLatestRef.current = false; historyRangePending = true; }
+        latestVisibleBeforeZoom = latestCandleVisible();
+      };
       chart.subscribeAction("onZoom", preserveCurrentZoom);
       chart.subscribeAction("onScroll", preserveManualScroll);
       // Axis measurement and indicator layout can change the plot width without
@@ -1403,7 +1434,15 @@ export function KLineReplayChart({
         if (applyingViewportRef.current || shiftLayoutFrame != null) return;
         shiftLayoutFrame = requestAnimationFrame(() => {
           shiftLayoutFrame = null;
-          if (chartRef.current === chart) alignViewport(chart);
+          if (chartRef.current === chart) {
+            alignViewport(chart);
+            latestVisibleBeforeZoom = latestCandleVisible();
+            if (historyRangePending) {
+              historyRangePending = false;
+              const range = chart.getVisibleRange();
+              historyRangeRef.current?.({ before: range.from < 30, after: range.to > chart.getDataList().length - 30 });
+            }
+          }
         });
       };
       chart.subscribeAction("onVisibleRangeChange", scheduleShiftLayout);
@@ -1445,85 +1484,61 @@ export function KLineReplayChart({
     const barSpaceBeforeUpdate = chart.getBarSpace().bar;
     preservedBarSpaceRef.current = barSpaceBeforeUpdate;
     const previouslyApplied = appliedBarsRef.current;
+    const previousLastTimestamp = previouslyApplied.at(-1)?.timestamp;
     const visibleBefore = chart.getVisibleRange();
-    const anchorIndex = Math.max(0, Math.min(previouslyApplied.length - 1, Math.floor(visibleBefore.realTo)));
+    const anchorIndex = Math.max(0, Math.min(previouslyApplied.length - 1, Math.floor((visibleBefore.from + visibleBefore.to) / 2)));
     const anchorTimestamp = previouslyApplied[anchorIndex]?.timestamp;
+    const anchorPoint = anchorTimestamp == null ? undefined : chart.convertToPixel({ timestamp: anchorTimestamp }, { paneId: PRICE_INDICATOR_PANE });
+    const anchorX = (Array.isArray(anchorPoint) ? anchorPoint[0] : anchorPoint)?.x;
+    const rebased = previouslyApplied.length > 0 && bars.length > 0 && previouslyApplied[0].timestamp !== bars[0].timestamp;
+    const rebaseDrawingIndexes = () => {
+      if (!rebased) return;
+      const indexes = new Map(bars.map((bar, index) => [bar.timestamp, index]));
+      chart.getOverlays({ groupId: USER_DRAWING_GROUP }).forEach(overlay => chart.overrideOverlay({
+        id: overlay.id,
+        points: overlay.points.map(point => ({ ...point, dataIndex: point.timestamp == null ? point.dataIndex : indexes.get(point.timestamp) ?? point.dataIndex })),
+      }));
+    };
     const restoreViewport = () => {
       // A new current candle returns to the handle; same-bar quotes preserve manual panning.
-      if (!focusTimestamp && bars.length && previouslyApplied.at(-1)?.timestamp !== bars.at(-1)?.timestamp) followLatestRef.current = true;
+      if (!focusTimestamp && bars.length && previousLastTimestamp !== bars.at(-1)?.timestamp) followLatestRef.current = true;
       if (followLatestRef.current) { alignViewport(chart); return; }
-      const nextAnchorIndex = bars.findIndex(bar => bar.timestamp === anchorTimestamp);
-      if (nextAnchorIndex < 0) return;
+      if (anchorTimestamp == null || anchorX == null || !bars.some(bar => bar.timestamp === anchorTimestamp)) return;
+      const nextPoint = chart.convertToPixel({ timestamp: anchorTimestamp }, { paneId: PRICE_INDICATOR_PANE });
+      const nextX = (Array.isArray(nextPoint) ? nextPoint[0] : nextPoint)?.x;
+      if (nextX == null) return;
       applyingViewportRef.current = true;
-      const desiredRight = nextAnchorIndex + visibleBefore.realTo - anchorIndex;
-      chart.scrollByDistance((chart.getVisibleRange().realTo - desiredRight) * barSpaceBeforeUpdate);
+      chart.scrollByDistance(anchorX - nextX, 0);
       applyingViewportRef.current = false;
     };
-    if (liveUpdates && updateBarRef.current) {
-      const updates = incrementalBarUpdates(previouslyApplied, bars);
-      if (updates) {
-        updates.forEach(bar => updateBarRef.current?.(bar));
-        appliedBarsRef.current = [...bars];
-        if (updates.length) requestAnimationFrame(() => {
-          if (chartRef.current !== chart) return;
-          chart.resize(); chart.setBarSpace(barSpaceBeforeUpdate); restoreViewport();
-        });
-        return;
-      }
-    }
-    const samePrefix = previouslyApplied.length <= bars.length
-      && previouslyApplied.every((bar, index) => bar.timestamp === bars[index]?.timestamp);
-    const appendedBars = samePrefix ? bars.slice(previouslyApplied.length) : [];
-    const previousLastBar = previouslyApplied.at(-1);
-    const nextLastBar = bars.at(-1);
-    const lastBarChanged = samePrefix
-      && appendedBars.length === 0
-      && previousLastBar != null
-      && nextLastBar != null
-      && (
-        previousLastBar.open !== nextLastBar.open
-        || previousLastBar.high !== nextLastBar.high
-        || previousLastBar.low !== nextLastBar.low
-        || previousLastBar.close !== nextLastBar.close
-        || previousLastBar.volume !== nextLastBar.volume
-      );
-    const barsChanged = !samePrefix
-      || appendedBars.length > 0
-      || previouslyApplied.length !== bars.length
-      || lastBarChanged;
+    const updates = incrementalBarUpdates(previouslyApplied, bars);
+    if (updates?.length === 0) return;
     const updateBar = updateBarRef.current;
-    if (barsChanged && bars.length <= AUTHORITATIVE_REPLAY_RESET_BAR_LIMIT) {
-      // A single authoritative load also collapses multiple indicator updates
-      // into one paint, which keeps the candle and overlay canvases in sync.
-      chart.resetData();
-    } else if (samePrefix && updateBar) {
-      appendedBars.forEach((bar) => updateBar(bar));
-      if (lastBarChanged && nextLastBar) updateBar(nextLastBar);
+    if (updates && updateBar) {
+      // Replay and live quotes share the same tail-update path. A historical
+      // correction, rewind or window rebase still requires an authoritative load.
+      updates.forEach(updateBar);
       const chartBars = chart.getDataList();
       const chartLastTimestamp = chartBars.at(-1)?.timestamp;
-      if (chartBars.length !== bars.length || chartLastTimestamp !== nextLastBar?.timestamp) {
+      if (chartBars.length !== bars.length || chartLastTimestamp !== bars.at(-1)?.timestamp) {
         chart.resetData();
       } else {
         appliedBarsRef.current = [...bars];
       }
-    } else if (!samePrefix || previouslyApplied.length !== bars.length || lastBarChanged) {
+    } else {
       chart.resetData();
     }
 
     requestAnimationFrame(() => {
+      if (chartRef.current !== chart) return;
       // KLineCharts draws candles and overlays on separate canvases. Explicitly
       // invalidate the layout so Chrome cannot retain an old candle layer while
       // a trade marker and the price axis continue to move.
       chart.resize();
       chart.setBarSpace(barSpaceBeforeUpdate);
-      restoreViewport();
-      requestAnimationFrame(() => {
-        chart.resize();
-        chart.setBarSpace(barSpaceBeforeUpdate);
-        restoreViewport();
-      });
+      rebaseDrawingIndexes(); restoreViewport();
     });
-  }, [alignViewport, bars, focusTimestamp, liveUpdates]);
+  }, [alignViewport, bars, focusTimestamp, liveUpdates, onHistoryRange]);
 
   useEffect(() => {
     movingAverageSettingsRef.current = movingAverageSettings;
@@ -1880,7 +1895,7 @@ export function KLineReplayChart({
     }}
   />{shiftHandle.x > 0 && <button className="chart-shift-handle" style={{ left: shiftHandle.x }}
     role="slider" aria-label="平移图表" aria-valuemin={50} aria-valuemax={95} aria-valuenow={100 - shiftHandle.percent}
-    aria-valuetext={`右侧留白 ${Math.round(shiftHandle.percent)}%`} title="拖动三角设置当前 K 线位置与右侧留白；缩放和换根自动对齐，方向键微调，双击恢复"
+    aria-valuetext={`右侧留白 ${Math.round(shiftHandle.percent)}%`} title="拖动三角设置留白；最新 K 线可见时缩放对齐，换根自动对齐；方向键微调，双击恢复"
     onPointerDown={event => { event.preventDefault(); event.currentTarget.setPointerCapture(event.pointerId); }}
     onPointerMove={event => {
       if (!event.currentTarget.hasPointerCapture(event.pointerId) || !chartRef.current || !containerRef.current) return;

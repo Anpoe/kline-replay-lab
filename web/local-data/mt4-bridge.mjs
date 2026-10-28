@@ -282,6 +282,7 @@ export class Mt4Bridge {
     requireValue(Math.abs(this.now() / 1000 - next.capturedAt) <= 60, "电脑与终端时间不一致，请检查系统时间", 409);
     return this.run(() => {
       requireValue(token === this.state.token, "MT4 配对凭证已变化", 401);
+      let marketBars = [];
       if (fast) {
         requireValue(payload.commandPollVersion === 1 && this.snapshot?.commandPollVersion === 1 && accountKey(next) === accountKey(this.snapshot) && next.sessionId === this.snapshot.sessionId, "请先重新建立当前终端连接", 409);
         requireValue(next.capturedAt >= this.snapshot.capturedAt, "终端数据已过期，请重新读取", 409);
@@ -294,6 +295,7 @@ export class Mt4Bridge {
             const byTime = new Map(base.map(bar => [bar.timestamp, bar]));
             const floor = base.at(-2)?.timestamp ?? last.timestamp;
             for (const bar of tail) if (bar.timestamp >= floor) byTime.set(bar.timestamp, bar);
+            marketBars = tail.filter(bar => bar.timestamp >= floor && JSON.stringify(base.find(previous => previous.timestamp === bar.timestamp)) !== JSON.stringify(bar));
             chart = { ...chart, bars: [...byTime.values()].sort((a,b) => a.timestamp - b.timestamp).slice(-300) };
           }
         }
@@ -306,6 +308,11 @@ export class Mt4Bridge {
       if (!next.account.connected || !next.account.tradeAllowed || (next.account.mode === "real" && !next.account.allowReal)) this.stop("MT4 交易权限或连接已关闭");
       this.snapshot = next; this.lastSeen = this.now();
       if (!fast || next.receipts.length) this.collectArchive(next, fast ? { ...payload, archiveResponse: null } : payload);
+      else if (marketBars.length) {
+        // Persist the displayed fast tail without rebuilding order history/evidence.
+        try { this.archive.saveBars(accountKey(next), next.chart.symbol, next.chart.timeframe, marketBars); }
+        catch { this.archiveError = "行情未能保存，请检查本机存储后重试同步"; }
+      }
       const ack = [];
       for (const receipt of next.receipts) {
         const c = this.state.commands.find(c => c.id === receipt.id);

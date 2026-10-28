@@ -5,3 +5,9 @@ export function chartShiftPlacement(width, barSpace, percent) {
   const x = width * (1 - normalized / 100);
   return { x, rightOffset: width - x - barSpace / 2, percent: normalized };
 }
+
+export function isCandleInViewport(x, width, candleWidth) {
+  return Number.isFinite(x) && Number.isFinite(width) && width > 0
+    && Number.isFinite(candleWidth) && candleWidth > 0
+    && x + candleWidth / 2 > 0 && x - candleWidth / 2 < width;
+}

@@ -4,12 +4,13 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { X } from "lucide-react";
 import type { KLineData } from "klinecharts";
 import { DecisionDetails, DecisionHistory, DecisionTradeSummary } from "../../../components/DecisionReview";
-import { draftAfterDecisionSaved, type DecisionRecord } from "../../../lib/decisionWorkflow";
+import { decisionChartView, draftAfterDecisionSaved, type DecisionRecord } from "../../../lib/decisionWorkflow";
 import { timeframeMinutes } from "../../../lib/timeframeCatalog";
 import { requestMt4Archive } from "../mt4Gateway";
-import type { ArchiveTrade } from "../mt4ArchiveContracts";
+import type { ArchiveTrade, ArchiveContext, ArchiveDecisionPlan, DecisionPlanSource } from "../mt4ArchiveContracts";
 import type { Mt4Order } from "../mt4Contracts";
-import { decisionRecord, decisionValue, mt4Draft, ensureProtectiveAnalysis, applyEntryReceipt, linkDecisionTrade, type Mt4EntryReceipt } from "../mt4Analysis";
+import type { Mt4OrderProtectionLine } from '../mt4Protection.mjs';
+import { decisionRecord, decisionValue, mt4Draft, mt4PlanViews, ensureProtectiveAnalysis, applyEntryReceipt, linkDecisionTrade, type Mt4EntryReceipt } from "../mt4Analysis";
 import { DecisionPlanCard } from "../../../components/DecisionPlanCard";
 import { ChartDrawingRail } from "../../../components/ChartDrawingRail";
 import { ChartDrawingTextEditor } from "../../../components/ChartDrawingTextEditor";
@@ -22,6 +23,7 @@ import { KLineReplayChart, type DrawingRequest, type PersistedDrawing, type Pric
 import type { MacdSettings, MovingAverageSettings } from "../../../lib/chartIndicators";
 import type { Mt4CandleClock } from "../../../lib/mt4ChartWindow.mjs";
 import { mt4CandleCountdown } from "../../../lib/mt4CandleCountdown.mjs";
+import { mt4PeriodEnd } from '../../../lib/mt4History.mjs';
 import { addReasonTag, applyAnalysisDrawings, deleteDecisionRecord, editDecisionRecord, emptyAnalysis, readAnalysis, recordDecision, removeReasonTag, renameReasonTag, type Mt4Analysis, type Mt4Decision, type Mt4DecisionDraft } from "../mt4Analysis";
 
 const noop = () => {};
@@ -33,15 +35,19 @@ function load(key: string) {
   catch { return { data: emptyAnalysis(), error: "已有绘图与决策记录无法读取。请先导出原记录，再保存新内容。", raw }; }
 }
 
-export function Mt4ChartWorkbench({ syncOrderPrices = true, accountKey, relatedOrders = [], onRelatedTradeSelect, onAnalysisChange, entryReceipt, sharedReasonTags, onReasonTagsChange, storageKey, initialAnalysis, persistedAnalysis, onPersist, onNotice, readOnly = false, tradeMarkers = [], onTradeSelect, focusTimestamp, bars, symbol, timeframe, digits, decisionOpen, emptyMessage, onOpenDecision, orderPriceSelection, onOrderPriceSelect, onPlanProtectionChange, orderPrices, onCancelOrderPriceSelection, candleClock, movingAverageSettings, macdSettings, keyboardShortcuts, shortcutsEnabled = true }: {
+export function Mt4ChartWorkbench({ syncOrderPrices = true, accountKey, relatedOrders = [], onRelatedTradeSelect, onAnalysisChange, entryReceipt, sharedReasonTags, onReasonTagsChange, storageKey, initialAnalysis, persistedAnalysis, onPersist, onNotice, readOnly = false, showChartMarkers = true, planContext, archivedPlans = [], onOpenPlanSource, editingPlanId, liveOrderLines = [], onLiveOrderLineMove, tradeMarkers = [], onTradeSelect, focusTimestamp, onHistoryRange, bars, symbol, timeframe, digits, decisionOpen, emptyMessage, onOpenDecision, orderPriceSelection, orderPriceSelectionLabel, onOrderPriceSelect, onPlanProtectionChange, orderPrices, onCancelOrderPriceSelection, candleClock, movingAverageSettings, macdSettings, keyboardShortcuts, shortcutsEnabled = true }: {
   syncOrderPrices?: boolean; accountKey: string; relatedOrders?: Mt4Order[]; onRelatedTradeSelect?: (order: Mt4Order, event: 'entry' | 'exit') => void;
   onAnalysisChange?: (key: string, value: Mt4Analysis | null) => void; entryReceipt?: Mt4EntryReceipt;
   sharedReasonTags?: string[]; onReasonTagsChange?: (tags: string[]) => void;
   keyboardShortcuts?: ShortcutSettings; shortcutsEnabled?: boolean;
   onNotice?: (message: string) => void;
+  showChartMarkers?: boolean; planContext?: Pick<ArchiveContext, 'timeframe' | 'scope'>; archivedPlans?: ArchiveDecisionPlan[];
+  onOpenPlanSource?: (source: DecisionPlanSource) => void; editingPlanId?: string;
+  liveOrderLines?: Mt4OrderProtectionLine[]; onLiveOrderLineMove?: (line: Mt4OrderProtectionLine, price: number) => boolean;
   initialAnalysis?: Mt4Analysis; persistedAnalysis?: Mt4Analysis | null; onPersist?: (next: Mt4Analysis) => void; readOnly?: boolean; tradeMarkers?: TradeMarker[]; onTradeSelect?: (id: string, event: "entry" | "exit") => void; focusTimestamp?: number;
+  onHistoryRange?: (range: { before: boolean; after: boolean }) => void;
   storageKey: string; bars: KLineData[]; symbol: string; timeframe: string; digits: number; decisionOpen: boolean; emptyMessage: string; onOpenDecision: () => void;
-  orderPriceSelection: PriceSelectionMode | null; onOrderPriceSelect: (kind: PriceSelectionMode, price: number) => void;
+  orderPriceSelectionLabel?: string; orderPriceSelection: PriceSelectionMode | null; onOrderPriceSelect: (kind: PriceSelectionMode, price: number) => void;
   onPlanProtectionChange: (changes: { stopLoss?: string; takeProfit?: string }) => void; orderPrices: { stopLoss: number; takeProfit: number; entry: number };
   onCancelOrderPriceSelection: () => void;
   candleClock?: Mt4CandleClock;
@@ -138,8 +144,10 @@ export function Mt4ChartWorkbench({ syncOrderPrices = true, accountKey, relatedO
     if (next !== current.current) store(next);
   }, [entryReceipt, accountKey, symbol, timeframe, store]);
   const locateDecision = (record: DecisionRecord) => {
-    if (!bars.some(bar => bar.timestamp === record.barTimestamp)) { setError('这份决策的行情不在当前窗口，请在历史档案补取对应时段行情。'); return; }
-    setSelectedDecisionId(record.id); setDecisionFocus({ timestamp: record.barTimestamp, nonce: ++nonce.current });
+    setSelectedDecisionId(record.id);
+    const marker = decisionChartView([record], bars, { periodEnd: planPeriodEnd }).markers[0];
+    if (!marker) { setError('这份决策的行情不在当前窗口，请在历史档案补取对应时段行情。'); return; }
+    setDecisionFocus({ timestamp: marker.timestamp, nonce: ++nonce.current });
   };
   const deleteSavedDecision = (record: Mt4Decision) => {
     if (!window.confirm('确定删除这份决策吗？它会从图表标记与决策记录中移除，历史修订仍会保留。')) return;
@@ -169,7 +177,10 @@ export function Mt4ChartWorkbench({ syncOrderPrices = true, accountKey, relatedO
     const timer = setInterval(() => setCountdown(clockInput.current ? mt4CandleCountdown({ ...clockInput.current, now: Date.now(), monotonicNow: performance.now() }) : null), 100);
     return () => clearInterval(timer);
   }, []);
-  const selectedDecision = analysis.decisions.find(d => d.id === selectedDecisionId);
+  const planViews = mt4PlanViews(analysis, planContext ?? { timeframe: Number(timeframeMinutes(timeframe)) || 43200 }, archivedPlans);
+  const selectedPlan = planViews.find(view => view.record.id === selectedDecisionId);
+  const planPeriodEnd = (timestamp: number) => mt4PeriodEnd(timestamp, Number(timeframeMinutes(timeframe)) || 43200);
+  const planChart = decisionChartView(planViews.map(view => view.record), bars, { selectedId: analysis.editor ? '' : selectedDecisionId, visible: showChartMarkers, periodEnd: planPeriodEnd });
   const orderPricesInitialized = useRef(false);
   const lastOrderProtection = useRef({ stopLoss: orderPrices.stopLoss, takeProfit: orderPrices.takeProfit });
   useEffect(() => {
@@ -246,13 +257,19 @@ export function Mt4ChartWorkbench({ syncOrderPrices = true, accountKey, relatedO
     const previous = current.current.editor;
     if (previous) { const next = { ...current.current, draft: previous.originalDraft }; delete next.editor; store(next); onPlanProtectionChange({ stopLoss: next.draft.stopLoss, takeProfit: next.draft.takeProfit }); }
   };
-  const beginEditor = (target: { timestamp: number; referencePrice: number }, record?: Mt4Decision) => {
+  const beginEditor = useCallback((target: { timestamp: number; referencePrice: number }, record?: Mt4Decision) => {
     const previous = current.current;
     store({ ...previous, draft: record ? structuredClone(record.draft) : emptyAnalysis().draft,
       editor: { ...(record ? { decisionId: record.id } : {}), candleTimestamp: target.timestamp, referencePrice: target.referencePrice, originalDraft: previous.editor?.originalDraft ?? structuredClone(previous.draft) } });
     setPriceMode(null); setDrawingRequest(null); setSelectedDecisionId(record?.id ?? ""); setBackfillAssociation(true);
     onOpenDecision();
-  };
+  }, [store, onOpenDecision]);
+  const startedPlanEdit = useRef('');
+  useEffect(() => {
+    if (!editingPlanId || readOnly || startedPlanEdit.current === editingPlanId) return;
+    const record = analysis.decisions.find(record => record.id === editingPlanId);
+    if (record) { startedPlanEdit.current = editingPlanId; beginEditor({ timestamp: record.candleTimestamp, referencePrice: record.referencePrice }, record); }
+  }, [editingPlanId, readOnly, analysis.decisions, beginEditor]);
   const tagAction = (action: () => Mt4Analysis) => {
     try { const next = action(); if (store(next, true)) { onReasonTagsChange?.(next.reasonTags); setEditingTag(""); setEditingTagValue(""); setCustomReason(""); } }
     catch (e) { setError(e instanceof Error ? e.message : "标签未保存，请重试。"); }
@@ -285,6 +302,8 @@ export function Mt4ChartWorkbench({ syncOrderPrices = true, accountKey, relatedO
   if (last) for (const item of [{ kind: "stop-loss", price: orderPrices.stopLoss, label: "委托止损" }, { kind: "take-profit", price: orderPrices.takeProfit, label: "委托止盈" }, { kind: "entry-trigger", price: orderPrices.entry, label: "委托触发价" }] as const) {
     if (item.price > 0 && !protectionLines.some(p => p.kind === item.kind && Math.abs(p.price - item.price) < 10 ** -digits / 2)) protectionLines.push({ id: `mt4-order-${item.kind}`, kind: item.kind, price: item.price, timestamp: last.timestamp, label: item.label, movable: true, source: "draft" });
   }
+  protectionLines.push(...planChart.protectionLines);
+  if (!readOnly) protectionLines.push(...liveOrderLines);
 
   const shortcutCursor = () => { onCancelOrderPriceSelection(); setDrawingRequest(null); setTextOpen(false); setPriceMode(null); setSelectedId(""); setDrawingGroupOpen(""); };
   const undoDrawing = () => { const previous = undo.at(-1); const present = current.current.drawings; if (previous) { setRedo(history => [...history, present]); setUndo(history => history.slice(0, -1)); restore(previous); } };
@@ -326,27 +345,28 @@ export function Mt4ChartWorkbench({ syncOrderPrices = true, accountKey, relatedO
         {bars.length ? <KLineReplayChart bars={bars} symbol={symbol} timeframe={timeframe} timezone="UTC" pricePrecision={digits} dataIndexOffset={0}
           keyboardShortcuts={keyboardShortcuts} shortcutsEnabled={shortcutsEnabled}
           movingAverageSettings={movingAverageSettings} macdSettings={macdSettings} drawingRequest={drawingRequest} clearNonce={clearNonce} drawings={readOnly ? analysis.drawings.map(d => ({ ...d, lock: true })) : analysis.drawings}
-          selectedDrawingId={selectedId} drawingsRestoreNonce={restoreNonce} tradeMarkers={tradeMarkers} onTradeSelect={onTradeSelect} focusTimestamp={decisionFocus?.timestamp ?? focusTimestamp} focusNonce={decisionFocus?.nonce} decisionMarkers={analysis.decisions.map(d => ({ id: d.id, timestamp: d.candleTimestamp, price: bars.find(bar => bar.timestamp === d.candleTimestamp)?.high ?? d.referencePrice, label: "计划 " + (analysis.decisions.length - analysis.decisions.indexOf(d)) }))}
+          selectedDrawingId={selectedId} drawingsRestoreNonce={restoreNonce} tradeMarkers={tradeMarkers} onTradeSelect={onTradeSelect} focusTimestamp={decisionFocus?.timestamp ?? focusTimestamp} focusNonce={decisionFocus?.nonce} decisionMarkers={planChart.markers}
           corporateActionMarkers={[]} protectionLines={protectionLines} priceSelectionMode={orderPriceSelection ?? priceMode} hideDate={false} hidePrice={false} enableCandleContextMenu
-          latestCandleCountdown={countdown} liveUpdates
+          latestCandleCountdown={countdown} liveUpdates onHistoryRange={onHistoryRange}
           onDecisionSelect={id => setSelectedDecisionId(id)}
           onCorporateActionSelect={noop} onProtectionPriceSelect={pickPrice} onProtectionLineMove={(line, price) => {
             if (readOnly) return false;
             if (orderPriceSelection || priceMode) return false;
+            if (line.source === 'position' && 'accountKey' in line && 'order' in line) return onLiveOrderLineMove?.(line as Mt4OrderProtectionLine, price) ?? false;
             if (line.id.startsWith("mt4-order-")) onOrderPriceSelect(line.kind as PriceSelectionMode, price);
             else updateDraft(line.kind === "stop-loss" ? { stopLoss: price.toFixed(digits) } : { takeProfit: price.toFixed(digits) }, true);
             return true;
           }} onCandleContextMenu={readOnly ? noop : target => beginEditor(target)}
           onDrawingsChange={readOnly ? noop : changeDrawings} onDrawingSelect={readOnly ? noop : id => setSelectedId(id ?? "")} /> : <div className="mt4-empty">{emptyMessage}</div>}
-        {selectedDecision && !analysis.editor && <DecisionDetails record={decisionRecord(selectedDecision)} dateLabel={decisionDate} priceLabel={value => value.toFixed(digits)}
-          onClose={() => setSelectedDecisionId('')} onLocate={() => locateDecision(decisionRecord(selectedDecision))}
-          onEdit={readOnly ? undefined : () => beginEditor({ timestamp: selectedDecision.candleTimestamp, referencePrice: selectedDecision.referencePrice }, selectedDecision)}
-          onDelete={readOnly ? undefined : () => deleteSavedDecision(selectedDecision)} linkedTrades={linkedTradeSummary(decisionRecord(selectedDecision))} />}
+        {showChartMarkers && selectedPlan && !analysis.editor && <DecisionDetails record={selectedPlan.record} dateLabel={decisionDate} priceLabel={value => value.toFixed(digits)}
+          onClose={() => setSelectedDecisionId('')} onLocate={() => locateDecision(selectedPlan.record)}
+          onEdit={readOnly ? undefined : () => { const original = analysis.decisions.find(record => record.id === selectedPlan.record.id); if (original) beginEditor({ timestamp: original.candleTimestamp, referencePrice: original.referencePrice }, original); else onOpenPlanSource?.(selectedPlan.source); }}
+          onDelete={readOnly || !selectedPlan.local ? undefined : () => { const original = analysis.decisions.find(record => record.id === selectedPlan.record.id); if (original) deleteSavedDecision(original); }} linkedTrades={selectedPlan.local ? linkedTradeSummary(selectedPlan.record) : undefined} />}
       </div>
       {textOpen && <ChartDrawingTextEditor className="drawing-text-editor mt4-text-editor" maxLength={500} value={text} onChange={setText}
         onPlace={() => { if (text.trim()) { startDrawing("trainingTextBox", "文字标记", text.trim()); setText(""); } }} onCancel={() => setTextOpen(false)} />}
 
-      {(priceMode || orderPriceSelection) && <div className="mt4-pick-status" role="status">点击图表设置{orderPriceSelection ? "委托价格" : priceMode === "stop-loss" ? "计划止损" : "计划目标"}<button aria-label="取消图表取价" onClick={() => { setPriceMode(null); onCancelOrderPriceSelection(); }}><X size={14} /></button></div>}
+      {(priceMode || orderPriceSelection) && <div className="mt4-pick-status" role="status">点击图表设置{orderPriceSelection ? orderPriceSelectionLabel ?? "委托价格" : priceMode === "stop-loss" ? "计划止损" : "计划目标"}<button aria-label="取消图表取价" onClick={() => { setPriceMode(null); onCancelOrderPriceSelection(); }}><X size={14} /></button></div>}
     </div>
     {decisionOpen && !readOnly && <DecisionPlanCard className="mt4-decision-card" id="mt4-decision-card"
       value={{ marketState: analysis.draft.marketState, location: analysis.draft.location, reasons: analysis.draft.reasons, stop: analysis.draft.stopLoss, target: analysis.draft.takeProfit, note: analysis.draft.note }}

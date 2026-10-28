@@ -3,6 +3,23 @@ import test from "node:test";
 import * as analysis from "../app/features/mt4/mt4Analysis.ts";
 const draft = { marketState: "趋势", location: "回调位置", reasons: ["顺势", "关键位置"], stopLoss: "1.09", takeProfit: "1.12", note: "等待回调确认" };
 
+test('real-time chart views historical plans from other periods without copying them into the active draft', () => {
+  const current=analysis.emptyAnalysis();current.draft.note='独立实时草稿';
+  const historical=analysis.recordDecision({...analysis.emptyAnalysis(),draft:structuredClone(draft)},{id:'historical-plan',recordedAt:1000,candleTimestamp:900,referencePrice:1.1}).decisions[0];
+  const archived=[{scope:'trade:42',timeframe:5,decision:historical}];
+  const views=analysis.mt4PlanViews(current,{scope:'chart',timeframe:15},archived);
+  assert.equal(views[0].record.id,'historical-plan');assert.equal(views[0].record.decision.stop,'1.09');
+  assert.deepEqual(views[0].source,{scope:'trade:42',timeframe:5,decisionId:'historical-plan'});
+  assert.equal(views[0].local,false);assert.equal(current.decisions.length,0);assert.equal(current.draft.note,'独立实时草稿');
+  const revised={...historical,updatedAt:2000,draft:{...draft,stopLoss:'1.08'}};
+  assert.equal(analysis.mt4PlanViews(current,{scope:'chart',timeframe:15},[...archived,{scope:'chart',timeframe:5,decision:revised}])[0].record.decision.stop,'1.08');
+  const owned={...current,decisions:[historical]};
+  const local=analysis.mt4PlanViews(owned,{scope:'trade:42',timeframe:5},archived);
+  assert.equal(local.length,1);assert.equal(local[0].local,true);
+  // A stale index entry cannot resurrect a deletion in the current scope.
+  assert.equal(analysis.mt4PlanViews(current,{scope:'trade:42',timeframe:5},archived).length,0);
+});
+
 test("MT4 analysis separates accounts, symbols and chart periods", () => {
   const key = analysis.analysisKey("account-a", "EURUSD.a", 5);
   assert.notEqual(key, analysis.analysisKey("account-b", "EURUSD.a", 5));

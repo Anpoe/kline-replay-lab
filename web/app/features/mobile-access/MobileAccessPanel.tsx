@@ -89,12 +89,13 @@ export function MobileAccessPanel() {
   const activeRemoteMode = remoteMode ?? (state?.addresses.some(item => item.kind === "direct") ? "direct" : "tailscale");
   const addresses = state?.addresses.filter(item => mode === "lan" ? item.address !== "tailscale" && item.kind !== "direct" : activeRemoteMode === "direct" ? item.kind === "direct" : item.address === "tailscale") ?? [];
   const selected = addresses.find(item => item.address === address) ?? addresses[0];
+  const connectionUrl = selected?.kind === "direct" ? `${new URL(selected.url).origin}/` : selected?.url;
   const disabled = busy || !connected;
   return <section className="settings-rule settings-group mobile-access-panel" aria-labelledby="settings-group-mobile-access" data-settings-group="mobile-access">
     <header className="mobile-access-header">
       <div className="mobile-access-heading"><h4 id="settings-group-mobile-access"><Smartphone size={15} aria-hidden="true" />手机访问</h4>
         {!remote && <span className={`mobile-access-status${state?.enabled ? " active" : ""}`} role="status">{busy ? "处理中…" : state ? state.enabled ? "已开启" : "未开启" : (error || loadError) ? "连接不可用" : "检查中…"}</span>}
-        <SettingsHelp label="手机访问说明">选择同一 Wi-Fi 或跨网络连接，电脑需保持开启并运行训练营。配对二维码 5 分钟内有效且只能使用一次，授权保留 30 天。此处操作即时保存；手机与电脑使用同一份已保存数据，当前未保存的训练不会自动接力。</SettingsHelp>
+        <SettingsHelp label="手机访问说明">选择同一 Wi-Fi 或跨网络连接，电脑需保持开启并运行训练营。首次连接需在电脑确认，授权长期保留直到主动撤销。自有域名可直接打开并请求连接；同一 Wi-Fi 和 Tailscale 首次使用配对二维码，二维码 5 分钟内有效且只能使用一次。同一浏览器再次打开地址即可进入；清除浏览器数据或更换浏览器后需要重新确认。此处操作即时保存；手机与电脑使用同一份已保存数据，当前未保存的训练不会自动接力。</SettingsHelp>
       </div>
       {!remote && <button type="button" className={state?.enabled ? "ghost-button" : "primary-button"} disabled={disabled || !state} onClick={() => {
         if (state?.enabled && !window.confirm("关闭手机访问？所有手机将暂时无法访问，已保存的设备授权会保留。")) return;
@@ -113,23 +114,23 @@ export function MobileAccessPanel() {
         <div className="mobile-access-connection" {...(mode === "remote" ? { role: "tabpanel", id: `${connectionId}-remote-panel`, "aria-labelledby": `${connectionId}-remote-${activeRemoteMode}` } : {})}>
         {mode === "remote" && activeRemoteMode === "tailscale" && (state.tailscale ? <TailscaleAccessPanel state={state.tailscale} enabled={state.enabled} disabled={disabled} run={run} /> : <p className="task-error" role="alert">远程连接状态不可用，请重新检查。<button type="button" className="ghost-button" disabled={busy} onClick={() => void refresh()}>重新检查</button></p>)}
         {mode === "remote" && activeRemoteMode === "direct" && !selected && <div className="mobile-access-domain-empty"><span role="status">未配置自有域名</span><div className="mobile-access-actions"><button type="button" className="ghost-button" onClick={() => setRemoteMode("tailscale")}>使用 Tailscale</button><SettingsHelp label="自有域名说明">自有域名仅使用当前电脑已有的连接配置，不随程序分发。手机与电脑的网络需支持该地址。没有自有域名时，可以使用 Tailscale 跨网络连接。</SettingsHelp></div></div>}
-        {selected ? <div className="mobile-access-pairing">
-          <div className={`mobile-access-qr${state.challenge ? "" : " empty"}`}>{state.challenge ? <Image unoptimized width={176} height={176} alt="手机配对二维码" src={`/api/mobile-access/qr?address=${encodeURIComponent(selected.address)}&code=${encodeURIComponent(state.challenge.code)}`} /> : <span role="status">请刷新二维码</span>}</div>
+        {selected ? <div className={selected.kind === "direct" ? "mobile-access-details" : "mobile-access-pairing"}>
+          {selected.kind !== "direct" && <div className={`mobile-access-qr${state.challenge ? "" : " empty"}`}>{state.challenge ? <Image unoptimized width={176} height={176} alt="手机配对二维码" src={`/api/mobile-access/qr?address=${encodeURIComponent(selected.address)}&code=${encodeURIComponent(state.challenge.code)}`} /> : <span role="status">请刷新二维码</span>}</div>}
           <div className="mobile-access-details">
             <label>连接地址<select aria-label="手机连接地址" value={selected.address} onChange={(event) => setAddress(event.target.value)}>{addresses.map((item) => <option key={item.address} value={item.address}>{item.address === "tailscale" ? "Tailscale" : `${item.name} · ${item.address}`}</option>)}</select></label>
-            <output className="mobile-access-url">{selected.url.split("#")[0]}</output>
-            <span role="status">{state.challenge ? `有效至 ${new Date(state.challenge.expiresAt).toLocaleTimeString("zh-CN", { hour12: false })}` : "二维码已使用或过期"}</span>
-            <div className="mobile-access-actions"><button type="button" className="ghost-button" disabled={disabled} onClick={() => void run("rotate")}><RefreshCw size={13} aria-hidden="true" />刷新二维码</button><button type="button" className="ghost-button" disabled={disabled || !state.challenge} onClick={() => {
-              void (async () => { try { await navigator.clipboard.writeText(selected.url); setNotice("配对链接已复制，请在手机浏览器中打开。"); } catch { setNotice("请选中下方配对链接，复制到手机浏览器。"); } })();
-            }}><Copy size={13} aria-hidden="true" />复制链接</button></div>
-            {notice.includes("选中") && <input aria-label="配对链接" readOnly value={selected.url} onFocus={(event) => event.target.select()} />}
+            <output className="mobile-access-url">{connectionUrl?.split("#")[0]}</output>
+            <span role="status">{selected.kind === "direct" ? "首次确认后直接进入" : state.challenge ? `有效至 ${new Date(state.challenge.expiresAt).toLocaleTimeString("zh-CN", { hour12: false })}` : "二维码已使用或过期"}</span>
+            <div className="mobile-access-actions">{selected.kind !== "direct" && <button type="button" className="ghost-button" disabled={disabled} onClick={() => void run("rotate")}><RefreshCw size={13} aria-hidden="true" />刷新二维码</button>}<button type="button" className="ghost-button" disabled={disabled || (selected.kind !== "direct" && !state.challenge)} onClick={() => {
+              void (async () => { try { await navigator.clipboard.writeText(connectionUrl!); setNotice(selected.kind === "direct" ? "访问地址已复制，请在手机浏览器中打开。" : "配对链接已复制，请在手机浏览器中打开。"); } catch { setNotice("请选中下方连接地址，复制到手机浏览器。"); } })();
+            }}><Copy size={13} aria-hidden="true" />{selected.kind === "direct" ? "复制访问地址" : "复制链接"}</button></div>
+            {notice.includes("选中") && <input aria-label="连接地址" readOnly value={connectionUrl} onFocus={(event) => event.target.select()} />}
           </div>
         </div> : mode === "lan" ? <p className="task-error" role="alert">没有找到可用的本地地址，请连接 Wi-Fi 后重新检查。<button type="button" className="ghost-button" disabled={busy} onClick={() => void refresh()}>重新检查</button></p> : null}
         {mode === "lan" && <details className="mobile-access-disclosure"><summary><ChevronRight size={14} aria-hidden="true" />连接帮助</summary><div className="mobile-access-actions"><button type="button" className="ghost-button" disabled={busy} onClick={() => void refresh()}>重新检查</button>{state.firewallAvailable && <button type="button" className="ghost-button" disabled={disabled} onClick={() => void run("firewall")}>允许本地网络连接</button>}<SettingsHelp label="手机连接故障帮助">确认手机与电脑连接同一可信 Wi-Fi，并将 Windows 当前网络设为专用网络，再选择“允许本地网络连接”并接受系统授权。此操作只放行当前程序在专用网络中的本地子网连接。访客网络或路由器的设备隔离可能阻止连接；可切换普通家庭 Wi-Fi。切换网络后重新检查地址并扫码。</SettingsHelp></div></details>}
         </div>
         </div>
       </>}
-      {state && <details className="mobile-access-disclosure mobile-access-devices"><summary><ChevronRight size={14} aria-hidden="true" />已授权设备<span className="mobile-access-count">{state.devices.length}</span></summary><div>{state.devices.length === 0 ? <span className="mobile-access-empty">尚未配对设备</span> : state.devices.map((device) => <div className="mobile-access-device" key={device.id}><div><strong>{device.name}</strong><span>{device.expired ? "授权已过期，请重新配对" : `授权至 ${new Date(device.expiresAt).toLocaleDateString("zh-CN")}`}</span></div><button type="button" className="danger-button" disabled={disabled} onClick={() => { if (window.confirm(`撤销“${device.name}”的访问授权？手机将无法继续访问，已保存数据会保留。`)) void run("revoke", { id: device.id }); }}>撤销授权</button></div>)}</div></details>}
+      {state && <details className="mobile-access-disclosure mobile-access-devices"><summary><ChevronRight size={14} aria-hidden="true" />已授权设备<span className="mobile-access-count">{state.devices.length}</span></summary><div>{state.devices.length === 0 ? <span className="mobile-access-empty">尚未配对设备</span> : state.devices.map((device) => <div className="mobile-access-device" key={device.id}><div><strong>{device.name}</strong><span>{device.expired ? "授权已过期，请重新配对" : device.expiresAt === null ? "长期授权" : `授权至 ${new Date(device.expiresAt).toLocaleDateString("zh-CN")}`}</span></div><button type="button" className="danger-button" disabled={disabled} onClick={() => { if (window.confirm(`撤销“${device.name}”的访问授权？手机将无法继续访问，已保存数据会保留。`)) void run("revoke", { id: device.id }); }}>撤销授权</button></div>)}</div></details>}
     </>}
     {notice && <p className="settings-consequence" role="status">{notice}</p>}
     {(error || loadError) && <div className="task-error" role="alert">{error || loadError}<button type="button" className="ghost-button" disabled={busy} onClick={() => { setError(""); void refresh(); }}>重试</button></div>}

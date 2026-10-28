@@ -114,6 +114,43 @@ double BO_CeilToTick(double price, BOSymbolInfo &info)
    return(NormalizeDouble(ticks*info.tickSize, info.digits));
   }
 
+bool BO_IsOpenOrder(int orderType)
+  {
+   return(orderType>=OP_BUY && orderType<=OP_SELLSTOP);
+  }
+
+bool BO_IsBuyOrder(int orderType)
+  {
+   return(orderType==OP_BUY || orderType==OP_BUYLIMIT || orderType==OP_BUYSTOP);
+  }
+
+int BO_EntryOrderType(int side, int mode)
+  {
+   if(mode==1) return(side==OP_BUY ? OP_BUYLIMIT : OP_SELLLIMIT);
+   if(mode==2) return(side==OP_BUY ? OP_BUYSTOP : OP_SELLSTOP);
+   return(side);
+  }
+
+bool BO_ValidatePendingPrice(int orderType, double bid, double ask, double price,
+                             BOSymbolInfo &info, string &error)
+  {
+   if(!BO_IsOpenOrder(orderType)) { error="unsupported order type"; return(false); }
+   if(orderType<OP_BUYLIMIT) return(true);
+   if(price<=0.0 || !MathIsValidNumber(price) || bid<=0.0 || ask<=0.0 || info.tickSize<=0.0 || info.point<=0.0)
+     { error="pending price or quote is invalid"; return(false); }
+   if(MathAbs(price/info.tickSize-MathRound(price/info.tickSize))>0.00001 ||
+      MathAbs(price/info.point-MathRound(price/info.point))>0.00001)
+     { error="pending price does not match symbol tick size"; return(false); }
+   double distance=0.0;
+   if(orderType==OP_BUYLIMIT) distance=ask-price;
+   else if(orderType==OP_SELLLIMIT) distance=price-bid;
+   else if(orderType==OP_BUYSTOP) distance=price-ask;
+   else distance=bid-price;
+   if(distance<=0.0 || distance+info.point*0.00001<info.stopLevelPoints*info.point)
+     { error="pending price direction or broker stop distance is invalid"; return(false); }
+   return(true);
+  }
+
 bool BO_DirectionalPrices(int orderType, double referencePrice, double slDistance, double tpDistance,
                           BOSymbolInfo &info, double &slPrice, double &tpPrice)
   {
@@ -122,10 +159,10 @@ bool BO_DirectionalPrices(int orderType, double referencePrice, double slDistanc
 
    if(referencePrice<=0.0 || slDistance<0.0 || tpDistance<0.0)
       return(false);
-   if(orderType!=OP_BUY && orderType!=OP_SELL)
+   if(!BO_IsOpenOrder(orderType))
       return(false);
 
-   if(orderType==OP_BUY)
+   if(BO_IsBuyOrder(orderType))
      {
       if(slDistance>0.0)
          slPrice=BO_FloorToTick(referencePrice-slDistance, info);
@@ -184,7 +221,7 @@ bool BO_ValidatePlanStops(int orderType, double bid, double ask, BOOrderPlan &pl
                           BOSymbolInfo &info, string &error)
   {
    error="";
-   if(orderType!=OP_BUY && orderType!=OP_SELL)
+   if(!BO_IsOpenOrder(orderType))
      {
       error="unsupported order type";
       return(false);
@@ -195,17 +232,18 @@ bool BO_ValidatePlanStops(int orderType, double bid, double ask, BOOrderPlan &pl
       return(false);
      }
 
+   double reference=BO_IsMarketOrder(orderType) ? (BO_IsBuyOrder(orderType) ? bid : ask) : plan.referencePrice;
    double minimumDistance=info.stopLevelPoints*info.point;
    double tolerance=info.point*0.5;
 
-   if(orderType==OP_BUY)
+   if(BO_IsBuyOrder(orderType))
      {
-      if(plan.slPrice>0.0 && plan.slPrice>bid-minimumDistance+tolerance)
+      if(plan.slPrice>0.0 && plan.slPrice>reference-minimumDistance+tolerance)
         {
          error="SL is closer than broker stop level";
          return(false);
         }
-      if(plan.tpPrice>0.0 && plan.tpPrice<bid+minimumDistance-tolerance)
+      if(plan.tpPrice>0.0 && plan.tpPrice<reference+minimumDistance-tolerance)
         {
          error="TP is closer than broker stop level";
          return(false);
@@ -213,12 +251,12 @@ bool BO_ValidatePlanStops(int orderType, double bid, double ask, BOOrderPlan &pl
      }
    else
      {
-      if(plan.slPrice>0.0 && plan.slPrice<ask+minimumDistance-tolerance)
+      if(plan.slPrice>0.0 && plan.slPrice<reference+minimumDistance-tolerance)
         {
          error="SL is closer than broker stop level";
          return(false);
         }
-      if(plan.tpPrice>0.0 && plan.tpPrice>ask-minimumDistance+tolerance)
+      if(plan.tpPrice>0.0 && plan.tpPrice>reference-minimumDistance+tolerance)
         {
          error="TP is closer than broker stop level";
          return(false);
@@ -258,7 +296,7 @@ bool BO_ValidateOrderSpec(BOOrderSpec &spec, double referencePrice, BOSymbolInfo
 
 bool BO_ComputeBatchPlans(int orderType, double bid, double ask, double equity, int lotMode,
                           double fixedLots, double riskPercent, int activeCount,
-                          BOOrderSpec &specs[], BOSymbolInfo &info, BOOrderPlan &plans[], string &error)
+                          BOOrderSpec &specs[], BOSymbolInfo &info, BOOrderPlan &plans[], string &error, double pendingPrice=0.0)
   {
    error="";
 
@@ -267,7 +305,7 @@ bool BO_ComputeBatchPlans(int orderType, double bid, double ask, double equity, 
       error="order count must be between 1 and 10";
       return(false);
      }
-   if(orderType!=OP_BUY && orderType!=OP_SELL)
+   if(!BO_IsOpenOrder(orderType))
      {
       error="unsupported order type";
       return(false);
@@ -299,7 +337,8 @@ bool BO_ComputeBatchPlans(int orderType, double bid, double ask, double equity, 
       return(false);
      }
 
-   double referencePrice=(orderType==OP_BUY ? ask : bid);
+   if(!BO_ValidatePendingPrice(orderType, bid, ask, pendingPrice, info, error)) return(false);
+   double referencePrice=BO_IsMarketOrder(orderType) ? (BO_IsBuyOrder(orderType) ? ask : bid) : pendingPrice;
    double totalRisk=equity*riskPercent/100.0;
    double riskPerRow=(lotMode==BO_LOTS_RISK ? totalRisk/activeCount : 0.0);
    bool anyInvalid=false;

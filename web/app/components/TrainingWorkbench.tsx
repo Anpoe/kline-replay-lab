@@ -85,8 +85,8 @@ import { DrawingPropertyBar } from "./DrawingPropertyBar";
 import { ChartDrawingTextEditor } from "./ChartDrawingTextEditor";
 import { ChartDrawingRail } from "./ChartDrawingRail";
 import { DecisionPlanCard } from "./DecisionPlanCard";
-import { DecisionDetails, DecisionHistory, DecisionTradeSummary } from "./DecisionReview";
-import { commitDecisionRecord, ensureProtectiveDecisionRecord, decisionForEntry, hasDecisionPlanContent, draftAfterDecisionSaved, decisionProtectionFromDrawings, updateDecisionRecord, removeDecisionRecord, validateDecisionPlan, normalizeDecisionTag, latestEntryDecisionRecord, renameDecisionReason, type DecisionRecord } from "../lib/decisionWorkflow";
+import { ChartMarkerToggle, DecisionDetails, DecisionHistory, DecisionTradeSummary } from "./DecisionReview";
+import { decisionChartView, commitDecisionRecord, ensureProtectiveDecisionRecord, decisionForEntry, hasDecisionPlanContent, draftAfterDecisionSaved, decisionProtectionFromDrawings, updateDecisionRecord, removeDecisionRecord, validateDecisionPlan, normalizeDecisionTag, latestEntryDecisionRecord, renameDecisionReason, type DecisionRecord } from "../lib/decisionWorkflow";
 import { decisionPlanScore, type DecisionPlanValue } from "../lib/decisionPlan";
 import { ChartIndicatorEditor } from "./ChartIndicatorEditor";
 import { ChartIndicatorMenu } from "./ChartIndicatorMenu";
@@ -150,10 +150,12 @@ import {
 } from "../lib/timeframeAggregation";
 import {
   availableTimeframesForInstrument,
+  replaySourceTimeframe,
   resolveAvailableTimeframe,
 } from "../lib/timeframeAvailability";
 import { TIMEFRAME_IDS, timeframeLabel, timeframeLookbackMs, timeframeMinutes } from "../lib/timeframeCatalog";
-import { visibleTimeframeViewBars } from "../lib/timeframeView";
+import { findTimeframeViewCursor, rebaseReplayTaskToFinerBars, remapReplayDrawingPoints, replayTimeframeEnd, visibleTimeframeViewBars } from "../lib/timeframeView";
+import { randomReplayPairs } from "../lib/replayRange";
 import {
   CN_A_MAINBOARD_RULES_V1,
   buyQuantityStep,
@@ -187,6 +189,7 @@ import {
 } from "../lib/trainingTasks";
 import {
   advanceReplayCursor,
+  rewindReplayCursor,
   createReplayTradingSessionPredicate,
   firstReplaySkippedBarIndex,
   isReplayOrderDueAtBar,
@@ -965,6 +968,7 @@ type NewTaskRequest = {
   timeframe: string;
   draft: TrainingTaskDraft;
   snapshotId?: string;
+  selectionTimeframe?: string;
 };
 type LatestWatchRequest = {
   instrumentId: string;
@@ -1607,7 +1611,7 @@ function replayPriceBand(
   // A weekly bar spans several sessions, so a daily price-limit band cannot be
   // inferred from its previous weekly close. Daily data is ordered from listing
   // onward in the complete local A-share library, which lets us honor IPO days.
-  if (timeframe === "1w" || timeframe === "1mo") return null;
+  if (rules.priceLimitRatio == null || timeframe === "1w" || timeframe === "1mo") return null;
   const listedTradingDay = timeframe === "1d" ? cursor + 2 : undefined;
   return createPriceBand(
     rules,
@@ -1706,7 +1710,6 @@ export function TrainingWorkbench() {
   const [chartBars, setChartBars] = useState<KLineData[]>([]);
   const [chartViewLoading, setChartViewLoading] = useState(false);
   const [chartViewError, setChartViewError] = useState("");
-  const [chartViewSnapshotId, setChartViewSnapshotId] = useState("");
   const [snapshotDataIndexOffset, setSnapshotDataIndexOffset] = useState(0);
   const [cursor, setCursor] = useState(0);
   const [loading, setLoading] = useState(true);
@@ -1734,13 +1737,20 @@ export function TrainingWorkbench() {
   const [mobileOrdersExpanded, setMobileOrdersExpanded] = useState(false);
   const [chartHeight, setChartHeight] = useState(520);
   const [chartHeightAdjusted, setChartHeightAdjusted] = useState(false);
+  const [chartHeightMinimum, setChartHeightMinimum] = useState(350);
   const [chartHeightLimit, setChartHeightLimit] = useState(720);
   const [actualChartHeight, setActualChartHeight] = useState(520);
   const chartAreaRef = useRef<HTMLDivElement>(null);
   const chartResizeStart = useRef<{ y: number; height: number } | null>(null);
   const visibleChartHeight = Math.min(chartHeight, chartHeightLimit);
   useEffect(() => {
-    const updateChartHeightLimit = () => setChartHeightLimit(Math.max(350, window.innerHeight - 370));
+    const updateChartHeightLimit = () => {
+      const mobileLayout = window.innerWidth <= 920;
+      setChartHeightMinimum(mobileLayout ? 240 : 350);
+      setChartHeightLimit(mobileLayout
+        ? Math.max(380, window.innerHeight - 160)
+        : Math.max(350, window.innerHeight - 370));
+    };
     updateChartHeightLimit();
     window.addEventListener("resize", updateChartHeightLimit);
     return () => window.removeEventListener("resize", updateChartHeightLimit);
@@ -1867,11 +1877,12 @@ export function TrainingWorkbench() {
   const [startingTraining, setStartingTraining] = useState(false);
   const [taskDraft, setTaskDraft] = useState<TrainingTaskDraft>(defaultTrainingTaskDraft);
   const [setupInstrumentId, setSetupInstrumentId] = useState("600519.SH");
-  const [setupTimeframe, setSetupTimeframe] = useState("1d");
   const [setupError, setSetupError] = useState("");
   const [ruleNotice, setRuleNotice] = useState("");
   const [events, setEvents] = useState<TrainingEvent[]>([]);
   const [selectedDecisionId, setSelectedDecisionId] = useState("");
+  const [showChartMarkers, setShowChartMarkers] = useState(true);
+  const [reviewDecisionFocus, setReviewDecisionFocus] = useState({ id: '', nonce: 0 });
   const [decisionTarget, setDecisionTarget] = useState<CandleContextTarget | null>(null);
   const [backfillAssociation, setBackfillAssociation] = useState<"associate" | "none">("associate");
   const [editingDecisionId, setEditingDecisionId] = useState("");
@@ -1930,7 +1941,7 @@ export function TrainingWorkbench() {
   const marketLoadRef = useRef<{ id: number; controller: AbortController | null }>({ id: 0, controller: null });
   const timeframeViewLoadRef = useRef<{ id: number; controller: AbortController | null }>({ id: 0, controller: null });
   const sessionSummaryLoadRef = useRef<{ id: number; controller: AbortController | null }>({ id: 0, controller: null });
-  const sessionSummariesReadyRef = useRef(false);
+  const sessionSummariesReadyRef = useRef<false | "recent" | "all">(false);
   const liveRequestRef = useRef<LiveScanResult | null>(null);
   const liveRequestTimeframeRef = useRef<string | null>(null);
   const latestWatchRequestRef = useRef<LatestWatchRequest | null>(null);
@@ -2066,10 +2077,7 @@ export function TrainingWorkbench() {
     () => availableTimeframesForInstrument(availableInstruments, instrumentId, timeframes),
     [availableInstruments, instrumentId],
   );
-  const setupAvailableTimeframes = useMemo(
-    () => availableTimeframesForInstrument(availableInstruments, setupInstrumentId, timeframes),
-    [availableInstruments, setupInstrumentId],
-  );
+  const setupTimeframe = replaySourceTimeframe(availableInstruments, setupInstrumentId, timeframe);
   const currentAssetType = inferInstrumentAssetType(
     instrument.id,
     instrument.market,
@@ -2094,39 +2102,39 @@ export function TrainingWorkbench() {
   }).length, [availableInstruments, dataMarket]);
   const currentBar = bars[cursor];
   const showingCanonicalChart = chartTimeframe === timeframe;
-  const renderedChartBars = useMemo(() => {
-    if (showingCanonicalChart) return visibleBars;
-    if (!currentBar) return [];
-    const canBuildPartialBar = canAggregateTimeframe(timeframe, chartTimeframe);
-    const viewStartTimestamp = bars[visibleBarStartIndex]?.timestamp ?? Number.NEGATIVE_INFINITY;
-    const visible = visibleTimeframeViewBars(
-      chartBars,
-      currentBar.timestamp,
-      canBuildPartialBar,
-    ).filter((bar) => bar.timestamp >= viewStartTimestamp);
-    if (!canBuildPartialBar) return visible;
-
+  const chartStepBucketKey = useMemo(() => {
+    if (!canAggregateTimeframe(timeframe, chartTimeframe)) return undefined;
     const isFxInstrument = instrument.market.toUpperCase() === "FX" || /\.FX$/i.test(instrument.id);
-    const currentTargetBucket = isFxInstrument
-      ? String(bucketStartTimestamp(currentBar.timestamp, chartTimeframe as FxTimeframe, {
+    return (timestamp: number) => isFxInstrument
+      ? String(bucketStartTimestamp(timestamp, chartTimeframe as FxTimeframe, {
           timeZone: instrument.timezone,
           sessionStartHour: 17,
           sessionStartMinute: 0,
           weekStartsOn: 0,
         }))
-      : timeframeBucketKey(currentBar.timestamp, chartTimeframe as SupportedTimeframe, instrument.timezone);
-    const sourceCandles = bars.slice(visibleBarStartIndex, cursor + 1)
-      .filter((bar) => {
-        const bucket = isFxInstrument
-          ? String(bucketStartTimestamp(bar.timestamp, chartTimeframe as FxTimeframe, {
-              timeZone: instrument.timezone,
-              sessionStartHour: 17,
-              sessionStartMinute: 0,
-              weekStartsOn: 0,
-            }))
-          : timeframeBucketKey(bar.timestamp, chartTimeframe as SupportedTimeframe, instrument.timezone);
-        return bucket === currentTargetBucket;
-      })
+      : timeframeBucketKey(timestamp, chartTimeframe as SupportedTimeframe, instrument.timezone);
+  }, [chartTimeframe, timeframe, instrument.id, instrument.market, instrument.timezone]);
+  const chartTrainingInteractive = showingCanonicalChart || Boolean(chartStepBucketKey);
+  const chartDrawings = useMemo(() => showingCanonicalChart ? drawings
+    : drawings.map(drawing => remapReplayDrawingPoints(drawing, bars, chartBars, snapshotDataIndexOffset)),
+  [bars, chartBars, drawings, showingCanonicalChart, snapshotDataIndexOffset]);
+  const renderedChartBars = useMemo(() => {
+    if (showingCanonicalChart) return visibleBars;
+    if (!currentBar) return [];
+    const canBuildPartialBar = Boolean(chartStepBucketKey);
+    const viewStartTimestamp = chartBars[0]?.timestamp ?? Number.NEGATIVE_INFINITY;
+    const visible = visibleTimeframeViewBars(
+      chartBars,
+      currentBar.timestamp,
+      canBuildPartialBar,
+    ).filter((bar) => bar.timestamp >= viewStartTimestamp);
+    if (!chartStepBucketKey) return visible;
+
+    const isFxInstrument = instrument.market.toUpperCase() === "FX" || /\.FX$/i.test(instrument.id);
+    const currentTargetBucket = chartStepBucketKey(currentBar.timestamp);
+    let bucketStartCursor = cursor;
+    while (bucketStartCursor > 0 && chartStepBucketKey(bars[bucketStartCursor - 1].timestamp) === currentTargetBucket) bucketStartCursor -= 1;
+    const sourceCandles = bars.slice(bucketStartCursor, cursor + 1)
       .map((bar) => ({
       timestamp: bar.timestamp,
       open: bar.open,
@@ -2147,14 +2155,7 @@ export function TrainingWorkbench() {
     if (!partialCandles.length) return visible;
     return [
       ...visible.filter((bar) => {
-        const bucket = isFxInstrument
-          ? String(bucketStartTimestamp(bar.timestamp, chartTimeframe as FxTimeframe, {
-              timeZone: instrument.timezone,
-              sessionStartHour: 17,
-              sessionStartMinute: 0,
-              weekStartsOn: 0,
-            }))
-          : timeframeBucketKey(bar.timestamp, chartTimeframe as SupportedTimeframe, instrument.timezone);
+        const bucket = chartStepBucketKey(bar.timestamp);
         return bucket !== currentTargetBucket;
       }),
       ...partialCandles,
@@ -2163,14 +2164,13 @@ export function TrainingWorkbench() {
     bars,
     chartBars,
     chartTimeframe,
+    chartStepBucketKey,
     cursor,
     currentBar,
     instrument.id,
     instrument.market,
     instrument.timezone,
     showingCanonicalChart,
-    timeframe,
-    visibleBarStartIndex,
     visibleBars,
   ]);
   const selectedPatternPresetDraft = patternPresetDrafts.find((preset) => (
@@ -2411,9 +2411,13 @@ export function TrainingWorkbench() {
         realizedPnl: exitIsVisible ? position.realizedPnl : undefined,
       };
     }), [currentBar, executions, positions]);
+  const decisionChart = useMemo(() => decisionChartView(decisionSubmissions, renderedChartBars, {
+    selectedId: editingDecisionId || hideTaskPrice ? '' : selectedDecisionId,
+    currentTimestamp: currentBar?.timestamp ?? 0, visible: showChartMarkers, periodMs: timeframeLookbackMs(chartTimeframe) ?? undefined,
+  }), [decisionSubmissions, renderedChartBars, editingDecisionId, hideTaskPrice, selectedDecisionId, currentBar, showChartMarkers, chartTimeframe]);
   const protectionLines = useMemo<ProtectionLine[]>(() => {
     if (!currentBar) return [];
-    return deriveProtectionLines({
+    return [...deriveProtectionLines({
       currentTimestamp: currentBar.timestamp,
       openingGapPreviousClose: currentBar.close,
       openingGapMode,
@@ -2426,31 +2430,27 @@ export function TrainingWorkbench() {
       positions,
       hoveredClosedPositionId,
       movable: liveMode || trainingTask?.status !== "completed",
-    });
-  }, [currentBar, effectiveOpeningGapUnit, effectiveOrderStop, effectiveOrderTarget, hoveredClosedPositionId, liveMode, openingGapMode, openingGapThreshold, orderTriggerPrice, orderType, positions, trainingTask?.status]);
+    }), ...decisionChart.protectionLines];
+  }, [currentBar, decisionChart.protectionLines, effectiveOpeningGapUnit, effectiveOrderStop, effectiveOrderTarget, hoveredClosedPositionId, liveMode, openingGapMode, openingGapThreshold, orderTriggerPrice, orderType, positions, trainingTask?.status]);
+  const chartTaskBars = useMemo(() => trainingTask && chartStepBucketKey
+    ? chartBars.filter(bar => bar.timestamp > trainingTask.startTimestamp && bar.timestamp <= trainingTask.endTimestamp)
+    : null, [chartBars, chartStepBucketKey, trainingTask]);
   const currentTaskProgress = trainingTask
-    ? taskProgress(trainingTask, cursor)
+    ? chartTaskBars && chartTaskBars.length
+      ? { ...taskProgress(trainingTask, cursor), total: chartTaskBars.length,
+          revealed: chartTaskBars.filter(bar => bar.timestamp <= (currentBar?.timestamp ?? 0)).length }
+      : taskProgress(trainingTask, cursor)
     : { revealed: 0, total: 0, percent: 0 };
   const progress = trainingTask
     ? currentTaskProgress.percent
     : bars.length > 1 ? (cursor / (bars.length - 1)) * 100 : 0;
   const trainingComplete = trainingTask?.status === "completed";
-  const playbackDisabled = loading || trainingComplete;
+  const playbackDisabled = loading || chartViewLoading || trainingComplete;
   const rewindLocked = Boolean(trainingTask?.randomRun);
   const reviewLocked = Boolean(
     hideTaskInstrument || hideTaskDate || hideTaskPrice,
   );
-  const decisionMarkers = useMemo<DecisionMarker[]>(() => decisionSubmissions
-    .filter((submission) => !currentBar || submission.barTimestamp <= currentBar.timestamp)
-    .map((submission, index) => {
-      const submissionBar = bars[submission.cursor] ?? bars.find((bar) => bar.timestamp === submission.barTimestamp);
-      return {
-        id: submission.id,
-        timestamp: submission.barTimestamp,
-        price: submissionBar?.high ?? submission.referencePrice,
-        label: `计划 ${index + 1}`,
-      };
-    }), [bars, currentBar, decisionSubmissions]);
+  const decisionMarkers = decisionChart.markers;
   const selectedDecision = decisionSubmissions.find((submission) => submission.id === selectedDecisionId);
   const activeDecisionSubmission = editingDecisionId
     ? decisionSubmissions.find((submission) => submission.id === editingDecisionId)
@@ -2835,15 +2835,7 @@ export function TrainingWorkbench() {
   const reviewPreviewDecisionMarkers = useMemo<DecisionMarker[]>(() => {
     const previewLastBar = reviewPreviewBars.at(-1);
     if (!previewLastBar) return [];
-    return reviewState.decisionSubmissions
-      .filter((submission) => submission.barTimestamp <= previewLastBar.timestamp)
-      .map((submission, index) => ({
-        id: submission.id,
-        timestamp: submission.barTimestamp,
-        price: reviewPreviewBars.find((bar) => bar.timestamp === submission.barTimestamp)?.high
-          ?? submission.referencePrice,
-        label: `计划 ${index + 1}`,
-      }));
+    return decisionChartView(reviewState.decisionSubmissions, reviewPreviewBars, { currentTimestamp: previewLastBar.timestamp }).markers;
   }, [reviewPreviewBars, reviewState.decisionSubmissions]);
 
   const parseTrainingState = useCallback((value: unknown): TrainingState | null => {
@@ -3676,12 +3668,10 @@ export function TrainingWorkbench() {
           controller.signal,
         );
       } else {
-        // New Replay tasks only need the configured history context and training
-        // span. Keeping intraday snapshots bounded prevents multi-million-bar
-        // FX datasets from exhausting the browser or the development worker.
+        // Read the requested date span without substituting a fixed candle count.
         data = await marketDataGateway.createSnapshot<typeof data>({
             instrumentId: requestInstrumentId,
-            timeframe: requestTimeframe,
+            timeframe: newTaskRequest?.selectionTimeframe ?? requestTimeframe,
             adjustmentType: defaultAdjustmentTypeForInstrument(requestInstrumentId),
             replayWindow: newTaskRequest && !latestWatchRequest ? {
               mode: newTaskRequest.draft.mode,
@@ -3695,6 +3685,26 @@ export function TrainingWorkbench() {
           }, controller.signal);
       }
       if (marketLoadRef.current.id !== requestId) return;
+      const initialChartTimeframe = newTaskRequest?.selectionTimeframe ?? requestTimeframe;
+      const initialChartBars = data.candles;
+      let preparedTask: TrainingTask | undefined;
+      if (newTaskRequest?.draft.randomRun && initialChartTimeframe !== requestTimeframe && !restoreRequest) {
+        const selectedTask = resolveTrainingTask({
+          ...newTaskRequest.draft,
+          ...(data.selection ? { startMode: "bar" as const, startBar: data.selection.startCursor + 1 } : {}),
+          historyBars: appSettingsRef.current.replayHistoryBars,
+        }, data.candles, data.instrument.timezone, createUuid());
+        const finerData = await marketDataGateway.createSnapshot<typeof data>({
+          instrumentId: requestInstrumentId,
+          timeframe: requestTimeframe,
+          timeframeView: { sourceSnapshotId: data.snapshot.id, sourceTimeframe: initialChartTimeframe },
+        }, controller.signal);
+        if (marketLoadRef.current.id !== requestId) return;
+        preparedTask = rebaseReplayTaskToFinerBars(selectedTask, finerData.candles,
+          initialChartTimeframe, data.instrument.timezone,
+          data.instrument.market.toUpperCase() === "FX" || /\.FX$/i.test(requestInstrumentId));
+        data = { ...finerData, instrument: data.instrument };
+      }
       const stockNeedsActions = data.instrument.market === "CN" && /^\d{6}\.(SH|SZ|BJ)$/.test(data.instrument.id);
       const loadedActions = stockNeedsActions
         ? await marketDataGateway.loadCorporateActions<{ corporateActions?: { enabled?: boolean }; events?: CorporateActionEvent[]; error?: string }>(data.instrument.id, controller.signal)
@@ -3708,10 +3718,9 @@ export function TrainingWorkbench() {
       const loadedDataIndexOffset = data.window?.startIndex ?? 0;
       setInstrument(data.instrument);
       setBars(data.candles);
-      setChartTimeframe(requestTimeframe);
-      setChartBars(data.candles);
+      setChartTimeframe(initialChartTimeframe);
+      setChartBars(initialChartBars);
       setChartViewError("");
-      setChartViewSnapshotId("");
       setSnapshotDataIndexOffset(loadedDataIndexOffset);
       setDataSnapshotId(data.snapshot.id);
       setSnapshotHash(data.snapshot.contentHash);
@@ -3945,7 +3954,7 @@ export function TrainingWorkbench() {
               startBar: data.selection.startCursor + 1,
             }
           : newTaskRequest?.draft;
-        const nextTask = resolveTrainingTask(
+        const nextTask = preparedTask ?? resolveTrainingTask(
           {
             ...(boundedDraft ?? defaultTrainingTaskDraft),
             historyBars: appSettingsRef.current.replayHistoryBars,
@@ -4077,6 +4086,7 @@ export function TrainingWorkbench() {
 
   const loadTimeframeView = useCallback(async (nextTimeframe: string) => {
     if (nextTimeframe === chartTimeframe) return;
+    setPlaying(false);
     timeframeViewLoadRef.current.controller?.abort();
     if (nextTimeframe === timeframe) {
       timeframeViewLoadRef.current = {
@@ -4085,13 +4095,12 @@ export function TrainingWorkbench() {
       };
       setChartTimeframe(timeframe);
       setChartBars(bars);
-      setChartViewSnapshotId("");
       setChartViewError("");
       setChartViewLoading(false);
       return;
     }
     if (!dataSnapshotId) {
-      setChartViewError("当前状态没有可复用的来源快照，暂时不能切换观察周期。");
+      setChartViewError("当前训练数据尚未就绪，请重新载入后切换周期。");
       return;
     }
 
@@ -4122,11 +4131,10 @@ export function TrainingWorkbench() {
       if (timeframeViewLoadRef.current.id !== requestId) return;
       setChartBars(data.candles);
       setChartTimeframe(nextTimeframe);
-      setChartViewSnapshotId(data.snapshot.id);
       setChartViewError("");
     } catch (error) {
       if (controller.signal.aborted || timeframeViewLoadRef.current.id !== requestId) return;
-      setChartViewError(error instanceof Error ? error.message : "观察周期加载失败");
+      setChartViewError(error instanceof Error ? error.message : "图表周期加载失败，请重新选择周期重试");
     } finally {
       if (timeframeViewLoadRef.current.id === requestId) {
         timeframeViewLoadRef.current.controller = null;
@@ -4487,6 +4495,7 @@ export function TrainingWorkbench() {
   }, [appendEvent, executionProfile, marketRules.id, marketRules.instrumentEconomics, marketRules.version, tradingMode]);
 
   const revealMany = useCallback((count: number) => {
+    if (loading || chartViewLoading) return;
     const endCursor = trainingTask?.endCursor ?? bars.length - 1;
     if (cursor >= endCursor || trainingTask?.status === "completed") {
       setPlaying(false);
@@ -4503,6 +4512,7 @@ export function TrainingWorkbench() {
       bars,
       cursor,
       requestedCount: count,
+      stepBucketKey: chartStepBucketKey,
       endCursor,
       session: replayTradingSession,
       timeframe,
@@ -4663,6 +4673,11 @@ export function TrainingWorkbench() {
         // Weekend candles are revealed for chart continuity, but they have no
         // executable market or protective orders and do not settle positions.
         remainingOrders = [...futureOrders, ...deferredOrders];
+      } else if (executableOrders.length === 0 && !simulatedPositions.some(position => position.status === "open")) {
+        // Corporate actions and session settlement above still visit every bar.
+        // With no exposure or eligible orders, execution cannot change the state.
+        // Avoid cloning all closed trades and queuing React updates overnight.
+        remainingOrders = [...futureOrders, ...deferredOrders];
       } else {
         const executionResult = executeOrders(
           executableOrders,
@@ -4814,12 +4829,12 @@ export function TrainingWorkbench() {
         endCursor: completedTask.endCursor,
       }, bars[processedCursor]?.timestamp);
     }
-  }, [appendEvent, bars, cashBalance, corporateActions, corporateActionsError, corporateActionsForInstrumentId, trainingPriceBasis, cursor, events, executeOrders, executionProfile, instrument.id, instrument.market, instrument.timezone, liveMode, marketRules, pendingOrders, positions, settleTrainingAtBar, timeframe, tradingMode, trainingTask]);
+  }, [appendEvent, bars, cashBalance, chartStepBucketKey, chartViewLoading, corporateActions, corporateActionsError, corporateActionsForInstrumentId, trainingPriceBasis, cursor, events, executeOrders, executionProfile, instrument.id, instrument.market, instrument.timezone, liveMode, loading, marketRules, pendingOrders, positions, settleTrainingAtBar, timeframe, tradingMode, trainingTask]);
 
   const revealNext = useCallback(() => revealMany(1), [revealMany]);
   const revealPrevious = () => {
-    if (rewindLocked) return;
-    const nextCursor = Math.max(trainingTask?.startCursor ?? 0, cursor - 1);
+    if (rewindLocked || playbackDisabled) return;
+    const nextCursor = rewindReplayCursor({ bars, cursor, startCursor: trainingTask?.startCursor ?? 0, stepBucketKey: chartStepBucketKey });
     if (nextCursor === cursor) return;
     if (decisionTarget && decisionTarget.dataIndex > nextCursor) {
       if (decisionDraftBeforeBackfillRef.current) setDecision(decisionDraftBeforeBackfillRef.current);
@@ -5934,6 +5949,7 @@ export function TrainingWorkbench() {
     nextTimeframe: string,
     options: { latestWatch?: boolean } = {},
   ) => {
+    if (!options.latestWatch) nextTimeframe = replaySourceTimeframe(availableInstruments, nextInstrumentId, nextTimeframe);
     preemptStartupRandom();
     const targetMarket = availableInstruments.find((item) => item.id === nextInstrumentId)?.market
       ?? (/\.FX$/i.test(nextInstrumentId) ? "FX" : /\.GOLD$/i.test(nextInstrumentId) ? "GOLD" : undefined);
@@ -7502,7 +7518,11 @@ export function TrainingWorkbench() {
   };
 
   const openDecisionForCandle = useCallback((target: CandleContextTarget) => {
-    const targetCursor = bars.findIndex((bar) => bar.timestamp === target.timestamp);
+    const targetCursor = showingCanonicalChart
+      ? bars.findIndex((bar) => bar.timestamp === target.timestamp)
+      : findTimeframeViewCursor(bars, Math.min(bars[cursor]?.timestamp ?? 0,
+          replayTimeframeEnd(target.timestamp, chartTimeframe, instrument.timezone,
+            instrument.market.toUpperCase() === "FX" || /\.FX$/i.test(instrument.id)) - 1));
     if (targetCursor < 0 || targetCursor > cursor) return;
     const targetBar = bars[targetCursor];
     if (!decisionTarget) {
@@ -7523,7 +7543,7 @@ export function TrainingWorkbench() {
     setPlaying(false);
     setSaveState("正在补写历史 K 线决策");
     requestAnimationFrame(() => decisionPanelRef.current?.scrollIntoView({ behavior: "smooth", block: "nearest" }));
-  }, [bars, cursor, decision, decisionTarget]);
+  }, [bars, chartTimeframe, cursor, decision, decisionTarget, instrument.id, instrument.market, instrument.timezone, showingCanonicalChart]);
 
   const cancelDecisionBackfill = () => {
     if (decisionDraftBeforeBackfillRef.current) setDecision(decisionDraftBeforeBackfillRef.current);
@@ -7757,6 +7777,20 @@ export function TrainingWorkbench() {
       setSelectedDrawingId("");
     }
     appendEvent("drawings_changed", { action: "change", drawings: nextDrawings });
+  };
+
+  const handleChartDrawingsChange = (nextDrawings: PersistedDrawing[]) => {
+    if (showingCanonicalChart) { handleDrawingsChange(nextDrawings); return; }
+    handleDrawingsChange(nextDrawings.map(drawing => {
+      const previous = drawings.find(item => item.id === drawing.id);
+      const previousView = chartDrawings.find(item => item.id === drawing.id);
+      const mapped = remapReplayDrawingPoints(drawing, chartBars, bars, 0, snapshotDataIndexOffset);
+      return { ...mapped, points: mapped.points.map((point, index) => {
+        const before = previousView?.points[index], after = drawing.points[index];
+        return before && previous?.points[index] && before.timestamp === after.timestamp
+          && before.dataIndex === after.dataIndex && before.value === after.value ? previous.points[index] : point;
+      }) };
+    }));
   };
 
   const beginDrawing = (tool: DrawingTool) => {
@@ -8183,7 +8217,8 @@ export function TrainingWorkbench() {
   }, [parseTrainingState]);
 
   const loadSessions = useCallback(async (includeAll = false, force = false) => {
-    if (!force && sessionSummariesReadyRef.current) return;
+    const loadedScope = sessionSummariesReadyRef.current;
+    if (!force && (loadedScope === "all" || (loadedScope === "recent" && !includeAll))) return;
     sessionSummaryLoadRef.current.controller?.abort();
     const requestId = sessionSummaryLoadRef.current.id + 1;
     const controller = new AbortController();
@@ -8200,7 +8235,7 @@ export function TrainingWorkbench() {
       );
       if (controller.signal.aborted || result.status !== "completed" || sessionSummaryLoadRef.current.id !== requestId) return;
       setSessionSummaries(result.summaries);
-      sessionSummariesReadyRef.current = true;
+      sessionSummariesReadyRef.current = includeAll ? "all" : "recent";
     } catch {
       if (!controller.signal.aborted) {
         // Review data is optional for the replay shell; retain the current list on a transient failure.
@@ -9038,15 +9073,11 @@ export function TrainingWorkbench() {
     const nextInstrumentId = availableInstruments.some((item) => item.id === appSettings.defaultInstrumentId)
       ? appSettings.defaultInstrumentId
       : availableInstruments[0]?.id ?? appSettings.defaultInstrumentId;
-    const nextAvailableTimeframes = availableTimeframesForInstrument(
-      availableInstruments,
-      nextInstrumentId,
-      TIMEFRAME_IDS,
-    );
     setSetupInstrumentId(nextInstrumentId);
-    setSetupTimeframe(resolveAvailableTimeframe(nextAvailableTimeframes, appSettings.defaultTimeframe));
     setTaskDraft({
       ...defaultTrainingTaskDraft,
+      mode: "range",
+      startMode: "date",
       randomRun: false,
       startDate: currentBar ? tradingDate(currentBar.timestamp, instrument.timezone) : "",
       startBar: cursor + 1,
@@ -9076,7 +9107,7 @@ export function TrainingWorkbench() {
     anchorInstrumentId: instrumentId,
     market: appSettings.randomMarket,
     timeframeMode: appSettings.randomTimeframeMode,
-    anchorTimeframe: timeframe,
+    anchorTimeframe: chartTimeframe,
     fixedTimeframe: appSettings.randomTimeframe,
     dateMode: appSettings.randomDateMode,
     startDate: appSettings.randomDateMode === "range" ? appSettings.randomStartDate : undefined,
@@ -9085,7 +9116,7 @@ export function TrainingWorkbench() {
     includeIndices: appSettings.randomIncludeIndices,
     usLiquidityFilter: appSettings.randomUsLiquidityFilter,
     usMinAverageDailyDollarVolume: appSettings.randomUsMinAverageDailyDollarVolume,
-  }), [appSettings, instrumentId, timeframe]);
+  }), [appSettings, instrumentId, chartTimeframe]);
 
   const randomCandidatePairs = useCallback((config: RandomTrainingConfig = currentRandomConfig()) => {
     const allowedInstruments = availableInstruments.filter((item) =>
@@ -9096,28 +9127,12 @@ export function TrainingWorkbench() {
       : config.instrumentMode === "market"
         ? allowedInstruments.filter((item) => marketRuleCode(item.market) === marketRuleCode(config.market))
         : allowedInstruments;
-    const requestedTimeframes = config.timeframeMode === "current"
-      ? [config.anchorTimeframe]
-      : config.timeframeMode === "fixed"
-        ? [config.fixedTimeframe]
-        : [...TIMEFRAME_IDS];
-    const createPairs = (instruments: AvailableInstrument[], allowedTimeframes?: string[]) => instruments.flatMap((item) =>
-      item.timeframes
-        .filter((candidateTimeframe) => !allowedTimeframes || allowedTimeframes.includes(candidateTimeframe))
-        .map((candidateTimeframe) => ({ instrument: item, timeframe: candidateTimeframe })));
-    if (config.instrumentMode === "market") {
-      const marketPairs = createPairs(instrumentCandidates, requestedTimeframes);
-      const marketFallback = marketPairs.length ? marketPairs : createPairs(instrumentCandidates);
-      return [...marketFallback].sort(() => randomUint32() / 0x1_0000_0000 - 0.5);
-    }
-    const exactPairs = createPairs(instrumentCandidates, requestedTimeframes);
-    const fallbackPairs = exactPairs.length
-      ? exactPairs
-      : createPairs(instrumentCandidates).length
-        ? createPairs(instrumentCandidates)
-        : createPairs(allowedInstruments, requestedTimeframes).length
-          ? createPairs(allowedInstruments, requestedTimeframes)
-          : createPairs(allowedInstruments);
+    const createPairs = (instruments: AvailableInstrument[]) => randomReplayPairs(instruments,
+      config.timeframeMode, config.anchorTimeframe, config.fixedTimeframe);
+    const candidates = createPairs(instrumentCandidates);
+    const fallbackPairs = candidates.length || config.instrumentMode === "market"
+      ? candidates
+      : createPairs(allowedInstruments);
     return [...fallbackPairs].sort(() => randomUint32() / 0x1_0000_0000 - 0.5);
   }, [availableInstruments, currentRandomConfig]);
 
@@ -9154,7 +9169,7 @@ export function TrainingWorkbench() {
         timeframe: requestTimeframe,
         adjustmentType: defaultAdjustmentTypeForInstrument(requestInstrumentId, requestMarket),
         randomWindow: {
-          length: draft.length > 0 ? draft.length : randomConfig.length,
+          length: Math.max(0, draft.length),
           historyBars: appSettingsRef.current.replayHistoryBars,
           startDate: randomConfig.dateMode === "range" ? randomConfig.startDate : undefined,
           endDate: randomConfig.dateMode === "range" ? randomConfig.endDate : undefined,
@@ -9178,7 +9193,7 @@ export function TrainingWorkbench() {
     const selectedPresets = visiblePatternPresets(patternPresets).filter((preset) => draft.patternPresetIds?.includes(preset.id));
     if (!selectedPresets.length) return null;
     const loaded = await loadPatternCandles(requestInstrumentId, requestTimeframe);
-    const requestedLength = draft.length > 0 ? draft.length : applyRandomDateRange ? randomConfig.length : 0;
+    const requestedLength = Math.max(0, draft.length);
     const maximumIndex = Math.max(0, loaded.candles.length - 1 - Math.max(1, requestedLength));
     const matches = findPatternMatches(loaded.candles, selectedPresets, {
       cooldownBars: appSettings.patternCooldownBars,
@@ -9224,6 +9239,10 @@ export function TrainingWorkbench() {
     draft: TrainingTaskDraft,
     snapshotId?: string,
   ) => {
+    if (draft.randomRun && draft.randomConfig) draft = { ...draft, randomConfig: { ...draft.randomConfig, length: draft.length } };
+    const executionTimeframe = draft.randomRun
+      ? replaySourceTimeframe(availableInstruments, requestInstrumentId, requestTimeframe)
+      : requestTimeframe;
     const targetMarket = availableInstruments.find((item) => item.id === requestInstrumentId)?.market
       ?? (/\.FX$/i.test(requestInstrumentId) ? "FX" : undefined);
     setLoading(true);
@@ -9234,13 +9253,14 @@ export function TrainingWorkbench() {
     setLatestWatchMode(false);
     newTaskRequestRef.current = {
       instrumentId: requestInstrumentId,
-      timeframe: requestTimeframe,
+      timeframe: executionTimeframe,
+      selectionTimeframe: draft.randomRun ? requestTimeframe : undefined,
       draft,
       snapshotId,
     };
     restoreRequestRef.current = null;
     setInstrumentId(requestInstrumentId);
-    setTimeframe(requestTimeframe);
+    setTimeframe(executionTimeframe);
     setReviewedSession(null);
     setShowRandomComplete(false);
     setOrderQty(configuredDefaultOrderQuantityForRequest(appSettingsRef.current, targetMarket, requestInstrumentId));
@@ -9254,7 +9274,7 @@ export function TrainingWorkbench() {
     randomConfig: RandomTrainingConfig = currentRandomConfig(),
   ) => {
     const pairs = randomCandidatePairs(randomConfig);
-    const requestedLength = draft.length > 0 ? draft.length : randomConfig.length;
+    const requestedLength = Math.max(0, draft.length);
     const attemptLimit = Math.min(pairs.length, Math.max(24, appSettings.patternScanAttempts));
     for (let index = 0; index < attemptLimit; index += 1) {
       const pair = pairs[index];
@@ -9347,7 +9367,7 @@ export function TrainingWorkbench() {
               ...draft,
               startMode: "bar" as const,
               startBar: windowSnapshot.startCursor + 1,
-              length: draft.length > 0 ? draft.length : randomConfig.length,
+              length: Math.max(0, draft.length),
               randomRun: true,
               randomConfig,
               patternPresetNames: selectedPresets.map((preset) => preset.name),
@@ -9365,7 +9385,7 @@ export function TrainingWorkbench() {
             ...draft,
             startMode: "bar" as const,
             startBar: match.index + 1,
-            length: draft.length > 0 ? draft.length : randomConfig.length,
+            length: Math.max(0, draft.length),
             randomRun: true,
             randomConfig,
             patternPresetNames: selectedPresets.map((preset) => preset.name),
@@ -9546,7 +9566,7 @@ export function TrainingWorkbench() {
       ...defaultTrainingTaskDraft,
       mode: completedTask.mode,
       startMode: "random",
-      length: completedTask.requestedLength ?? randomConfig.length,
+      length: randomConfig.length,
       hideInstrument: completedTask.hideInstrument,
       hideDate: completedTask.hideDate,
       hidePrice: completedTask.hidePrice,
@@ -9661,7 +9681,7 @@ export function TrainingWorkbench() {
   );
 
   const shortcutsEnabled = settingsReady && !showSettings && !showTaskSetup && !showLiveScan && !showPatternFilters && !showTrash && !showRandomComplete;
-  const shortcutReplayAvailable = view === "replay" && !liveMode && !latestWatchMode && !trashPreview && !loading && showingCanonicalChart;
+  const shortcutReplayAvailable = view === "replay" && !liveMode && !latestWatchMode && !trashPreview && !loading && !chartViewLoading;
   const shortcutTradeAvailable = view === "replay" && !loading && !trashPreview && !latestWatchMode && Boolean(currentBar) && (liveMode || !trainingComplete);
   const changeShortcutTimeframe = (direction: number) => {
     const index = Math.max(0, currentAvailableTimeframes.indexOf(chartTimeframe));
@@ -9673,7 +9693,7 @@ export function TrainingWorkbench() {
     randomTraining: { enabled: view === "replay" && !startingTraining && !loading, run: () => { void startQuickRandomTraining(); } },
     replayNext: { enabled: shortcutReplayAvailable && !playbackDisabled && cursor < (trainingTask?.endCursor ?? bars.length - 1), run: () => { setPlaying(false); revealNext(); } },
     replayForwardFive: { enabled: shortcutReplayAvailable && !playbackDisabled && cursor < (trainingTask?.endCursor ?? bars.length - 1), run: () => { setPlaying(false); revealMany(5); } },
-    replayPrevious: { enabled: shortcutReplayAvailable && !rewindLocked && !trainingComplete && cursor > (trainingTask?.startCursor ?? 0), run: () => { setPlaying(false); revealPrevious(); } },
+    replayPrevious: { enabled: shortcutReplayAvailable && !rewindLocked && !playbackDisabled && cursor > (trainingTask?.startCursor ?? 0), run: () => { setPlaying(false); revealPrevious(); } },
     replayPlay: { enabled: shortcutReplayAvailable && !playbackDisabled, run: () => { setPlaying(!playing); appendEvent("playback_toggled", { playing: !playing, speed }); } },
     tradeBuy: { enabled: shortcutTradeAvailable && marketRules.tradingEnabled, run: () => queueOpenOrder("buy") },
     tradeSell: { enabled: shortcutTradeAvailable && marketRules.tradingEnabled && marketRules.allowShort, run: () => queueOpenOrder("sell") },
@@ -9683,8 +9703,8 @@ export function TrainingWorkbench() {
     timeframePrevious: { enabled: view === "replay" && !loading && !chartViewLoading && currentAvailableTimeframes.length > 1, run: () => changeShortcutTimeframe(-1) },
     timeframeNext: { enabled: view === "replay" && !loading && !chartViewLoading && currentAvailableTimeframes.length > 1, run: () => changeShortcutTimeframe(1) },
     indicators: { enabled: view === "replay" && !loading, run: () => setIndicatorMenuOpen(open => !open) },
-    drawingTrend: { enabled: view === "replay" && showingCanonicalChart && !loading && !trashPreview, run: () => beginDrawing(allDrawingTools.find(tool => tool.name === "segment")!) },
-    drawingPosition: { enabled: view === "replay" && showingCanonicalChart && !loading && !trashPreview, run: () => beginDrawing(trainingPositionTool) },
+    drawingTrend: { enabled: view === "replay" && chartTrainingInteractive && !loading && !trashPreview, run: () => beginDrawing(allDrawingTools.find(tool => tool.name === "segment")!) },
+    drawingPosition: { enabled: view === "replay" && chartTrainingInteractive && !loading && !trashPreview, run: () => beginDrawing(trainingPositionTool) },
     drawingCursor: { enabled: view === "replay", run: () => { setDrawingRequest(null); setDrawingTextOpen(false); setSelectedDrawingId(""); setDrawingGroupOpen(""); setProtectionPriceSelection(null); } },
     drawingUndo: { enabled: view === "replay" && !trashPreview && drawingUndoStack.length > 0, run: undoDrawing },
     drawingRedo: { enabled: view === "replay" && !trashPreview && drawingRedoStack.length > 0, run: redoDrawing },
@@ -9759,10 +9779,8 @@ export function TrainingWorkbench() {
               </span>
             )}
             <ChartTimeframePicker value={chartTimeframe} available={currentAvailableTimeframes} disabled={chartViewLoading} onChange={handleTimeframeChange} />
-            {chartViewLoading && <span className="chart-view-status">正在切换观察周期…</span>}
+            {chartViewLoading && <span className="chart-view-status">正在切换周期…</span>}
             {chartViewError && <span className="chart-view-status error" role="alert">{chartViewError}</span>}
-            {chartViewSnapshotId && !chartViewLoading && !chartViewError && <span className="chart-view-status">观察数据已缓存</span>}
-            {!showingCanonicalChart && <span className="chart-view-status">训练基准 {timeframeLabel(timeframe)} · 仅观察</span>}
             <ChartIndicatorMenu settings={movingAverageSettings} onChange={setMovingAverageSettings} macdSettings={macdSettings} onMacdChange={setMacdSettings} open={indicatorMenuOpen} onOpenChange={setIndicatorMenuOpen} />
           </div>
           <div className="top-actions">
@@ -9819,8 +9837,8 @@ export function TrainingWorkbench() {
                 <span>{tradingMode === "capital" ? "资金账户" : "收益率"}</span>
               </div>
               <ChartTimeframePicker className="mobile-timeframes" value={chartTimeframe} available={currentAvailableTimeframes} disabled={chartViewLoading} onChange={item => { setMobileToolbarOpen(false); handleTimeframeChange(item); }} />
-              {!showingCanonicalChart && <span className="mobile-chart-view-note">训练基准 {timeframeLabel(timeframe)} · 仅观察</span>}
-              {chartViewLoading && <div className="mobile-random-status"><Activity size={12} />正在切换观察周期…</div>}
+              <ChartMarkerToggle checked={showChartMarkers} onChange={setShowChartMarkers} />
+              {chartViewLoading && <div className="mobile-random-status"><Activity size={12} />正在切换周期…</div>}
               {chartViewError && <div className="mobile-random-error" role="alert">{chartViewError}</div>}
               <div className="mobile-indicator-settings">
                 <strong><LineChart size={13} />图表指标</strong>
@@ -10259,8 +10277,8 @@ export function TrainingWorkbench() {
               <div className="task-modal-head">
                 <div>
                   <span>{taskSetupKind === "random" ? "RANDOM REPLAY" : "TRAINING TASK"}</span>
-                  <h2 id="task-modal-title">{taskSetupKind === "random" ? "随机训练" : "新建 Replay 训练"}</h2>
-                  <p>训练内容发生实际修改后会自动保存；也可以随时手动保存。单纯浏览 K 线不会触发保存。</p>
+                  <h2 id="task-modal-title" title="训练内容发生实际修改后会自动保存；也可以随时手动保存。单纯浏览 K 线不会触发保存。">{taskSetupKind === "random" ? "随机训练" : "新建 Replay 训练"}</h2>
+                  <p>到达训练终点时，持仓按最后一根收盘价平仓并保存。</p>
                 </div>
                 <button aria-label={taskSetupKind === "random" ? "关闭随机训练设置" : "关闭新建训练"} onClick={() => setShowTaskSetup(false)}><X size={19} /></button>
               </div>
@@ -10303,24 +10321,9 @@ export function TrainingWorkbench() {
                       instruments={availableInstruments}
                       ariaLabel="训练品种"
                       onChange={(nextInstrumentId) => {
-                        const nextAvailableTimeframes = availableTimeframesForInstrument(
-                          availableInstruments,
-                          nextInstrumentId,
-                          timeframes,
-                        );
                         setSetupInstrumentId(nextInstrumentId);
-                        setSetupTimeframe((current) => resolveAvailableTimeframe(nextAvailableTimeframes, current));
                       }}
                     />
-                  </label>
-                  <label>周期
-                    <select value={setupTimeframe} onChange={(event) => setSetupTimeframe(event.target.value)}>
-                      {TIMEFRAME_IDS.map((item) => (
-                        <option key={item} value={item} disabled={!setupAvailableTimeframes.includes(item)}>
-                          {timeframeLabel(item)}
-                        </option>
-                      ))}
-                    </select>
                   </label>
                 </div>
               )}
@@ -10333,7 +10336,7 @@ export function TrainingWorkbench() {
                     <span>
                       {appSettings.randomInstrumentMode === "current" ? "固定当前品种" : appSettings.randomInstrumentMode === "market" ? `${appSettings.randomMarket}中随机标的` : "全部品种随机"}
                       {" · "}
-                      {appSettings.randomTimeframeMode === "current" ? "固定当前周期" : appSettings.randomTimeframeMode === "fixed" ? `固定 ${appSettings.randomTimeframe}` : "全部周期随机"}
+                      {appSettings.randomTimeframeMode === "current" ? `当前 ${timeframeLabel(chartTimeframe)}` : appSettings.randomTimeframeMode === "fixed" ? timeframeLabel(appSettings.randomTimeframe) : "全部周期随机"}
                       {" · "}
                       {appSettings.randomDateMode === "range" ? `${appSettings.randomStartDate || "未设置"} 至 ${appSettings.randomEndDate || "未设置"}` : "全部历史"}
                       {activeRandomIncludesCn && <> · {appSettings.randomIncludeIndices ? "纳入指数（只看盘）" : "仅可交易品种"}</>}
@@ -10430,9 +10433,9 @@ export function TrainingWorkbench() {
               ))}
 
               {taskDraft.mode !== "range" && (
-                <label className="task-wide-field">训练长度（揭示 K 线数）
-                  <input type="number" min="0" value={taskDraft.length} onChange={(event) => setTaskDraft((draft) => ({ ...draft, length: Math.max(0, Number(event.target.value)) }))} />
-                  <small>填 0 时默认载入后续 5,000 根；为避免分钟级超大数据卡死，单个 Replay 最多载入后续 10,000 根。填入数量后，到达边界会按最后一根收盘价自动平仓、保存并进入完成状态。</small>
+                <label className="task-wide-field" title="0 表示练到已有数据末尾，不设固定根数上限；也可选择测试区间，按开始和结束日期训练。随机训练的根数按所选随机周期计算。">训练范围（K 线数）
+                  <input type="number" min="0" aria-describedby="task-range-help" value={taskDraft.length} onChange={(event) => setTaskDraft((draft) => ({ ...draft, length: Math.max(0, Number(event.target.value)) }))} />
+                  <span id="task-range-help" className="live-sr-only">0 表示练到已有数据末尾，不设固定根数上限；测试区间按开始和结束日期训练。随机训练的根数按所选随机周期计算。</span>
                 </label>
               )}
 
@@ -10518,12 +10521,13 @@ export function TrainingWorkbench() {
                   ><List size={16} /></button>
                   <strong>{hideTaskInstrument ? "BLIND" : instrument.symbol}</strong>
                   <span>{hideTaskInstrument
-                    ? `品种已隐藏 · ${timeframeLabel(chartTimeframe)}${showingCanonicalChart ? "" : ` · 训练基准 ${timeframeLabel(timeframe)}`}`
+                    ? `品种已隐藏 · ${timeframeLabel(chartTimeframe)}`
                     : liveMode
                       ? `${instrument.name} · ${timeframeLabel(chartTimeframe)} · 最新行情`
                       : latestWatchMode
                         ? `${instrument.name} · ${timeframeLabel(chartTimeframe)} · 最新行情 · 仅看盘`
-                      : `${instrument.name} · ${timeframeLabel(chartTimeframe)}${showingCanonicalChart ? "" : ` · 训练基准 ${timeframeLabel(timeframe)}`} · 历史训练`}</span>
+                      : `${instrument.name} · ${timeframeLabel(chartTimeframe)} · 历史训练`}</span>
+                  {desktopLayout && <ChartMarkerToggle checked={showChartMarkers} onChange={setShowChartMarkers} />}
                 </div>
                 {latestWatchMode && (
                   <button
@@ -10581,7 +10585,7 @@ export function TrainingWorkbench() {
               )}
 
               <div className="chart-area" ref={chartAreaRef}>
-                <ChartDrawingRail observing={!showingCanonicalChart} cursorActive={!selectedDrawingId && !drawingGroupOpen && !drawingRequest && !drawingTextOpen}
+                <ChartDrawingRail observing={!chartTrainingInteractive} cursorActive={!selectedDrawingId && !drawingGroupOpen && !drawingRequest && !drawingTextOpen}
                   onCursor={() => { setDrawingRequest(null); setDrawingTextOpen(false); setSelectedDrawingId(""); setDrawingGroupOpen(""); }}
                   activeTool={drawingRequest?.name} groupTools={groupDrawingTools} openGroup={drawingGroupOpen} onOpenGroup={setDrawingGroupOpen}
                   onSelectTool={beginDrawing} onGroupTool={(group, tool) => setGroupDrawingTools(current => ({ ...current, [group]: tool }))}
@@ -10618,25 +10622,25 @@ export function TrainingWorkbench() {
                       pricePrecision={instrument.pricePrecision}
                       movingAverageSettings={movingAverageSettings}
                       macdSettings={macdSettings}
-                      drawingRequest={showingCanonicalChart ? drawingRequest : null}
+                      drawingRequest={chartTrainingInteractive ? drawingRequest : null}
                       clearNonce={clearNonce}
-                      tradeMarkers={tradeMarkers}
+                      tradeMarkers={showChartMarkers ? tradeMarkers : []}
                       decisionMarkers={decisionMarkers}
                       corporateActionMarkers={corporateActionMarkers}
                       protectionLines={protectionLines}
-                      priceSelectionMode={showingCanonicalChart ? protectionPriceSelection : null}
-                      drawings={showingCanonicalChart ? drawings : []}
-                      selectedDrawingId={showingCanonicalChart ? selectedDrawingId : ""}
-                      drawingsRestoreNonce={showingCanonicalChart ? drawingsRestoreNonce : 0}
+                      priceSelectionMode={chartTrainingInteractive ? protectionPriceSelection : null}
+                      drawings={chartTrainingInteractive ? chartDrawings : []}
+                      selectedDrawingId={chartTrainingInteractive ? selectedDrawingId : ""}
+                      drawingsRestoreNonce={chartTrainingInteractive ? drawingsRestoreNonce : 0}
                       hideDate={hideTaskDate}
                       hidePrice={hideTaskPrice}
                       onDecisionSelect={setSelectedDecisionId}
                       onCorporateActionSelect={setSelectedCorporateActionId}
-                      onProtectionPriceSelect={showingCanonicalChart ? applyDraftProtectionPrice : ignoreProtectionPriceSelect}
-                      onProtectionLineMove={showingCanonicalChart ? moveProtectionLine : rejectProtectionLineMove}
-                      onCandleContextMenu={showingCanonicalChart ? openDecisionForCandle : ignoreCandleContextMenu}
-                      onDrawingsChange={showingCanonicalChart ? handleDrawingsChange : ignoreDrawingsChange}
-                      onDrawingSelect={showingCanonicalChart ? (id) => setSelectedDrawingId(id ?? "") : ignoreDrawingSelect}
+                      onProtectionPriceSelect={chartTrainingInteractive ? applyDraftProtectionPrice : ignoreProtectionPriceSelect}
+                      onProtectionLineMove={chartTrainingInteractive ? moveProtectionLine : rejectProtectionLineMove}
+                      onCandleContextMenu={chartTrainingInteractive ? openDecisionForCandle : ignoreCandleContextMenu}
+                      onDrawingsChange={chartTrainingInteractive ? handleChartDrawingsChange : ignoreDrawingsChange}
+                      onDrawingSelect={chartTrainingInteractive ? (id) => setSelectedDrawingId(id ?? "") : ignoreDrawingSelect}
                     />
                   )}
                   {selectedCorporateAction && (
@@ -10651,7 +10655,7 @@ export function TrainingWorkbench() {
                       <button type="button" onClick={() => setProtectionPriceSelection(null)}>取消</button>
                     </div>
                   )}
-                  {selectedDecision && <DecisionDetails record={selectedDecision}
+                  {showChartMarkers && selectedDecision && <DecisionDetails record={selectedDecision}
                     dateLabel={timestamp => hideTaskDate ? 'K线 #' + (selectedDecision.cursor + 1) : formatDate(timestamp, timeframe, activeChartTimeZone)}
                     priceLabel={value => value.toFixed(instrument.pricePrecision)} hidePrice={hideTaskPrice}
                     onClose={() => setSelectedDecisionId('')} onLocate={() => locateDecision(selectedDecision)}
@@ -10669,7 +10673,7 @@ export function TrainingWorkbench() {
                 tabIndex={0}
                 aria-label="调整看盘区域高度"
                 aria-orientation="horizontal"
-                aria-valuemin={350}
+                aria-valuemin={chartHeightMinimum}
                 aria-valuemax={chartHeightLimit}
                 aria-valuenow={actualChartHeight}
                 title="拖动调整看盘区域高度"
@@ -10684,15 +10688,16 @@ export function TrainingWorkbench() {
                 onPointerMove={(event) => {
                   if (!chartResizeStart.current) return;
                   const { y, height } = chartResizeStart.current;
-                  setChartHeight(Math.max(350, Math.min(chartHeightLimit, Math.round(height + event.clientY - y))));
+                  setChartHeight(Math.max(chartHeightMinimum, Math.min(chartHeightLimit, Math.round(height + event.clientY - y))));
                 }}
                 onPointerUp={() => { chartResizeStart.current = null; }}
                 onPointerCancel={() => { chartResizeStart.current = null; }}
+                onLostPointerCapture={() => { chartResizeStart.current = null; }}
                 onKeyDown={(event) => {
                   if (event.key === "ArrowUp" || event.key === "ArrowDown") {
                     event.preventDefault();
                     setChartHeightAdjusted(true);
-                    setChartHeight(Math.max(350, Math.min(chartHeightLimit, actualChartHeight + (event.key === "ArrowDown" ? 20 : -20))));
+                    setChartHeight(Math.max(chartHeightMinimum, Math.min(chartHeightLimit, actualChartHeight + (event.key === "ArrowDown" ? 20 : -20))));
                   }
                 }}
               />
@@ -10700,12 +10705,12 @@ export function TrainingWorkbench() {
               <div className="replay-controls">
                 <div className="progress-meta">
                   <span>{currentBar ? (hideTaskDate ? `训练第 ${currentTaskProgress.revealed} 根` : formatDate(currentBar.timestamp, timeframe, activeChartTimeZone)) : "--"}</span>
-                  <span>{loading ? "正在加载…" : trainingTask ? `${currentTaskProgress.revealed} / ${currentTaskProgress.total} 根` : `${cursor + 1} / ${bars.length} 根`}</span>
+                  <span title={`进度按当前 ${timeframeLabel(chartTimeframe)} 图表周期计数；切换周期不会改变训练结束时间`} aria-label={`训练范围进度，按当前 ${timeframeLabel(chartTimeframe)} 图表周期计数`}>{loading ? "正在加载…" : trainingTask ? `${currentTaskProgress.revealed} / ${currentTaskProgress.total} 根` : `${cursor + 1} / ${bars.length} 根`}</span>
                 </div>
                 <div className="progress-track"><span style={{ width: `${progress}%` }} /></div>
                 <div className="transport">
                   <button aria-label={rewindLocked ? "随机训练不可重置" : "重置"} title={rewindLocked ? "随机训练为单向揭示，不允许重置" : undefined} disabled={playbackDisabled || rewindLocked} onClick={resetTraining}><RotateCcw size={17} /></button>
-                  <button aria-label={rewindLocked ? "随机训练不可回退" : "上一根"} title={rewindLocked ? "随机训练为单向揭示，不允许查看上一根" : undefined} disabled={rewindLocked || trainingComplete || cursor <= (trainingTask?.startCursor ?? 0)} onClick={revealPrevious}><ChevronLeft size={19} /></button>
+                  <button aria-label={rewindLocked ? "随机训练不可回退" : "上一根"} title={rewindLocked ? "随机训练为单向揭示，不允许查看上一根" : `按当前 ${timeframeLabel(chartTimeframe)} 周期回看一根`} disabled={rewindLocked || playbackDisabled || cursor <= (trainingTask?.startCursor ?? 0)} onClick={revealPrevious}><ChevronLeft size={19} /></button>
                   <button className="play-button" disabled={playbackDisabled} aria-label={playing ? "暂停" : "播放"} onClick={() => {
                     const nextPlaying = !playing;
                     setPlaying(nextPlaying);
@@ -10713,8 +10718,8 @@ export function TrainingWorkbench() {
                   }}>
                     {playing ? <Pause size={20} /> : <Play size={20} fill="currentColor" />}
                   </button>
-                  <button aria-label="下一根" disabled={playbackDisabled} onClick={revealNext}><ChevronRight size={19} /></button>
-                  <button aria-label="前进五根" disabled={playbackDisabled} onClick={() => revealMany(5)}><FastForward size={18} /></button>
+                  <button aria-label="下一根" title={`按当前 ${timeframeLabel(chartTimeframe)} 周期前进一根`} disabled={playbackDisabled} onClick={revealNext}><ChevronRight size={19} /></button>
+                  <button aria-label="前进五根" title={`按当前 ${timeframeLabel(chartTimeframe)} 周期前进五根`} disabled={playbackDisabled} onClick={() => revealMany(5)}><FastForward size={18} /></button>
                 </div>
                 <div className="speed-control">
                   {[0.5, 1, 2, 5].map((value) => <button key={value} className={speed === value ? "active" : ""} onClick={() => {
@@ -10828,9 +10833,9 @@ export function TrainingWorkbench() {
                           aria-pressed={protectionPriceSelection === "entry-trigger"}
                           className={protectionPriceSelection === "entry-trigger" ? "active" : ""}
                           type="button"
-                          title={showingCanonicalChart ? "点击 K 线图选择委托触发价" : `请先切换回基准周期 ${timeframeLabel(timeframe)}`}
+                          title={chartTrainingInteractive ? "点击 K 线图选择委托触发价" : `请先切换到 ${timeframeLabel(timeframe)} 周期`}
                           onClick={() => {
-                            if (!showingCanonicalChart) {
+                            if (!chartTrainingInteractive) {
                               setRuleNotice(`请先切换回基准周期 ${timeframeLabel(timeframe)}，再在图表选择委托触发价`);
                               return;
                             }
@@ -10841,12 +10846,12 @@ export function TrainingWorkbench() {
                       </span>
                     </label>
                   )}
-                    stop={{ label: "止损", value: effectiveOrderStop ? trainingPriceLabel(effectiveOrderStop) : "", selected: protectionPriceSelection === "stop-loss", pickLabel: "在图表选择保护止损价", clearLabel: "清除保护止损价", title: showingCanonicalChart ? "点击 K 线图选择止损价格" : `请先切换回基准周期 ${timeframeLabel(timeframe)}`, onPick: () => {
-                      if (!showingCanonicalChart) { setRuleNotice(`请先切换回基准周期 ${timeframeLabel(timeframe)}，再在图表选择止损价格`); return; }
+                    stop={{ label: "止损", value: effectiveOrderStop ? trainingPriceLabel(effectiveOrderStop) : "", selected: protectionPriceSelection === "stop-loss", pickLabel: "在图表选择保护止损价", clearLabel: "清除保护止损价", title: chartTrainingInteractive ? "点击 K 线图选择止损价格" : `请先切换到 ${timeframeLabel(timeframe)} 周期`, onPick: () => {
+                      if (!chartTrainingInteractive) { setRuleNotice(`请先切换到 ${timeframeLabel(timeframe)} 周期，再在图表选择止损价格`); return; }
                       setProtectionPriceSelection(current => current === "stop-loss" ? null : "stop-loss"); setRuleNotice("请在上方 K 线图点击选择止损价格");
                     }, onClear: () => clearDraftProtectionPrice("stop-loss") }}
-                    target={{ label: "止盈", value: effectiveOrderTarget ? trainingPriceLabel(effectiveOrderTarget) : "", selected: protectionPriceSelection === "take-profit", pickLabel: "在图表选择保护止盈价", clearLabel: "清除保护止盈价", title: showingCanonicalChart ? "点击 K 线图选择止盈价格" : `请先切换回基准周期 ${timeframeLabel(timeframe)}`, onPick: () => {
-                      if (!showingCanonicalChart) { setRuleNotice(`请先切换回基准周期 ${timeframeLabel(timeframe)}，再在图表选择止盈价格`); return; }
+                    target={{ label: "止盈", value: effectiveOrderTarget ? trainingPriceLabel(effectiveOrderTarget) : "", selected: protectionPriceSelection === "take-profit", pickLabel: "在图表选择保护止盈价", clearLabel: "清除保护止盈价", title: chartTrainingInteractive ? "点击 K 线图选择止盈价格" : `请先切换到 ${timeframeLabel(timeframe)} 周期`, onPick: () => {
+                      if (!chartTrainingInteractive) { setRuleNotice(`请先切换到 ${timeframeLabel(timeframe)} 周期，再在图表选择止盈价格`); return; }
                       setProtectionPriceSelection(current => current === "take-profit" ? null : "take-profit"); setRuleNotice("请在上方 K 线图点击选择止盈价格");
                     }, onClear: () => clearDraftProtectionPrice("take-profit") }}
                     info={(liveMode
@@ -11883,6 +11888,9 @@ export function TrainingWorkbench() {
                 initialDrawings={reviewState.drawings}
                 tradeMarkers={reviewPreviewTradeMarkers}
                 decisionMarkers={reviewPreviewDecisionMarkers}
+                decisionRecords={reviewState.decisionSubmissions} selectedDecisionId={reviewDecisionFocus.id} focusNonce={reviewDecisionFocus.nonce}
+                onDecisionSelect={id => setReviewDecisionFocus(previous => ({ id, nonce: previous.nonce + 1 }))}
+                showChartMarkers={showChartMarkers} onChartMarkersChange={setShowChartMarkers}
                 corporateActionMarkers={reviewPreviewCorporateActionMarkers}
                 corporateActionsError={reviewedSession ? reviewChartStateForSession?.corporateActionsError : corporateActionsError}
                 onCorporateActionSelect={setSelectedCorporateActionId}
@@ -11892,7 +11900,7 @@ export function TrainingWorkbench() {
               <DecisionHistory records={reviewState.decisionSubmissions} expanded
                 dateLabel={timestamp => formatDate(timestamp, reviewedSession?.session.timeframe ?? timeframe, reviewChartTimeZone)}
                 priceLabel={value => value.toFixed(instrument.pricePrecision)}
-                onLocate={record => openReviewEvidence(record.barTimestamp, '计划')}
+                onLocate={record => setReviewDecisionFocus(previous => ({ id: record.id, nonce: previous.nonce + 1 }))}
                 linkedTrades={record => <span className="decision-history-linked">{reviewState.positions.filter(position => position.decisionSubmissionId === record.id).length ? '已关联 ' + reviewState.positions.filter(position => position.decisionSubmissionId === record.id).length + ' 笔交易' : '尚未关联交易'}</span>}
               />
               </div>

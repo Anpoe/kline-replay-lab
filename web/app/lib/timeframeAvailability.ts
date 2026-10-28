@@ -54,3 +54,12 @@ export function resolveAvailableTimeframe(
     ? requestedTimeframe
     : availableTimeframes[0] ?? requestedTimeframe;
 }
+
+/** New replay sessions keep the finest real series as their execution timeline. */
+export function replaySourceTimeframe(
+  instruments: readonly TimeframeCatalogItem[],
+  instrumentId: string,
+  fallback: string,
+) {
+  return availableTimeframesForInstrument(instruments, instrumentId, TIMEFRAME_IDS)[0] ?? fallback;
+}

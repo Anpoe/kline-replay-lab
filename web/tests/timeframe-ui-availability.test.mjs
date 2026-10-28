@@ -34,10 +34,11 @@ test("every active snapshot session keeps its mode while changing the chart time
   assert.doesNotMatch(handler, /if \(trainingTask\?\.randomRun\)/);
 });
 
-test("settings, setup, and review period selectors use MT4 labels", () => {
-  assert.match(workbench, /timeframeLabel\(item\)/);
-  assert.match(settings, /timeframeLabel\(item\)/);
-  assert.match(settings, /canAggregateTimeframe\(sourceTimeframe, targetTimeframe\)/);
+test("normal training uses date ranges and random training retains its period rule", () => {
+  assert.match(picker, /TIMEFRAME_LABELS\[item\]/);
+  assert.doesNotMatch(workbench, /setSetupTimeframe/);
+  assert.match(settings, /data-settings-group="random-timeframe"/);
+  assert.match(settings, /draft\.randomTimeframeMode/);
   assert.match(review, /timeframeLabel\(value\)/);
   assert.match(maintenance, /TIMEFRAME_IDS\.map\(\(value\)/);
   assert.match(maintenance, /disabled=\{!available\}/);

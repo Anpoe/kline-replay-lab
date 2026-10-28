@@ -10,7 +10,7 @@
 
 实盘默认关闭，后续需要在 MT4 与训练营分别明确开启。历史回放训练继续使用独立的模拟账户。断线或执行结果未知时，请先在 MT4 核对，程序不会自动重复下单。
 
-> 当前版本：`v0.1.11`<br>
+> 当前版本：`v0.1.13`<br>
 > [下载最新版本（GitHub Releases）](https://github.com/Anpoe/kline-replay-lab/releases/latest)
 
 ## 给普通用户：三分钟开始使用
@@ -196,7 +196,7 @@ npm run verify
 生成正式发布包时请传入语义化版本号，例如：
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File launcher\build-release.ps1 -ReleaseVersion 0.1.11
+powershell -ExecutionPolicy Bypass -File launcher\build-release.ps1 -ReleaseVersion 0.1.13
 ```
 
 开发时通常需要分别启动本地数据服务和 WebUI：

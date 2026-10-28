@@ -58,7 +58,15 @@ export async function handleMt4Request(bridge, request, response, startupError =
       const url = new URL(request.url, 'http://127.0.0.1');
       if (request.method === 'GET') {
         const key = url.searchParams.get('accountKey') ?? '', symbol = url.searchParams.get('symbol') ?? '', tf = Number(url.searchParams.get('timeframe') ?? 5), action = url.searchParams.get('action');
-        if (action && !['accounts','analysis','trade','backup','list','chart'].includes(action)) throw new Mt4Error('不支持的档案读取');
+        if (action && !['accounts','analysis','plans','trade','backup','list','chart','bars'].includes(action)) throw new Mt4Error('不支持的档案读取');
+        if (action === 'plans') {
+          send(200, bridge.archive.decisionPlans({ accountKey: key, symbol, offset: url.searchParams.get('offset') ?? 0, limit: url.searchParams.get('limit') ?? 100 }));
+          return true;
+        }
+        if (action === 'bars') {
+          send(200, bridge.archive.bars({ accountKey: key, symbol, timeframe: tf, before: url.searchParams.get('before') ?? 0, after: url.searchParams.get('after') ?? 0, focus: url.searchParams.get('focus') ?? 0, limit: url.searchParams.get('limit') ?? 1000 }));
+          return true;
+        }
         const filters={accountKey:key,symbol,from:url.searchParams.get('from')??'',to:url.searchParams.get('to')??''};
         send(200, action === 'accounts' ? { accounts: bridge.archive.accounts() } : action === 'analysis' ? bridge.archive.analysis(key, symbol, tf, url.searchParams.get('scope') ?? 'chart') : action === 'trade' ? bridge.archive.trade(key, symbol, Number(url.searchParams.get('ticket')), tf, Number(url.searchParams.get('focus') ?? 0)) : action === 'chart' ? bridge.archive.chart({...filters,timeframe:tf}) : action === 'backup' ? bridge.archive.backup() : bridge.archive.list({...filters,page:Number(url.searchParams.get('page')??0),chartSymbol:url.searchParams.get('chartSymbol')??''}));
       } else if (request.method === 'POST') {

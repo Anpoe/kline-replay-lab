@@ -17,6 +17,7 @@ import { canAggregateTimeframe, TIMEFRAME_IDS, timeframeLabel } from "../../../l
 
 import { findSettingsGroups, settingsCategories, settingsGroups, type SettingsGroupId } from "../settingsNavigation";
 import { SettingsHelp } from "../../../components/SettingsHelp";
+import { notificationSound } from "../../../lib/notificationSound.mjs";
 import { MobileAccessPanel } from "../../mobile-access/MobileAccessPanel";
 import { ShortcutSettingsPanel } from "./ShortcutSettingsPanel";
 
@@ -98,6 +99,7 @@ export function SettingsPanel({
 }: SettingsPanelProps) {
   const tab = requestedTab === "mt4" && !mt4Available ? "basic" : requestedTab;
   const [query, setQuery] = useState("");
+  const [soundError, setSoundError] = useState("");
   const searchRef = useRef<HTMLInputElement>(null);
   const navigationRef = useRef<HTMLElement>(null);
   const contentRef = useRef<HTMLDivElement>(null);
@@ -123,14 +125,6 @@ export function SettingsPanel({
     onTabChange(next);
     contentRef.current?.scrollTo({ top: 0 });
   };
-  const availableTimeframes = new Set(
-    TIMEFRAME_IDS.filter((targetTimeframe) => availableInstruments.some((item) => (
-      item.timeframes?.some((sourceTimeframe) => (
-        sourceTimeframe === targetTimeframe
-        || canAggregateTimeframe(sourceTimeframe, targetTimeframe)
-      ))
-    ))),
-  );
   return (
     <div className="task-modal-backdrop" role="presentation" onMouseDown={(event) => {
       if (event.target === event.currentTarget) onClose();
@@ -604,30 +598,17 @@ export function SettingsPanel({
 
               </section>}
               {visibleIds.has("random-timeframe") && <section className="settings-rule settings-group" aria-labelledby="settings-group-random-timeframe" data-settings-group="random-timeframe">
-                <header className="settings-group-head"><div>{searching && <span className="settings-group-category">{groupCategory("random-timeframe")}</span>}<h4 id="settings-group-random-timeframe">{groupTitle("random-timeframe")}</h4></div></header>
-
-
+                <header className="settings-group-head"><div>{searching && <span className="settings-group-category">{groupCategory("random-timeframe")}</span>}<h4 id="settings-group-random-timeframe">{groupTitle("random-timeframe")}</h4></div><SettingsHelp label="随机周期说明"><span>用于抽取训练片段和选择初始图表周期。开始后可切换周期；上一根、下一根每次只移动当前图表的一根。</span></SettingsHelp></header>
                 <div className="task-start-options">
-                  {([
-                    ["current", "固定当前周期"],
-                    ["all", "全部周期随机"],
-                    ["fixed", "指定周期"],
-                  ] as const).map(([value, label]) => (
-                    <button key={value} className={draft.randomTimeframeMode === value ? "active" : ""} onClick={() => onDraftChange((next) => ({ ...next, randomTimeframeMode: value }))}>{label}</button>
+                  {([['current', '固定当前周期'], ['all', '全部周期随机'], ['fixed', '指定周期']] as const).map(([value, label]) => (
+                    <button key={value} className={draft.randomTimeframeMode === value ? "active" : ""} onClick={() => onDraftChange(next => ({ ...next, randomTimeframeMode: value }))}>{label}</button>
                   ))}
                 </div>
-                {draft.randomTimeframeMode === "fixed" && (
-                  <label>指定周期
-                    <select value={draft.randomTimeframe} onChange={(event) => onDraftChange((next) => ({ ...next, randomTimeframe: event.target.value }))}>
-                      {TIMEFRAME_IDS.map((item) => (
-                        <option key={item} value={item} disabled={!availableTimeframes.has(item)}>
-                          {timeframeLabel(item)}
-                        </option>
-                      ))}
-                    </select>
-                  </label>
-                )}
-
+                {draft.randomTimeframeMode === "fixed" && <label>指定周期
+                  <select value={draft.randomTimeframe} onChange={event => onDraftChange(next => ({ ...next, randomTimeframe: event.target.value }))}>
+                    {TIMEFRAME_IDS.map(item => <option key={item} value={item} disabled={!availableInstruments.some(instrument => instrument.timeframes?.some(source => source === item || canAggregateTimeframe(source, item)))}>{timeframeLabel(item)}</option>)}
+                  </select>
+                </label>}
               </section>}
               {visibleIds.has("random-dates") && <section className="settings-rule settings-group" aria-labelledby="settings-group-random-dates" data-settings-group="random-dates">
                 <header className="settings-group-head"><div>{searching && <span className="settings-group-category">{groupCategory("random-dates")}</span>}<h4 id="settings-group-random-dates">{groupTitle("random-dates")}</h4></div></header>
@@ -646,8 +627,8 @@ export function SettingsPanel({
 
               </section>}
               {visibleIds.has("random-length") && <section className="settings-rule settings-group" aria-labelledby="settings-group-random-length" data-settings-group="random-length">
-                <header className="settings-group-head"><div>{searching && <span className="settings-group-category">{groupCategory("random-length")}</span>}<h4 id="settings-group-random-length">{groupTitle("random-length")}</h4></div><SettingsHelp label={`${groupTitle("random-length")}说明`}><span>每局随机训练的默认长度；0 表示一直练到该数据集末尾。</span></SettingsHelp></header>
-                <label>揭示 K 线数
+                <header className="settings-group-head"><div>{searching && <span className="settings-group-category">{groupCategory("random-length")}</span>}<h4 id="settings-group-random-length">{groupTitle("random-length")}</h4></div><SettingsHelp label={`${groupTitle("random-length")}说明`}><span>范围按本局随机选中的周期 K 线数计算；0 表示从随机起点练到已有数据末尾，不设固定根数上限。切换图表后，每次仍只推进当前周期的一根。</span></SettingsHelp></header>
+                <label>范围 K 线数
                   <input type="number" min="0" value={draft.randomLength} onChange={(event) => onDraftChange((next) => ({ ...next, randomLength: Math.max(0, Number(event.target.value)) }))} />
 
                 </label>
@@ -801,6 +782,14 @@ export function SettingsPanel({
                     onChange={() => onDraftChange(next => ({ ...next, mt4ChartMotion: { ...next.mt4ChartMotion, enabled: !next.mt4ChartMotion.enabled } }))} />
                 </div>
 
+                <div className="settings-row-action" title="开启后，每次图表从冻结恢复实时波动时播放一次；首次打开、切换图表和持续更新不重复提示。可点击试听启用浏览器声音。">
+                  <div><strong>开始波动提示音</strong></div>
+                  <button type="button" className="ghost-button" aria-label="试听开始波动提示音" onClick={async () => setSoundError(await notificationSound.preview() ? "" : "无法播放提示音，请允许此页面播放声音后重试试听。")}>试听</button>
+                  <SettingsSwitch checked={draft.mt4ChartMotion.soundEnabled} label="开始波动提示音" descriptionId="settings-mt4-sound-help"
+                    onChange={() => onDraftChange(next => ({ ...next, mt4ChartMotion: { ...next.mt4ChartMotion, soundEnabled: !next.mt4ChartMotion.soundEnabled } }))} />
+                </div>
+                <span id="settings-mt4-sound-help" className="live-sr-only">仅在开启开收盘波动窗口时生效；每次解除冻结播放一次，试听可确认浏览器声音是否可用。</span>
+                {soundError && <div className="mt4-error" role="alert">{soundError}</div>}
                 <span id="settings-mt4-window-help" className="live-sr-only">开盘后、收盘前秒数均为 1–86400 的整数；两个窗口覆盖整根 K 线时持续更新。按 MT4 服务器时间计算。</span>
                 <div className="execution-settings-grid">
                   <label title="每根 K 线开盘后允许更新的秒数；1–86400 的整数。两个窗口覆盖整根 K 线时持续更新。">开盘后（秒）

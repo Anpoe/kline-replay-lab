@@ -126,6 +126,7 @@ export function advanceReplayCursor({
   randomRun = false,
   liveMode = false,
   scheduledOrderTimestamps = [],
+  stepBucketKey,
 }: {
   bars: readonly { timestamp: number }[];
   cursor: number;
@@ -138,13 +139,33 @@ export function advanceReplayCursor({
   randomRun?: boolean;
   liveMode?: boolean;
   scheduledOrderTimestamps?: readonly number[];
+  /** Group execution bars by the currently selected chart candle. */
+  stepBucketKey?: (timestamp: number) => string;
 }) {
   const end = Math.min(endCursor, bars.length - 1);
   if (cursor >= end) return cursor;
   const count = Number.isFinite(requestedCount) ? Math.max(1, Math.floor(requestedCount)) : 1;
   const inSession = createReplayTradingSessionPredicate({ session, timeframe, timezone, sessionTimeZone, randomRun, liveMode });
   let destination = Math.min(end, cursor + count);
-  if (inSession) {
+  if (stepBucketKey) {
+    const currentBucket = stepBucketKey(bars[cursor].timestamp);
+    let previousBucket = currentBucket;
+    let remaining = count;
+    let targetCursor: number | undefined;
+    destination = end;
+    for (let index = cursor + 1; index <= end; index += 1) {
+      const bucket = stepBucketKey(bars[index].timestamp);
+      if (bucket !== previousBucket) {
+        if (remaining === 0 && targetCursor != null) break;
+        previousBucket = bucket;
+        targetCursor = undefined;
+      }
+      if (bucket === currentBucket || (inSession && !inSession(bars[index].timestamp))) continue;
+      if (targetCursor == null) remaining -= 1;
+      targetCursor = index;
+      if (remaining === 0) destination = index;
+    }
+  } else if (inSession) {
     let remaining = count;
     destination = end;
     for (let index = cursor + 1; index <= end; index += 1) {
@@ -165,4 +186,25 @@ export function advanceReplayCursor({
     if (!inSession || inSession(bars[pauseCursor].timestamp)) return pauseCursor;
   }
   return destination;
+}
+
+/** Rewinding only moves the cursor; it does not undo orders or executions. */
+export function rewindReplayCursor({
+  bars,
+  cursor,
+  startCursor = 0,
+  stepBucketKey,
+}: {
+  bars: readonly { timestamp: number }[];
+  cursor: number;
+  startCursor?: number;
+  stepBucketKey?: (timestamp: number) => string;
+}) {
+  if (cursor <= startCursor) return cursor;
+  if (!stepBucketKey) return Math.max(startCursor, cursor - 1);
+  const currentBucket = stepBucketKey(bars[cursor].timestamp);
+  for (let index = cursor - 1; index >= startCursor; index -= 1) {
+    if (stepBucketKey(bars[index].timestamp) !== currentBucket) return index;
+  }
+  return startCursor;
 }

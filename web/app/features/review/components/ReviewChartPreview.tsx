@@ -34,6 +34,8 @@ import {
 } from "../../../components/KLineReplayChart";
 import type { MacdSettings, MovingAverageSettings } from "../../../lib/chartIndicators";
 import type { CorporateActionMarker } from "../../../lib/corporateActions";
+import { ChartMarkerToggle, DecisionDetails } from '../../../components/DecisionReview';
+import { decisionChartView, type DecisionRecord } from '../../../lib/decisionWorkflow';
 
 type ReviewChartInstrument = {
   symbol: string;
@@ -133,6 +135,8 @@ type ReviewChartPreviewProps = {
   initialDrawings: PersistedDrawing[];
   tradeMarkers: TradeMarker[];
   decisionMarkers: DecisionMarker[];
+  decisionRecords?: DecisionRecord[]; selectedDecisionId?: string; onDecisionSelect?: (id: string) => void; focusNonce?: number;
+  showChartMarkers?: boolean; onChartMarkersChange?: (visible: boolean) => void;
   corporateActionMarkers?: CorporateActionMarker[];
   onCorporateActionSelect?: (id: string) => void;
   loading?: boolean;
@@ -152,12 +156,16 @@ export function ReviewChartPreview({
   initialDrawings,
   tradeMarkers,
   decisionMarkers,
+  decisionRecords = [], selectedDecisionId = '', onDecisionSelect = () => undefined, focusNonce,
+  showChartMarkers = true, onChartMarkersChange = () => undefined,
   corporateActionMarkers = [],
   onCorporateActionSelect = () => undefined,
   loading = false,
   error = "",
   corporateActionsError = "",
 }: ReviewChartPreviewProps) {
+  const selectedDecision = decisionRecords.find(record => record.id === selectedDecisionId);
+  const planChart = decisionChartView(decisionRecords, bars, { selectedId: selectedDecisionId, visible: showChartMarkers, currentTimestamp: bars.at(-1)?.timestamp ?? 0 });
   const [selectedCorporateActionId, setSelectedCorporateActionId] = useState("");
   const selectedCorporateAction = corporateActionMarkers.find(action => action.id === selectedCorporateActionId);
   const [drawingRequest, setDrawingRequest] = useState<DrawingRequest>(null);
@@ -330,7 +338,7 @@ export function ReviewChartPreview({
           <strong>{instrument.symbol}</strong>
           <small>{instrument.name} · {timeframe} · 以查看为主</small>
         </div>
-        <span className="review-chart-preview-badge">仅查看 · 可画图</span>
+        <ChartMarkerToggle checked={showChartMarkers} onChange={onChartMarkersChange} />
       </header>
 
       <div className="review-chart-area">
@@ -533,10 +541,11 @@ export function ReviewChartPreview({
             macdSettings={macdSettings}
             drawingRequest={drawingRequest}
             clearNonce={clearNonce}
-            tradeMarkers={tradeMarkers}
-      decisionMarkers={decisionMarkers}
+            tradeMarkers={showChartMarkers ? tradeMarkers : []}
+      decisionMarkers={showChartMarkers ? decisionRecords.length ? planChart.markers : decisionMarkers : []}
       corporateActionMarkers={corporateActionMarkers}
-            protectionLines={[]}
+            protectionLines={planChart.protectionLines}
+            focusTimestamp={planChart.markers.find(marker => marker.id === selectedDecisionId)?.timestamp} focusNonce={focusNonce}
             priceSelectionMode={null}
             drawings={drawings}
             selectedDrawingId={selectedDrawingId}
@@ -544,7 +553,7 @@ export function ReviewChartPreview({
             hideDate={false}
             hidePrice={false}
             enableCandleContextMenu={false}
-      onDecisionSelect={() => undefined}
+      onDecisionSelect={onDecisionSelect}
       onCorporateActionSelect={(id) => {
         setSelectedCorporateActionId(id);
         onCorporateActionSelect(id);
@@ -558,6 +567,9 @@ export function ReviewChartPreview({
           {loading && <div className="review-chart-state">正在准备训练行情…</div>}
           {!loading && error && <div className="review-chart-state error" role="alert">{error}</div>}
           {!loading && !error && !bars.length && <div className="review-chart-state">暂无可预览的 K 线</div>}
+          {showChartMarkers && selectedDecision && <DecisionDetails record={selectedDecision}
+            dateLabel={timestamp => new Date(timestamp).toLocaleString('zh-CN', { timeZone: displayTimezone, hour12: false })}
+            priceLabel={price => price.toFixed(instrument.pricePrecision)} onClose={() => onDecisionSelect('')} onLocate={() => onDecisionSelect(selectedDecision.id)} />}
           {selectedCorporateAction && (
             <div className="corporate-action-card" role="status">
               <div><span>权息事件 · {selectedCorporateAction.label}</span><strong>{selectedCorporateAction.date}</strong></div>

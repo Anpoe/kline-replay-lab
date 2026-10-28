@@ -1,11 +1,17 @@
 import { mt4ServerTime } from './mt4Clock.mjs';
 import { mt4CandleCloseTime } from './mt4CandleCountdown.mjs';
 
-export const DEFAULT_MT4_CHART_MOTION = Object.freeze({ enabled: false, startSeconds: 10, endSeconds: 10 });
+export const DEFAULT_MT4_CHART_MOTION = Object.freeze({ enabled: false, startSeconds: 10, endSeconds: 10, soundEnabled: false });
 export function normalizeMt4ChartMotion(value) {
   const input = value && typeof value === 'object' && !Array.isArray(value) ? value : {};
   const seconds = (value, fallback) => typeof value === 'number' && Number.isFinite(value) ? Math.max(1, Math.min(86400, Math.round(value))) : fallback;
-  return { enabled: input.enabled === true, startSeconds: seconds(input.startSeconds, 10), endSeconds: seconds(input.endSeconds, 10) };
+  return { enabled: input.enabled === true, startSeconds: seconds(input.startSeconds, 10), endSeconds: seconds(input.endSeconds, 10), soundEnabled: input.soundEnabled === true };
+}
+
+export function shouldPlayMt4WindowSound(previous, next) {
+  return !!previous && previous.scope === next.scope && previous.window === 'frozen' && next.window === 'live'
+    && next.settings.enabled === true && next.settings.soundEnabled === true
+    && ['enabled', 'soundEnabled', 'startSeconds', 'endSeconds'].every(key => previous.settings[key] === next.settings[key]);
 }
 
 export function mt4ChartWindow({ settings, openTime, timeframe, serverTime, receivedAt, now, connected, anchor, monotonicNow }) {

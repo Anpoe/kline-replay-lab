@@ -1,8 +1,14 @@
 'use client';
-import type { ReactNode } from 'react';
+import { useId, type ReactNode } from 'react';
 import { Pencil, Trash2, X } from 'lucide-react';
 import { decisionPlanScore } from '../lib/decisionPlan';
 import type { DecisionRecord } from '../lib/decisionWorkflow';
+
+export function ChartMarkerToggle({ checked, onChange, className = '' }: { checked: boolean; onChange: (checked: boolean) => void; className?: string }) {
+  const helpId = useId();
+  const help = '显示或隐藏图表上的交易与计划标记；当前委托和持仓的保护价保持显示。';
+  return <label className={`chart-marker-toggle ${className}`} title={help}><input type="checkbox" checked={checked} onChange={event => onChange(event.target.checked)} aria-label="图表标记" aria-describedby={helpId} /><span>图表标记</span><span id={helpId} className="live-sr-only">{help}</span></label>;
+}
 
 export type DecisionTradeView = {
   id: string; label: string; side: 'long' | 'short'; quantity: string; result: string; tone?: 'up' | 'down';

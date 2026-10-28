@@ -90,7 +90,7 @@ export class Mt4Archive {
   nextMarketRequest(key) { return this.access(db => db.prepare("SELECT symbol,timeframe,anchor FROM market_requests WHERE account_key=? AND status='queued' ORDER BY updated_at,anchor LIMIT 1").get(key)); }
   finishMarketRequest(key, symbol, timeframe, anchor, status) { return this.access(db => db.prepare('UPDATE market_requests SET status=?,updated_at=? WHERE account_key=? AND symbol=? AND timeframe=? AND anchor=?').run(status, this.now(), key, symbol, timeframe, anchor)); }
   retryMarketRequests(key) { return this.access(db => db.prepare("UPDATE market_requests SET status='queued' WHERE account_key=? AND status='missing'").run(key)); }
-  accounts() { return this.access(db => db.prepare('SELECT * FROM accounts ORDER BY updated_at DESC').all().map(a => ({ accountKey: a.account_key, login: a.login, server: a.server, mode: a.mode, currency: a.currency, updatedAt: a.updated_at, scan: JSON.parse(a.scan_json), market: Object.fromEntries(db.prepare('SELECT status,COUNT(*) AS n FROM market_requests WHERE account_key=? GROUP BY status').all(a.account_key).map(row => [row.status,row.n])), symbols: db.prepare('SELECT DISTINCT symbol FROM orders WHERE account_key=? ORDER BY symbol').all(a.account_key).map(r => r.symbol) }))); }
+  accounts() { return this.access(db => db.prepare('SELECT * FROM accounts ORDER BY updated_at DESC').all().map(a => ({ accountKey: a.account_key, login: a.login, server: a.server, mode: a.mode, currency: a.currency, updatedAt: a.updated_at, scan: JSON.parse(a.scan_json), market: Object.fromEntries(db.prepare('SELECT status,COUNT(*) AS n FROM market_requests WHERE account_key=? GROUP BY status').all(a.account_key).map(row => [row.status,row.n])), symbols: db.prepare('SELECT symbol FROM orders WHERE account_key=? UNION SELECT symbol FROM bars WHERE account_key=? ORDER BY symbol').all(a.account_key,a.account_key).map(r => r.symbol) }))); }
   filterWhere({ accountKey, symbol = '', from = '', to = '' }) {
     ensure(/^[a-f0-9]{64}$/.test(accountKey), '请选择账户');
     let bounds; try { bounds=dateRangeBounds(from,to); } catch(error) { throw new ArchiveError(error.message); }
@@ -110,6 +110,26 @@ export class Mt4Archive {
       const decode=r=>({...JSON.parse(r.data_json),timeframe:r.timeframe,firstSeen:r.first_seen,lastSeen:r.last_seen,...(r.position!=null?{position:r.position}: {})});
       const chartRows=chartSymbol?db.prepare(`SELECT * FROM (SELECT *,ROW_NUMBER() OVER(ORDER BY ${time} DESC,ticket DESC,symbol)-1 AS position FROM orders WHERE ${where}) WHERE symbol=? AND json_extract(data_json,'$.type')<2 ORDER BY position LIMIT 2001`).all(...args,chartSymbol):[];
       return { total, page:actualPage, orders:rows.map(decode), chartOrders:chartRows.slice(0,2000).map(decode), chartLimited:chartRows.length>2000, updatedAt:this.now() };
+    });
+  }
+  bars({ accountKey, symbol, timeframe, before = 0, after = 0, focus = 0, limit = 1000 }) {
+    timeframe = Number(timeframe); context(accountKey, symbol, timeframe);
+    const cursors = [before, after, focus].map(Number);
+    ensure(cursors.every(n => Number.isSafeInteger(n) && n >= 0) && cursors.filter(Boolean).length <= 1, '行情读取位置无效');
+    ensure(Number.isInteger(Number(limit)) && Number(limit) > 0 && Number(limit) <= 2000, '行情读取数量无效');
+    [before, after, focus] = cursors; limit = Number(limit);
+    return this.access(db => {
+      const args = [accountKey, symbol, timeframe];
+      const read = (condition, cursor, count, direction) => db.prepare(`SELECT data_json FROM bars WHERE account_key=? AND symbol=? AND timeframe=? ${condition} ORDER BY timestamp ${direction} LIMIT ?`).all(...args, ...(cursor ? [cursor] : []), count).map(row => JSON.parse(row.data_json));
+      let bars;
+      if (focus) {
+        const left = read('AND timestamp<=?', focus, Math.ceil(limit / 2), 'DESC').reverse();
+        const right = read('AND timestamp>?', focus, limit - left.length, 'ASC');
+        bars = [...left, ...right];
+      } else bars = before ? read('AND timestamp<?', before, limit, 'DESC').reverse() : after ? read('AND timestamp>?', after, limit, 'ASC') : read('', 0, limit, 'DESC').reverse();
+      const exists = (comparison, timestamp) => !!db.prepare(`SELECT 1 FROM bars WHERE account_key=? AND symbol=? AND timeframe=? AND timestamp${comparison}? LIMIT 1`).get(...args, timestamp);
+      const spec = db.prepare('SELECT data_json FROM instruments WHERE account_key=? AND symbol=?').get(accountKey, symbol);
+      return { accountKey, symbol, timeframe, bars, hasBefore: bars.length > 0 && exists('<', bars[0].timestamp), hasAfter: bars.length > 0 && exists('>', bars.at(-1).timestamp), digits: spec ? JSON.parse(spec.data_json).digits : 5, updatedAt: this.now() };
     });
   }
   chart({accountKey,symbol,timeframe,from='',to=''}) {
@@ -142,6 +162,16 @@ export class Mt4Archive {
     context(key, symbol, timeframe); ensure(scope === 'chart' || /^trade:\d+$/.test(scope), '分析范围无效');
     return this.access(db => { const row = db.prepare('SELECT * FROM analyses WHERE account_key=? AND symbol=? AND timeframe=? AND scope=?').get(key, symbol, Number(timeframe), scope);
       return row ? { revision: row.revision, data: JSON.parse(row.data_json), updatedAt: row.updated_at } : { revision: 0, data: null, updatedAt: 0 }; });
+  }
+  decisionPlans({ accountKey, symbol, offset = 0, limit = 100 }) {
+    context(accountKey, symbol, 1);
+    offset = Number(offset); limit = Number(limit);
+    ensure(Number.isSafeInteger(offset) && offset >= 0 && Number.isInteger(limit) && limit >= 1 && limit <= 100, '计划分页无效');
+    return this.access(db => {
+      const rows = db.prepare('SELECT timeframe,scope,data_json FROM analyses WHERE account_key=? AND symbol=? ORDER BY timeframe,scope LIMIT ? OFFSET ?').all(accountKey, symbol, limit + 1, offset);
+      const plans = rows.slice(0, limit).flatMap(row => (JSON.parse(row.data_json).decisions ?? []).map(decision => ({ timeframe: row.timeframe, scope: row.scope, decision: { ...decision, drawings: [] } })));
+      return { plans, nextOffset: rows.length > limit ? offset + limit : null };
+    });
   }
   saveAnalysis({ accountKey, symbol, timeframe, scope = 'chart', revision, data, migrate = false }) {
     context(accountKey, symbol, timeframe);

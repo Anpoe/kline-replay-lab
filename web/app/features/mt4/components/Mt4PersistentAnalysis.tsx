@@ -4,16 +4,17 @@ import { useCallback, useEffect, useRef, useState, type ComponentProps } from 'r
 import { Mt4ChartWorkbench } from './Mt4ChartWorkbench';
 import { emptyAnalysis, readAnalysis, type Mt4Analysis } from '../mt4Analysis';
 import { requestMt4Archive } from '../mt4Gateway';
-import type { ArchiveAnalysis, ArchiveContext } from '../mt4ArchiveContracts';
+import type { ArchiveAnalysis, ArchiveContext, ArchiveDecisionPlan, ArchiveDecisionPlans } from '../mt4ArchiveContracts';
 
 export function downloadArchiveJson(value: unknown, name: string) {
   const url = URL.createObjectURL(new Blob([typeof value === 'string' ? value : JSON.stringify(value, null, 2)], { type: 'application/json' }));
   const a = document.createElement('a'); a.href = url; a.download = name; a.click(); setTimeout(() => URL.revokeObjectURL(url), 1000);
 }
 type WorkbenchProps = ComponentProps<typeof Mt4ChartWorkbench>;
-export function Mt4PersistentAnalysis({ context, seed, onNotice, ...props }: Omit<WorkbenchProps, 'initialAnalysis' | 'onPersist' | 'persistedAnalysis' | 'accountKey'> & { context: ArchiveContext; seed?: Mt4Analysis }) {
+export function Mt4PersistentAnalysis({ context, seed, onNotice, ...props }: Omit<WorkbenchProps, 'initialAnalysis' | 'onPersist' | 'persistedAnalysis' | 'accountKey' | 'planContext' | 'archivedPlans'> & { context: ArchiveContext; seed?: Mt4Analysis }) {
   const [loaded, setLoaded] = useState<Mt4Analysis | null>(null), [error, setError] = useState(''), [reload, setReload] = useState(0);
   const [persistedAnalysis, setPersistedAnalysis] = useState<Mt4Analysis | null>(null);
+  const [archivedPlans, setArchivedPlans] = useState<ArchiveDecisionPlan[]>([]), [plansError, setPlansError] = useState(''), [plansRetry, setPlansRetry] = useState(0);
   const revision = useRef(0), pending = useRef<Mt4Analysis | null>(null), current = useRef<Mt4Analysis | null>(null), saving = useRef(false), conflict = useRef(false), mounted = useRef(true), timer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [identity] = useState(context), [initialSeed] = useState(seed);
   const legacyKey = props.storageKey;
@@ -82,9 +83,35 @@ export function Mt4PersistentAnalysis({ context, seed, onNotice, ...props }: Omi
     const warn = (event: BeforeUnloadEvent) => { if (pending.current || saving.current) { event.preventDefault(); event.returnValue = ''; } };
     window.addEventListener('beforeunload', warn); return () => window.removeEventListener('beforeunload', warn);
   }, []);
+  useEffect(() => {
+    if (props.readOnly) return;
+    const controller = new AbortController(); let timer: ReturnType<typeof setTimeout>;
+    const loadPlans = async () => {
+      try {
+        if (document.visibilityState !== 'hidden') {
+          const plans: ArchiveDecisionPlan[] = []; let offset: number | null = 0;
+          do {
+            const page: ArchiveDecisionPlans = await requestMt4Archive({ action: 'plans', accountKey: identity.accountKey, symbol: identity.symbol, offset }, undefined, AbortSignal.any([controller.signal, AbortSignal.timeout(15000)]));
+            if (!Array.isArray(page.plans) || (page.nextOffset !== null && (!Number.isSafeInteger(page.nextOffset) || page.nextOffset <= offset))) throw new Error('请重启训练营控制面板后重新读取计划标记。');
+            // Use the same legacy-data normalization as the owning editor.
+            for (const plan of page.plans) {
+              const decision = readAnalysis(JSON.stringify({ version: 1, decisions: [plan.decision] })).decisions[0];
+              if (decision) plans.push({ ...plan, decision });
+            }
+            offset = page.nextOffset;
+          } while (offset !== null && !controller.signal.aborted);
+          if (!controller.signal.aborted) { setArchivedPlans(plans); setPlansError(''); }
+        }
+      } catch { if (!controller.signal.aborted) setPlansError('计划标记未能更新，请重试；仍未恢复时，请重启训练营控制面板。'); }
+      if (!controller.signal.aborted) timer = setTimeout(() => void loadPlans(), 3000);
+    };
+    void loadPlans();
+    return () => { controller.abort(); clearTimeout(timer); };
+  }, [identity.accountKey, identity.symbol, props.readOnly, plansRetry, persistedAnalysis]);
   if (props.readOnly) return <Mt4ChartWorkbench accountKey={identity.accountKey} {...props} onNotice={onNotice} initialAnalysis={initialSeed ?? emptyAnalysis()} onPersist={() => {}} />;
   return <>
     {error && <div className="mt4-archive-save" role="status"><span className="down" role="alert">{error}</span><button className="ghost-button" onClick={() => { conflict.current = false; if (loaded) void flush(); else setReload(n => n + 1); }}>重试</button><button className="ghost-button" onClick={() => downloadArchiveJson(current.current ?? localStorage.getItem(legacyKey) ?? '{}', 'MT4-绘图与决策.json')}>导出当前内容</button><button className="ghost-button" onClick={() => { if (window.confirm('重新读取会放弃本页未保存的编辑，请先导出当前内容。继续吗？')) { pending.current = null; localStorage.removeItem(outboxKey); setLoaded(null); setReload(n => n + 1); } }}>重新读取</button></div>}
-    {loaded && <Mt4ChartWorkbench accountKey={identity.accountKey} {...props} initialAnalysis={loaded} persistedAnalysis={persistedAnalysis} onPersist={persist} />}
+    {plansError && <div className="mt4-archive-save" role="status"><span className="down">{plansError}</span><button className="ghost-button" onClick={() => setPlansRetry(n => n + 1)}>重试读取计划</button></div>}
+    {loaded && <Mt4ChartWorkbench accountKey={identity.accountKey} {...props} planContext={identity} archivedPlans={archivedPlans} initialAnalysis={loaded} persistedAnalysis={persistedAnalysis} onPersist={persist} />}
   </>;
 }

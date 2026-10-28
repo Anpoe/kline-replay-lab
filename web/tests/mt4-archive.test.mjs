@@ -17,6 +17,24 @@ async function fixture(t) {
   t.after(async () => { archive.close(); await rm(dir, { recursive: true, force: true }); });
   return { dir, archive };
 }
+
+test('saved plan lookup spans chart periods and trade scopes while preserving account and symbol boundaries', async t => {
+  const { archive }=await fixture(t),a=snapshot(),key=archiveAccountKey(a.account);archive.ingest(a);archive.ingest(snapshot('456'));
+  const plan=id=>({id,recordedAt:1000,candleTimestamp:1800000000000,referencePrice:2000,draft:{stopLoss:'1990',takeProfit:'2030'},drawings:[{id:'saved-drawing'}]});
+  const data=id=>({version:1,draft:{},drawings:[],decisions:[plan(id)]});
+  archive.saveAnalysis({accountKey:key,symbol:order.symbol,timeframe:5,scope:'trade:42',revision:0,data:data('historical')});
+  archive.saveAnalysis({accountKey:key,symbol:order.symbol,timeframe:15,revision:0,data:data('live')});
+  archive.saveAnalysis({accountKey:archiveAccountKey(snapshot('456').account),symbol:order.symbol,timeframe:5,revision:0,data:data('other-account')});
+  archive.saveAnalysis({accountKey:key,symbol:'EURUSD.a',timeframe:5,revision:0,data:data('other-symbol')});
+  const first=archive.decisionPlans({accountKey:key,symbol:order.symbol,limit:1});
+  const second=archive.decisionPlans({accountKey:key,symbol:order.symbol,offset:first.nextOffset,limit:1});
+  assert.deepEqual([...first.plans,...second.plans].map(p=>p.decision.id),['historical','live']);
+  assert.equal(first.plans[0].scope,'trade:42');assert.equal(first.plans[0].timeframe,5);
+  assert.deepEqual(first.plans[0].decision.drawings,[]);
+  assert.equal(second.nextOffset,null);
+  assert.equal(archive.analysis(key,order.symbol,5,'trade:42').data.decisions[0].drawings.length,1);
+  assert.throws(()=>archive.decisionPlans({accountKey:key,symbol:order.symbol,offset:-1}),/分页/);
+});
 test('account/server/type and raw symbol isolate identical tickets; reimport is idempotent', async t => {
   const { archive } = await fixture(t), a = snapshot(), b = snapshot('456');
   archive.ingest(a); archive.ingest(a); archive.ingest(b);
@@ -77,6 +95,46 @@ async function bridgeFixture(t) {
   const heartbeat = extra => bridge.terminal(pairing.token, { ...payload, ...extra });
   return { bridge, root, payload, heartbeat, key: archiveAccountKey(payload.account) };
 }
+test('all observed candles survive restart and cursor paging beyond 5000, isolated by account/symbol/period', async t => {
+  const { archive, dir } = await fixture(t), a = snapshot(), key = archiveAccountKey(a.account);
+  archive.ingest(a); archive.ingest(snapshot('456'));
+  const bars = Array.from({ length: 6505 }, (_, i) => ({ ...a.chart.bars[0], timestamp: a.chart.bars[0].timestamp - (6504 - i) * 300000 }));
+  archive.saveBars(key, order.symbol, 5, bars);
+  archive.saveBars(key, order.symbol, 15, [bars[0]]);
+  archive.saveBars(key, 'EURUSD.a', 5, [bars[1]]);
+  const restarted = new Mt4Archive({ directory: dir });
+  const query = { accountKey: key, symbol: order.symbol, timeframe: 5 };
+  let page = restarted.bars(query), read = [...page.bars];
+  while (page.hasBefore) { page = restarted.bars({ ...query, before: read[0].timestamp }); read = [...page.bars, ...read]; }
+  assert.deepEqual(read, bars); assert.equal(new Set(read.map(bar => bar.timestamp)).size, 6505);
+  const focused = restarted.bars({ ...query, focus: bars[2000].timestamp, limit: 200 });
+  assert.equal(focused.hasBefore, true); assert.equal(focused.hasAfter, true); assert.ok(focused.bars.some(b => b.timestamp === bars[2000].timestamp));
+  const after = restarted.bars({ ...query, after: focused.bars.at(-1).timestamp, limit: 200 });
+  assert.equal(after.bars[0].timestamp, focused.bars.at(-1).timestamp + 300000);
+  assert.equal(restarted.bars({ ...query, timeframe: 15 }).bars.length, 1);
+  assert.equal(restarted.bars({ ...query, symbol: 'EURUSD.a' }).bars.length, 1);
+  assert.ok(restarted.accounts().find(account => account.accountKey === key).symbols.includes('EURUSD.a'), 'Observed instruments remain discoverable without any trade');
+  assert.equal(restarted.bars({ ...query, accountKey: archiveAccountKey(snapshot('456').account) }).bars.length, 1);
+  assert.throws(() => restarted.bars({ ...query, before: -1 }), /位置/);
+  assert.throws(() => restarted.bars({ ...query, limit: 500000 }), /数量/);
+  assert.throws(() => restarted.bars({ ...query, before: 1, after: 2 }), /位置/);
+});
+test('fast displayed tail and final close are durable without rebuilding archive order evidence', async t => {
+  const f = await bridgeFixture(t);
+  const full = { ...f.payload, commandPollVersion: 1, marketPollVersion: 1 };
+  await f.heartbeat(full);
+  const original = f.payload.chart.bars[0];
+  const closed = { ...original, close: 2001, volume: 100 };
+  const next = { ...original, timestamp: original.timestamp + 300000, close: 2000.5 };
+  let ingests = 0; const ingest = f.bridge.archive.ingest.bind(f.bridge.archive);
+  f.bridge.archive.ingest = (...args) => { ingests++; return ingest(...args); };
+  await f.bridge.terminal(f.bridge.state.token, { ...full, chart: { ...full.chart, bars: [closed, next] } }, { fast: true });
+  assert.equal(ingests, 0);
+  const restarted = new Mt4Archive({ directory: path.join(f.root, 'mt4') });
+  const result = restarted.bars({ accountKey: f.key, symbol: order.symbol, timeframe: 5 });
+  assert.deepEqual(result.bars, [closed, next]);
+  assert.equal(restarted.trade(f.key, order.symbol, order.ticket, 5).events.length, 1);
+});
 test('bridge paginates more than 50 historical orders, persists cursors, then collects historical candles', async t => {
   const f = await bridgeFixture(t), history = Array.from({ length: 125 }, (_, i) => ({ ...order, ticket: 100 + i, openTime: 1790000000 + i * 100, closeTime: 1790000060 + i * 100, closePrice: 2010 }));
   const extra = { orders: [], orderCount: 0, history: history.slice(-50), historyTotal: 125 };

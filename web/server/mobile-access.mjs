@@ -5,7 +5,9 @@ import { networkInterfaces } from "node:os";
 import path from "node:path";
 
 const PAIR_TTL = 5 * 60_000;
-export const DEVICE_TTL = 30 * 86400_000;
+// Browsers bound persistent cookie lifetimes; active sessions renew this cookie.
+// Device approval itself has no expiry and ends only when explicitly revoked.
+export const COOKIE_TTL = 400 * 86400_000;
 export const mobileCookie = "kline_mobile";
 const hash = (value) => createHash("sha256").update(value).digest("hex");
 const secret = () => randomBytes(32).toString("base64url");
@@ -59,10 +61,17 @@ export class MobileAccess {
     try {
       const parsed = JSON.parse(await readFile(this.stateFile, "utf8"));
       ensure(parsed.version === 1 && typeof parsed.enabled === "boolean" && Array.isArray(parsed.devices) && parsed.devices.length <= 50, "invalid state");
-      ensure(parsed.devices.every((d) => typeof d.id === "string" && typeof d.name === "string" && d.name.length <= 40 && /^[a-f0-9]{64}$/.test(d.tokenHash) && Number.isFinite(d.createdAt) && Number.isFinite(d.expiresAt)), "invalid devices");
+      ensure(parsed.devices.every((d) => typeof d.id === "string" && typeof d.name === "string" && d.name.length <= 40 && /^[a-f0-9]{64}$/.test(d.tokenHash) && Number.isFinite(d.createdAt) && (d.expiresAt === null || Number.isFinite(d.expiresAt))), "invalid devices");
       this.state = parsed;
+      // Preserve active approvals across the change, without reviving expired ones.
+      if (parsed.devices.some(d => d.expiresAt !== null && d.expiresAt > this.now())) {
+        await this.transaction(state => ({ ...state, devices: state.devices.map(d => d.expiresAt !== null && d.expiresAt > this.now() ? { ...d, expiresAt: null } : d) }));
+      }
     } catch (error) {
-      if (error.code !== "ENOENT") this.storageError = "手机授权记录无法读取，访问已关闭。请在电脑上重新开启并配对。";
+      if (error.code !== "ENOENT") {
+        this.state = { version: 1, enabled: false, devices: [] };
+        this.storageError ||= "手机授权记录无法读取，访问已关闭。请在电脑上重新开启并配对。";
+      }
     }
     return this;
   }
@@ -74,7 +83,7 @@ export class MobileAccess {
       storageError: this.storageError,
       challenge: this.challenge,
       pending: [...this.pending.values()].filter((p) => p.status === "pending").map(({ id, name, number, expiresAt }) => ({ id, name, number, expiresAt })),
-      devices: this.state.devices.map(({ id, name, createdAt, expiresAt }) => ({ id, name, createdAt, expiresAt, expired: expiresAt <= this.now() })),
+      devices: this.state.devices.map(({ id, name, createdAt, expiresAt }) => ({ id, name, createdAt, expiresAt, expired: expiresAt !== null && expiresAt <= this.now() })),
     };
   }
 
@@ -113,25 +122,38 @@ export class MobileAccess {
     return this.challenge;
   }
 
-  pair(code, name) {
+  pair(code, name, { allowWithoutCode = false } = {}) {
     this.prune();
     ensure(this.state.enabled, "手机访问未开启，请在电脑上开启。", 403);
-    ensure(this.challenge && same(code, this.challenge.code), "二维码已使用或过期，请在电脑上刷新二维码后重新扫码。", 410);
+    const usesChallenge = this.challenge && same(code, this.challenge.code);
+    ensure(usesChallenge || (allowWithoutCode && code === undefined), "二维码已使用或过期，请在电脑上刷新二维码后重新扫码。", 410);
     ensure(typeof name === "string" && name.trim().length > 0 && name.trim().length <= 40 && !/[\x00-\x1f\x7f]/.test(name), "请填写 1–40 字的设备名称。");
     ensure(this.pending.size < 20 && this.state.devices.length < 50, "配对设备过多，请在电脑上清理后重试。", 429);
     const token = secret();
     const request = { id: randomUUID(), name: name.trim(), number: String(randomInt(1_000_000)).padStart(6, "0"), secretHash: hash(token), expiresAt: this.now() + PAIR_TTL, status: "pending" };
     this.pending.set(request.id, request);
-    this.challenge = null;
+    if (usesChallenge) this.challenge = null;
     return { id: request.id, secret: token, number: request.number, expiresAt: request.expiresAt };
   }
 
-  approve(id, number) {
+  async approve(id, number) {
     this.prune();
     const request = this.pending.get(id);
     ensure(this.state.enabled && request?.status === "pending", "配对请求已过期，请让手机重新扫码。", 410);
     ensure(same(request.number, number), "核对码不一致，请刷新配对列表。", 409);
-    request.status = "approved";
+    request.status = "approving";
+    try {
+      await this.transaction(state => {
+        ensure(state.enabled && this.pending.get(id) === request, "配对已结束，请重新请求连接。", 410);
+        ensure(state.devices.length < 50, "授权设备过多，请在电脑上清理后重试。", 429);
+        state.devices.push({ id: request.id, name: request.name, tokenHash: request.secretHash, createdAt: this.now(), expiresAt: null });
+        return state;
+      });
+      request.status = "approved";
+    } catch (error) {
+      request.status = "pending";
+      throw error;
+    }
   }
 
   deny(id) {
@@ -143,24 +165,19 @@ export class MobileAccess {
   async claim(id, token) {
     this.prune();
     const request = this.pending.get(id);
+    // A persisted approval also completes a claim after a restart or a lost reply.
+    if (!request && this.authorize(token) && this.state.devices.some(d => d.id === id && same(d.tokenHash, hash(token)))) return { status: "approved", token };
     ensure(this.state.enabled && typeof token === "string" && token.length <= 100 && request && same(request.secretHash, hash(token)), "配对已结束，请在电脑上刷新二维码后重新扫码。", 410);
-    if (request.status === "pending" || request.status === "denied") return { status: request.status };
-    await this.transaction((state) => {
-      ensure(state.enabled && this.pending.get(id) === request, "配对已结束，请重新扫码。", 410);
-      if (!request.claimed && !state.devices.some((d) => d.id === id)) {
-        ensure(state.devices.length < 50, "授权设备过多，请在电脑上清理后重试。", 429);
-        state.devices.push({ id: request.id, name: request.name, tokenHash: request.secretHash, createdAt: this.now(), expiresAt: this.now() + DEVICE_TTL });
-      } else ensure(state.devices.some((d) => d.id === id), "授权已撤销，请重新扫码。", 403);
-      return state;
-    });
-    request.claimed = true;
+    if (request.status === "pending" || request.status === "approving") return { status: "pending" };
+    if (request.status === "denied") return { status: "denied" };
+    ensure(this.state.devices.some(d => d.id === id && same(d.tokenHash, request.secretHash)), "授权已撤销，请重新请求连接。", 403);
     return { status: "approved", token };
   }
 
   authorize(token) {
     if (!this.state.enabled || typeof token !== "string" || token.length > 100) return false;
     const digest = hash(token);
-    return this.state.devices.some((device) => device.expiresAt > this.now() && same(device.tokenHash, digest));
+    return this.state.devices.some((device) => (device.expiresAt === null || device.expiresAt > this.now()) && same(device.tokenHash, digest));
   }
 
   async revoke(id) {

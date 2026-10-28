@@ -310,9 +310,11 @@ bool BO_SavePanelState(string stateKey, string symbol, int orderCount, int lotMo
                        int bridgeConfirmSeconds,
                        bool candleAlertEnabled, int candleAlertSeconds,
                        string templateName, int &slUnits[], double &slValues[],
-                       int &tpUnits[], double &tpValues[], string &error)
+                       int &tpUnits[], double &tpValues[], string &error, int entryMode=0, double pendingPrice=0.0)
   {
    error="";
+   if(entryMode<0 || entryMode>2 || !MathIsValidNumber(pendingPrice) || pendingPrice<0.0)
+     { error="panel order mode or pending price is invalid"; return(false); }
    string path=BO_PanelStatePath(stateKey);
    if(path=="")
      {
@@ -388,6 +390,8 @@ bool BO_SavePanelState(string stateKey, string symbol, int orderCount, int lotMo
       FileWrite(handle, StringFormat("row%d.tpValue", i+1), DoubleToString(tpValues[i], 8));
      }
 
+   FileWrite(handle, "entryMode", entryMode);
+   FileWrite(handle, "pendingPrice", DoubleToString(pendingPrice, 8));
    FileClose(handle);
    return(true);
   }
@@ -401,8 +405,9 @@ bool BO_LoadPanelState(string stateKey, string currentSymbol, string &savedSymbo
                        int &bridgeConfirmSeconds,
                        bool &candleAlertEnabled, int &candleAlertSeconds,
                        string &templateName, int &slUnits[], double &slValues[],
-                       int &tpUnits[], double &tpValues[], string &error)
+                       int &tpUnits[], double &tpValues[], int &entryMode, double &pendingPrice, string &error)
   {
+   entryMode=0; pendingPrice=0.0;
    savedSymbol="";
    orderCount=0;
    lotMode=BO_LOTS_FIXED;
@@ -516,6 +521,8 @@ bool BO_LoadPanelState(string stateKey, string currentSymbol, string &savedSymbo
       else if(key=="bridgeConfirmSeconds") { savedBridgeConfirmSeconds=StrToInteger(value); hasBridgeConfirmSeconds=true; }
       else if(key=="candleAlertEnabled") { savedCandleAlertEnabled=StrToInteger(value); hasCandleAlertEnabled=true; }
       else if(key=="candleAlertSeconds") { savedCandleAlertSeconds=StrToInteger(value); hasCandleAlertSeconds=true; }
+      else if(key=="entryMode") { entryMode=StrToInteger(value); }
+      else if(key=="pendingPrice") { pendingPrice=StrToDouble(value); }
       else if(key=="templateName") { savedTemplateName=value; hasTemplateName=true; }
       else
         {
@@ -581,6 +588,8 @@ bool BO_LoadPanelState(string stateKey, string currentSymbol, string &savedSymbo
                                    savedBridgeConfirmSeconds, error))
       return(false);
 
+   if(entryMode<0 || entryMode>2 || !MathIsValidNumber(pendingPrice) || pendingPrice<0.0)
+     { error="panel order mode or pending price is invalid"; return(false); }
    slippagePoints=savedSlippage;
    accountWideClose=(savedAccountWide==1);
    confirmClose=(savedConfirm==1);
@@ -596,6 +605,26 @@ bool BO_LoadPanelState(string stateKey, string currentSymbol, string &savedSymbo
       candleAlertSeconds=savedCandleAlertSeconds;
    templateName=BO_SanitizeTemplateName(savedTemplateName);
    return(true);
+  }
+
+bool BO_LoadPanelState(string stateKey, string currentSymbol, string &savedSymbol,
+                       int &orderCount, int &lotMode, double &fixedLots,
+                       double &riskPercent, int &slippagePoints,
+                       bool &accountWideClose, bool &confirmClose, bool &settingsExpanded,
+                       int &bridgeMode, int &bridgePollMilliseconds,
+                       int &bridgeOpenTtlSeconds, int &bridgeCloseTtlSeconds,
+                       int &bridgeConfirmSeconds,
+                       bool &candleAlertEnabled, int &candleAlertSeconds,
+                       string &templateName, int &slUnits[], double &slValues[],
+                       int &tpUnits[], double &tpValues[], string &error)
+  {
+   int entryMode=0; double pendingPrice=0.0;
+   return(BO_LoadPanelState(stateKey, currentSymbol, savedSymbol, orderCount, lotMode,
+                            fixedLots, riskPercent, slippagePoints, accountWideClose,
+                            confirmClose, settingsExpanded, bridgeMode, bridgePollMilliseconds,
+                            bridgeOpenTtlSeconds, bridgeCloseTtlSeconds, bridgeConfirmSeconds,
+                            candleAlertEnabled, candleAlertSeconds, templateName,
+                            slUnits, slValues, tpUnits, tpValues, entryMode, pendingPrice, error));
   }
 
 // Overload for backward compatibility (without candle alert parameters)

@@ -1,5 +1,7 @@
 import type { Mt4CommandInput, Mt4Order, Mt4Status } from "./mt4Contracts.ts";
 
+import { executeMt4Command, mt4CommandDelay } from "./mt4CommandRunner.ts";
+
 type Target = Pick<Mt4Order, "ticket" | "symbol" | "type" | "lots" | "openTime">;
 export type CloseAllPlan = { accountKey: string; login: string; server: string; mode: string; sessionId: string; positions: Target[] };
 export type CloseAllProgress = { total: number; closed: number; absent: number; remaining: number; currentTicket?: number };
@@ -36,15 +38,8 @@ export function captureCloseAllPlan(state: Mt4Status): CloseAllPlan {
   if (!positions.length) throw Error("当前没有可平仓的持仓。");
   return { accountKey: state.accountKey, login: snapshot.account.login, server: snapshot.account.server, mode: snapshot.account.mode, sessionId: snapshot.sessionId, positions };
 }
-function delay(milliseconds: number, signal?: AbortSignal) {
-  return new Promise<void>((resolve,reject) => {
-    const abort = () => { clearTimeout(timer); signal?.removeEventListener("abort",abort); reject(Error("已停止，已发送的指令仍需核对。")); };
-    const timer = setTimeout(() => { signal?.removeEventListener("abort",abort); resolve(); }, milliseconds);
-    signal?.addEventListener("abort",abort,{once:true}); if (signal?.aborted) abort();
-  });
-}
 export async function runCloseAll(plan: CloseAllPlan, slippage: number, options: Options): Promise<CloseAllResult> {
-  const now = options.now ?? Date.now, wait = options.wait ?? delay;
+  const now = options.now ?? Date.now, wait = options.wait ?? mt4CommandDelay;
   const progress: CloseAllProgress = {total:plan.positions.length,closed:0,absent:0,remaining:plan.positions.length};
   let state: Mt4Status | undefined, pendingCommand: Mt4CommandInput | undefined;
   const publish = () => { progress.remaining = progress.total-progress.closed-progress.absent; options.onProgress?.({...progress}); };
@@ -70,26 +65,20 @@ export async function runCloseAll(plan: CloseAllPlan, slippage: number, options:
       progress.currentTicket = target.ticket; publish();
       if (options.shouldStop?.()) throw Error("已停止后续平仓。");
       pendingCommand = command; options.onPending?.(command);
-      let next: Mt4Status;
-      try { next = await request({action:"command",command}); }
-      catch(e) { if (options.isDefiniteRejection?.(e)) { pendingCommand = undefined; options.onPending?.(null); } throw e; }
-      const deadline = now() + (options.timeoutMs ?? 30000);
-      while (true) {
-        assertRunning(); requireContext(next,plan);
-        const receipt = next.commands.find(c => c.id === command.id);
-        if (receipt) {
-          if (receipt.accountKey !== plan.accountKey || receipt.login !== plan.login || receipt.server !== plan.server || receipt.mode !== plan.mode || receipt.symbol !== target.symbol || receipt.ticket !== target.ticket || receipt.type !== "close") throw Error("平仓回报与本次订单不一致，请在 MT4 核对。");
-          if (["failed","cancelled","resolved","unknown"].includes(receipt.status)) {
-            if (receipt.status === "failed" || receipt.status === "cancelled") { pendingCommand = undefined; options.onPending?.(null); }
-            throw Error(receipt.error || "平仓结果尚未确认，请在 MT4 核对执行回报。");
-          }
-          if (receipt.status === "succeeded" && !next.snapshot!.orders.some(o => o.ticket === target.ticket)) {
-            pendingCommand = undefined; options.onPending?.(null); progress.closed++; delete progress.currentTicket; publish(); break;
-          }
-        }
-        if (now() >= deadline) throw Error("平仓回报与持仓尚未确认一致，请重新读取并在 MT4 核对。");
-        await wait(150,options.signal); next = await request();
-      }
+      try {
+        await executeMt4Command(command, {
+          request, signal: options.signal, now, wait, timeoutMs: options.timeoutMs,
+          validateState: next => requireContext(next, plan),
+          validateReceipt: receipt => {
+            if (receipt.accountKey !== plan.accountKey || receipt.login !== plan.login || receipt.server !== plan.server || receipt.mode !== plan.mode || receipt.symbol !== target.symbol || receipt.ticket !== target.ticket || receipt.type !== "close") throw Error("平仓回报与本次订单不一致，请在 MT4 核对。");
+          },
+          applied: next => !next.snapshot!.orders.some(o => o.ticket === target.ticket),
+          onRejected: () => { pendingCommand = undefined; options.onPending?.(null); },
+          unknownMessage: "平仓结果尚未确认，请在 MT4 核对执行回报。",
+          timeoutMessage: "平仓回报与持仓尚未确认一致，请重新读取并在 MT4 核对。",
+        });
+      } catch(e) { if (options.isDefiniteRejection?.(e)) { pendingCommand = undefined; options.onPending?.(null); } throw e; }
+      pendingCommand = undefined; options.onPending?.(null); progress.closed++; delete progress.currentTicket; publish();
     }
     return {...progress,outcome:"complete",message:"本次确认的持仓已处理。",currentPositions:state ? targets(state).length : 0};
   } catch(e) {

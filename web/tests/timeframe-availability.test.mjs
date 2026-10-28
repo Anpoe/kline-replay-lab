@@ -4,10 +4,18 @@ import test from "node:test";
 import {
   availableTimeframesForInstrument,
   isTimeframeAvailable,
+  replaySourceTimeframe,
   timeframeDisplayOptions,
 } from "../app/lib/timeframeAvailability.ts";
 
 const supported = ["1m", "5m", "15m", "30m", "1h", "4h", "1d", "1w", "1mo"];
+
+test("new replay automatically uses the finest real coverage, independent of saved cycle preferences", () => {
+  const catalog = [{ id: "FX", timeframes: ["1d", "5m", "1m"] }, { id: "STOCK", timeframes: ["1d"] }];
+  assert.equal(replaySourceTimeframe(catalog, "FX", "1h"), "1m");
+  assert.equal(replaySourceTimeframe(catalog, "STOCK", "1m"), "1d");
+  assert.equal(replaySourceTimeframe(catalog, "UNKNOWN", "1h"), "1h");
+});
 
 test("keeps every timeframe visible while deriving larger periods from daily data", () => {
   const catalog = [{ id: "AAPL.US", timeframes: ["1d"] }];

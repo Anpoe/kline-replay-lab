@@ -43,8 +43,8 @@ test("scan, computer approval and claim are all required; codes are single-use",
   assert.equal(service.authorize(request.secret), false);
   assert.equal((await service.claim(request.id, request.secret)).status, "pending");
   assert.throws(() => service.pair(challenge.code, "other"), /二维码/);
-  assert.throws(() => service.approve(request.id, "000000-wrong"), /核对码/);
-  service.approve(request.id, request.number);
+  await assert.rejects(service.approve(request.id, "000000-wrong"), /核对码/);
+  await service.approve(request.id, request.number);
   assert.equal((await service.claim(request.id, request.secret)).status, "approved");
   assert.equal(service.authorize(request.secret), true);
   assert.equal((await service.claim(request.id, request.secret)).status, "approved", "lost responses can retry the same claim");
@@ -55,7 +55,7 @@ test("device hashes survive restart, disabled access pauses authorization and re
   const { service, options } = await fixture(t);
   await service.setEnabled(true);
   const request = service.pair(service.rotateChallenge().code, "Phone");
-  service.approve(request.id, request.number);
+  await service.approve(request.id, request.number);
   await service.claim(request.id, request.secret);
   const disk = await readFile(options.stateFile, "utf8");
   assert.ok(!disk.includes(request.secret));
@@ -86,25 +86,58 @@ test("rotation, expiration, denial, wrong secret and disabling cancel pending re
   assert.equal((await service.claim(request.id, request.secret)).status, "denied");
   const expired = service.pair(service.rotateChallenge().code, "Phone");
   advance(300_001);
-  assert.throws(() => service.approve(expired.id, expired.number), /过期/);
+  await assert.rejects(service.approve(expired.id, expired.number), /过期/);
   const cancelled = service.pair(service.rotateChallenge().code, "Phone");
   await service.setEnabled(false);
   await service.setEnabled(true);
   await assert.rejects(service.claim(cancelled.id, cancelled.secret), /重新扫码/);
 });
 
-test("authorization expires and concurrent approvals retain both devices", async (t) => {
-  const { service, advance } = await fixture(t);
+test("permanent approvals survive long inactivity, restart and lost claim responses", async (t) => {
+  const { service, advance, options } = await fixture(t);
   await service.setEnabled(true);
   const first = service.pair(service.rotateChallenge().code, "One");
   const second = service.pair(service.rotateChallenge().code, "Two");
-  service.approve(first.id, first.number);
-  service.approve(second.id, second.number);
+  await Promise.all([service.approve(first.id, first.number), service.approve(second.id, second.number)]);
   await Promise.all([service.claim(first.id, first.secret), service.claim(second.id, second.secret)]);
   assert.equal(service.status().devices.length, 2);
-  advance(30 * 86400_000 + 1);
-  assert.equal(service.authorize(first.secret), false);
-  assert.equal(service.authorize(second.secret), false);
+  assert.ok(service.status().devices.every(device => device.expiresAt === null && !device.expired));
+  advance(100 * 365 * 86400_000);
+  const restarted = await new MobileAccess(options).init();
+  assert.equal(restarted.authorize(first.secret), true);
+  assert.equal(restarted.authorize(second.secret), true);
+  assert.equal((await restarted.claim(first.id, first.secret)).status, "approved");
+  await assert.rejects(restarted.claim(first.id, second.secret));
+  await restarted.revoke(first.id);
+  await assert.rejects(restarted.claim(first.id, first.secret));
+});
+
+test("existing active approvals become permanent while already expired approvals stay expired", async t => {
+  const { service, options, advance } = await fixture(t);
+  await service.setEnabled(true);
+  const active = service.pair(service.rotateChallenge().code, "Active");
+  const expired = service.pair(service.rotateChallenge().code, "Expired");
+  for (const request of [active, expired]) { await service.approve(request.id, request.number); await service.claim(request.id, request.secret); }
+  const stored = JSON.parse(await readFile(options.stateFile, "utf8"));
+  stored.devices[0].expiresAt = options.now() + 1000;
+  stored.devices[1].expiresAt = options.now() - 1000;
+  await writeFile(options.stateFile, JSON.stringify(stored));
+  await new MobileAccess(options).init();
+  advance(2000);
+  const restarted = await new MobileAccess(options).init();
+  assert.equal(restarted.authorize(active.secret), true);
+  assert.equal(restarted.authorize(expired.secret), false);
+  assert.equal(JSON.parse(await readFile(options.stateFile, "utf8")).devices[0].expiresAt, null);
+});
+
+test("computer approval is durable before the phone receives its first cookie", async t => {
+  const { service, options } = await fixture(t);
+  await service.setEnabled(true);
+  const request = service.pair(undefined, "Domain phone", { allowWithoutCode: true });
+  await service.approve(request.id, request.number);
+  const restarted = await new MobileAccess(options).init();
+  assert.equal((await restarted.claim(request.id, request.secret)).status, "approved");
+  assert.equal(restarted.authorize(request.secret), true);
 });
 
 test("corrupt state and failed writes fail closed with a recoverable status", async (t) => {

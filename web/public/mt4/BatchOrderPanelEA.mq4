@@ -1,6 +1,6 @@
 ﻿#property strict
-#property version "1.13"
-#property description "Batch market-order panel with per-row SL/TP settings."
+#property version "1.15"
+#property description "Batch market, limit and stop orders with per-row SL/TP settings."
 
 #include "BatchOrderMath.mqh"
 #include "BatchOrderTemplate.mqh"
@@ -56,6 +56,8 @@ const int BO_TRADE_RETRY_DELAY_MS = 250;
 const int BO_BATCH_ORDER_SPACING_MS = 200;
 
 int gOrderCount=1;
+int gOrderMode=0;
+double gPendingPrice=0.0;
 int gLotMode=BO_LOTS_FIXED;
 double gFixedLots=0.10;
 double gRiskPercent=1.0;
@@ -91,7 +93,7 @@ int gBridgeLastPendingSecond=-1;
 string gLastExecutionDetails="";
 string gLastCloseDetails="";
 
-bool ExecuteBatch(int orderType, int orderCountOverride=0);
+bool ExecuteBatch(int orderType, int orderCountOverride=0, double pendingPrice=0.0);
 bool CloseManagedOrders(bool accountWide, bool skipConfirmation=false);
 bool RestartBridgeTimer(bool restoreLastEvent);
 
@@ -107,6 +109,12 @@ string UnitText(int unit)
    if(unit==BO_UNIT_PL)
       return("金额");
    return("pips");
+  }
+
+string PanelOrderLabel(int side)
+  {
+   string label=side==OP_BUY ? "Buy" : "Sell";
+   return(label+(gOrderMode==1 ? " Limit" : gOrderMode==2 ? " Stop" : ""));
   }
 
 string PanelNumber(double value)
@@ -297,7 +305,7 @@ void SavePanelState()
                          gBridgeOpenTtlSeconds, gBridgeCloseTtlSeconds,
                          gBridgeConfirmSeconds,
                          gCandleAlertEnabled, gCandleAlertSeconds,
-                         gTemplateName, gSlUnits, gSlValues, gTpUnits, gTpValues, error))
+                         gTemplateName, gSlUnits, gSlValues, gTpUnits, gTpValues, error, gOrderMode, gPendingPrice))
       Print("BatchOrderPanel state save failed: ", error);
   }
 
@@ -305,6 +313,8 @@ bool RestorePanelState()
   {
    int loadedCount=0;
    int loadedMode=BO_LOTS_FIXED;
+   int loadedEntryMode=0;
+   double loadedPendingPrice=0.0;
    double loadedFixedLots=0.0;
    double loadedRiskPercent=0.0;
    int loadedSlippage=0;
@@ -334,13 +344,15 @@ bool RestorePanelState()
                          loadedBridgeConfirmSeconds,
                          loadedCandleAlertEnabled, loadedCandleAlertSeconds,
                          loadedTemplateName, loadedSlUnits, loadedSlValues,
-                         loadedTpUnits, loadedTpValues, error))
+                         loadedTpUnits, loadedTpValues, loadedEntryMode, loadedPendingPrice, error))
      {
       if(error!="")
          gStatus="记忆设置加载失败，已使用默认值："+error;
       return(false);
      }
 
+   gOrderMode=loadedEntryMode;
+   gPendingPrice=loadedPendingPrice;
    gOrderCount=ClampOrderCount(loadedCount);
    gLotMode=loadedMode;
    gFixedLots=loadedFixedLots;
@@ -566,7 +578,11 @@ void CreateMainObjects()
    CreateEdit(BO_PREFIX+"OrderCount", IntegerToString(gOrderCount), BO_PANEL_X+88, BO_PANEL_Y+51, 49, 26);
    CreateButton(BO_PREFIX+"LotMode", "固定手数", BO_PANEL_X+145, BO_PANEL_Y+51, 112, 26, C'48,69,90');
    CreateEdit(BO_PREFIX+"LotValue", DoubleToString(gFixedLots, 2), BO_PANEL_X+265, BO_PANEL_Y+51, 85, 26);
-   CreateLabel(BO_PREFIX+"LotHint", "点击按钮切换手数/风险", BO_PANEL_X+366, BO_PANEL_Y+55, 210, 22, C'133,151,170', 8);
+   CreateButton(BO_PREFIX+"OrderMode", "市价", BO_PANEL_X+366, BO_PANEL_Y+51, 106, 26, C'48,69,90');
+   CreateEdit(BO_PREFIX+"EntryPrice", "", BO_PANEL_X+480, BO_PANEL_Y+51, 100, 26);
+   ObjectSetString(0, BO_PREFIX+"OrderMode", OBJPROP_TOOLTIP, "点击切换市价、Limit 限价挂单、Stop 突破挂单；订单数适用于整批");
+   ObjectSetString(0, BO_PREFIX+"LotMode", OBJPROP_TOOLTIP, "固定手数按每笔填写；风险百分比为整批权益风险，按订单数平分");
+   ObjectSetString(0, BO_PREFIX+"EntryPrice", OBJPROP_TOOLTIP, "挂单价：整批使用同一价格，SL/TP 仍按各行设置；按账户和品种记住委托类型与价格，重载后自动恢复");
 
    CreateLabel(BO_PREFIX+"HeaderSL", "止损 SL", BO_PANEL_X+56, BO_PANEL_Y+91, 100, 22, C'87,196,207', 9);
    CreateLabel(BO_PREFIX+"HeaderTP", "止盈 TP", BO_PANEL_X+294, BO_PANEL_Y+91, 100, 22, C'87,196,207', 9);
@@ -586,7 +602,7 @@ void CreateMainObjects()
 
 void DeleteMainObjects()
   {
-   string names[]={"CountLabel","OrderCount","LotMode","LotValue","LotHint",
+   string names[]={"CountLabel","OrderCount","LotMode","LotValue","LotHint","OrderMode","EntryPrice",
                    "HeaderSL","HeaderTP","PageLabel","PagePrev","PageNext",
                    "Buy","Sell","ManagedClose","TemplateLabel","TemplateName",
                    "SaveTemplate","LoadTemplate","AccountClose"};
@@ -638,6 +654,11 @@ void RefreshPanel()
       SetText(BO_PREFIX+"OrderCount", IntegerToString(gOrderCount));
       SetText(BO_PREFIX+"LotMode", gLotMode==BO_LOTS_RISK ? "风险百分比" : "固定手数");
       SetText(BO_PREFIX+"LotValue", gLotMode==BO_LOTS_RISK ? DoubleToString(gRiskPercent, 2) : DoubleToString(gFixedLots, 2));
+      SetText(BO_PREFIX+"OrderMode", gOrderMode==1 ? "Limit 限价" : gOrderMode==2 ? "Stop 突破" : "市价");
+      ObjectSetInteger(0, BO_PREFIX+"EntryPrice", OBJPROP_READONLY, gOrderMode==0);
+      SetText(BO_PREFIX+"EntryPrice", gOrderMode==0 ? "市价" : gPendingPrice>0.0 ? DoubleToString(gPendingPrice, Digits) : "");
+      SetText(BO_PREFIX+"Buy", PanelOrderLabel(OP_BUY));
+      SetText(BO_PREFIX+"Sell", PanelOrderLabel(OP_SELL));
       SetText(BO_PREFIX+"TemplateName", gTemplateName);
 
       int pageCount=(gOrderCount+BO_VISIBLE_ROWS-1)/BO_VISIBLE_ROWS;
@@ -783,6 +804,16 @@ void CommitNumericEdit(string objectName)
          gTemplateName=StringTrimLeft(StringTrimRight(text));
       SavePanelState();
       RefreshPanel();
+      return;
+     }
+   if(objectName==BO_PREFIX+"EntryPrice")
+     {
+      if(gOrderMode==0) return;
+      if(!IsUnsignedNumber(text, false) || StrToDouble(text)<=0.0)
+        { gPendingPrice=0.0; SavePanelState(); SetStatus("挂单价请输入大于 0 的有效价格"); return; }
+      gPendingPrice=StrToDouble(text);
+      SavePanelState();
+      SetStatus("挂单价已设为 "+DoubleToString(gPendingPrice, Digits));
       return;
      }
    if(objectName==BO_PREFIX+"OrderCount")
@@ -1034,6 +1065,13 @@ void HandleClick(string objectName)
       SetStatus("桥接模式已设为 "+BridgeModeText());
       return;
      }
+   if(objectName==BO_PREFIX+"OrderMode")
+     {
+      gOrderMode=(gOrderMode+1)%3;
+      SavePanelState();
+      RefreshPanel();
+      return;
+     }
    if(objectName==BO_PREFIX+"LotMode")
      {
       gLotMode=(gLotMode==BO_LOTS_FIXED ? BO_LOTS_RISK : BO_LOTS_FIXED);
@@ -1063,12 +1101,14 @@ void HandleClick(string objectName)
 
    if(objectName==BO_PREFIX+"Buy")
      {
-      ExecuteBatch(OP_BUY);
+      if(gOrderMode!=0) CommitNumericEdit(BO_PREFIX+"EntryPrice");
+      ExecuteBatch(BO_EntryOrderType(OP_BUY, gOrderMode), 0, gPendingPrice);
       return;
      }
    if(objectName==BO_PREFIX+"Sell")
      {
-      ExecuteBatch(OP_SELL);
+      if(gOrderMode!=0) CommitNumericEdit(BO_PREFIX+"EntryPrice");
+      ExecuteBatch(BO_EntryOrderType(OP_SELL, gOrderMode), 0, gPendingPrice);
       return;
      }
    if(objectName==BO_PREFIX+"ManagedClose")
@@ -1175,11 +1215,20 @@ bool SendPlannedOrder(int orderType, BOOrderPlan &plan, string &result)
    for(int attempt=1; attempt<=BO_TRADE_MAX_ATTEMPTS; attempt++)
      {
       RefreshRates();
-      price=(orderType==OP_BUY ? Ask : Bid);
+      price=BO_IsMarketOrder(orderType) ? (orderType==OP_BUY ? Ask : Bid) : plan.referencePrice;
       if(price<=0.0)
         {
          result="market price unavailable";
          return(false);
+        }
+      if(!BO_IsMarketOrder(orderType))
+        {
+         BOSymbolInfo currentInfo;
+         string validation="";
+         if(!LoadSymbolInfo(currentInfo, validation) ||
+            !BO_ValidatePendingPrice(orderType, Bid, Ask, price, currentInfo, validation) ||
+            !BO_ValidatePlanStops(orderType, Bid, Ask, plan, currentInfo, validation))
+           { result="pending order rejected: "+validation; return(false); }
         }
       price=NormalizeDouble(price, Digits);
 
@@ -1200,7 +1249,7 @@ bool SendPlannedOrder(int orderType, BOOrderPlan &plan, string &result)
       return(true);
      }
 
-   if(errorCode!=ERR_INVALID_STOPS || (plan.slPrice<=0.0 && plan.tpPrice<=0.0))
+   if(!BO_IsMarketOrder(orderType) || errorCode!=ERR_INVALID_STOPS || (plan.slPrice<=0.0 && plan.tpPrice<=0.0))
      {
       result=StringFormat("send failed: %s", TradeErrorText(errorCode));
       return(false);
@@ -1264,7 +1313,7 @@ bool SendPlannedOrder(int orderType, BOOrderPlan &plan, string &result)
    return(true);
   }
 
-bool ExecuteBatch(int orderType, int orderCountOverride=0)
+bool ExecuteBatch(int orderType, int orderCountOverride=0, double pendingPrice=0.0)
   {
    gLastExecutionDetails="";
    int executionCount=orderCountOverride>0 ? ClampOrderCount(orderCountOverride) : gOrderCount;
@@ -1292,7 +1341,7 @@ bool ExecuteBatch(int orderType, int orderCountOverride=0)
 
    BOOrderSpec specs[BO_MAX_ROWS];
    BOOrderPlan plans[BO_MAX_ROWS];
-    for(int i=0; i<executionCount; i++)
+   for(int i=0; i<executionCount; i++)
      {
       specs[i].slUnit=gSlUnits[i];
       specs[i].slValue=gSlValues[i];
@@ -1301,8 +1350,8 @@ bool ExecuteBatch(int orderType, int orderCountOverride=0)
      }
 
    RefreshRates();
-     if(!BO_ComputeBatchPlans(orderType, Bid, Ask, AccountEquity(), gLotMode,
-                              gFixedLots, gRiskPercent, executionCount, specs, info, plans, error))
+   if(!BO_ComputeBatchPlans(orderType, Bid, Ask, AccountEquity(), gLotMode,
+                           gFixedLots, gRiskPercent, executionCount, specs, info, plans, error, pendingPrice))
      {
       gLastExecutionDetails=error;
       SetStatus("未下单："+error);
@@ -1313,8 +1362,16 @@ bool ExecuteBatch(int orderType, int orderCountOverride=0)
    int failed=0;
    int unprotected=0;
    string details="";
-    for(int row=0; row<executionCount; row++)
+   int batchLogin=AccountNumber();
+   string batchServer=AccountServer();
+   for(int row=0; row<executionCount; row++)
      {
+      if(!BO_IsMarketOrder(orderType) &&
+         (AccountNumber()!=batchLogin || AccountServer()!=batchServer || !IsConnected() || !IsTradeAllowed()))
+        {
+         AppendDetail(details, StringFormat("stopped; %d orders not sent: account or trading connection changed", executionCount-row));
+         break;
+        }
       string result="";
       if(SendPlannedOrder(orderType, plans[row], result))
         {
@@ -1325,13 +1382,18 @@ bool ExecuteBatch(int orderType, int orderCountOverride=0)
       else
          failed++;
       AppendDetail(details, StringFormat("#%d %s", row+1, result));
+      if(!BO_IsMarketOrder(orderType) && failed>0)
+        {
+         AppendDetail(details, StringFormat("stopped; %d orders not sent", executionCount-row-1));
+         break;
+        }
       if(row+1<executionCount)
          Sleep(BO_BATCH_ORDER_SPACING_MS);
      }
 
    gLastExecutionDetails=details;
    SetStatus(StringFormat("%s 完成：成功 %d，失败 %d，未保护 %d；%s",
-                           orderType==OP_BUY ? "Buy" : "Sell", opened, failed,
+                           BO_IsBuyOrder(orderType) ? "Buy" : "Sell", opened, failed,
                            unprotected, details));
    return(opened==executionCount && failed==0 && unprotected==0);
   }

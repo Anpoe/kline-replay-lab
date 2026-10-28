@@ -1,6 +1,6 @@
 import { randomBytes } from "node:crypto";
 import QRCode from "qrcode";
-import { DEVICE_TTL, isLocalAdmin, isPrivateAddress, listLanAddresses, mobileCookie } from "./mobile-access.mjs";
+import { COOKIE_TTL, isLocalAdmin, isPrivateAddress, listLanAddresses, mobileCookie } from "./mobile-access.mjs";
 import { mobileConnectPage } from "./mobile-connect-page.mjs";
 
 const prefix = "/api/mobile-access";
@@ -21,7 +21,7 @@ function classify(req, tailscale, directOrigin) {
   // Serve identity and forwarding headers may never grant localhost management rights.
   if (req.url?.startsWith("/__kline-tailscale/") || Object.keys(req.headers).some(key => key.startsWith("tailscale-") || key.startsWith("x-forwarded-") || key === "forwarded")) return { denied: true };
   const direct = directOrigin && req.headers.host?.toLowerCase() === new URL(directOrigin).host;
-  return { local: isLocalAdmin(req), remote: isLanRequest(req) || Boolean(direct) };
+  return { local: isLocalAdmin(req), remote: isLanRequest(req) || Boolean(direct), direct: Boolean(direct) };
 }
 function isLanRequest(req) {
   if (!isPrivateAddress(req.socket.remoteAddress)) return false;
@@ -32,6 +32,9 @@ function isLanRequest(req) {
 }
 function cookieToken(req) {
   return (req.headers.cookie ?? "").split(";").map((part) => part.trim()).find((part) => part.startsWith(`${mobileCookie}=`))?.slice(mobileCookie.length + 1);
+}
+function rememberDevice(req, res, token) {
+  res.setHeader("Set-Cookie", `${mobileCookie}=${token}; Path=/; Max-Age=${COOKIE_TTL / 1000}; Expires=${new Date(Date.now() + COOKIE_TTL).toUTCString()}; HttpOnly; SameSite=Lax${req[remoteContext] ? "; Secure" : ""}`);
 }
 export function canUpgrade(req, service, tailscale, directOrigin) {
   const access = classify(req, tailscale, directOrigin);
@@ -94,18 +97,21 @@ export function createMobileAccessHandler({ service, interfaces, port, firewall,
       if (reserved) {
         if (!hasSafeOrigin(req)) fail("请从本机页面重新操作。", 403);
         if (pathname === `${prefix}/session` && req.method === "GET") {
-          return send(res, 200, { enabled: service.state.enabled, authorized: local || service.authorize(cookieToken(req)) });
+          const token = cookieToken(req);
+          const authorized = service.authorize(token);
+          if (!local && authorized) rememberDevice(req, res, token);
+          return send(res, 200, { enabled: service.state.enabled, authorized: local || authorized, canRequestPairing: Boolean(access.direct) });
         }
         if (pathname === `${prefix}/pair` || pathname === `${prefix}/claim`) {
           if (req.method !== "POST") fail("请通过手机连接页面继续。", 405);
-          if (!sameOrigin(req)) fail("请从扫码打开的页面继续。", 403);
+          if (!sameOrigin(req)) fail("请从手机连接页面继续。", 403);
           const body = await readBody(req);
           if (pathname.endsWith("/pair")) {
             rateLimit(req);
-            return send(res, 200, service.pair(body.code, body.name));
+            return send(res, 200, service.pair(body.code, body.name, { allowWithoutCode: Boolean(access.direct) }));
           }
           const result = await service.claim(body.id, body.secret);
-          if (result.status === "approved") res.setHeader("Set-Cookie", `${mobileCookie}=${result.token}; Path=/; Max-Age=${DEVICE_TTL / 1000}; HttpOnly; SameSite=Strict${req[remoteContext] ? "; Secure" : ""}`);
+          if (result.status === "approved") rememberDevice(req, res, result.token);
           return send(res, 200, { status: result.status });
         }
         if (!local) fail("请在电脑本机页面管理手机访问。", 403);
@@ -124,7 +130,7 @@ export function createMobileAccessHandler({ service, interfaces, port, firewall,
           case "enable": await service.setEnabled(true); service.rotateChallenge(); break;
           case "disable": await service.setEnabled(false); break;
           case "rotate": service.rotateChallenge(); break;
-          case "approve": service.approve(body.id, body.number); break;
+          case "approve": await service.approve(body.id, body.number); break;
           case "deny": service.deny(body.id); break;
           case "revoke": await service.revoke(body.id); break;
           case "firewall": await firewall(port()); break;
@@ -141,6 +147,10 @@ export function createMobileAccessHandler({ service, interfaces, port, firewall,
         return send(res, 200, await status());
       }
       if (pathname === "/mobile-connect" && req.method === "GET") {
+        if (!local && hasSafeOrigin(req) && service.authorize(cookieToken(req))) {
+          res.setHeader("Location", "/");
+          return send(res, 302, "", "text/plain");
+        }
         const nonce = randomBytes(18).toString("base64");
         res.setHeader("Content-Security-Policy", `default-src 'none'; script-src 'nonce-${nonce}'; style-src 'nonce-${nonce}'; connect-src 'self'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'`);
         return send(res, 200, mobileConnectPage(nonce, theme), "text/html; charset=utf-8");
