@@ -16,7 +16,8 @@ type ScanFilters = {
 
 type ScanRequest = {
   action?: "scan" | "refresh";
-  market?: "CN" | "US";
+  storedOnly?: boolean;
+  market?: "CN" | "US" | "FX" | "GOLD";
   instrumentIds?: string[];
   /** Signal-day timestamps used to locate the simulated next-session fill. */
   entryAfter?: Record<string, number>;
@@ -81,7 +82,7 @@ function withBarRevision<T extends {
 
 export async function POST(request: Request) {
   const payload = await request.json() as ScanRequest;
-  const market = payload.market === "US" ? "US" : "CN";
+  const market = payload.market === "US" || payload.market === "FX" || payload.market === "GOLD" ? payload.market : "CN";
 
   if (payload.action === "refresh") {
     const instrumentIds = Array.isArray(payload.instrumentIds)
@@ -95,7 +96,7 @@ export async function POST(request: Request) {
     );
     if (market === "CN") {
       try {
-        const response = await fetchLocalData("/quotes/realtime", {
+        const response = await fetchLocalData(payload.storedOnly ? "/prices/latest" : "/quotes/realtime", {
           method: "POST",
           headers: { "content-type": "application/json" },
           body: JSON.stringify({
@@ -174,6 +175,10 @@ export async function POST(request: Request) {
     }
     await ensureSchema();
     const db = getRawDb();
+    const marginMarket = market === "FX" || market === "GOLD";
+    const adjustment = marginMarket ? "none" : "all";
+    const closedBefore = marginMarket ? Date.now() - 86_400_000 : Number.MAX_SAFE_INTEGER;
+    const priceBasis = marginMarket ? "raw" as const : "adjusted" as const;
     const prices: Array<{
       instrumentId: string;
       timestamp: number;
@@ -214,17 +219,17 @@ export async function POST(request: Request) {
           (SELECT previous.close FROM candles previous
             WHERE previous.instrument_id = c.instrument_id
               AND previous.timeframe = '1d'
-              AND previous.adjustment_type = 'all'
+              AND previous.adjustment_type = '${adjustment}'
               AND previous.timestamp < c.timestamp
             ORDER BY previous.timestamp DESC LIMIT 1) AS previousClose
         FROM candles c
         JOIN (
           SELECT instrument_id, MAX(timestamp) AS timestamp
           FROM candles
-          WHERE timeframe = '1d' AND adjustment_type = 'all' AND instrument_id IN (${placeholders})
+          WHERE timeframe = '1d' AND adjustment_type = '${adjustment}' AND instrument_id IN (${placeholders}) AND timestamp <= ${closedBefore}
           GROUP BY instrument_id
         ) latest ON latest.instrument_id = c.instrument_id AND latest.timestamp = c.timestamp
-        WHERE c.timeframe = '1d' AND c.adjustment_type = 'all'
+        WHERE c.timeframe = '1d' AND c.adjustment_type = '${adjustment}'
       `).bind(...batch).all<{
         instrumentId: string;
         timestamp: number;
@@ -261,7 +266,7 @@ export async function POST(request: Request) {
           SELECT timestamp, open, high, low, close, volume, turnover, source,
             quality_flags AS qualityFlags
           FROM candles
-          WHERE instrument_id = ? AND timeframe = '1d' AND adjustment_type = 'all' AND timestamp > ?
+          WHERE instrument_id = ? AND timeframe = '1d' AND adjustment_type = '${adjustment}' AND timestamp > ? AND timestamp <= ${closedBefore}
           ORDER BY timestamp ASC
           LIMIT 65
         `).bind(instrumentId, after).all<{
@@ -294,7 +299,7 @@ export async function POST(request: Request) {
             closed: true,
             ...(entry.source ? { source: entry.source } : {}),
             ...(entry.qualityFlags ? { qualityFlags: parseQualityFlags(entry.qualityFlags) } : {}),
-            priceBasis: "adjusted" as const,
+            priceBasis: priceBasis,
           }));
         if (entryBars.length) {
           entryBarsByInstrument.set(instrumentId, entryBars);
@@ -331,12 +336,12 @@ export async function POST(request: Request) {
           closed: true,
           ...(row.source ? { source: row.source } : {}),
           ...(row.qualityFlags ? { qualityFlags: parseQualityFlags(row.qualityFlags) } : {}),
-          priceBasis: "adjusted" as const,
+          priceBasis: priceBasis,
           ...(Number.isFinite(Number(row.previousClose)) && Number(row.previousClose) > 0
             ? { previousClose: Number(row.previousClose) }
             : {}),
           ...(entry ?? {}),
-          ...(entryBars?.length ? { entryBars: entryBars.map((bar) => withBarRevision(bar, "adjusted")) } : {}),
+          ...(entryBars?.length ? { entryBars: entryBars.map((bar) => withBarRevision(bar, priceBasis)) } : {}),
           revision: withBarRevision({
             timestamp: Number(row.timestamp),
             open: Number(row.open),
@@ -347,14 +352,16 @@ export async function POST(request: Request) {
             turnover: row.turnover == null ? null : Number(row.turnover),
             source: row.source,
             qualityFlags: parseQualityFlags(row.qualityFlags),
-            priceBasis: "adjusted",
-          }, "adjusted").revision,
+            priceBasis,
+          }, priceBasis).revision,
           ...(entryHasMoreByInstrument.get(row.instrumentId) ? { hasMoreEntryBars: true } : {}),
         };
       }));
     }
     return Response.json({ market, prices });
   }
+
+  if (market === "FX" || market === "GOLD") return Response.json({ error: "该市场可查看行情和模拟交易，暂不支持实时筛选" }, { status: 400 });
 
   const allPresets = normalizePatternPresets(payload.presets);
   const selected = new Set(Array.isArray(payload.presetIds) ? payload.presetIds : []);

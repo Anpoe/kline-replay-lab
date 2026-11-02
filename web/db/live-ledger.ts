@@ -1,4 +1,6 @@
+import type { MarginPosition, InstrumentEconomics } from "../app/lib/fxTrading.ts";
 import {
+  isLiveAccountMarket,
   liveAccountCurrencyForMarket,
   liveAccountIdForMarket,
   normalizeLiveMarketAccountSnapshot,
@@ -127,7 +129,7 @@ export type NormalizedPortfolio = {
   corporateActionEvents: JsonRecord[];
   symbol: string;
   name: string;
-  market: "CN" | "US";
+  market: LiveAccountMarket;
   latestTimestamp: number;
   latestClose: number;
   scanTimestamp: number;
@@ -401,7 +403,7 @@ function uniqueById<T extends { id: string }>(items: T[]) {
 export function normalizePortfolio(value: unknown, sortOrder = 0): NormalizedPortfolio | null {
   if (!isRecord(value)) return null;
   const instrumentId = stringValue(value.instrumentId);
-  const market = value.market === "CN" || value.market === "US" ? value.market : null;
+  const market = isLiveAccountMarket(value.market) ? value.market : null;
   const symbol = stringValue(value.symbol, instrumentId);
   const name = stringValue(value.name, symbol);
   const updatedAt = stringValue(value.updatedAt, new Date(0).toISOString());
@@ -461,7 +463,7 @@ export function normalizePortfolio(value: unknown, sortOrder = 0): NormalizedPor
 
 function normalizeLiveAccount(value: unknown): NormalizedLiveAccount | null {
   const record = isRecord(value) ? value : {};
-  const market: LiveAccountMarket | null = record.market === "CN" || record.market === "US"
+  const market: LiveAccountMarket | null = isLiveAccountMarket(record.market)
     ? record.market
     : null;
   if (!market) return null;
@@ -910,7 +912,7 @@ type PortfolioRow = {
   accountId: string | null;
   symbol: string;
   name: string;
-  market: "CN" | "US";
+  market: LiveAccountMarket;
   latestTimestamp: number;
   latestClose: number;
   scanTimestamp: number;
@@ -932,7 +934,8 @@ type PortfolioRow = {
 type AccountRow = {
   id: string;
   market: LiveAccountMarket;
-  currency: "CNY" | "USD";
+  currency: string;
+  payloadJson: string;
   displayName: string;
   status: string;
   tradingMode: "return" | "capital";
@@ -969,7 +972,7 @@ export async function readLiveState(db: D1Database) {
       risk_capital AS riskCapital, cash_balance AS cashBalance,
       reserved_cash AS reservedCash, reserved_margin AS reservedMargin,
       equity, available_cash AS availableCash, account_version AS version,
-      payload_version AS payloadVersion, execution_profile_json AS executionProfileJson,
+      payload_version AS payloadVersion, payload_json AS payloadJson, execution_profile_json AS executionProfileJson,
       execution_profile_version AS executionProfileVersion,
       execution_engine_version AS executionEngineVersion, execution_switch_state AS executionSwitchState,
       switched_at AS switchedAt, previous_account_version AS previousAccountVersion,
@@ -1049,8 +1052,8 @@ export async function readLiveState(db: D1Database) {
     scanTimestamp: row.scanTimestamp,
     presetIds: parseJson<string[]>(row.presetIdsJson, []),
     presetNames: parseJson<string[]>(row.presetNamesJson, []),
-    positions: [] as Array<Record<string, unknown>>,
-    pendingOrders: [] as Array<Record<string, unknown>>,
+    positions: [] as Array<Record<string, unknown> & MarginPosition>,
+    pendingOrders: [] as Array<Record<string, unknown> & { id: string; reservedMargin?: number }>,
     executions: [] as Array<Record<string, unknown>>,
     orderRejections: [] as Array<Record<string, unknown>>,
     tradingMode: row.tradingMode,
@@ -1072,8 +1075,9 @@ export async function readLiveState(db: D1Database) {
     const payload = parseJson<JsonRecord>(String(row.payloadJson ?? ""), {});
     portfolio.positions.push({
       ...payload,
-      id: String(row.id), side: row.side, qty: Number(row.qty), entryPrice: Number(row.entryPrice),
-      entryTimestamp: Number(row.entryTimestamp), entryOrderId: String(row.entryOrderId), status: row.status,
+      id: String(row.id), side: row.side === "short" ? "short" : "long", qty: Number(row.qty), entryPrice: Number(row.entryPrice),
+      ...(isRecord(payload.instrumentEconomics) ? { instrumentEconomics: payload.instrumentEconomics as InstrumentEconomics } : {}),
+      entryTimestamp: Number(row.entryTimestamp), entryOrderId: String(row.entryOrderId), status: row.status === "closed" ? "closed" : "open",
       ...(row.entryOrderType === null ? {} : { entryOrderType: String(row.entryOrderType) }),
       ...(row.entryIntrabar === null ? {} : { entryIntrabar: Boolean(Number(row.entryIntrabar)) }),
       ...(row.exitPrice === null ? {} : { exitPrice: Number(row.exitPrice) }),
@@ -1186,6 +1190,7 @@ export async function readLiveState(db: D1Database) {
   }
   const accounts = (accountResult.results as AccountRow[]).flatMap((row) => {
     const account = normalizeLiveAccount({
+      ...parseJson<JsonRecord>(row.payloadJson, {}),
       id: row.id,
       market: row.market,
       currency: row.currency,

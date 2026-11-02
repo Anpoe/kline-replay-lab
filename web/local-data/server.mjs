@@ -1,4 +1,5 @@
 import http from "node:http";
+import { candlePageQuery, sliceCandlePage } from '../app/lib/candlePaging.mjs';
 import { access, mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -343,18 +344,20 @@ const server = http.createServer(async (request, response) => {
       }));
     }
     if (request.method === "GET" && url.pathname === "/candles") {
+      const page = candlePageQuery(url.searchParams);
       const result = await store.getCandles(
         url.searchParams.get("instrument") ?? "",
         url.searchParams.get("timeframe") ?? "1d",
         url.searchParams.get("adjustmentType") ?? undefined,
+        page,
       );
       return result
-        ? send(response, 200, { ...result, activeSource })
+        ? send(response, 200, { ...result, ...(result.hasBefore === undefined ? sliceCandlePage(result.candles, page) : {}), activeSource })
         : send(response, 404, { error: `本机 ${activeSource === "baostock" ? "BaoStock" : "TDX"} 数据中未找到该品种或周期` });
     }
     if (request.method === "POST" && url.pathname === "/prices/latest") {
       const payload = await readJson(request);
-      return send(response, 200, { prices: await store.getLatestCandles(
+      return send(response, 200, { activeSource, prices: await store.getLatestCandles(
         Array.isArray(payload.instrumentIds) ? payload.instrumentIds : [],
         payload.entryAfter && typeof payload.entryAfter === "object" ? payload.entryAfter : {},
       ) });

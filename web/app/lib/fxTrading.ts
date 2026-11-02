@@ -264,13 +264,14 @@ export function marginAccountSnapshot(input: {
   spreadBps: number;
   reservedMargin?: number;
   economics: InstrumentEconomics;
+  externalMargin?: { floatingPnl: number; usedMargin: number; reservedMargin: number };
 }): MarginAccountSnapshot {
-  const floatingPnl = input.positions.reduce(
+  const floatingPnl = (input.externalMargin?.floatingPnl ?? 0) + input.positions.reduce(
     (sum, position) => sum + markToMarketPnl(position, input.sourcePrice, input.spreadBps),
     0,
   );
-  const margin = usedMargin(input.positions);
-  const reserved = Math.max(0, Number(input.reservedMargin ?? 0));
+  const margin = usedMargin(input.positions) + (input.externalMargin?.usedMargin ?? 0);
+  const reserved = Math.max(0, Number(input.reservedMargin ?? 0)) + (input.externalMargin?.reservedMargin ?? 0);
   const equity = input.balance + floatingPnl;
   const level = margin > 0 ? equity / margin * 100 : null;
   const stopOutLevelPct = Math.max(1, Number(input.economics.stopOutLevelPct ?? 50));

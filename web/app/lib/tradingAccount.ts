@@ -1,12 +1,25 @@
 import {
   accountNotional,
+  markToMarketPnl,
+  usedMargin,
+  type MarginPosition,
   accountPnl,
   type InstrumentEconomics,
+  normalizeFxAccountConfig,
+  type FxAccountConfig,
 } from "./fxTrading.ts";
 
 export type TradingMode = "return" | "capital";
 
-export type LiveAccountMarket = "CN" | "US";
+export type LiveAccountMarket = "CN" | "US" | "FX" | "GOLD";
+
+export function isLiveAccountMarket(value: unknown): value is LiveAccountMarket {
+  return value === "CN" || value === "US" || value === "FX" || value === "GOLD";
+}
+
+export function liveAccountNameForMarket(market: LiveAccountMarket) {
+  return `${{ CN: "A 股", US: "美股", FX: "外汇", GOLD: "黄金" }[market]}实时模拟账户`;
+}
 
 export type LiveAccountStatus = "active" | "paused" | "ending" | "archived";
 export type LiveAccountSwitchState = "legacy" | "pending" | "current" | "failed";
@@ -14,7 +27,8 @@ export type LiveAccountSwitchState = "legacy" | "pending" | "current" | "failed"
 export type LiveMarketAccountSnapshot = {
   id: string;
   market: LiveAccountMarket;
-  currency: "CNY" | "USD";
+  currency: string;
+  fxAccountConfig?: FxAccountConfig;
   displayName: string;
   status: LiveAccountStatus;
   tradingMode: TradingMode;
@@ -73,7 +87,7 @@ function liveAccountRecord(value: unknown): Record<string, unknown> {
 
 export function normalizeLiveMarketAccountSnapshot(value: unknown): LiveMarketAccountSnapshot | null {
   const record = liveAccountRecord(value);
-  const market = record.market === "CN" || record.market === "US" ? record.market : null;
+  const market = isLiveAccountMarket(record.market) ? record.market : null;
   const id = liveAccountString(record.id || record.accountId);
   if (!market || !id) return null;
   const reservedCash = Math.max(0, liveAccountNumber(record.reservedCash));
@@ -91,10 +105,11 @@ export function normalizeLiveMarketAccountSnapshot(value: unknown): LiveMarketAc
   return {
     id,
     market,
-    currency: record.currency === "USD" || record.currency === "CNY"
+    currency: typeof record.currency === "string" && /^[A-Z]{3}$/.test(record.currency)
       ? record.currency
       : liveAccountCurrencyForMarket(market),
-    displayName: liveAccountString(record.displayName, market === "CN" ? "A 股实时模拟账户" : "美股实时模拟账户"),
+    displayName: liveAccountString(record.displayName, liveAccountNameForMarket(market)),
+    ...(market === "FX" || market === "GOLD" ? { fxAccountConfig: normalizeFxAccountConfig(liveAccountRecord(record.fxAccountConfig)) } : {}),
     status,
     tradingMode,
     initialCapital: liveAccountNumber(record.initialCapital),
@@ -225,14 +240,32 @@ export function portfolioReturnPct(positions: AccountPosition[], currentPrice: n
   return notional > 0 ? pnl / notional * 100 : 0;
 }
 
-export function accountMarketValue(positions: AccountPosition[], currentPrice: number) {
+export function accountMarketValue(positions: AccountPosition[], currentPrice: number, spreadBps = 0) {
   return positions
     .filter((position) => position.status === "open")
     .reduce((sum, position) => (
-      sum + currentPrice * position.qty * (position.side === "long" ? 1 : -1)
+      sum + (position.instrumentEconomics?.settlementMode === "margin"
+        ? markToMarketPnl(position, currentPrice, spreadBps)
+        : currentPrice * position.qty * (position.side === "long" ? 1 : -1))
     ), 0);
 }
 
 export function accountEquity(cashBalance: number, positions: AccountPosition[], currentPrice: number) {
   return cashBalance + accountMarketValue(positions, currentPrice);
+}
+
+export function liveAccountMarginTotals(
+  accountId: string,
+  portfolios: Array<{ accountId?: string | null; latestClose: number; positions: MarginPosition[]; pendingOrders?: Array<{ reservedMargin?: number | null }> }>,
+  spreadBps = 0,
+) {
+  return portfolios.filter(item => item.accountId === accountId).reduce((total, portfolio) => ({
+    floatingPnl: total.floatingPnl + portfolio.positions.reduce((sum, position) => (
+      sum + markToMarketPnl(position, portfolio.latestClose, spreadBps)
+    ), 0),
+    usedMargin: total.usedMargin + usedMargin(portfolio.positions),
+    reservedMargin: total.reservedMargin + (portfolio.pendingOrders ?? []).reduce((sum, order) => (
+      sum + Math.max(0, Number(order.reservedMargin ?? 0))
+    ), 0),
+  }), { floatingPnl: 0, usedMargin: 0, reservedMargin: 0 });
 }

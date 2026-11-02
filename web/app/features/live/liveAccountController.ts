@@ -24,6 +24,7 @@ export function buildLiveAccountLifecycleCommand(
       displayName: account.displayName,
       executionProfile: { ...settings.executionProfile },
       executionProfileVersion: settings.executionProfileVersion,
+      fxAccountConfig: settings.fxAccountConfig,
     } : {}),
   };
 }
@@ -45,10 +46,12 @@ type MarkedPortfolio = {
   instrumentId: string;
   latestClose: number;
   positions: Parameters<typeof accountMarketValue>[0];
+  pendingOrders?: Array<{ reservedMargin?: number }>;
 };
 
+
 export function sharedLiveAccountEquity(
-  account: Pick<LiveMarketAccountSnapshot, "id" | "tradingMode" | "cashBalance" | "equity">,
+  account: Pick<LiveMarketAccountSnapshot, "id" | "tradingMode" | "cashBalance" | "equity"> & { executionProfile?: Record<string, unknown> },
   portfolios: MarkedPortfolio[],
   current?: { instrumentId: string; price: number; positions: MarkedPortfolio["positions"] },
 ) {
@@ -57,6 +60,7 @@ export function sharedLiveAccountEquity(
     sum + accountMarketValue(
       current?.instrumentId === item.instrumentId ? current.positions : item.positions,
       current?.instrumentId === item.instrumentId ? current.price : item.latestClose,
+      Number(account.executionProfile?.spreadBps ?? 0),
     )
   ), 0);
 }

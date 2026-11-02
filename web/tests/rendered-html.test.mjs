@@ -83,7 +83,7 @@ test("ships the K-line training workbench instead of the starter", async () => {
   assert.match(workbench, /查看复盘/);
   assert.match(reviewHistory, /全部可恢复训练，可滚动浏览/);
   assert.match(reviewHistory, /role="button"/);
-  assert.match(reviewHistory, /onClick=\{\(\) => onReview\(item\.id\)\}/);
+  assert.match(reviewHistory, /onClick=\{\(\) => cleanupOpen \? toggleSelection\(item\.id\) : onReview\(item\.id\)\}/);
   assert.doesNotMatch(reviewHistory, /className="review-session"/);
   assert.match(reviewHistory, /filters\.planStatus/);
   assert.match(reviewHistory, /已写计划/);

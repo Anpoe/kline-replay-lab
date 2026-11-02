@@ -49,5 +49,22 @@ test('quote reading covers equities, gold and FX, keeps partial failures recover
   assert.equal(quotes['EURUSD.FX'].error, true);
   assert.equal(calls.length, 3);
   assert.equal(JSON.parse(calls.find(x => x[0] === '/api/live-scan')[1].body).action, 'refresh');
+  assert.equal(JSON.parse(calls.find(x => x[0] === '/api/live-scan')[1].body).storedOnly, true);
+  assert.ok(calls.filter(x => x[0].startsWith('/api/candles?')).every(x => new URL(x[0], 'http://local').searchParams.get('limit') === '2'));
   assert.ok(calls.every(x => x[0] === '/api/live-scan' || x[0].startsWith('/api/candles?')));
+});
+
+test('large watchlists publish bounded batches without waiting for the entire list and stop on cancellation', async () => {
+  const controller = new AbortController();
+  const calls = [], progress = [];
+  const items = Array.from({ length: 100 }, (_, i) => ({ ...gold, instrumentId: `${i}.SH`, market: 'CN' }));
+  const quotes = await loadWatchlistQuotes(items, async (url, init) => {
+    const body = JSON.parse(init.body); calls.push(body);
+    assert.equal(body.storedOnly, true);
+    return { ok: true, json: async () => ({ prices: body.instrumentIds.map(instrumentId => ({ instrumentId, close: 110, previousClose: 100, timestamp: 2 })) }) };
+  }, controller.signal, partial => { progress.push(partial); controller.abort(); });
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].instrumentIds.length, 40);
+  assert.equal(Object.keys(progress[0]).length, 40);
+  assert.equal(Object.keys(quotes).length, 40);
 });

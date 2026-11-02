@@ -33,6 +33,7 @@ import {
   X,
 } from "lucide-react";
 import type { KLineData } from "klinecharts";
+import { loadObservationPage, useObservationHistory } from '../features/market-data/useObservationHistory';
 import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
 import {
   KLineReplayChart,
@@ -74,7 +75,7 @@ import {
   normalizeReasonTags,
 } from "../features/settings/settingsGateway";
 import { SettingsPanel } from "../features/settings/components/SettingsPanel";
-import { useKeyboardShortcuts } from "./useKeyboardShortcuts";
+import { useKeyboardShortcuts, usePointerRepeat } from "./useKeyboardShortcuts";
 import type { ShortcutAction } from "../lib/keyboardShortcuts";
 import { useDesktopLayout } from "./useDesktopLayout";
 import { WatchlistPanel, type WatchlistSource } from "../features/watchlist/WatchlistPanel";
@@ -258,6 +259,9 @@ import {
   availableCash as calculateAvailableCash,
   liveAccountCurrencyForMarket,
   liveAccountIdForMarket,
+  liveAccountNameForMarket,
+  liveAccountMarginTotals,
+  isLiveAccountMarket,
   normalizeLiveMarketAccountSnapshot,
   portfolioReturnPct,
   positionReturnPct,
@@ -356,6 +360,7 @@ type AvailableInstrument = {
   timeframes: string[];
 };
 type LiveWatchMarket = LiveScanMarket | "FX" | "GOLD";
+type LiveMarketResult = Omit<LiveScanResult, "market"> & { market: LiveWatchMarket };
 
 function inferInstrumentAssetType(
   instrumentId: string,
@@ -685,7 +690,7 @@ type LivePortfolioRecord = {
   instrumentId: string;
   symbol: string;
   name: string;
-  market: LiveScanMarket;
+  market: LiveWatchMarket;
   latestTimestamp: number;
   latestClose: number;
   scanTimestamp: number;
@@ -781,7 +786,7 @@ function serializeLivePortfolio(record: LivePortfolioRecord): LivePortfolioRecor
   };
 }
 
-function livePortfolioResult(portfolio: LivePortfolioRecord): LiveScanResult {
+function livePortfolioResult(portfolio: LivePortfolioRecord): LiveMarketResult {
   return {
     instrumentId: portfolio.instrumentId,
     symbol: portfolio.symbol,
@@ -799,12 +804,12 @@ function livePortfolioResult(portfolio: LivePortfolioRecord): LiveScanResult {
   };
 }
 
-function liveWatchResult(watch: LiveWatchRecord): LiveScanResult {
+function liveWatchResult(watch: LiveWatchRecord): LiveMarketResult {
   return {
     instrumentId: watch.instrumentId,
     symbol: watch.symbol,
     name: watch.name,
-    market: watch.market as LiveScanMarket,
+    market: watch.market,
     timestamp: watch.latestTimestamp,
     close: watch.latestClose,
     changePct: 0,
@@ -817,8 +822,8 @@ function liveWatchResult(watch: LiveWatchRecord): LiveScanResult {
   };
 }
 
-function watchlistItemResult(item: WatchlistItem, quote?: WatchlistQuote): LiveScanResult {
-  return { ...item, market: item.market as LiveScanMarket, timestamp: quote?.timestamp ?? 0, close: quote?.close ?? 0, changePct: quote?.changePct ?? Number.NaN, volume: 0, turnover: 0, averageVolume: 0, averageTurnover: 0, presetIds: [], presetNames: [] };
+function watchlistItemResult(item: WatchlistItem, quote?: WatchlistQuote): LiveMarketResult {
+  return { ...item, market: item.market as LiveWatchMarket, timestamp: quote?.timestamp ?? 0, close: quote?.close ?? 0, changePct: quote?.changePct ?? Number.NaN, volume: 0, turnover: 0, averageVolume: 0, averageTurnover: 0, presetIds: [], presetNames: [] };
 }
 
 function liveWatchObservationPrice(watch: LiveWatchRecord) {
@@ -970,10 +975,6 @@ type NewTaskRequest = {
   snapshotId?: string;
   selectionTimeframe?: string;
 };
-type LatestWatchRequest = {
-  instrumentId: string;
-  timeframe: string;
-};
 type MistakeSource = {
   session: TrainingSession;
   state: TrainingState;
@@ -998,7 +999,7 @@ type LivePerformanceFilters = {
   accountScope: string;
   buyDateFrom: string;
   buyDateTo: string;
-  market: "all" | LiveScanMarket;
+  market: "all" | LiveWatchMarket;
   holdingStatus: "all" | "holding" | "pending" | "closed";
   outcome: "all" | "profit" | "loss" | "flat";
 };
@@ -1018,7 +1019,7 @@ type SyncedPreferences = {
     groupTools: Record<string, string>;
   };
   liveScanSettings?: {
-    market: LiveScanMarket;
+    market: LiveWatchMarket;
     presetIds: string[];
     minPrice: string;
     maxPrice: string;
@@ -1162,12 +1163,12 @@ function sanitizeLiveWatchlist(value: unknown): LiveWatchRecord[] {
   }).slice(0, 500);
 }
 
-function sanitizeRecentLiveResults(value: unknown): LiveScanResult[] {
+function sanitizeRecentLiveResults(value: unknown): LiveMarketResult[] {
   if (!Array.isArray(value)) return [];
   const seen = new Set<string>();
   return value.flatMap((item) => {
     if (!item || typeof item !== "object") return [];
-    const candidate = item as Partial<LiveScanResult>;
+    const candidate = item as Partial<LiveMarketResult>;
     if (typeof candidate.instrumentId !== "string" || !candidate.instrumentId || seen.has(candidate.instrumentId)) return [];
     const market = typeof candidate.market === "string" ? candidate.market : "";
     if (!["CN", "US", "FX", "GOLD"].includes(market)) return [];
@@ -1179,7 +1180,7 @@ function sanitizeRecentLiveResults(value: unknown): LiveScanResult[] {
       // FX/GOLD entries are read-only latest-history views. The recent list
       // shares the live result shape so it can render without a second list
       // component; the click handler routes those markets back to history.
-      market: market as LiveScanMarket,
+      market: market as LiveWatchMarket,
       timestamp: Number.isFinite(candidate.timestamp) ? Number(candidate.timestamp) : 0,
       close: Number.isFinite(candidate.close) ? Number(candidate.close) : 0,
       changePct: Number.isFinite(candidate.changePct) ? Number(candidate.changePct) : 0,
@@ -1189,7 +1190,7 @@ function sanitizeRecentLiveResults(value: unknown): LiveScanResult[] {
       averageTurnover: Number.isFinite(candidate.averageTurnover) ? Number(candidate.averageTurnover) : 0,
       presetIds: Array.isArray(candidate.presetIds) ? candidate.presetIds.filter((id): id is string => typeof id === "string") : [],
       presetNames: Array.isArray(candidate.presetNames) ? candidate.presetNames.filter((name): name is string => typeof name === "string") : [],
-    } satisfies LiveScanResult];
+    } satisfies LiveMarketResult];
   }).slice(0, 50);
 }
 
@@ -1687,7 +1688,7 @@ export function TrainingWorkbench() {
   const view = requestedView === "mt4" && !desktopLayout ? "replay" : requestedView;
   const [watchlistCollapsed, setWatchlistCollapsed] = useState(true);
   const [watchlistSource, setWatchlistSource] = useState<WatchlistSource>("watchlist");
-  const [recentLiveResults, setRecentLiveResults] = useState<LiveScanResult[]>([]);
+  const [recentLiveResults, setRecentLiveResults] = useState<LiveMarketResult[]>([]);
   const [watchlistPreferencesReady, setWatchlistPreferencesReady] = useState(false);
   const [availableInstruments, setAvailableInstruments] = useState<AvailableInstrument[]>(defaultInstruments);
   const [instrumentId, setInstrumentId] = useState("600519.SH");
@@ -1735,6 +1736,7 @@ export function TrainingWorkbench() {
   const [orderPanelTab, setOrderPanelTab] = useState<"positions" | "pending" | "history">("positions");
   const [hoveredClosedPositionId, setHoveredClosedPositionId] = useState<string | null>(null);
   const [mobileOrdersExpanded, setMobileOrdersExpanded] = useState(false);
+  const nextBarButtonRef = useRef<HTMLButtonElement>(null);
   const [chartHeight, setChartHeight] = useState(520);
   const [chartHeightAdjusted, setChartHeightAdjusted] = useState(false);
   const [chartHeightMinimum, setChartHeightMinimum] = useState(350);
@@ -1830,15 +1832,14 @@ export function TrainingWorkbench() {
   const [livePriceRefreshedAt, setLivePriceRefreshedAt] = useState(0);
   const [liveScanData, setLiveScanData] = useState<LiveScanResponse | null>(null);
   const [liveMode, setLiveMode] = useState(false);
-  const [liveContext, setLiveContext] = useState<LiveScanResult | null>(null);
+  const [liveContext, setLiveContext] = useState<LiveMarketResult | null>(null);
   const [liveEntryFromCoverage, setLiveEntryFromCoverage] = useState(false);
-  const [latestWatchMode, setLatestWatchMode] = useState(false);
   const [liveAccounts, setLiveAccounts] = useState<LiveAccountRecord[]>([]);
   const [livePortfolios, setLivePortfolios] = useState<LivePortfolioRecord[]>([]);
   const [liveWatchlist, setLiveWatchlist] = useState<LiveWatchRecord[]>([]);
   const [liveScanIndex, setLiveScanIndex] = useState(0);
-  const [watchlistNavigation, setWatchlistNavigation] = useState<LiveScanResult[]>([]);
-  const watchlistNavigationRef = useRef<LiveScanResult[]>([]);
+  const [watchlistNavigation, setWatchlistNavigation] = useState<LiveMarketResult[]>([]);
+  const watchlistNavigationRef = useRef<LiveMarketResult[]>([]);
   const [liveNavigatorSource, setLiveNavigatorSource] = useState<LiveNavigatorSource>("scan");
   const [liveNavigatorResume, setLiveNavigatorResume] = useState<NonNullable<SyncedPreferences["liveNavigatorResume"]>>({ source: "scan", index: 0 });
   const [liveScanResume, setLiveScanResume] = useState<NonNullable<SyncedPreferences["liveScanResume"]>>({ index: 0 });
@@ -1909,6 +1910,8 @@ export function TrainingWorkbench() {
   const [trashActionId, setTrashActionId] = useState("");
   const [trashError, setTrashError] = useState("");
   const [emptySessionCleanupRunning, setEmptySessionCleanupRunning] = useState(false);
+  const sessionCleanupRunningRef = useRef(false);
+  const [sessionCleanupStatus, setSessionCleanupStatus] = useState("");
   const [snapshotTradeContexts, setSnapshotTradeContexts] = useState<SnapshotTradeContextMap>({});
   const [performanceFilters, setPerformanceFilters] = useState<PerformanceFilters>(defaultPerformanceFilters);
   const [performanceHeroDisplayMode, setPerformanceHeroDisplayMode] = useState<"return" | "amount">("return");
@@ -1918,6 +1921,7 @@ export function TrainingWorkbench() {
   const [selectedPerformanceSessionId, setSelectedPerformanceSessionId] = useState("");
   const [importStatus, setImportStatus] = useState("");
   const [chartLoadError, setChartLoadError] = useState("");
+  const [observationLoad, setObservationLoad] = useState(false);
   const [startupReady, setStartupReady] = useState(false);
   const [settingsReady, setSettingsReady] = useState(false);
   const [syncedPreferencesReady, setSyncedPreferencesReady] = useState(false);
@@ -1942,13 +1946,12 @@ export function TrainingWorkbench() {
   const timeframeViewLoadRef = useRef<{ id: number; controller: AbortController | null }>({ id: 0, controller: null });
   const sessionSummaryLoadRef = useRef<{ id: number; controller: AbortController | null }>({ id: 0, controller: null });
   const sessionSummariesReadyRef = useRef<false | "recent" | "all">(false);
-  const liveRequestRef = useRef<LiveScanResult | null>(null);
+  const liveRequestRef = useRef<LiveMarketResult | null>(null);
   const liveRequestTimeframeRef = useRef<string | null>(null);
-  const latestWatchRequestRef = useRef<LatestWatchRequest | null>(null);
   const liveAccountsRef = useRef<LiveAccountRecord[]>([]);
   const livePortfoliosRef = useRef<LivePortfolioRecord[]>([]);
   const liveWatchlistRef = useRef<LiveWatchRecord[]>([]);
-  const recentLiveResultsRef = useRef<LiveScanResult[]>([]);
+  const recentLiveResultsRef = useRef<LiveMarketResult[]>([]);
   const livePriceRefreshRunningRef = useRef(false);
   const liveAccountCommandRunningRef = useRef(false);
   const liveStateSavePromiseRef = useRef<ReturnType<typeof liveGateway.saveState> | null>(null);
@@ -2173,6 +2176,9 @@ export function TrainingWorkbench() {
     showingCanonicalChart,
     visibleBars,
   ]);
+  const observationHistory = useObservationHistory(
+    !loading && (liveMode), instrumentId, chartTimeframe, chartBars,
+  );
   const selectedPatternPresetDraft = patternPresetDrafts.find((preset) => (
     preset.id === selectedPatternPresetId && isPatternPresetAvailable(preset)
   )) ?? patternPresetDrafts.find(isPatternPresetAvailable);
@@ -2272,13 +2278,24 @@ export function TrainingWorkbench() {
   const goldInstrument = marketRuleCode(instrument.market) === "GOLD" || /\.GOLD$/i.test(instrument.id);
   const marginContractUnit = goldInstrument ? "盎司" : instrumentEconomics?.baseCurrency ?? "基础币";
   const marginPipLabel = goldInstrument ? "每点" : "每 Pip";
+  const currentLivePortfolio = liveMode
+    ? livePortfolios.find((portfolio) => portfolio.instrumentId === instrument.id)
+    : undefined;
+  const currentLiveExecutionAccount = liveMode
+    ? currentLivePortfolio
+      ? currentLivePortfolio.accountId
+        ? liveAccounts.find((account) => account.id === currentLivePortfolio.accountId)
+        : undefined
+      : liveAccounts.find((account) => account.market === tradingCommandMarketFor(instrument.market, instrument.id, instrument.market) && account.status !== "archived")
+    : undefined;
   const reservedMarginTotal = pendingOrders.reduce(
     (sum, order) => sum + Math.max(0, Number(order.reservedMargin ?? 0)),
     0,
   );
   const currentMarginAccount = currentBar && marginInstrument
     ? marginAccountSnapshot({
-      balance: cashBalance,
+      balance: currentLiveExecutionAccount?.cashBalance ?? cashBalance,
+      externalMargin: currentLiveExecutionAccount ? liveAccountMarginTotals(currentLiveExecutionAccount.id, livePortfolios.filter(item => item.instrumentId !== instrument.id), executionProfile.spreadBps) : undefined,
       positions: openPositions,
       sourcePrice: currentBar.close,
       spreadBps: executionProfile.spreadBps,
@@ -2289,16 +2306,6 @@ export function TrainingWorkbench() {
   const oneLotPipValue = currentBar && marginInstrument
     ? pipValueInAccount(currentBar.close, 1, instrumentEconomics)
     : null;
-  const currentLivePortfolio = liveMode
-    ? livePortfolios.find((portfolio) => portfolio.instrumentId === instrument.id)
-    : undefined;
-  const currentLiveExecutionAccount = liveMode
-    ? currentLivePortfolio
-      ? currentLivePortfolio.accountId
-        ? liveAccounts.find((account) => account.id === currentLivePortfolio.accountId)
-        : undefined
-      : liveAccounts.find((account) => account.market === (instrument.market === "US" ? "US" : "CN") && account.status !== "archived")
-    : undefined;
   const liveAccountRealizedPnl = currentLiveExecutionAccount
     ? livePortfolios
       .filter((portfolio) => portfolio.accountId === currentLiveExecutionAccount.id)
@@ -2562,7 +2569,7 @@ export function TrainingWorkbench() {
     // instrument's bar together with the new live context.  Never persist
     // that mixed state under the new symbol; the live ledger is restored only
     // after the requested instrument has finished loading.
-    if (!liveMode || !liveContext || !currentBar || instrument.id !== liveContext.instrumentId) return;
+    if (!liveMode || !liveContext || !currentBar || loading || !trainingReady || instrument.id !== liveContext.instrumentId) return;
     const previousPortfolio = livePortfoliosRef.current.find((portfolio) => portfolio.instrumentId === liveContext.instrumentId);
     const portfolioAccount = previousPortfolio?.accountId
       ? liveAccountsRef.current.find(account => account.id === previousPortfolio.accountId)
@@ -2597,8 +2604,9 @@ export function TrainingWorkbench() {
       const account: LiveAccountRecord = {
         id: accountId as string,
         market: liveContext.market,
-        currency: liveAccountCurrencyForMarket(liveContext.market),
-        displayName: liveContext.market === "CN" ? "A 股实时模拟账户" : "美股实时模拟账户",
+        currency: liveContext.market === "FX" || liveContext.market === "GOLD" ? appSettingsRef.current.fxAccountConfig.accountCurrency : liveAccountCurrencyForMarket(liveContext.market),
+        ...(liveContext.market === "FX" || liveContext.market === "GOLD" ? { fxAccountConfig: { ...appSettingsRef.current.fxAccountConfig } } : {}),
+        displayName: liveAccountNameForMarket(liveContext.market),
         status: "active",
         tradingMode: defaults.tradingMode,
         initialCapital: defaults.tradingMode === "capital" ? startingCapital : 0,
@@ -2695,7 +2703,7 @@ export function TrainingWorkbench() {
       next[previousIndex] = nextRecord;
       return next;
     });
-  }, [cashBalance, currentBar, decision, decisionSubmissions, executions, initialCapital, instrument.id, liveContext, liveMode, orderRejections, pendingOrders, positions, tradingMode]);
+  }, [cashBalance, currentBar, decision, decisionSubmissions, executions, initialCapital, instrument.id, liveContext, liveMode, loading, orderRejections, pendingOrders, positions, tradingMode, trainingReady]);
 
   useEffect(() => {
     const move = (event: PointerEvent) => {
@@ -3560,11 +3568,9 @@ export function TrainingWorkbench() {
     preemptStartupRandom();
     liveRequestRef.current = null;
     liveRequestTimeframeRef.current = null;
-    latestWatchRequestRef.current = null;
     setLiveMode(false);
     setLiveContext(null);
     setLiveEntryFromCoverage(false);
-    setLatestWatchMode(false);
     livePersistSignatureRef.current = "";
     setPositions([]);
     setPendingOrders([]);
@@ -3620,18 +3626,16 @@ export function TrainingWorkbench() {
     newTaskRequestRef.current = null;
     const liveRequest = liveRequestRef.current;
     liveRequestRef.current = null;
-    const latestWatchRequest = latestWatchRequestRef.current;
-    latestWatchRequestRef.current = null;
+    setObservationLoad(Boolean(liveRequest));
     // Keep the restore/new-task precedence explicit so a newer random round
     // still invalidates an older load, while live observation can override it.
-    let requestInstrumentId = latestWatchRequest?.instrumentId
-      ?? restoreRequest?.instrumentId
+    let requestInstrumentId = restoreRequest?.instrumentId
       ?? newTaskRequest?.instrumentId
       ?? instrumentId;
     if (liveRequest) requestInstrumentId = liveRequest.instrumentId;
-    const requestTimeframe = latestWatchRequest?.timeframe ?? (liveRequest
+    const requestTimeframe = liveRequest
       ? liveRequestTimeframeRef.current ?? "1d"
-      : restoreRequest?.timeframe ?? newTaskRequest?.timeframe ?? timeframe);
+      : restoreRequest?.timeframe ?? newTaskRequest?.timeframe ?? timeframe;
     setLoading(true);
     setChartLoadError("");
     setTrainingReady(false);
@@ -3648,11 +3652,15 @@ export function TrainingWorkbench() {
       let data: {
         instrument: Instrument;
         candles: KLineData[];
-        snapshot: SnapshotMeta;
+        snapshot?: SnapshotMeta;
+        adjustmentType?: string;
         window?: { startIndex: number; endIndex: number; barCount: number; snapshotBarCount: number; isPartial: boolean };
         selection?: { startCursor: number; endCursor: number; sourceStartIndex: number; sourceEndIndex: number; sourceBarCount: number; truncated?: boolean };
       };
-      if (requestedSnapshotId) {
+      if (liveRequest) {
+        data = await loadObservationPage<typeof data>(requestInstrumentId, requestTimeframe, controller.signal);
+        if (!data.instrument || !data.candles.length) throw new Error('没有可查看的 K 线，请在管理行情中准备数据后重试。');
+      } else if (requestedSnapshotId) {
         const persistedTask = restoreRequest?.state.trainingTask;
         data = await reviewGateway.loadSnapshot<typeof data>(
           requestedSnapshotId,
@@ -3673,7 +3681,7 @@ export function TrainingWorkbench() {
             instrumentId: requestInstrumentId,
             timeframe: newTaskRequest?.selectionTimeframe ?? requestTimeframe,
             adjustmentType: defaultAdjustmentTypeForInstrument(requestInstrumentId),
-            replayWindow: newTaskRequest && !latestWatchRequest ? {
+            replayWindow: newTaskRequest ? {
               mode: newTaskRequest.draft.mode,
               startMode: newTaskRequest.draft.startMode,
               startDate: newTaskRequest.draft.startDate,
@@ -3685,10 +3693,11 @@ export function TrainingWorkbench() {
           }, controller.signal);
       }
       if (marketLoadRef.current.id !== requestId) return;
-      const initialChartTimeframe = newTaskRequest?.selectionTimeframe ?? requestTimeframe;
+      const initialChartTimeframe = liveRequest ? requestTimeframe : newTaskRequest?.selectionTimeframe ?? requestTimeframe;
       const initialChartBars = data.candles;
       let preparedTask: TrainingTask | undefined;
-      if (newTaskRequest?.draft.randomRun && initialChartTimeframe !== requestTimeframe && !restoreRequest) {
+      if (newTaskRequest?.draft.randomRun && initialChartTimeframe !== requestTimeframe && !restoreRequest && !liveRequest) {
+        if (!data.snapshot) throw new Error('训练快照未能读取，请重新载入。');
         const selectedTask = resolveTrainingTask({
           ...newTaskRequest.draft,
           ...(data.selection ? { startMode: "bar" as const, startBar: data.selection.startCursor + 1 } : {}),
@@ -3714,7 +3723,8 @@ export function TrainingWorkbench() {
       setCorporateActionsForInstrumentId(data.instrument.id);
       setCorporateActions(loadedActions?.corporateActions?.enabled ? loadedActions.events ?? [] : []);
       setCorporateActionsError(stockNeedsActions ? loadedActions?.error ?? (loadedActions?.corporateActions?.enabled ? "" : "权息信息尚未建立；请在数据管理中建立后重新载入训练。") : "");
-      setTrainingPriceBasis(data.snapshot.adjustmentType === "none" ? "raw" : ["qfq", "hfq", "all"].includes(data.snapshot.adjustmentType) ? "adjusted" : "unknown");
+      const adjustmentType = data.snapshot?.adjustmentType ?? data.adjustmentType ?? '';
+      setTrainingPriceBasis(adjustmentType === "none" ? "raw" : ["qfq", "hfq", "all"].includes(adjustmentType) ? "adjusted" : "unknown");
       const loadedDataIndexOffset = data.window?.startIndex ?? 0;
       setInstrument(data.instrument);
       setBars(data.candles);
@@ -3722,9 +3732,13 @@ export function TrainingWorkbench() {
       setChartBars(initialChartBars);
       setChartViewError("");
       setSnapshotDataIndexOffset(loadedDataIndexOffset);
-      setDataSnapshotId(data.snapshot.id);
-      setSnapshotHash(data.snapshot.contentHash);
+      setDataSnapshotId(data.snapshot?.id ?? '');
+      setSnapshotHash(data.snapshot?.contentHash ?? '');
       const restoredMarketRules = restoreRequest?.state.marketRules;
+      const loadedLivePortfolio = liveRequest ? livePortfoliosRef.current.find(item => item.instrumentId === liveRequest.instrumentId) : undefined;
+      const loadedLiveAccount = liveRequest ? liveAccountsRef.current.find(item => loadedLivePortfolio?.accountId
+        ? item.id === loadedLivePortfolio.accountId : item.market === liveRequest.market && item.status !== "archived") : undefined;
+      const loadedFxConfig = loadedLiveAccount?.fxAccountConfig ?? appSettingsRef.current.fxAccountConfig;
       const loadedMarketRules = restoredMarketRules?.id === "generic-cash"
         && (
           data.instrument.market === "FX"
@@ -3732,11 +3746,11 @@ export function TrainingWorkbench() {
           || data.instrument.id.endsWith(".FX")
           || data.instrument.id.endsWith(".GOLD")
         )
-        ? resolveMarketRules(data.instrument.market, data.instrument.id, appSettingsRef.current.fxAccountConfig)
+        ? resolveMarketRules(data.instrument.market, data.instrument.id, loadedFxConfig)
         : restoredMarketRules ?? resolveMarketRules(
           data.instrument.market,
           data.instrument.id,
-          appSettingsRef.current.fxAccountConfig,
+          loadedFxConfig,
         );
       setMarketRules(loadedMarketRules);
       setRuleNotice("");
@@ -3746,7 +3760,6 @@ export function TrainingWorkbench() {
         const liveCursor = data.candles.length - 1;
         setLiveMode(true);
         setLiveContext({ ...liveRequest, timestamp: data.candles[liveCursor]?.timestamp ?? liveRequest.timestamp, close: data.candles[liveCursor]?.close ?? liveRequest.close });
-        setLatestWatchMode(false);
         setCursor(Math.max(0, liveCursor));
         setTrainingTask(null);
         setPositions(savedPortfolio?.positions ?? []);
@@ -3801,52 +3814,8 @@ export function TrainingWorkbench() {
         eventSequenceRef.current = 0;
         setEvents([]);
         setSaveState("Live observation · not saved as training");
-      } else if (latestWatchRequest) {
-        setTrashPreview(false);
-        setLiveMode(false);
-        setLiveContext(null);
-        setLiveEntryFromCoverage(false);
-        setLatestWatchMode(true);
-        const latestCursor = Math.max(0, data.candles.length - 1);
-        setCursor(latestCursor);
-        setTrainingTask(null);
-        setPositions([]);
-        setPendingOrders([]);
-        setExecutions([]);
-        setOrderRejections([]);
-        setDecision(defaultDecision);
-        setDecisionSubmissions([]);
-        setSelectedDecisionId("");
-        setDecisionTarget(null);
-        setEditingDecisionId("");
-        setOrderQty(configuredDefaultOrderQuantity(
-          appSettingsRef.current,
-          data.instrument.market,
-          data.instrument.id,
-          loadedMarketRules,
-        ));
-        const nextTradingDefaults = trainingAccountRuntimeDefaults(
-          appSettingsRef.current,
-          data.instrument.market,
-          data.instrument.id,
-        );
-        setTradingMode(nextTradingDefaults.tradingMode);
-        setInitialCapital(nextTradingDefaults.initialCapital);
-        setCashBalance(nextTradingDefaults.initialCapital);
-        setExecutionProfile(appSettingsRef.current.executionProfile);
-        setPositionSizeMode(appSettingsRef.current.positionSizeMode);
-        setRiskPercent(appSettingsRef.current.riskPercent);
-        setProtectionPriceSelection(null);
-        setDrawings([]);
-        setDrawingUndoStack([]);
-        setDrawingRedoStack([]);
-        setClearNonce(Date.now());
-        setSessionId(createUuid());
-        setRandomSeed(createUuid());
-        eventSequenceRef.current = 0;
-        setEvents([]);
-        setSaveState("最新行情 · 仅看盘");
       } else if (restoreRequest) {
+        if (!data.snapshot) throw new Error('训练快照未能读取，请重新载入。');
         const isTrashPreview = Boolean(restoreRequest.preview);
         const previewSaveLabel = restoreRequest.previewKind === "duplicate"
           ? "重复训练预览 · 未恢复"
@@ -3854,7 +3823,6 @@ export function TrainingWorkbench() {
         setTrashPreview(isTrashPreview);
         setLiveMode(false);
         setLiveContext(null);
-        setLatestWatchMode(false);
         const evidenceCursor = restoreRequest.evidenceTimestamp == null
           ? -1
           : data.candles.findIndex((bar) => bar.timestamp === restoreRequest.evidenceTimestamp);
@@ -3940,10 +3908,10 @@ export function TrainingWorkbench() {
             ? "证据 K 线不在原始快照中，已保留训练当前位置"
             : restoreRequest.evidenceTimestamp != null ? "已跳到证据 K 线" : "已恢复保存点");
       } else {
+        if (!data.snapshot) throw new Error('训练快照未能读取，请重新载入。');
         setTrashPreview(false);
         setLiveMode(false);
         setLiveContext(null);
-        setLatestWatchMode(false);
         setLiveEntryFromCoverage(false);
         const nextSessionId = createUuid();
         const nextSeed = createUuid();
@@ -4063,6 +4031,9 @@ export function TrainingWorkbench() {
       setTrainingReady(true);
     } catch (error) {
       if (marketLoadRef.current.id !== requestId || controller.signal.aborted) return;
+      if (liveRequest) {
+        liveRequestRef.current = liveRequest;
+      }
       const message = error instanceof Error ? error.message : "行情加载失败";
       setChartLoadError(message);
       setImportStatus(message);
@@ -4088,6 +4059,25 @@ export function TrainingWorkbench() {
     if (nextTimeframe === chartTimeframe) return;
     setPlaying(false);
     timeframeViewLoadRef.current.controller?.abort();
+    if (liveMode) {
+      const requestId = timeframeViewLoadRef.current.id + 1;
+      const controller = new AbortController();
+      timeframeViewLoadRef.current = { id: requestId, controller };
+      setChartViewLoading(true);
+      setChartViewError('');
+      try {
+        const page = await loadObservationPage<{ candles: KLineData[] }>(instrumentId, nextTimeframe, controller.signal);
+        if (controller.signal.aborted || timeframeViewLoadRef.current.id !== requestId) return;
+        if (!page.candles.length) throw new Error('这个周期没有 K 线，请选择其他周期或准备行情数据。');
+        setChartBars(page.candles);
+        setChartTimeframe(nextTimeframe);
+      } catch (error) {
+        if (!controller.signal.aborted) setChartViewError(error instanceof Error ? error.message : '行情未能读取，请重新选择周期重试。');
+      } finally {
+        if (timeframeViewLoadRef.current.id === requestId) { timeframeViewLoadRef.current.controller = null; setChartViewLoading(false); }
+      }
+      return;
+    }
     if (nextTimeframe === timeframe) {
       timeframeViewLoadRef.current = {
         id: timeframeViewLoadRef.current.id + 1,
@@ -4144,6 +4134,7 @@ export function TrainingWorkbench() {
   }, [
     bars,
     chartTimeframe,
+    liveMode,
     dataSnapshotId,
     instrument.market,
     instrumentId,
@@ -4222,7 +4213,7 @@ export function TrainingWorkbench() {
   }, [persistTrainingState, randomSeed, sessionId, trainingComplete, trainingMutationSignature, trainingReady, trainingState, trashPreview]);
 
   useEffect(() => {
-    if (trashPreview || liveMode || latestWatchMode || !sessionId || !randomSeed || !trainingReady) {
+    if (trashPreview || liveMode || !sessionId || !randomSeed || !trainingReady) {
       if (trainingAutosaveTimerRef.current !== null) {
         window.clearTimeout(trainingAutosaveTimerRef.current);
         trainingAutosaveTimerRef.current = null;
@@ -4256,7 +4247,7 @@ export function TrainingWorkbench() {
       window.clearTimeout(timer);
       if (trainingAutosaveTimerRef.current === timer) trainingAutosaveTimerRef.current = null;
     };
-  }, [latestWatchMode, liveMode, persistTrainingState, randomSeed, sessionId, trainingMutationSignature, trainingReady, trainingState, trashPreview]);
+  }, [liveMode, persistTrainingState, randomSeed, sessionId, trainingMutationSignature, trainingReady, trainingState, trashPreview]);
 
   const executeOrders = useCallback((
     orders: PendingOrder[],
@@ -5178,7 +5169,7 @@ export function TrainingWorkbench() {
       return;
     }
     const activeExecutionProfile = executionProfile;
-    const orderEconomics = liveMode ? undefined : marketRules.instrumentEconomics;
+    const orderEconomics = marketRules.instrumentEconomics;
     const marginMode = isMarginEconomics(orderEconomics);
     const expectedExecutionPrice = marginMode && selectedOrderType !== "market"
       ? executionPriceFromQuote(side, expectedEntry, activeExecutionProfile)
@@ -5214,7 +5205,7 @@ export function TrainingWorkbench() {
     const decisionSubmissionId = protectiveDecisionId
       ?? latestEntryDecisionId(decisionSubmissions, currentBar.timestamp);
     const tradingCommandMarket = tradingCommandMarketFor(marketRules.market, instrument.id, instrument.market);
-    const liveCommandMarket = instrument.market === "US" ? "US" : "CN";
+    const liveCommandMarket = tradingCommandMarketFor(instrument.market, instrument.id, instrument.market);
     const currentLivePortfolio = liveMode
       ? livePortfoliosRef.current.find((item) => item.instrumentId === instrument.id)
       : undefined;
@@ -5392,7 +5383,8 @@ export function TrainingWorkbench() {
           tradingMode: defaults.tradingMode,
           initialCapital: defaults.tradingMode === "capital" ? defaults.initialCapital : null,
           riskCapital: defaults.tradingMode === "return" ? defaults.initialCapital : null,
-          displayName: liveCommandMarket === "CN" ? "A 股实时模拟账户" : "美股实时模拟账户",
+          displayName: liveAccountNameForMarket(liveCommandMarket),
+          fxAccountConfig: appSettingsRef.current.fxAccountConfig,
           executionProfile: activeExecutionProfile,
           executionProfileVersion: appSettingsRef.current.executionProfileVersion,
         }).then((payload) => {
@@ -5473,7 +5465,7 @@ export function TrainingWorkbench() {
       rejectOrderAttempt(validation, { action: "close", positionId, position });
       return;
     }
-    const liveMarket = instrument.market === "US" ? "US" : "CN";
+    const liveMarket = tradingCommandMarketFor(instrument.market, instrument.id, instrument.market);
     const currentLivePortfolio = liveMode
       ? livePortfoliosRef.current.find((item) => item.instrumentId === instrument.id)
       : undefined;
@@ -5591,7 +5583,7 @@ export function TrainingWorkbench() {
         ? liveAccountsRef.current.find((item) => item.id === currentLivePortfolio.accountId)
         : undefined;
       const orderId = createUuid();
-      const liveMarket = instrument.market === "US" ? "US" : "CN";
+      const liveMarket = tradingCommandMarketFor(instrument.market, instrument.id, instrument.market);
       const closeCommand = normalizeTradingCommand({
         commandId: orderId,
         type: "close-position",
@@ -5751,7 +5743,7 @@ export function TrainingWorkbench() {
           type: "close-all",
           environment: "live",
           accountId: currentLiveAccount.id,
-          market: instrument.market === "US" ? "US" : "CN",
+          market: tradingCommandMarketFor(instrument.market, instrument.id, instrument.market),
           timestamp: currentBar.timestamp,
           observedAccountVersion: currentLiveAccount.version,
           observedMarketRevision: currentLivePortfolio.lastProcessedRevision ?? null,
@@ -5947,23 +5939,18 @@ export function TrainingWorkbench() {
   const startFreshTraining = (
     nextInstrumentId: string,
     nextTimeframe: string,
-    options: { latestWatch?: boolean } = {},
   ) => {
-    if (!options.latestWatch) nextTimeframe = replaySourceTimeframe(availableInstruments, nextInstrumentId, nextTimeframe);
+    nextTimeframe = replaySourceTimeframe(availableInstruments, nextInstrumentId, nextTimeframe);
     preemptStartupRandom();
     const targetMarket = availableInstruments.find((item) => item.id === nextInstrumentId)?.market
       ?? (/\.FX$/i.test(nextInstrumentId) ? "FX" : /\.GOLD$/i.test(nextInstrumentId) ? "GOLD" : undefined);
     setDuplicateTrainingPreview(null);
     liveRequestRef.current = null;
     liveRequestTimeframeRef.current = null;
-    latestWatchRequestRef.current = options.latestWatch
-      ? { instrumentId: nextInstrumentId, timeframe: nextTimeframe }
-      : null;
     setTrainingNavigatorActive(false);
     setLiveMode(false);
     setLiveContext(null);
     setLiveEntryFromCoverage(false);
-    setLatestWatchMode(Boolean(options.latestWatch));
     livePersistSignatureRef.current = "";
     setPositions([]);
     setPendingOrders([]);
@@ -5990,7 +5977,7 @@ export function TrainingWorkbench() {
     eventSequenceRef.current = 0;
     setEvents([]);
     restoreRequestRef.current = null;
-    newTaskRequestRef.current = options.latestWatch ? null : {
+    newTaskRequestRef.current = {
       instrumentId: nextInstrumentId,
       timeframe: nextTimeframe,
       draft: defaultTrainingTaskDraft,
@@ -6003,7 +5990,7 @@ export function TrainingWorkbench() {
 
   const handleTimeframeChange = (nextTimeframe: string) => {
     if (!currentAvailableTimeframes.includes(nextTimeframe)) return;
-    if (dataSnapshotId) {
+    if (dataSnapshotId || liveMode) {
       void loadTimeframeView(nextTimeframe);
       return;
     }
@@ -6091,7 +6078,7 @@ export function TrainingWorkbench() {
     const portfolios = livePortfoliosRef.current;
     const executionPortfolios = options.includePortfolios === false ? [] : portfolios;
     const watchlist = liveWatchlistRef.current;
-    const recent = recentLiveResultsRef.current.filter((item) => item.market === "CN" || item.market === "US");
+    const recent = recentLiveResultsRef.current;
     const scanResults = (liveScanData?.results ?? []).filter((item) => item.market === "CN" || item.market === "US");
     const tracked = [...executionPortfolios, ...watchlist, ...recent, ...scanResults];
     if (!tracked.length) {
@@ -6161,7 +6148,7 @@ export function TrainingWorkbench() {
           }
         }
       }
-      for (const market of ["CN", "US"] as LiveScanMarket[]) {
+      for (const market of ["CN", "US", "FX", "GOLD"] as LiveWatchMarket[]) {
         const instrumentIds = [...new Set(tracked.filter((item) => item.market === market).map((item) => item.instrumentId))];
         if (!instrumentIds.length) continue;
         try {
@@ -6262,7 +6249,7 @@ export function TrainingWorkbench() {
         } catch (error) {
           errors.push(error instanceof Error
             ? error.message
-            : `${market === "CN" ? "A 股" : "美股"}最新价同步失败`);
+            : `${performanceMarketLabel(market)}最新价同步失败`);
         }
       }
       if (!pricesById.size) {
@@ -6320,12 +6307,15 @@ export function TrainingWorkbench() {
         ), 0);
         accountReservedById.set(portfolio.accountId, (accountReservedById.get(portfolio.accountId) ?? 0) + reserved);
       }
+      let executionLedger = portfolios;
       const nextPortfoliosBeforeAccountSync = portfolios.map((portfolio) => {
         if (options.includePortfolios === false) return portfolio;
         const price = pricesById.get(portfolio.instrumentId);
         if (!price) return portfolio;
         syncedInstrumentIds.add(portfolio.instrumentId);
         const account = portfolio.accountId ? accountById.get(portfolio.accountId) : undefined;
+        const marketRules = resolveMarketRules(portfolio.market, portfolio.instrumentId, account?.fxAccountConfig);
+        const portfolioTimezone = portfolio.market === "CN" ? "Asia/Shanghai" : portfolio.market === "US" ? "America/New_York" : "UTC";
         const effectiveTradingMode = account?.tradingMode ?? portfolio.tradingMode;
         const processedTimestamp = Number(portfolio.lastProcessedTimestamp);
         const latestRevision = price.revision ?? stableLiveBarRevision({
@@ -6399,7 +6389,7 @@ export function TrainingWorkbench() {
                 pendingOrders: livePendingOrders,
                 barTimestamp: bar.timestamp,
                 priceBasis: bar.priceBasis ?? "unknown",
-                currency: account?.currency ?? "CNY",
+                currency: account?.currency === "USD" ? "USD" : "CNY",
                 capitalMode: effectiveTradingMode === "capital",
                 processedEventIds: terminalActionIds,
                 existingEntries: actionEntriesById,
@@ -6427,6 +6417,8 @@ export function TrainingWorkbench() {
               profile: activeLiveExecutionProfile,
               cashBalance: liveCashBalance,
               capitalMode: effectiveTradingMode === "capital",
+              instrumentEconomics: marketRules.instrumentEconomics,
+              externalMargin: account && isMarginEconomics(marketRules.instrumentEconomics) ? liveAccountMarginTotals(account.id, executionLedger.filter(item => item.instrumentId !== portfolio.instrumentId), activeLiveExecutionProfile.spreadBps) : undefined,
               validateFill: (order, rawPrice, fillBar) => {
                 if (order.action === "open" && order.side === "buy" && order.openingGapMode && order.openingGapMode !== "off") {
                   const openingGapReferencePrice = corporateActionReferenceClose ?? order.openingGapReferencePrice ?? previousLiveClose;
@@ -6460,7 +6452,7 @@ export function TrainingWorkbench() {
                 if (order.action === "close") {
                   const position = livePositions.find((item) => item.id === order.positionId && item.status === "open");
                   if (position) {
-                    const closeValidation = validateCloseOrder(marketRules, position, fillBar.timestamp, instrument.timezone);
+                    const closeValidation = validateCloseOrder(marketRules, position, fillBar.timestamp, portfolioTimezone);
                     if (!closeValidation.ok) return {
                       ok: false,
                       code: closeValidation.code ?? "market_rule_rejected",
@@ -6472,7 +6464,7 @@ export function TrainingWorkbench() {
                 const priceBand = corporateActionReferenceClose != null && timeframe === "1d"
                   ? createPriceBand(marketRules, corporateActionReferenceClose)
                   : fillCursor >= 0
-                  ? replayPriceBand(marketRules, bars, fillCursor, instrument.timezone, timeframe)
+                  ? replayPriceBand(marketRules, bars, fillCursor, portfolioTimezone, timeframe)
                   : null;
                 const priceValidation = validateMarketFill(marketRules, order.side, rawPrice, priceBand);
                 return priceValidation.ok ? { ok: true } : {
@@ -6482,7 +6474,7 @@ export function TrainingWorkbench() {
                 };
               },
               validateProtectiveFill: (position, _side, rawPrice, _reason, fillBar) => {
-                const closeValidation = validateCloseOrder(marketRules, position, fillBar.timestamp, instrument.timezone);
+                const closeValidation = validateCloseOrder(marketRules, position, fillBar.timestamp, portfolioTimezone);
                 if (!closeValidation.ok) return {
                   ok: false,
                   code: closeValidation.code ?? "market_rule_rejected",
@@ -6492,7 +6484,7 @@ export function TrainingWorkbench() {
                 const priceBand = corporateActionReferenceClose != null && timeframe === "1d"
                   ? createPriceBand(marketRules, corporateActionReferenceClose)
                   : fillCursor >= 0
-                  ? replayPriceBand(marketRules, bars, fillCursor, instrument.timezone, timeframe)
+                  ? replayPriceBand(marketRules, bars, fillCursor, portfolioTimezone, timeframe)
                   : null;
                 const priceValidation = validateMarketFill(marketRules, position.side === "long" ? "sell" : "buy", rawPrice, priceBand);
                 return priceValidation.ok ? { ok: true } : {
@@ -6634,6 +6626,7 @@ export function TrainingWorkbench() {
           accountCashById.set(account.id, nextCashBalance);
           accountReservedById.set(account.id, nextReservedCash);
         }
+        executionLedger = executionLedger.map(item => item.instrumentId === nextPortfolio.instrumentId ? nextPortfolio : item);
         return nextPortfolio;
       });
       const nextPortfolios = nextPortfoliosBeforeAccountSync.map((portfolio) => {
@@ -6662,13 +6655,20 @@ export function TrainingWorkbench() {
           const price = pricesById.get(portfolio.instrumentId)?.close ?? portfolio.latestClose;
           return sum + accountMarketValue(portfolio.positions, price);
         }, 0);
-        const nextEquity = account.tradingMode === "capital"
+        const marginTotals = account.market === "FX" || account.market === "GOLD"
+          ? liveAccountMarginTotals(account.id, nextPortfolios, Number(account.executionProfile.spreadBps ?? 0)) : null;
+        const nextEquity = marginTotals ? nextCashBalance + marginTotals.floatingPnl : account.tradingMode === "capital"
           ? nextCashBalance + markedValue
           : account.equity;
+        const nextAvailableCash = marginTotals
+          ? nextEquity - marginTotals.usedMargin - marginTotals.reservedMargin
+          : account.tradingMode === "capital" ? nextCashBalance - nextReservedCash : 0;
         const corrected = accountCorrections.has(account.id);
         const changed = nextCashBalance !== account.cashBalance
           || nextReservedCash !== account.reservedCash
+          || (marginTotals && marginTotals.reservedMargin !== account.reservedMargin)
           || nextEquity !== account.equity
+          || nextAvailableCash !== account.availableCash
           || JSON.stringify(portfolioInstrumentIds) !== JSON.stringify(account.portfolioInstrumentIds)
           || corrected;
         if (!changed) return account;
@@ -6676,7 +6676,8 @@ export function TrainingWorkbench() {
           ...account,
           cashBalance: nextCashBalance,
           reservedCash: nextReservedCash,
-          availableCash: account.tradingMode === "capital" ? nextCashBalance - nextReservedCash : 0,
+          ...(marginTotals ? { reservedMargin: marginTotals.reservedMargin } : {}),
+          availableCash: nextAvailableCash,
           equity: nextEquity,
           portfolioInstrumentIds,
           ...(corrected ? { status: "paused" as const, needsUserAction: true } : {}),
@@ -6697,6 +6698,19 @@ export function TrainingWorkbench() {
       if (nextPortfoliosWithAccountVersion.some((portfolio, index) => portfolio !== portfolios[index])) {
         livePortfoliosRef.current = nextPortfoliosWithAccountVersion;
         setLivePortfolios(nextPortfoliosWithAccountVersion);
+        // The shell and the ledger must move to the same execution snapshot in
+        // this render. Otherwise the autosave effect can restore stale orders
+        // or positions before the refreshed chart has finished loading.
+        const active = liveMode && liveContext
+          ? nextPortfoliosWithAccountVersion.find(item => item.instrumentId === liveContext.instrumentId)
+          : undefined;
+        if (active) {
+          setPositions(active.positions);
+          setPendingOrders(active.pendingOrders);
+          setExecutions(active.executions);
+          setOrderRejections(active.orderRejections);
+          setCashBalance(active.cashBalance);
+        }
       }
       const nextWatchlist = watchlist.map((watch) => {
         // Keep the observation baseline fixed at the original observation day.
@@ -6892,34 +6906,15 @@ export function TrainingWorkbench() {
     }
   };
 
-  const rememberRecentLiveResult = (result: LiveScanResult) => {
+  const rememberRecentLiveResult = (result: LiveMarketResult) => {
     setRecentLiveResults((items) => [
       result,
       ...items.filter((item) => item.instrumentId !== result.instrumentId),
     ].slice(0, 50));
   };
 
-  const rememberRecentInstrument = (item: AvailableInstrument) => {
-    const market = performanceMarketCode(item.market, item.id);
-    rememberRecentLiveResult({
-      instrumentId: item.id,
-      symbol: item.short,
-      name: item.label,
-      market: market as LiveScanMarket,
-      timestamp: 0,
-      close: 0,
-      changePct: 0,
-      volume: 0,
-      turnover: 0,
-      averageVolume: 0,
-      averageTurnover: 0,
-      presetIds: [],
-      presetNames: [],
-    });
-  };
-
   const openLiveScanResult = (
-    result: LiveScanResult,
+    result: LiveMarketResult,
     index?: number,
     source: LiveNavigatorSource = "scan",
     targetTimeframe = "1d",
@@ -6928,9 +6923,7 @@ export function TrainingWorkbench() {
     preemptStartupRandom();
     rememberRecentLiveResult(result);
     liveRequestTimeframeRef.current = targetTimeframe;
-    latestWatchRequestRef.current = null;
     setLiveEntryFromCoverage(fromCoverage);
-    setLatestWatchMode(false);
     const switchingInstrument = !liveMode || liveContext?.instrumentId !== result.instrumentId;
     if (switchingInstrument) {
       // Do not let the previous replay/live symbol remain visible while its
@@ -7085,18 +7078,13 @@ export function TrainingWorkbench() {
     const targetTimeframe = TIMEFRAME_IDS.includes(item.timeframe as typeof TIMEFRAME_IDS[number])
       ? item.timeframe
       : "1d";
-    if (marketCode !== "CN" && marketCode !== "US") {
-      rememberRecentInstrument({ id: item.id, short: item.symbol, label: item.name, market: item.market, assetType: "other", timeframes: [targetTimeframe] });
-      startFreshTraining(item.id, targetTimeframe, { latestWatch: true });
-      return;
-    }
     const latest = liveScanData?.results.find((result) => result.instrumentId === item.id);
     const latestIndex = liveScanData?.results.findIndex((result) => result.instrumentId === item.id) ?? -1;
     openLiveScanResult({
       instrumentId: item.id,
       symbol: item.symbol,
       name: item.name,
-      market: marketCode as LiveScanMarket,
+      market: marketCode as LiveWatchMarket,
       timestamp: latest?.timestamp ?? item.lastTimestamp,
       close: latest?.close ?? 0,
       changePct: latest?.changePct ?? 0,
@@ -7119,18 +7107,13 @@ export function TrainingWorkbench() {
     );
     const targetTimeframe = resolveAvailableTimeframe(nextAvailableTimeframes, "1d");
     const marketCode = performanceMarketCode(selected.market, selected.id);
-    if (marketCode !== "CN" && marketCode !== "US") {
-      rememberRecentInstrument(selected);
-      startFreshTraining(nextInstrumentId, targetTimeframe, { latestWatch: true });
-      return;
-    }
     const latest = liveScanData?.results.find((result) => result.instrumentId === nextInstrumentId);
     const latestIndex = liveScanData?.results.findIndex((result) => result.instrumentId === nextInstrumentId) ?? -1;
     openLiveScanResult({
       instrumentId: selected.id,
       symbol: selected.short,
       name: selected.label,
-      market: marketCode as LiveScanMarket,
+      market: marketCode as LiveWatchMarket,
       timestamp: latest?.timestamp ?? 0,
       close: latest?.close ?? 0,
       changePct: latest?.changePct ?? 0,
@@ -7169,7 +7152,7 @@ export function TrainingWorkbench() {
   };
 
   const resetTraining = () => {
-    if (rewindLocked || latestWatchMode) return;
+    if (rewindLocked) return;
     saveCompletedTrainingRef.current = false;
     setShowRandomComplete(false);
     setTrainingNavigatorActive(false);
@@ -7235,10 +7218,6 @@ export function TrainingWorkbench() {
   const saveSession = async () => {
     if (trashPreview) {
       setSaveState(duplicateTrainingPreview ? "重复训练预览不会保存训练" : "回收站查看模式不会保存训练");
-      return;
-    }
-    if (latestWatchMode) {
-      setSaveState("仅看盘模式不会保存训练");
       return;
     }
     if (liveMode) {
@@ -7360,40 +7339,15 @@ export function TrainingWorkbench() {
     });
   };
 
-  const deleteSession = async (session: TrainingSession) => {
-    if (!window.confirm(`确定将 ${session.instrumentId} · ${timeframeLabel(session.timeframe)} 的这次训练移入回收站吗？`)) return;
-    const removedIndex = sessionSummaries.findIndex((item) => item.session.id === session.id);
-    const removedSummary = removedIndex >= 0 ? sessionSummaries[removedIndex] : undefined;
-    setSessionSummaries((items) => items.filter((item) => item.session.id !== session.id));
-    try {
-      await reviewGateway.deleteSession(session.id);
-    } catch {
-      if (removedSummary) {
-        setSessionSummaries((items) => {
-          if (items.some((item) => item.session.id === session.id)) return items;
-          const restored = [...items];
-          restored.splice(Math.min(removedIndex, restored.length), 0, removedSummary);
-          return restored;
-        });
-      }
-      setImportStatus("训练记录移入回收站失败。");
-      return;
-    }
-    if (reviewedSession?.session.id === session.id) setReviewedSession(null);
-    const localDraft = settingsGateway.loadLastDraft<{ id?: string }>();
-    if (localDraft?.id === session.id) settingsGateway.removeLastDraft();
-    if (session.id === sessionId) {
-      resetTraining();
-      setSaveState("原训练已移入回收站，已开始一场新的空白训练");
-    }
-  };
-
-  const deleteEmptyTrainingSessions = async (summaries: TrainingSessionSummary[]) => {
-    if (emptySessionCleanupRunning) return;
-    const candidates = summaries.filter((summary) => !summary.hasMeaningfulActivity);
+  const deleteTrainingSessions = async (summaries: TrainingSessionSummary[], emptyOnly = false) => {
+    if (sessionCleanupRunningRef.current) return;
+    const candidates = summaries.filter((summary) => !emptyOnly || !summary.hasMeaningfulActivity);
     if (!candidates.length) return;
-    if (!window.confirm(`确定将当前筛选中的 ${candidates.length} 场没有操作和决策的训练移入回收站吗？这些训练只看过 K 线，没有画图、填写决策、下单或其他训练操作；移入后仍可在回收站恢复。`)) return;
-
+    const scope = emptyOnly ? "当前筛选中没有操作和决策的" : "选中的";
+    const activeWarning = candidates.some((summary) => summary.session.id === sessionId)
+      ? "当前训练也在其中，移入后将开始一场新的空白训练。" : "";
+    if (!window.confirm(`确定将${scope} ${candidates.length} 场训练移入回收站吗？${activeWarning}移入后仍可在回收站恢复。`)) return;
+    sessionCleanupRunningRef.current = true;
     const candidateIds = new Set(candidates.map((summary) => summary.session.id));
     setEmptySessionCleanupRunning(true);
     setSessionSummaries((items) => items.filter((summary) => !candidateIds.has(summary.session.id)));
@@ -7401,7 +7355,7 @@ export function TrainingWorkbench() {
     const failedSummaries: TrainingSessionSummary[] = [];
     for (let index = 0; index < candidates.length; index += 1) {
       const candidate = candidates[index];
-      setSaveState(`正在清理无操作训练（${index + 1}/${candidates.length}）…`);
+      setSessionCleanupStatus(`正在清理训练（${index + 1}/${candidates.length}）…`);
       try {
         await reviewGateway.deleteSession(candidate.session.id);
         deletedIds.add(candidate.session.id);
@@ -7414,9 +7368,9 @@ export function TrainingWorkbench() {
       setSessionSummaries((items) => (
         [...items, ...failedSummaries].sort((left, right) => compareTrainingSessionSummariesByCreatedAt(left, right))
       ));
-      setSaveState(`已清理 ${deletedIds.size} 场，另有 ${failedSummaries.length} 场未能移入回收站，请稍后重试。`);
+      setSessionCleanupStatus(`已清理 ${deletedIds.size} 场，另有 ${failedSummaries.length} 场未能移入回收站，请稍后重试。`);
     } else {
-      setSaveState(`已将 ${deletedIds.size} 场没有操作和决策的训练移入回收站。`);
+      setSessionCleanupStatus(`已将 ${deletedIds.size} 场训练移入回收站。`);
     }
 
     setTrainingNavigatorSessions((items) => items.filter((item) => !deletedIds.has(item.id)));
@@ -7425,10 +7379,11 @@ export function TrainingWorkbench() {
     if (localDraft?.id && deletedIds.has(localDraft.id)) settingsGateway.removeLastDraft();
     if (deletedIds.has(sessionId)) {
       resetTraining();
-      setSaveState(failedSummaries.length
+      setSessionCleanupStatus(failedSummaries.length
         ? `原训练已移入回收站；已清理 ${deletedIds.size} 场，另有 ${failedSummaries.length} 场失败。`
         : "原训练已移入回收站，已开始一场新的空白训练");
     }
+    sessionCleanupRunningRef.current = false;
     setEmptySessionCleanupRunning(false);
   };
 
@@ -7602,10 +7557,6 @@ export function TrainingWorkbench() {
   const locateDecision = (record: DecisionRecord) => { openReviewEvidence(record.barTimestamp, "计划"); setSelectedDecisionId(record.id); };
 
   const submitDecision = () => {
-    if (latestWatchMode) {
-      setSaveState("仅看盘模式不会记录训练决策");
-      return;
-    }
     const editingSubmission = editingDecisionId
       ? decisionSubmissions.find((submission) => submission.id === editingDecisionId)
       : undefined;
@@ -8419,7 +8370,9 @@ export function TrainingWorkbench() {
         ? (accountPortfolio.corporateActionEvents ?? []).filter(event => event.status === "applied")
           .reduce((sum, event) => sum + (event.amount ?? 0), 0)
         : 0);
-    const floating = open.reduce((sum, position) => sum + (accountPortfolio.latestClose - position.entryPrice) * position.qty * (position.side === "long" ? 1 : -1) - (position.entryFee ?? 0), 0);
+    const floating = open.reduce((sum, position) => sum + (isMarginEconomics(position.instrumentEconomics)
+      ? markToMarketPnl(position, accountPortfolio.latestClose, Number(account?.executionProfile.spreadBps ?? 0))
+      : (accountPortfolio.latestClose - position.entryPrice) * position.qty * (position.side === "long" ? 1 : -1)) - (position.entryFee ?? 0), 0);
     const total = realized + floating;
      const closedReturns = closed.map((position) => positionReturnPct(position, position.exitPrice ?? position.entryPrice));
      const values = accountPortfolio.tradingMode === "capital" ? [realized, floating, total] : [
@@ -8538,13 +8491,13 @@ export function TrainingWorkbench() {
     accountScope: filters.accountScope,
     market: filters.market,
   }));
-  const getLiveNavigatorResults = (source: LiveNavigatorSource): LiveScanResult[] => {
+  const getLiveNavigatorResults = (source: LiveNavigatorSource): LiveMarketResult[] => {
     // Portfolio navigation follows the visible performance rows; scanner and
     // watch navigation retain their own lists.
     if (source === "list") return watchlistNavigationRef.current;
     if (source === "portfolio") return filteredLivePerformanceRows.map(row => livePortfolioResult(row.portfolio));
     if (source === "watch") return liveWatchlist
-      .filter((watch) => watch.market === "CN" || watch.market === "US")
+      .filter((watch) => isLiveAccountMarket(watch.market))
       .map(liveWatchResult);
     const results = liveScanData?.results ?? [];
     if (liveMode && liveContext && !results.some((result) => result.instrumentId === liveContext.instrumentId)) {
@@ -8615,7 +8568,7 @@ export function TrainingWorkbench() {
     if (liveNavigatorSource === "list") return watchlistNavigation.length ? watchlistNavigation : liveContext ? [liveContext] : [];
     if (liveNavigatorSource === "portfolio") return filteredLivePerformanceRows.map(row => livePortfolioResult(row.portfolio));
     if (liveNavigatorSource === "watch") return liveWatchlist
-      .filter((watch) => watch.market === "CN" || watch.market === "US")
+      .filter((watch) => isLiveAccountMarket(watch.market))
       .map(liveWatchResult);
     const results = liveScanData?.results ?? [];
     // A symbol opened from the data coverage table may not belong to the
@@ -9137,7 +9090,7 @@ export function TrainingWorkbench() {
   }, [availableInstruments, currentRandomConfig]);
 
   const loadPatternCandles = useCallback(async (requestInstrumentId: string, requestTimeframe: string) => {
-    if (requestInstrumentId === instrumentId && requestTimeframe === timeframe && bars.length) {
+    if (!liveMode && requestInstrumentId === instrumentId && requestTimeframe === timeframe && bars.length) {
       return { candles: bars as PatternCandle[], timezone: instrument.timezone };
     }
     const data = await marketDataGateway.loadCandles<{ instrument?: Instrument; candles?: KLineData[] }>(requestInstrumentId, requestTimeframe);
@@ -9145,7 +9098,7 @@ export function TrainingWorkbench() {
       candles: (data.candles ?? []) as PatternCandle[],
       timezone: data.instrument?.timezone ?? "Asia/Shanghai",
     };
-  }, [bars, instrument.timezone, instrumentId, marketDataGateway, timeframe]);
+  }, [bars, instrument.timezone, instrumentId, marketDataGateway, timeframe, liveMode]);
 
   const createRandomWindowSnapshot = useCallback(async (
     requestInstrumentId: string,
@@ -9249,8 +9202,6 @@ export function TrainingWorkbench() {
     setChartLoadError("");
     setTrainingReady(false);
     setPlaying(false);
-    latestWatchRequestRef.current = null;
-    setLatestWatchMode(false);
     newTaskRequestRef.current = {
       instrumentId: requestInstrumentId,
       timeframe: executionTimeframe,
@@ -9681,8 +9632,9 @@ export function TrainingWorkbench() {
   );
 
   const shortcutsEnabled = settingsReady && !showSettings && !showTaskSetup && !showLiveScan && !showPatternFilters && !showTrash && !showRandomComplete;
-  const shortcutReplayAvailable = view === "replay" && !liveMode && !latestWatchMode && !trashPreview && !loading && !chartViewLoading;
-  const shortcutTradeAvailable = view === "replay" && !loading && !trashPreview && !latestWatchMode && Boolean(currentBar) && (liveMode || !trainingComplete);
+  const shortcutReplayAvailable = view === "replay" && !liveMode && !trashPreview && !loading && !chartViewLoading;
+  const replayNextAvailable = shortcutReplayAvailable && !playbackDisabled && cursor < (trainingTask?.endCursor ?? bars.length - 1);
+  const shortcutTradeAvailable = view === "replay" && !loading && !trashPreview && Boolean(currentBar) && (liveMode || !trainingComplete);
   const changeShortcutTimeframe = (direction: number) => {
     const index = Math.max(0, currentAvailableTimeframes.indexOf(chartTimeframe));
     handleTimeframeChange(currentAvailableTimeframes[(index + direction + currentAvailableTimeframes.length) % currentAvailableTimeframes.length]);
@@ -9691,7 +9643,7 @@ export function TrainingWorkbench() {
     openSettings: { enabled: true, run: () => openSettingsPanel("shortcuts") },
     saveTraining: { enabled: view === "replay" && !loading && !trashPreview, run: () => { void saveSession(); } },
     randomTraining: { enabled: view === "replay" && !startingTraining && !loading, run: () => { void startQuickRandomTraining(); } },
-    replayNext: { enabled: shortcutReplayAvailable && !playbackDisabled && cursor < (trainingTask?.endCursor ?? bars.length - 1), run: () => { setPlaying(false); revealNext(); } },
+    replayNext: { enabled: replayNextAvailable, run: () => { setPlaying(false); revealNext(); } },
     replayForwardFive: { enabled: shortcutReplayAvailable && !playbackDisabled && cursor < (trainingTask?.endCursor ?? bars.length - 1), run: () => { setPlaying(false); revealMany(5); } },
     replayPrevious: { enabled: shortcutReplayAvailable && !rewindLocked && !playbackDisabled && cursor > (trainingTask?.startCursor ?? 0), run: () => { setPlaying(false); revealPrevious(); } },
     replayPlay: { enabled: shortcutReplayAvailable && !playbackDisabled, run: () => { setPlaying(!playing); appendEvent("playback_toggled", { playing: !playing, speed }); } },
@@ -9710,9 +9662,16 @@ export function TrainingWorkbench() {
     drawingRedo: { enabled: view === "replay" && !trashPreview && drawingRedoStack.length > 0, run: redoDrawing },
   };
   useKeyboardShortcuts({ settings: appSettings.shortcuts, enabled: shortcutsEnabled,
-    contextKey: `${view}:${sessionId}:${instrumentId}:${timeframe}:${chartTimeframe}:${liveMode}:${latestWatchMode}`,
+    contextKey: `${view}:${sessionId}:${instrumentId}:${timeframe}:${chartTimeframe}:${liveMode}`,
     isAvailable: action => Boolean(shortcutHandlers[action]?.enabled),
     onAction: action => { const handler = shortcutHandlers[action]; if (!handler?.enabled) return false; handler.run(); return true; },
+  });
+  usePointerRepeat({ targetRef: nextBarButtonRef,
+    enabled: shortcutsEnabled && replayNextAvailable,
+    contextKey: `${view}:${sessionId}:${instrumentId}:${timeframe}:${chartTimeframe}:${liveMode}`,
+    repeatIntervalMs: appSettings.shortcuts.repeatIntervalMs,
+    isAvailable: () => Boolean(shortcutHandlers.replayNext?.enabled),
+    onAction: () => { const handler = shortcutHandlers.replayNext; if (!handler?.enabled) return false; handler.run(); return true; },
   });
 
   return (
@@ -9769,7 +9728,7 @@ export function TrainingWorkbench() {
                 <span className="market-pill">{currentAssetLabel}</span>
               </>
             )}
-            <span className="rule-pill">{liveMode ? "实时模拟" : latestWatchMode ? "仅看盘" : trainingTask ? trainingModeLabels[trainingTask.mode] : "自由训练"}</span>
+            <span className="rule-pill">{liveMode ? "实时模拟" : trainingTask ? trainingModeLabels[trainingTask.mode] : "自由训练"}</span>
             <span className="rule-pill">{tradingMode === "capital" ? "资金账户" : "收益率"}</span>
             {trashPreview && <span className="rule-pill read-only">{duplicateTrainingPreview ? "重复训练预览 · 未恢复" : "回收站查看 · 未恢复"}</span>}
             {!marketRules.tradingEnabled && <span className="rule-pill read-only">只看盘</span>}
@@ -10489,7 +10448,7 @@ export function TrainingWorkbench() {
                 scan={liveScanData?.results ?? []}
                 catalog={availableInstruments.map(item => ({ instrumentId: item.id, symbol: item.short, name: item.label, market: performanceMarketCode(item.market, item.id) })).filter(item => ["CN", "US", "FX", "GOLD"].includes(item.market))}
                 ready={liveStateReady}
-                selectedId={liveMode ? liveContext?.instrumentId ?? "" : latestWatchMode ? instrument.id : ""}
+                selectedId={liveMode ? liveContext?.instrumentId ?? "" : ""}
                 onClose={() => setWatchlistCollapsed(true)}
                 onScan={() => { setWatchlistSource("scan"); setLiveScanError(""); setShowLiveScan(true); }}
                 onData={() => setView("database")}
@@ -10497,14 +10456,9 @@ export function TrainingWorkbench() {
                 onRemoveFavorite={removeLiveWatch}
                 onOpen={(item, quote, items) => {
                   const result = watchlistItemResult(item, quote);
-                  if (item.market === "CN" || item.market === "US") {
-                    watchlistNavigationRef.current = items.filter(entry => entry.market === "CN" || entry.market === "US").map(entry => watchlistItemResult(entry, entry.instrumentId === item.instrumentId ? quote : undefined));
-                    setWatchlistNavigation(watchlistNavigationRef.current);
-                    openLiveScanResult(result, undefined, "list");
-                  } else {
-                    rememberRecentLiveResult(result);
-                    startFreshTraining(item.instrumentId, "1d", { latestWatch: true });
-                  }
+                  watchlistNavigationRef.current = items.map(entry => watchlistItemResult(entry, entry.instrumentId === item.instrumentId ? quote : undefined));
+                  setWatchlistNavigation(watchlistNavigationRef.current);
+                  openLiveScanResult(result, undefined, "list");
                 }}
               />
             )}
@@ -10524,18 +10478,9 @@ export function TrainingWorkbench() {
                     ? `品种已隐藏 · ${timeframeLabel(chartTimeframe)}`
                     : liveMode
                       ? `${instrument.name} · ${timeframeLabel(chartTimeframe)} · 最新行情`
-                      : latestWatchMode
-                        ? `${instrument.name} · ${timeframeLabel(chartTimeframe)} · 最新行情 · 仅看盘`
                       : `${instrument.name} · ${timeframeLabel(chartTimeframe)} · 历史训练`}</span>
                   {desktopLayout && <ChartMarkerToggle checked={showChartMarkers} onChange={setShowChartMarkers} />}
                 </div>
-                {latestWatchMode && (
-                  <button
-                    type="button"
-                    className="watch-mode-exit"
-                    onClick={() => startFreshTraining(instrumentId, timeframe)}
-                  >返回训练</button>
-                )}
                 {currentBar && (
                   <div className="ohlc-line">
                     {hideTaskPrice ? <span><EyeOff size={13} />绝对价格已隐藏</span> : (
@@ -10607,14 +10552,15 @@ export function TrainingWorkbench() {
                 <div className="chart-wrap">
                   {loading ? <div className="chart-loading">正在准备历史 K 线…</div> : chartLoadError ? (
                     <div className="chart-loading" role="alert">
-                      <strong>这组行情无法开始训练</strong>
+                      <strong>{observationLoad ? '行情暂时无法读取' : '这组行情无法开始训练'}</strong>
                       <span>{chartLoadError}</span>
-                      <button type="button" className="ghost-button" onClick={startQuickRandomTraining}>重新随机</button>
+                      {observationLoad ? <button type="button" className="ghost-button" onClick={() => setLoadNonce(value => value + 1)}>重试读取</button> : <button type="button" className="ghost-button" onClick={startQuickRandomTraining}>重新随机</button>}
                     </div>
                   ) : (
                     <KLineReplayChart
                       keyboardShortcuts={appSettings.shortcuts} shortcutsEnabled={shortcutsEnabled}
-                      bars={renderedChartBars}
+                      bars={liveMode ? observationHistory.bars : renderedChartBars}
+                      onHistoryRange={observationHistory.onRange}
                       dataIndexOffset={showingCanonicalChart ? chartDataIndexOffset : 0}
                       symbol={hideTaskInstrument ? "BLIND" : instrument.symbol}
                       timezone={activeChartTimeZone}
@@ -10643,6 +10589,8 @@ export function TrainingWorkbench() {
                       onDrawingSelect={chartTrainingInteractive ? (id) => setSelectedDrawingId(id ?? "") : ignoreDrawingSelect}
                     />
                   )}
+                  {(liveMode) && observationHistory.loading && <div className="price-selection-hint" role="status">正在读取历史 K 线…</div>}
+                  {(liveMode) && observationHistory.error && <div className="price-selection-hint" role="alert">{observationHistory.error}<button type="button" onClick={() => void observationHistory.retry()}>重试读取</button></div>}
                   {selectedCorporateAction && (
                     <div className="corporate-action-card" role="status">
                       <div><span>权息事件 · {selectedCorporateAction.label}</span>{selectedCorporateAction.date && <strong>{selectedCorporateAction.date}</strong>}</div>
@@ -10662,7 +10610,7 @@ export function TrainingWorkbench() {
                     onEdit={() => editDecision(selectedDecision)} onDelete={() => deleteDecision(selectedDecision)}
                     linkedTrades={<DecisionLinkedTradeSummary positions={linkedDecisionPositions} tradingMode={tradingMode} marginInstrument={marginInstrument} dateLabel={trainingDateLabel} priceLabel={trainingPriceLabel} onEvidence={openReviewEvidence} compact />}
                   />}
-                  <div className="replay-watermark">{liveMode || latestWatchMode ? "WATCH · 最新行情" : `REPLAY · ${trainingComplete ? "未来已揭示" : "未来已隐藏"}`} · {chartTimeZoneLabel(activeChartTimeZone)}</div>
+                  <div className="replay-watermark">{liveMode ? "WATCH · 最新行情" : `REPLAY · ${trainingComplete ? "未来已揭示" : "未来已隐藏"}`} · {chartTimeZoneLabel(activeChartTimeZone)}</div>
                   <div className="chart-touch-hint">长按 K 线补写决策</div>
                 </div>
               </div>
@@ -10702,7 +10650,7 @@ export function TrainingWorkbench() {
                 }}
               />
 
-              <div className="replay-controls">
+              {!liveMode && <div className="replay-controls">
                 <div className="progress-meta">
                   <span>{currentBar ? (hideTaskDate ? `训练第 ${currentTaskProgress.revealed} 根` : formatDate(currentBar.timestamp, timeframe, activeChartTimeZone)) : "--"}</span>
                   <span title={`进度按当前 ${timeframeLabel(chartTimeframe)} 图表周期计数；切换周期不会改变训练结束时间`} aria-label={`训练范围进度，按当前 ${timeframeLabel(chartTimeframe)} 图表周期计数`}>{loading ? "正在加载…" : trainingTask ? `${currentTaskProgress.revealed} / ${currentTaskProgress.total} 根` : `${cursor + 1} / ${bars.length} 根`}</span>
@@ -10718,7 +10666,8 @@ export function TrainingWorkbench() {
                   }}>
                     {playing ? <Pause size={20} /> : <Play size={20} fill="currentColor" />}
                   </button>
-                  <button aria-label="下一根" title={`按当前 ${timeframeLabel(chartTimeframe)} 周期前进一根`} disabled={playbackDisabled} onClick={revealNext}><ChevronRight size={19} /></button>
+                  <button ref={nextBarButtonRef} className="replay-next-button" aria-label="下一根" title={`按当前 ${timeframeLabel(chartTimeframe)} 周期前进一根；长按连续前进，松手停止`} aria-describedby="replay-next-hold-help" disabled={playbackDisabled} onClick={revealNext}><ChevronRight size={19} /></button>
+                  <span id="replay-next-hold-help" className="live-sr-only">轻点前进一根，长按连续前进，松手或滑出按钮停止</span>
                   <button aria-label="前进五根" title={`按当前 ${timeframeLabel(chartTimeframe)} 周期前进五根`} disabled={playbackDisabled} onClick={() => revealMany(5)}><FastForward size={18} /></button>
                 </div>
                 <div className="speed-control">
@@ -10727,7 +10676,7 @@ export function TrainingWorkbench() {
                     appendEvent("playback_speed_changed", { speed: value });
                   }}>{value}x</button>)}
                 </div>
-              </div>
+              </div>}
 
               {trainingComplete && !trainingTask?.randomRun && (
                 <div className="training-complete-banner">
@@ -11235,14 +11184,14 @@ export function TrainingWorkbench() {
                         setLivePerformanceFilters(filters => ({ ...filters, accountScope, market: account?.market ?? "all", holdingStatus: "all" }));
                       }}>
                         <option value="current">当前账户</option>
-                        {liveAccounts.map(account => <option key={account.id} value={account.id}>{account.market === "CN" ? "A 股" : "美股"} · {account.tradingMode === "capital" ? "资金账户" : "收益率模式"} · {account.currency} · {account.status === "archived" ? "已归档" : account.status === "paused" ? "已暂停" : account.status === "ending" ? "待结束" : "活动"} · {new Date(account.createdAt).toLocaleString("zh-CN")}</option>)}
+                        {liveAccounts.map(account => <option key={account.id} value={account.id}>{performanceMarketLabel(account.market)} · {account.tradingMode === "capital" ? "资金账户" : "收益率模式"} · {account.currency} · {account.status === "archived" ? "已归档" : account.status === "paused" ? "已暂停" : account.status === "ending" ? "待结束" : "活动"} · {new Date(account.createdAt).toLocaleString("zh-CN")}</option>)}
                         <option value="unlinked">未关联历史 · 只读</option>
                         <option value="all">全部记录</option>
                       </select>
                     </label>
                     <label className="live-compact-picker live-market-picker">市场
                       <select aria-label="实时表现市场" value={livePerformanceFilters.market} disabled={!liveStateReady || liveAccounts.some(account => account.id === livePerformanceFilters.accountScope)} onChange={event => setLivePerformanceFilters(filters => ({ ...filters, market: event.target.value as LivePerformanceFilters["market"] }))}>
-                        <option value="all">全部市场</option><option value="CN">A 股</option><option value="US">美股</option>
+                        <option value="all">全部市场</option><option value="CN">A 股</option><option value="US">美股</option><option value="FX">外汇</option><option value="GOLD">黄金</option>
                       </select>
                     </label>
                   </div>
@@ -11274,7 +11223,8 @@ export function TrainingWorkbench() {
                     {livePerformanceAccounts.map(account => {
                       const hasActivity = livePortfolios.some(portfolio => portfolio.accountId === account.id && (portfolio.pendingOrders.length > 0 || portfolio.positions.some(position => position.status === "open")));
                       const busy = liveAccountCommandRunning || livePriceRefreshRunning;
-                      const marketLabel = account.market === "CN" ? "A 股" : "美股";
+                      const marketLabel = performanceMarketLabel(account.market);
+                      const marginAccount = account.market === "FX" || account.market === "GOLD";
                       const modeLabel = account.tradingMode === "capital" ? "资金账户" : "收益率模式";
                       const formatBalance = (value: number) => value.toLocaleString("zh-CN", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
                       return <article className="live-account-band" data-mode={account.tradingMode} key={account.id} aria-label={`${marketLabel}${modeLabel}`}>
@@ -11285,10 +11235,10 @@ export function TrainingWorkbench() {
                           </div>
                         <dl className="live-account-funds">
                           {account.tradingMode === "capital" ? <>
-                            <div className="live-account-equity"><dt className="live-performance-hint" tabIndex={0} data-help="现金与全部关联持仓的最新市值合计，不随下方交易筛选改变" aria-label="总权益：现金与全部关联持仓的最新市值合计，不随下方交易筛选改变">总权益 · {account.currency}</dt><dd>{formatBalance(sharedLiveAccountEquity(account, livePortfolios))}</dd></div>
+                            <div className="live-account-equity"><dt className="live-performance-hint" tabIndex={0} data-help={marginAccount ? "余额与全部关联持仓的浮动盈亏合计" : "现金与全部关联持仓的最新市值合计，不随下方交易筛选改变"} aria-label={marginAccount ? "总权益：余额与全部关联持仓的浮动盈亏合计" : "总权益：现金与全部关联持仓的最新市值合计，不随下方交易筛选改变"}>总权益 · {account.currency}</dt><dd>{formatBalance(sharedLiveAccountEquity(account, livePortfolios))}</dd></div>
                             <div><dt>初始资金</dt><dd>{formatBalance(account.initialCapital)}</dd></div>
-                            <div><dt className="live-performance-hint" tabIndex={0} data-help={`当前现金 ${formatBalance(account.cashBalance)}；可用现金已扣除订单预留和占用资金`} aria-label={`可用现金：当前现金 ${formatBalance(account.cashBalance)}，可用现金已扣除订单预留和占用资金`}>可用现金</dt><dd>{formatBalance(account.availableCash)}</dd></div>
-                            <div><dt className="live-performance-hint" tabIndex={0} data-help="待成交买入订单预留的资金" aria-label="订单预留：待成交买入订单预留的资金">订单预留</dt><dd>{formatBalance(account.reservedCash)}</dd></div>
+                            <div><dt className="live-performance-hint" tabIndex={0} data-help={`当前现金 ${formatBalance(account.cashBalance)}；可用现金已扣除订单预留和占用资金`} aria-label={`可用现金：当前现金 ${formatBalance(account.cashBalance)}，可用现金已扣除订单预留和占用资金`}>{marginAccount ? "可用保证金" : "可用现金"}</dt><dd>{formatBalance(account.availableCash)}</dd></div>
+                            <div><dt className="live-performance-hint" tabIndex={0} data-help={marginAccount ? "待成交买入和卖出订单预留的保证金及费用" : "待成交买入订单预留的资金"} aria-label={marginAccount ? "订单预留：双向委托预留的保证金及费用" : "订单预留：待成交买入订单预留的资金"}>订单预留</dt><dd>{formatBalance(marginAccount ? account.reservedMargin : account.reservedCash)}</dd></div>
                           </> : <div><dt className="live-performance-hint" tabIndex={0} data-help="按风险比例计算仓位的基准，不是资金账户余额" aria-label="风险计算基准：按风险比例计算仓位的基准，不是资金账户余额">风险计算基准</dt><dd>{formatBalance(account.riskCapital)}</dd></div>}
                         </dl>
                           <div className="live-account-band-tools">
@@ -11330,7 +11280,7 @@ export function TrainingWorkbench() {
                     </div>}
                     {liveStateReady && livePerformanceAccounts.map(account => {
                       const defaults = liveAccountRuntimeDefaultsForMarket(appSettings, account.market);
-                      return defaults.tradingMode !== account.tradingMode && account.status !== "archived" ? <span className="live-account-default-notice" key={account.id}>新{livePerformanceAccounts.length > 1 ? account.market === "CN" ? "A 股" : "美股" : ""}账户默认：{defaults.tradingMode === "capital" ? "资金账户" : "收益率模式"}</span> : null;
+                      return defaults.tradingMode !== account.tradingMode && account.status !== "archived" ? <span className="live-account-default-notice" key={account.id}>新{livePerformanceAccounts.length > 1 ? performanceMarketLabel(account.market) : ""}账户默认：{defaults.tradingMode === "capital" ? "资金账户" : "收益率模式"}</span> : null;
                     })}
                   </footer>
                 </section>
@@ -11372,7 +11322,7 @@ export function TrainingWorkbench() {
                           const buyTimestamp = row.buyTimestamps.length ? Math.min(...row.buyTimestamps) : null;
                           return <tr key={row.portfolio.id}>
                             <th scope="row"><strong>{row.portfolio.symbol}</strong><small title={row.portfolio.name}>{row.portfolio.name}</small></th>
-                            <td title={`${row.open.length} 个持仓 · ${row.pending.length} 笔待成交 · ${row.closed.length} 笔已平仓${buyTimestamp === null ? "" : ` · 买入 ${new Date(buyTimestamp).toLocaleDateString("zh-CN")}`}`}><span>{row.open.length ? row.pending.length ? "持仓 · 待成交" : "持仓" : row.pending.length ? "待成交" : row.closed.length ? "已平仓" : "暂无交易"}</span><small>{row.portfolio.market === "CN" ? "A 股" : "美股"}{readOnly ? " · 只读" : ""}</small></td>
+                            <td title={`${row.open.length} 个持仓 · ${row.pending.length} 笔待成交 · ${row.closed.length} 笔已平仓${buyTimestamp === null ? "" : ` · 买入 ${new Date(buyTimestamp).toLocaleDateString("zh-CN")}`}`}><span>{row.open.length ? row.pending.length ? "持仓 · 待成交" : "持仓" : row.pending.length ? "待成交" : row.closed.length ? "已平仓" : "暂无交易"}</span><small>{performanceMarketLabel(row.portfolio.market)}{readOnly ? " · 只读" : ""}</small></td>
                             <td className="live-number">{row.open.length ? row.open.reduce((sum, position) => sum + position.qty, 0).toLocaleString("zh-CN", { maximumFractionDigits: 6 }) : "—"}</td>
                             <td className={`live-number ${row.realized >= 0 ? "up" : "down"}`}>{value(row.realized)}</td><td className={`live-number ${row.floating >= 0 ? "up" : "down"}`}>{value(row.floating)}</td><td className={`live-number live-total ${row.total >= 0 ? "up" : "down"}`}>{value(row.total)}</td>
                             <td className="live-number"><button type="button" className="ghost-button" aria-label={`${readOnly ? "查看" : "打开"} ${row.portfolio.symbol} ${readOnly ? "历史记录" : "实时模拟"}`} onClick={() => openLivePortfolio(row.portfolio)}>{readOnly ? "查看" : "打开"}</button></td>
@@ -11383,8 +11333,11 @@ export function TrainingWorkbench() {
                       <span>{livePerformanceAdvancedCount > 0 || livePerformanceFilters.holdingStatus !== "all" ? "当前条件下没有匹配的交易标的" : livePerformanceFilters.accountScope === "unlinked" ? "暂无未关联历史记录" : "所选账户暂无实时模拟交易"}</span>
                       {livePerformanceAdvancedCount > 0 || livePerformanceFilters.holdingStatus !== "all" ? <button type="button" className="ghost-button" onClick={clearLivePerformanceFilters}>清除筛选</button> : (livePerformanceAccounts.some(account => account.status === "active") || (livePerformanceFilters.accountScope === "current" && !livePerformanceAccounts.length)) && <button type="button" className="ghost-button" onClick={() => {
                         const market = livePerformanceAccounts.length === 1 ? livePerformanceAccounts[0].market : livePerformanceFilters.market;
+                        if (market === "FX" || market === "GOLD") {
+                          setWatchlistSource("watchlist"); setWatchlistCollapsed(false); setView("replay"); return;
+                        }
                         if (market !== "all" && market !== liveScanMarket) {
-                          setLiveScanMarket(market);
+                          setLiveScanMarket(market === "US" ? "US" : "CN");
                           setLiveScanData(null);
                         }
                         setLiveScanError("");
@@ -11434,9 +11387,7 @@ export function TrainingWorkbench() {
                               type="button"
                               className="ghost-button"
                               onClick={() => {
-                                const market = performanceMarketCode(watch.market, watch.instrumentId);
-                                if (market === "CN" || market === "US") openLiveScanResult(result, index >= 0 ? index : undefined, "watch");
-                                else startFreshTraining(watch.instrumentId, "1d", { latestWatch: true });
+                                openLiveScanResult(result, index >= 0 ? index : undefined, "watch");
                               }}
                             ><BarChart3 size={14} />打开</button><button type="button" className="row-action danger" onClick={() => removeLiveWatch(watch.instrumentId)}>移除</button></span>
                           </div>
@@ -11919,7 +11870,9 @@ export function TrainingWorkbench() {
                 onResetFilters={() => setReviewSessionFilters(defaultReviewSessionFilters)}
                 emptyActivityCount={emptyReviewSessionSummaries.length}
                 batchDeleteRunning={emptySessionCleanupRunning}
-                onDeleteEmpty={() => void deleteEmptyTrainingSessions(emptyReviewSessionSummaries)}
+                cleanupStatus={sessionCleanupStatus}
+                onDeleteEmpty={() => void deleteTrainingSessions(emptyReviewSessionSummaries, true)}
+                onDeleteSelected={(ids) => void deleteTrainingSessions(filteredReviewSessionSummaries.filter((summary) => ids.includes(summary.session.id)))}
                 onReview={(id) => {
                   const summary = filteredReviewSessionSummaries.find((item) => item.session.id === id);
                   if (summary) inspectSession(summary.session);
@@ -11930,7 +11883,7 @@ export function TrainingWorkbench() {
                 }}
                 onDelete={(id) => {
                   const summary = filteredReviewSessionSummaries.find((item) => item.session.id === id);
-                  if (summary) deleteSession(summary.session);
+                  if (summary) void deleteTrainingSessions([summary]);
                 }}
               />
               </div>

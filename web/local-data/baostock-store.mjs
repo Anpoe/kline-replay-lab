@@ -805,13 +805,18 @@ export class BaoStockLocalStore {
     };
   }
 
-  async getCandles(instrumentId, timeframe = "1d") {
+  async getCandles(instrumentId, timeframe = "1d", adjustmentType, page) {
     if (!TIMEFRAMES.includes(timeframe)) return null;
     const manifest = await this.getManifest();
     const instrument = manifest?.instruments.find((item) => item.id === instrumentId);
     if (!instrument || Number(instrument.barCount) <= 0) return null;
-    const daily = this.readDaily(instrumentId);
-    if (!daily.length) return null;
+    const daily = page && timeframe === '1d'
+      ? this.ensureDb().prepare(`SELECT timestamp, open, high, low, close, volume, turnover FROM candles
+          WHERE instrument_id = ? AND adjustment_type = ? ${page.before === undefined ? '' : 'AND timestamp < ?'}
+          ORDER BY timestamp DESC LIMIT ?`).all(instrumentId, BAOSTOCK_ADJUSTMENT_TYPE,
+          ...(page.before === undefined ? [] : [page.before]), page.limit + 1).reverse().map(row => ({ ...row }))
+      : this.readDaily(instrumentId);
+    if (!daily.length && !page) return null;
     const candles = timeframe === "1w"
       ? aggregateWeekly(daily)
       : timeframe === "1mo"

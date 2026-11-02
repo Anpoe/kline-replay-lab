@@ -42,6 +42,7 @@ export type LiveExecutionRunInput<
   profile?: Partial<ExecutionCostProfile>;
   cashBalance: number;
   capitalMode: boolean;
+  externalMargin?: { floatingPnl: number; usedMargin: number; reservedMargin: number };
   instrumentEconomics?: InstrumentEconomics;
   validateFill?: (order: TOrder, rawPrice: number, bar: LiveExecutionBar) => LiveExecutionValidation;
   validateProtectiveFill?: (
@@ -163,6 +164,7 @@ export function executeLiveBars<
       profile: input.profile,
       cashBalance,
       capitalMode: input.capitalMode,
+      externalMargin: input.externalMargin,
       instrumentEconomics: input.instrumentEconomics,
       validateFill: input.validateFill
         ? (order, rawPrice) => input.validateFill!(order, rawPrice, bar)

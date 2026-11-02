@@ -47,7 +47,7 @@ export type MarketOrderQtySettings = Record<DataMarket, number>;
 export type ChartTimeZonePreference = "market" | "Asia/Shanghai" | "America/New_York" | "Europe/London" | "UTC";
 export type ChartTimeZoneSettings = Record<DataMarket, ChartTimeZonePreference>;
 export type SettingsTab = "basic" | "training" | "accounts" | "orders" | "discipline" | "data" | "connections" | "mt4" | "storage" | "shortcuts";
-export type LiveAccountMarket = "CN" | "US";
+export type LiveAccountMarket = "CN" | "US" | "FX" | "GOLD";
 
 export type TrainingAccountDefaults = {
   tradingMode: TradingMode;
@@ -182,8 +182,8 @@ const defaultTrainingAccount: TrainingAccountDefaults = {
 
 const defaultLiveAccount: LiveAccountDefaults = {
   tradingMode: "return",
-  initialCapitalByMarket: { CN: DEFAULT_ACCOUNT_CAPITAL, US: DEFAULT_ACCOUNT_CAPITAL },
-  riskCapitalByMarket: { CN: DEFAULT_ACCOUNT_CAPITAL, US: DEFAULT_ACCOUNT_CAPITAL },
+  initialCapitalByMarket: { CN: DEFAULT_ACCOUNT_CAPITAL, US: DEFAULT_ACCOUNT_CAPITAL, FX: DEFAULT_ACCOUNT_CAPITAL, GOLD: DEFAULT_ACCOUNT_CAPITAL },
+  riskCapitalByMarket: { CN: DEFAULT_ACCOUNT_CAPITAL, US: DEFAULT_ACCOUNT_CAPITAL, FX: DEFAULT_ACCOUNT_CAPITAL, GOLD: DEFAULT_ACCOUNT_CAPITAL },
 };
 
 export const defaultAppSettings: AppSettings = {
@@ -292,8 +292,8 @@ export function liveAccountRuntimeDefaultsForMarket(
   settings: AppSettings,
   market: string | undefined,
 ) {
-  const key: LiveAccountMarket = marketOrderQtyKey(market) === "US" ? "US" : "CN";
-  const tradingMode = settings.liveAccount.tradingMode;
+  const key: LiveAccountMarket = marketOrderQtyKey(market) ?? "CN";
+  const tradingMode = tradingModeForInstrument(settings.liveAccount.tradingMode, key, "");
   return {
     market: key,
     tradingMode,
@@ -349,10 +349,14 @@ function normalizeLiveAccount(
     initialCapitalByMarket: {
       CN: normalizeAccountCapital(initialCapitalByMarket.CN, fallback.initialCapitalByMarket.CN),
       US: normalizeAccountCapital(initialCapitalByMarket.US, fallback.initialCapitalByMarket.US),
+      FX: normalizeAccountCapital(initialCapitalByMarket.FX, fallback.initialCapitalByMarket.FX),
+      GOLD: normalizeAccountCapital(initialCapitalByMarket.GOLD, fallback.initialCapitalByMarket.GOLD),
     },
     riskCapitalByMarket: {
       CN: normalizeAccountCapital(riskCapitalByMarket.CN, fallback.riskCapitalByMarket.CN),
       US: normalizeAccountCapital(riskCapitalByMarket.US, fallback.riskCapitalByMarket.US),
+      FX: normalizeAccountCapital(riskCapitalByMarket.FX, fallback.riskCapitalByMarket.FX),
+      GOLD: normalizeAccountCapital(riskCapitalByMarket.GOLD, fallback.riskCapitalByMarket.GOLD),
     },
   };
 }
@@ -407,8 +411,8 @@ export function normalizeSettings(value: Partial<AppSettings>): AppSettings {
       ? defaultLiveAccount
       : {
           tradingMode: legacyTradingMode,
-          initialCapitalByMarket: { CN: legacyCapital, US: legacyCapital },
-          riskCapitalByMarket: { CN: legacyCapital, US: legacyCapital },
+          initialCapitalByMarket: { CN: legacyCapital, US: legacyCapital, FX: legacyCapital, GOLD: legacyCapital },
+          riskCapitalByMarket: { CN: legacyCapital, US: legacyCapital, FX: legacyCapital, GOLD: legacyCapital },
         },
   );
   const defaultOrderQtyByMarket = normalizeMarketOrderQtySettings(

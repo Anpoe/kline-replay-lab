@@ -293,6 +293,12 @@ test("BaoStock local store coexists with legacy A-share files and serves qfq dai
   assert.equal(daily.adjustmentType, "qfq");
   assert.equal(daily.source, "baostock-qfq");
   assert.equal(daily.candles.length, 3);
+  const recentPage = await store.getCandles('600519.SH', '1d', 'qfq', { limit: 1 });
+  assert.deepEqual(recentPage.candles, daily.candles.slice(-2));
+  const olderPage = await store.getCandles('600519.SH', '1d', 'qfq', { limit: 1, before: daily.candles[1].timestamp });
+  assert.deepEqual(olderPage.candles, daily.candles.slice(0, 1));
+  const emptyPage = await store.getCandles('600519.SH', '1d', 'qfq', { limit: 1, before: daily.candles[0].timestamp });
+  assert.deepEqual(emptyPage.candles, []);
   assert.equal(daily.candles[1].close, 11.8);
   assert.equal(weekly.candles.length, 2);
   assert.equal(monthly.candles.length, 1);

@@ -5,6 +5,7 @@ import test from "node:test";
 import ts from "typescript";
 import * as patterns from "../app/lib/patternFilters.ts";
 import * as lookback from "../app/lib/liveScanLookback.mjs";
+import { stableLiveBarRevision } from "../app/lib/liveExecutionAdapter.ts";
 
 const source = ts.transpileModule(readFileSync(new URL("../app/api/live-scan/route.ts", import.meta.url), "utf8"), {
   compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 },
@@ -27,7 +28,7 @@ function createRoute(t, localFetch) {
     if (id === "../../lib/localDataService") return { fetchLocalData: localFetch };
     if (id === "../../lib/patternFilters") return patterns;
     if (id === "../../lib/liveScanLookback.mjs") return lookback;
-    if (id === "../../lib/liveExecutionAdapter") return {};
+    if (id === "../../lib/liveExecutionAdapter") return { stableLiveBarRevision };
     throw new Error(`Unexpected dependency: ${id}`);
   };
   new Function("require", "exports", source)(require, route);
@@ -37,6 +38,14 @@ function createRoute(t, localFetch) {
 const post = (route, body) => route.POST(new Request("http://localhost/api/live-scan", {
   method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body),
 }));
+
+test('watchlist reads stored CN prices without invoking external realtime quotes; trading refresh keeps its endpoint', async t => {
+  const calls = [];
+  const { route } = createRoute(t, async url => { calls.push(url); return Response.json({ activeSource: 'baostock', prices: [] }); });
+  assert.equal((await post(route, { action: 'refresh', storedOnly: true, market: 'CN', instrumentIds: ['600519.SH'] })).status, 200);
+  assert.equal((await post(route, { action: 'refresh', market: 'CN', instrumentIds: ['600519.SH'] })).status, 200);
+  assert.deepEqual(calls, ['/prices/latest', '/quotes/realtime']);
+});
 
 function seed(sqlite) {
   const days = [Date.UTC(2026, 9, 1), Date.UTC(2026, 9, 8), Date.UTC(2026, 9, 9)];
@@ -185,3 +194,28 @@ test("US route supports a standalone standard deviation condition combined with 
   assert.equal(await scan("current"), 0);
   assert.equal(await scan("current", "at_least"), 1);
 });
+
+for (const [market, instrumentId] of [['FX', 'EURUSD.FX'], ['GOLD', 'XAUUSD.GOLD']]) {
+  test(`${market} refresh returns complete stored bars with paging and excludes the current unclosed day`, async t => {
+    const { route, sqlite } = createRoute(t, () => { throw Error('must not use an external provider'); });
+    sqlite.exec("ALTER TABLE candles ADD COLUMN source TEXT; ALTER TABLE candles ADD COLUMN quality_flags TEXT;");
+    const start = Date.now() - 100 * 86400000;
+    for (let i = 0; i < 70; i++) {
+      sqlite.prepare("INSERT INTO candles (instrument_id, timeframe, adjustment_type, timestamp, open, high, low, close, volume, source, quality_flags) VALUES (?, '1d', 'none', ?, 100, 102, 99, 101, 0, 'dukascopy', '[]')").run(instrumentId, start + i * 86400000);
+    }
+    sqlite.prepare("INSERT INTO candles (instrument_id, timeframe, adjustment_type, timestamp, open, high, low, close) VALUES (?, '1d', 'none', ?, 200, 210, 190, 205)").run(instrumentId, Date.now());
+    const payload = await (await post(route, { action: 'refresh', market, instrumentIds: [instrumentId], entryAfter: { [instrumentId]: start } })).json();
+    assert.equal(payload.market, market);
+    const price = payload.prices[0];
+    assert.equal(price.close, 101);
+    assert.equal(price.priceBasis, 'raw');
+    assert.equal(price.entryBars.length, 64);
+    assert.equal(price.hasMoreEntryBars, true);
+    assert.equal(price.entryBars[0].timestamp, start + 86400000);
+    assert.equal(price.entryBars[0].closed, true);
+    assert.ok(price.entryBars[0].revision);
+    const second = await (await post(route, { action: 'refresh', market, instrumentIds: [instrumentId], entryAfter: { [instrumentId]: price.entryBars.at(-1).timestamp } })).json();
+    assert.equal(second.prices[0].entryBars.length, 5);
+    assert.equal(second.prices[0].hasMoreEntryBars, undefined);
+  });
+}

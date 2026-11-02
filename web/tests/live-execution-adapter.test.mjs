@@ -1,5 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { createFxInstrumentEconomics } from "../app/lib/fxTrading.ts";
+import { liveAccountMarginTotals } from "../app/lib/tradingAccount.ts";
 
 import { executeLiveBars } from "../app/lib/liveExecutionAdapter.ts";
 import { EXECUTION_ENGINE_VERSION } from "../app/lib/executionEngine.ts";
@@ -101,4 +103,30 @@ test("live adapter evaluates protective exits from complete intrabar highs and l
   assert.equal(result.fills[0].reason, "take_profit");
   assert.equal(result.fills[0].price, 110);
   assert.equal(result.positions[0].status, "closed");
+});
+
+test('live margin execution accounts for positions and reservations on other symbols', () => {
+  const economics = createFxInstrumentEconomics('EURUSD.FX');
+  const result = executeLiveBars({
+    orders: [{ id: 'entry', action: 'open', side: 'buy', qty: 0.1, createdAt: 1, positionId: 'p', orderType: 'market', instrumentEconomics: economics }],
+    positions: [], cashBalance: 1000, capitalMode: true, instrumentEconomics: economics,
+    externalMargin: { floatingPnl: 0, usedMargin: 800, reservedMargin: 150 },
+    profile: { spreadBps: 0, slippageBps: 0, commissionRateBps: 0 },
+    bars: [{ timestamp: 2, open: 1.1, high: 1.1, low: 1.1, close: 1.1, closed: true }],
+  });
+  assert.equal(result.fills.length, 0);
+  assert.equal(result.rejections[0].code, 'insufficient_margin_at_fill');
+});
+
+test('shared margin totals use each symbol price, both directions, and only the selected account', () => {
+  const eur = createFxInstrumentEconomics('EURUSD.FX');
+  const gbp = createFxInstrumentEconomics('GBPUSD.FX');
+  const totals = liveAccountMarginTotals('fx', [
+    { accountId: 'fx', latestClose: 1.11, positions: [{ side: 'long', qty: 0.1, entryPrice: 1.1, status: 'open', marginUsed: 110, instrumentEconomics: eur }], pendingOrders: [{ reservedMargin: 20 }] },
+    { accountId: 'fx', latestClose: 1.29, positions: [{ side: 'short', qty: 0.2, entryPrice: 1.3, status: 'open', marginUsed: 260, instrumentEconomics: gbp }], pendingOrders: [{ reservedMargin: 35 }] },
+    { accountId: 'gold', latestClose: 9, positions: [], pendingOrders: [{ reservedMargin: 999 }] },
+  ]);
+  assert.ok(Math.abs(totals.floatingPnl - 300) < 0.00001);
+  assert.equal(totals.usedMargin, 370);
+  assert.equal(totals.reservedMargin, 55);
 });

@@ -1,4 +1,6 @@
-import type { LiveScanMarket, LiveScanResponse } from "./liveScanContracts.ts";
+import type { LiveScanResponse } from "./liveScanContracts.ts";
+
+import { liveAccountNameForMarket, type LiveAccountMarket } from "../../lib/tradingAccount.ts";
 
 export type LiveGatewayFetchInit = {
   cache?: "no-store";
@@ -158,7 +160,7 @@ export function createLiveGateway(fetcher: LiveGatewayFetch) {
   );
 
   const refreshPrices = (
-    market: LiveScanMarket,
+    market: LiveAccountMarket,
     instrumentIds: string[],
     entryAfterOrSignal: Record<string, number> | AbortSignal = {},
     signal?: AbortSignal,
@@ -183,7 +185,7 @@ export function createLiveGateway(fetcher: LiveGatewayFetch) {
           ...(Object.keys(entryAfter).length ? { entryAfter } : {}),
         }),
       }, requestSignal),
-      `${market === "CN" ? "A 股" : "美股"}最新价同步失败`,
+      `${liveAccountNameForMarket(market)}行情读取失败`,
       true,
     );
   };

@@ -1,4 +1,5 @@
 import type { ExecutionCostProfile, OrderType } from "./executionEngine.ts";
+import { normalizeFxAccountConfig, type FxAccountConfig } from "./fxTrading.ts";
 
 export const TRADING_COMMAND_VERSION = "2026.09-v1";
 
@@ -60,6 +61,7 @@ export type TradingCommand = {
   marketRuleVersion?: string | null;
   executionProfile?: Partial<ExecutionCostProfile>;
   executionProfileVersion?: string | null;
+  fxAccountConfig?: FxAccountConfig;
 };
 
 export type TradingCommandErrorCode =
@@ -72,6 +74,7 @@ export type TradingCommandErrorCode =
   | "position_not_found"
   | "order_not_found"
   | "insufficient_cash"
+  | "insufficient_margin"
   | "duplicate_command_conflict";
 
 export class TradingCommandError extends Error {
@@ -156,6 +159,8 @@ export function normalizeTradingCommand(value: unknown): TradingCommand {
   }
   return {
     version: stringValue(record.version) || TRADING_COMMAND_VERSION,
+    ...(record.fxAccountConfig && typeof record.fxAccountConfig === "object"
+      ? { fxAccountConfig: normalizeFxAccountConfig(record.fxAccountConfig as Partial<FxAccountConfig>) } : {}),
     commandId,
     type: type as TradingCommandType,
     environment,

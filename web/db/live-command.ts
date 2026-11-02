@@ -14,8 +14,12 @@ import {
 import {
   liveAccountAvailableCash,
   liveAccountCurrencyForMarket,
+  liveAccountNameForMarket,
+  liveAccountMarginTotals,
 } from "../app/lib/tradingAccount.ts";
-import { EXECUTION_ENGINE_VERSION, estimatedBuyCashRequired } from "../app/lib/executionEngine.ts";
+import { EXECUTION_ENGINE_VERSION, estimatedBuyCashRequired, executionPrice, executionPriceFromQuote, executionFee } from "../app/lib/executionEngine.ts";
+import { normalizeFxAccountConfig, requiredMargin, isMarginEconomics } from "../app/lib/fxTrading.ts";
+import { resolveMarketRules, validateOpenOrder } from "../app/lib/marketRules.ts";
 
 type LiveState = Awaited<ReturnType<typeof readLiveState>>;
 type LiveAccount = LiveState["accounts"][number];
@@ -75,10 +79,15 @@ function accountReservation(accountId: string, portfolios: LivePortfolio[]) {
 
 function withAccountState(account: LiveAccount, portfolios: LivePortfolio[], version: number) {
   const reservedCash = accountReservation(account.id, portfolios);
+  const margin = account.market === "FX" || account.market === "GOLD"
+    ? liveAccountMarginTotals(account.id, portfolios, Number(account.executionProfile.spreadBps ?? 0)) : null;
+  const equity = margin ? account.cashBalance + margin.floatingPnl : account.equity;
   return {
     ...account,
     reservedCash,
-    availableCash: account.tradingMode === "capital" ? liveAccountAvailableCash({ cashBalance: account.cashBalance, reservedCash }) : 0,
+    ...(margin ? { reservedMargin: margin.reservedMargin, equity } : {}),
+    availableCash: margin ? equity - margin.usedMargin - margin.reservedMargin
+      : account.tradingMode === "capital" ? liveAccountAvailableCash({ cashBalance: account.cashBalance, reservedCash }) : 0,
     version,
     updatedAt: new Date().toISOString(),
   };
@@ -114,8 +123,10 @@ function accountActivity(state: LiveState, accountId: string) {
 
 function newAccountFromCommand(command: TradingCommand, accountId: string, fallback: LiveAccount): LiveAccount {
   const now = new Date().toISOString();
-  const market = command.market === "US" ? "US" : "CN";
-  const tradingMode = command.tradingMode ?? fallback.tradingMode;
+  const market = command.market;
+  const marginMode = market === "FX" || market === "GOLD";
+  const fxAccountConfig = normalizeFxAccountConfig(command.fxAccountConfig ?? fallback.fxAccountConfig);
+  const tradingMode = marginMode ? "capital" : command.tradingMode ?? fallback.tradingMode;
   const configuredCapital = Math.max(
     0,
     Number(command.initialCapital ?? command.riskCapital ?? (
@@ -125,8 +136,9 @@ function newAccountFromCommand(command: TradingCommand, accountId: string, fallb
   return {
     id: accountId,
     market,
-    currency: liveAccountCurrencyForMarket(market),
-    displayName: command.displayName ?? (market === "CN" ? "A 股实时模拟账户" : "美股实时模拟账户"),
+    currency: marginMode ? fxAccountConfig.accountCurrency : liveAccountCurrencyForMarket(market),
+    ...(marginMode ? { fxAccountConfig } : {}),
+    displayName: command.displayName ?? liveAccountNameForMarket(market),
     status: "active" as const,
     tradingMode,
     initialCapital: tradingMode === "capital" ? configuredCapital : 0,
@@ -180,7 +192,26 @@ function makeOrder(command: TradingCommand, account: LiveAccount, portfolio: Liv
   const qty = command.qty as number;
   const orderId = command.orderId ?? `order:${command.commandId}`;
   const referencePrice = Number(command.triggerPrice ?? portfolio.latestClose);
-  const reservedCash = account.tradingMode === "capital" && command.side === "buy"
+  const rules = resolveMarketRules(account.market, portfolio.instrumentId, account.fxAccountConfig);
+  const economics = rules.instrumentEconomics;
+  const marginMode = isMarginEconomics(economics);
+  if (marginMode) {
+    const validation = validateOpenOrder(rules, command.side!, qty);
+    if (!validation.ok) throw new TradingCommandError("invalid_command", validation.message ?? "委托数量不符合品种规则");
+  }
+  const price = marginMode && command.orderType && command.orderType !== "market"
+    ? executionPriceFromQuote(command.side!, referencePrice, account.executionProfile)
+    : executionPrice(command.side!, referencePrice, account.executionProfile, economics);
+  const fee = executionFee(price, qty, account.executionProfile, economics);
+  const margin = requiredMargin(price, qty, economics);
+  if (marginMode && (margin == null || !Number.isFinite(fee))) {
+    throw new TradingCommandError("invalid_command", "无法换算到账户币种，请检查报价币到账户币换算率");
+  }
+  const reservedMargin = marginMode ? Number(margin) + fee : 0;
+  if (marginMode && reservedMargin > account.availableCash + 0.000001) {
+    throw new TradingCommandError("insufficient_margin", "当前账户可用保证金不足，无法提交委托");
+  }
+  const reservedCash = !marginMode && account.tradingMode === "capital" && command.side === "buy"
     ? estimatedBuyCashRequired(referencePrice, qty, account.executionProfile)
     : 0;
   const reservedCashValue = Number.isFinite(reservedCash) ? reservedCash : 0;
@@ -190,7 +221,8 @@ function makeOrder(command: TradingCommand, account: LiveAccount, portfolio: Liv
   return {
     ...createOpenOrderFromTradingCommand(command, { orderId, positionId }),
     reservedCash: reservedCashValue || undefined,
-    reservedMargin: undefined,
+    reservedMargin: reservedMargin || undefined,
+    ...(marginMode ? { instrumentEconomics: economics } : {}),
     engineVersion: EXECUTION_ENGINE_VERSION,
     ...(command.executionProfileVersion ? { executionProfileVersion: command.executionProfileVersion } : {}),
   };
@@ -236,7 +268,7 @@ function createBootstrapPortfolio(account: LiveAccount, command: TradingCommand,
     corporateActionEvents: [],
     symbol: command.symbol ?? command.instrumentId,
     name: command.name ?? command.symbol ?? command.instrumentId,
-    market: command.market === "US" ? "US" as const : "CN" as const,
+    market: command.market,
     latestTimestamp: command.timestamp,
     latestClose: referencePrice,
     scanTimestamp: command.scanTimestamp ?? command.timestamp,
@@ -265,7 +297,7 @@ function addCloseOrder(portfolio: LivePortfolio, command: TradingCommand, positi
 
 export async function applyLiveTradingCommand(db: D1Database, value: unknown): Promise<LiveTradingCommandResult> {
   const command = normalizeTradingCommand(value);
-  if (command.environment !== "live" || (command.market !== "CN" && command.market !== "US")) {
+  if (command.environment !== "live") {
     throw new TradingCommandError("invalid_command", "当前命令入口只接受实时模拟交易命令");
   }
   const serializedCommand = commandJson(command);
@@ -286,13 +318,16 @@ export async function applyLiveTradingCommand(db: D1Database, value: unknown): P
       throw new TradingCommandError("account_version_conflict", "该市场已经存在活动账户，请先结束或归档当前账户");
     }
     const now = new Date().toISOString();
-    const tradingMode = command.tradingMode ?? "return";
+    const marginMode = command.market === "FX" || command.market === "GOLD";
+    const fxAccountConfig = normalizeFxAccountConfig(command.fxAccountConfig);
+    const tradingMode = marginMode ? "capital" : command.tradingMode ?? "return";
     const configuredCapital = Math.max(0, Number(command.initialCapital ?? command.riskCapital ?? 0));
     let account: LiveAccount = {
       id: command.accountId,
       market: command.market,
-      currency: liveAccountCurrencyForMarket(command.market),
-      displayName: command.displayName ?? (command.market === "CN" ? "A 股实时模拟账户" : "美股实时模拟账户"),
+      currency: marginMode ? fxAccountConfig.accountCurrency : liveAccountCurrencyForMarket(command.market),
+      ...(marginMode ? { fxAccountConfig } : {}),
+      displayName: command.displayName ?? liveAccountNameForMarket(command.market),
       status: "active",
       tradingMode,
       initialCapital: tradingMode === "capital" ? configuredCapital : 0,

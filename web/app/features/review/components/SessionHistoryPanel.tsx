@@ -57,6 +57,8 @@ type SessionHistoryPanelProps = {
   emptyActivityCount: number;
   batchDeleteRunning: boolean;
   onDeleteEmpty: () => void;
+  onDeleteSelected: (ids: string[]) => void;
+  cleanupStatus: string;
 };
 
 export function SessionHistoryPanel({
@@ -75,7 +77,21 @@ export function SessionHistoryPanel({
   emptyActivityCount,
   batchDeleteRunning,
   onDeleteEmpty,
+  onDeleteSelected,
+  cleanupStatus,
 }: SessionHistoryPanelProps) {
+  const [cleanupOpen, setCleanupOpen] = useState(false);
+  const selectionScope = JSON.stringify(filters);
+  const [selection, setSelection] = useState<{ scope: string; ids: string[] }>({ scope: selectionScope, ids: [] });
+  const selectedIds = new Set(selection.scope === selectionScope ? selection.ids : []);
+  const selectedItems = items.filter((item) => selectedIds.has(item.id));
+  const allSelected = items.length > 0 && selectedItems.length === items.length;
+  const toggleSelection = (id: string) => {
+    if (batchDeleteRunning) return;
+    const ids = new Set(selectedItems.map((item) => item.id));
+    if (ids.has(id)) ids.delete(id); else ids.add(id);
+    setSelection({ scope: selectionScope, ids: [...ids] });
+  };
   const [visibleState, setVisibleState] = useState<{
     items: readonly SessionHistoryItem[];
     count: number;
@@ -99,42 +115,67 @@ export function SessionHistoryPanel({
             <button
               type="button"
               className="delete-session history-batch-delete"
-              aria-label="批量移入没有操作和决策的训练"
-              title="只处理当前筛选中没有画图、决策、委托或成交的训练"
-              onClick={onDeleteEmpty}
-              disabled={batchDeleteRunning || emptyActivityCount === 0}
+              aria-expanded={cleanupOpen}
+              aria-controls="history-cleanup-actions"
+              onClick={() => {
+                setCleanupOpen(!cleanupOpen);
+                setSelection({ scope: selectionScope, ids: [] });
+              }}
+              disabled={batchDeleteRunning}
             >
-              <Trash2 size={13} />{batchDeleteRunning ? "清理中…" : `清理无操作训练（${emptyActivityCount}）`}
+              <Trash2 size={13} />{batchDeleteRunning ? "清理中…" : "清理"}
             </button>
-            <button type="button" className="history-filter-reset" onClick={onResetFilters} disabled={filtersAreDefault}>清除筛选</button>
+            <button type="button" className="history-filter-reset" onClick={() => { setSelection({ scope: selectionScope, ids: [] }); onResetFilters(); }} disabled={filtersAreDefault}>清除筛选</button>
           </div>
         </div>
+        {cleanupOpen && (
+          <div className="history-cleanup-actions" id="history-cleanup-actions" role="group" aria-label="清理训练">
+            <button type="button" className="history-filter-reset" disabled={batchDeleteRunning || !items.length}
+              title="选择当前筛选下的全部训练，包括尚未展开的记录"
+              aria-label="全选当前筛选下的全部训练，包括尚未展开的记录"
+              onClick={() => setSelection({ scope: selectionScope, ids: allSelected ? [] : items.map((item) => item.id) })}>
+              {allSelected ? "取消全选" : "全选"}
+            </button>
+            <button type="button" className="delete-session" onClick={onDeleteEmpty} disabled={batchDeleteRunning || emptyActivityCount === 0}
+              title="只清理当前筛选中没有画图、决策、委托或成交的训练"
+              aria-label={`清理当前筛选中没有画图、决策、委托或成交的训练，共 ${emptyActivityCount} 场`}>
+              清理无操作（{emptyActivityCount}）
+            </button>
+            <button type="button" className="delete-session" disabled={batchDeleteRunning || !selectedItems.length}
+              onClick={() => onDeleteSelected(selectedItems.map((item) => item.id))}>
+              <Trash2 size={13} />删除所选（{selectedItems.length}）
+            </button>
+            <button type="button" className="history-filter-reset" disabled={batchDeleteRunning}
+              onClick={() => { setCleanupOpen(false); setSelection({ scope: selectionScope, ids: [] }); }}>完成</button>
+          </div>
+        )}
+        {cleanupStatus && <div className="history-cleanup-status" role="status">{cleanupStatus}</div>}
         <div className="review-session-filters">
           <label className="review-session-search">
             <span>搜索</span>
             <input
               value={filters.query}
-              onChange={(event) => onFilterChange({ query: event.target.value })}
+              onChange={(event) => { setSelection({ scope: selectionScope, ids: [] }); onFilterChange({ query: event.target.value }); }}
               placeholder="代码、模式或形态"
             />
           </label>
           <label>
             <span>周期</span>
-            <select value={filters.timeframe} onChange={(event) => onFilterChange({ timeframe: event.target.value })}>
+            <select value={filters.timeframe} onChange={(event) => { setSelection({ scope: selectionScope, ids: [] }); onFilterChange({ timeframe: event.target.value }); }}>
               <option value="all">全部周期</option>
               {timeframes.map((value) => <option key={value} value={value}>{timeframeLabel(value)}</option>)}
             </select>
           </label>
           <label>
             <span>模式</span>
-            <select value={filters.modeLabel} onChange={(event) => onFilterChange({ modeLabel: event.target.value })}>
+            <select value={filters.modeLabel} onChange={(event) => { setSelection({ scope: selectionScope, ids: [] }); onFilterChange({ modeLabel: event.target.value }); }}>
               <option value="all">全部模式</option>
               {modeOptions.map((value) => <option key={value} value={value}>{value}</option>)}
             </select>
           </label>
           <label>
             <span>状态</span>
-            <select value={filters.status} onChange={(event) => onFilterChange({ status: event.target.value as ReviewSessionFilters["status"] })}>
+            <select value={filters.status} onChange={(event) => { setSelection({ scope: selectionScope, ids: [] }); onFilterChange({ status: event.target.value as ReviewSessionFilters["status"] }); }}>
               <option value="all">全部状态</option>
               <option value="completed">已完成</option>
               <option value="active">可继续</option>
@@ -142,7 +183,7 @@ export function SessionHistoryPanel({
           </label>
           <label>
             <span>事前计划</span>
-            <select value={filters.planStatus} onChange={(event) => onFilterChange({ planStatus: event.target.value as ReviewSessionFilters["planStatus"] })}>
+            <select value={filters.planStatus} onChange={(event) => { setSelection({ scope: selectionScope, ids: [] }); onFilterChange({ planStatus: event.target.value as ReviewSessionFilters["planStatus"] }); }}>
               <option value="all">全部计划</option>
               <option value="written">已写计划</option>
               <option value="unwritten">未写计划</option>
@@ -152,19 +193,26 @@ export function SessionHistoryPanel({
         <div className="review-session-scroll" tabIndex={0} aria-label="全部可恢复训练，可滚动浏览">
           {visibleItems.length ? visibleItems.map((item) => (
             <div
-              className={`session-row ${item.selected ? "active" : ""}`}
+              className={`session-row ${item.selected ? "active" : ""} ${cleanupOpen ? "cleanup-selectable" : ""}`}
               key={item.id}
               role="button"
               tabIndex={0}
-              aria-label={`查看 ${item.instrumentId} ${timeframeLabel(item.timeframe)} 复盘`}
-              onClick={() => onReview(item.id)}
+              aria-label={`${cleanupOpen ? "选择" : "查看"} ${item.instrumentId} ${timeframeLabel(item.timeframe)} ${cleanupOpen ? "训练" : "复盘"}`}
+              onClick={() => cleanupOpen ? toggleSelection(item.id) : onReview(item.id)}
               onKeyDown={(event) => {
                 if (event.key === "Enter" || event.key === " ") {
                   event.preventDefault();
-                  onReview(item.id);
+                  if (cleanupOpen) toggleSelection(item.id); else onReview(item.id);
                 }
               }}
             >
+              {cleanupOpen && (
+                <label className="history-session-select" onClick={(event) => event.stopPropagation()} onKeyDown={(event) => event.stopPropagation()}>
+                  <input type="checkbox" checked={selectedIds.has(item.id)} disabled={batchDeleteRunning}
+                    aria-label={`选择 ${item.instrumentId} ${timeframeLabel(item.timeframe)} ${item.createdAtLabel} 的训练`}
+                    onChange={() => toggleSelection(item.id)} />
+                </label>
+              )}
               <div className="session-main">
                 <div className="session-title">
                   <strong>{item.instrumentId} · {timeframeLabel(item.timeframe)}</strong>

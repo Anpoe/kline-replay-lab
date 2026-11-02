@@ -1,9 +1,18 @@
 @import "tailwindcss";
 
-/* Chart visibility uses the same compact checkbox in training, review and MT4. */
-.chart-marker-toggle { display: inline-flex; align-items: center; gap: 6px; min-height: 32px; color: var(--muted); font-size: 11px; white-space: nowrap; cursor: pointer; }
-.chart-marker-toggle > input { flex-shrink: 0; accent-color: var(--accent); }
-.chart-marker-toggle:focus-within { color: var(--foreground); }
+/* Shared marker control follows the toolbar's compact shape and semantic colors. */
+.chart-marker-toggle { display: inline-flex; align-items: center; justify-content: center; gap: 7px; min-height: 32px; padding: 0 9px; border: 1px solid var(--line); border-radius: 6px; background: var(--surface-soft); color: var(--muted); font-size: 11px; line-height: 1; vertical-align: middle; white-space: nowrap; cursor: pointer; }
+.chart-marker-toggle > input { appearance: none; display: grid; place-content: center; flex: 0 0 14px; width: 14px; height: 14px; margin: 0; padding: 0; border: 1px solid var(--line-strong); border-radius: 4px; background: var(--surface-raised); color: var(--background); cursor: inherit; }
+.chart-marker-toggle > input::before { content: ""; width: 7px; height: 4px; margin-top: -2px; border: solid currentColor; border-width: 0 0 2px 2px; transform: rotate(-45deg); visibility: hidden; }
+.chart-marker-toggle > input:checked { border-color: var(--accent); background: var(--accent); }
+.chart-marker-toggle > input:checked::before { visibility: visible; }
+.chart-marker-toggle:has(> input:checked) { border-color: var(--line-strong); background: var(--accent-soft); color: var(--accent-strong); }
+.chart-marker-toggle:hover { border-color: var(--line-strong); color: var(--foreground); }
+.chart-marker-toggle:has(> input:focus-visible) { outline: 2px solid var(--accent); outline-offset: 2px; }
+.chart-marker-toggle > input:focus-visible { outline: none; }
+.chart-heading .chart-marker-toggle { align-self: center; }
+.chart-marker-toggle > span:not(.live-sr-only) { color: inherit; }
+@media (forced-colors: active) { .chart-marker-toggle > input { appearance: auto; } .chart-marker-toggle > input::before { display: none; } }
 @media (pointer: coarse) { .chart-marker-toggle { min-height: 44px; } }
 
 /* Phone access reuses settings controls, semantic colors and compact status rows. */
@@ -1187,6 +1196,7 @@ button { color: inherit; }
 .progress-track { height: 3px; background: #1c292d; border-radius: 99px; overflow: hidden; }
 .progress-track span { display: block; height: 100%; background: linear-gradient(90deg, #159a76, var(--accent-strong)); border-radius: inherit; }
 .transport { display: flex; align-items: center; gap: 5px; }
+.replay-next-button { touch-action: none; user-select: none; -webkit-touch-callout: none; }
 .replay-controls .play-button { width: 38px; height: 38px; color: #07120f; background: var(--accent); border-radius: 50%; }
 .replay-controls .play-button:hover { color: #07120f; background: var(--accent-strong); }
 .replay-controls button:disabled { opacity: .3; cursor: not-allowed; }
@@ -2560,3 +2570,16 @@ button { color: inherit; }
 .mobile-access-remote-status { display: flex; align-items: center; justify-content: space-between; gap: 10px; color: var(--muted); font-size: 12px; }
 .mobile-access-remote-status .active { color: var(--accent); }
 .mobile-access-remote a { display: inline-flex; align-items: center; text-decoration: none; }
+
+/* 历史清理沿用记录工具栏、危险按钮和语义色。 */
+.history-cleanup-actions { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; margin-top: 12px; }
+.history-cleanup-actions button { min-height: 30px; }
+.history-cleanup-status { margin-top: 10px; color: var(--muted); font-size: 11px; overflow-wrap: anywhere; }
+.history-session-select { display: flex; align-items: flex-start; justify-content: center; flex: 0 0 28px; padding-top: 2px; cursor: pointer; }
+.history-session-select input { width: 16px; height: 16px; accent-color: var(--accent); }
+@media (max-width: 600px) {
+  .session-row.cleanup-selectable { flex-wrap: wrap; }
+  .session-row.cleanup-selectable > .session-main { flex-basis: calc(100% - 40px); }
+  .session-row.cleanup-selectable > .session-actions { display: flex; flex-basis: calc(100% - 40px); margin-left: 40px; }
+  .session-row.cleanup-selectable .session-title { flex-wrap: wrap; }
+}

@@ -6,6 +6,7 @@ import { applyLiveStatePatch, readLiveState } from "../db/live-ledger.ts";
 import { applyLiveTradingCommand } from "../db/live-command.ts";
 import { buildLiveAccountLifecycleCommand } from "../app/features/live/liveAccountController.ts";
 import { defaultAppSettings } from "../app/features/settings/settingsContracts.ts";
+import { executeLiveBars } from "../app/lib/liveExecutionAdapter.ts";
 
 function createD1(t) {
   const sqlite = new DatabaseSync(":memory:");
@@ -333,4 +334,86 @@ test("return account resets to latest capital defaults while unlinked history ke
   assert.equal(state.portfolios[0].accountId ?? null, null);
   assert.equal(state.portfolios[0].tradingMode, "return");
   assert.equal(state.portfolios[0].positions[0].realizedPnl, 20);
+});
+
+for (const [market, instrumentId, referencePrice, nextPrice] of [
+  ['FX', 'EURUSD.FX', 1.1, 1.11], ['GOLD', 'XAUUSD.GOLD', 2000, 2010],
+]) {
+  test(`${market} live orders share the existing command, fill and persistence lifecycle`, async t => {
+    const { db } = createD1(t);
+    const accountId = `live-account-${market}`;
+    const command = {
+      commandId: `first-${market}`, type: 'create-account', environment: 'live', accountId, market,
+      instrumentId, timestamp: 1, observedAccountVersion: 0, tradingMode: 'capital', initialCapital: 10000,
+      side: 'buy', qty: 0.1, referencePrice, orderId: 'entry', positionId: 'lot',
+      fxAccountConfig: { accountCurrency: 'USD', leverage: 100, stopOutLevelPct: 50 },
+      executionProfile: { spreadBps: 0, slippageBps: 0, commissionRateBps: 0, commissionMin: 0 },
+    };
+    const first = await applyLiveTradingCommand(db, command);
+    assert.equal(first.account.market, market);
+    assert.equal(first.account.currency, 'USD');
+    assert.ok(first.account.reservedMargin > 0);
+    assert.equal(first.account.reservedCash, 0);
+    assert.equal((await applyLiveTradingCommand(db, command)).idempotent, true);
+    let state = await readLiveState(db);
+    const order = state.portfolios[0].pendingOrders[0];
+    assert.equal(order.instrumentEconomics.quantityUnit, 'lot');
+    assert.equal(order.instrumentEconomics.contractSize, market === 'FX' ? 100000 : 100);
+    assert.equal(state.accounts[0].fxAccountConfig.leverage, 100);
+    const execute = (portfolio, cashBalance, timestamp, price) => executeLiveBars({
+      orders: portfolio.pendingOrders, positions: portfolio.positions, cashBalance, capitalMode: true,
+      profile: first.account.executionProfile, instrumentEconomics: order.instrumentEconomics,
+      bars: [{ timestamp, open: price, high: price, low: price, close: price, closed: true }],
+    });
+    const opened = execute(state.portfolios[0], 10000, 2, referencePrice);
+    assert.equal(opened.fills.length, 1);
+    assert.ok(opened.positions[0].marginUsed > 0);
+    await applyLiveStatePatch(db, {
+      accountUpserts: [{ ...first.account, cashBalance: opened.cashBalance, version: 2, reservedMargin: 0 }],
+      portfolioUpserts: [{ ...state.portfolios[0], positions: opened.positions, pendingOrders: [], executions: opened.fills, accountVersion: 2, lastProcessedTimestamp: 2 }],
+    });
+    state = await readLiveState(db);
+    const protection = await applyLiveTradingCommand(db, {
+      commandId: `protect-${market}`, type: 'modify-protection', environment: 'live', accountId, market,
+      instrumentId, positionId: 'lot', timestamp: 2, observedAccountVersion: 2,
+      stopLoss: referencePrice * 0.95, takeProfit: referencePrice * 1.1,
+    });
+    assert.equal(protection.portfolios[0].positions[0].stopLoss, referencePrice * 0.95);
+    const closedCommand = await applyLiveTradingCommand(db, {
+      commandId: `close-${market}`, type: 'close-position', environment: 'live', accountId, market,
+      instrumentId, positionId: 'lot', timestamp: 2, observedAccountVersion: protection.accountVersion,
+    });
+    const closed = execute(closedCommand.portfolios[0], opened.cashBalance, 3, nextPrice);
+    assert.equal(closed.positions[0].status, 'closed');
+    assert.ok(Math.abs(closed.cashBalance - 10100) < 0.00001);
+    await applyLiveStatePatch(db, {
+      accountUpserts: [{ ...closedCommand.account, version: closedCommand.accountVersion + 1, cashBalance: closed.cashBalance }],
+      portfolioUpserts: [{ ...closedCommand.portfolios[0], positions: closed.positions, pendingOrders: [], executions: [...opened.fills, ...closed.fills], accountVersion: closedCommand.accountVersion + 1 }],
+    });
+    const restored = await readLiveState(db);
+    assert.equal(restored.portfolios[0].positions[0].status, 'closed');
+    assert.equal(restored.portfolios[0].executions.length, 2);
+    assert.equal(restored.accounts[0].market, market);
+    assert.equal(restored.accounts[0].fxAccountConfig.leverage, 100);
+  });
+}
+
+test('FX short orders reserve margin across symbols, cancellation releases it and markets stay isolated', async t => {
+  const { db } = createD1(t);
+  const base = { environment: 'live', market: 'FX', accountId: 'fx', timestamp: 1, tradingMode: 'capital', initialCapital: 1500,
+    fxAccountConfig: { accountCurrency: 'USD', leverage: 100 }, executionProfile: { spreadBps: 0, slippageBps: 0, commissionRateBps: 0 } };
+  const first = await applyLiveTradingCommand(db, { ...base, commandId: 'fx-1', type: 'create-account', observedAccountVersion: 0,
+    instrumentId: 'EURUSD.FX', referencePrice: 1.1, side: 'sell', qty: 1, orderId: 'sell' });
+  assert.ok(Math.abs(first.account.reservedMargin - 1100) < 0.00001);
+  assert.ok(Math.abs(first.account.availableCash - 400) < 0.00001);
+  await assert.rejects(applyLiveTradingCommand(db, { ...base, commandId: 'fx-2', type: 'attach-portfolio', observedAccountVersion: 1,
+    instrumentId: 'GBPUSD.FX', referencePrice: 1.3, side: 'buy', qty: 1 }), /保证金不足/);
+  const cancelled = await applyLiveTradingCommand(db, { ...base, commandId: 'cancel', type: 'cancel-order', observedAccountVersion: 1,
+    instrumentId: 'EURUSD.FX', orderId: 'sell' });
+  assert.equal(cancelled.account.reservedMargin, 0);
+  assert.equal(cancelled.account.availableCash, 1500);
+  const gold = await applyLiveTradingCommand(db, { ...base, market: 'GOLD', accountId: 'gold', commandId: 'gold', type: 'create-account', observedAccountVersion: 0,
+    instrumentId: 'XAUUSD.GOLD', referencePrice: 2000, side: 'sell', qty: 0.1 });
+  assert.equal(gold.account.reservedMargin, 200);
+  assert.equal((await readLiveState(db)).accounts.find(a => a.id === 'fx').availableCash, 1500);
 });

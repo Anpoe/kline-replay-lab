@@ -4,12 +4,30 @@ import test from "node:test";
 import {
   aggregateCandlesToTimeframe,
   canAggregateTimeframe,
+  timeframeBucketKey,
 } from "../app/lib/timeframeAggregation.ts";
 import { aggregateCandles as aggregateFxCandles } from "../app/lib/fx/dukascopyAggregation.ts";
 
 function candle(timestamp, open, high, low, close, volume, turnover) {
   return { timestamp, open, high, low, close, volume, turnover };
 }
+
+test("daily replay reuses its timezone formatter across bars and preserves DST boundaries", () => {
+  const original = Intl.DateTimeFormat;
+  let constructions = 0;
+  Intl.DateTimeFormat = new Proxy(original, { construct(target, args) {
+    constructions += 1;
+    return Reflect.construct(target, args);
+  } });
+  try {
+    const times = ['2026-03-08T04:59:00Z', '2026-03-08T05:00:00Z', '2026-03-09T04:00:00Z'];
+    for (let i = 0; i < 20; i++) {
+      assert.deepEqual(times.map(t => timeframeBucketKey(Date.parse(t), '1d', 'America/Detroit')),
+        ['2026-03-07', '2026-03-08', '2026-03-09']);
+    }
+    assert.equal(constructions, 1);
+  } finally { Intl.DateTimeFormat = original; }
+});
 
 test("aggregates lower-period candles into a higher-period OHLCV bar", () => {
   const start = Date.parse("2026-01-05T09:30:00Z");

@@ -5,6 +5,7 @@ import {
   chartDisplayTimeZone,
   defaultAppSettings,
   normalizeSettings,
+  liveAccountRuntimeDefaultsForMarket,
 } from "../app/features/settings/settingsContracts.ts";
 import {
   prepareSettingsSave,
@@ -56,8 +57,8 @@ test("migrates the legacy account setting into independent training and live def
   });
   assert.deepEqual(settings.liveAccount, {
     tradingMode: "capital",
-    initialCapitalByMarket: { CN: 250000, US: 250000 },
-    riskCapitalByMarket: { CN: 250000, US: 250000 },
+    initialCapitalByMarket: { CN: 250000, US: 250000, FX: 250000, GOLD: 250000 },
+    riskCapitalByMarket: { CN: 250000, US: 250000, FX: 250000, GOLD: 250000 },
   });
   assert.equal(settings.tradingMode, "capital");
   assert.equal(settings.initialCapital, 250000);
@@ -78,7 +79,7 @@ test("normalizes account groups independently when one group is damaged", () => 
   assert.equal(settings.liveAccount.tradingMode, "capital");
   assert.equal(settings.liveAccount.initialCapitalByMarket.CN, 300000);
   assert.equal(settings.liveAccount.initialCapitalByMarket.US, 100000);
-  assert.deepEqual(settings.liveAccount.riskCapitalByMarket, { CN: 400000, US: 500000 });
+  assert.deepEqual(settings.liveAccount.riskCapitalByMarket, { CN: 400000, US: 500000, FX: 100000, GOLD: 100000 });
 });
 
 test("rejects an incomplete random date range before persistence", () => {
@@ -249,4 +250,11 @@ test("invalid active MT4 windows do not reach persistence", async () => {
     assert.equal(result.ok, false);
     assert.equal(writes, 0);
   }
+});
+
+test("FX and gold live defaults always use their own margin capital", () => {
+  const settings = normalizeSettings({ liveAccount: { tradingMode: "return", initialCapitalByMarket: { FX: 20000, GOLD: 30000 } } });
+  assert.deepEqual(liveAccountRuntimeDefaultsForMarket(settings, "FX"), { market: "FX", tradingMode: "capital", initialCapital: 20000 });
+  assert.deepEqual(liveAccountRuntimeDefaultsForMarket(settings, "GOLD"), { market: "GOLD", tradingMode: "capital", initialCapital: 30000 });
+  assert.equal(liveAccountRuntimeDefaultsForMarket(settings, "US").tradingMode, "return");
 });

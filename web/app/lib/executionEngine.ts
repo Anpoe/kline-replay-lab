@@ -144,6 +144,7 @@ export type ExecutionStepInput<
   profile?: Partial<ExecutionCostProfile>;
   cashBalance: number;
   capitalMode: boolean;
+  externalMargin?: { floatingPnl: number; usedMargin: number; reservedMargin: number };
   instrumentEconomics?: InstrumentEconomics;
   validateFill?: (order: TOrder, rawPrice: number) => FillValidation;
   validateProtectiveFill?: (
@@ -650,6 +651,7 @@ export function executeBarStep<
       const flow = marginMode ? -fee : cashFlow(order.side, price, fillQty, fee, orderEconomics);
       if (input.capitalMode && marginMode) {
         const snapshot = marginAccountSnapshot({
+          externalMargin: input.externalMargin,
           balance: cashBalance,
           positions,
           sourcePrice: resolvedPrice.sourcePrice,
@@ -810,6 +812,7 @@ export function executeBarStep<
     const onlyShort = open.length > 0 && open.every((position) => position.side === "short");
     const checkPrice = onlyLong ? input.bar.low : onlyShort ? input.bar.high : input.bar.close;
     const marginBefore = marginAccountSnapshot({
+      externalMargin: input.externalMargin,
       balance: cashBalance,
       positions,
       sourcePrice: checkPrice,
@@ -841,6 +844,7 @@ export function executeBarStep<
         cashBalance += closed.balanceFlow;
       }
       const marginAfter = marginAccountSnapshot({
+        externalMargin: input.externalMargin,
         balance: cashBalance,
         positions,
         sourcePrice: input.bar.close,
@@ -853,6 +857,7 @@ export function executeBarStep<
 
   const marginAccount = isMarginEconomics(marginEconomics)
     ? marginAccountSnapshot({
+      externalMargin: input.externalMargin,
       balance: cashBalance,
       positions,
       sourcePrice: input.bar.close,

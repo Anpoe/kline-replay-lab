@@ -15,6 +15,7 @@ import {
 } from "../../lib/marketAdjustments";
 import { normalizeTimeframeCoverage } from "../../lib/timeframeAvailability";
 import { isSupportedTimeframe } from "../../lib/timeframeCatalog";
+import { candlePageQuery, sliceCandlePage } from '../../lib/candlePaging.mjs';
 
 function isLocalCnSource(source: string) {
   const normalized = source.toLowerCase();
@@ -251,6 +252,10 @@ export async function GET(request: Request) {
   }
 
   const instrumentId = url.searchParams.get("instrument") ?? "600519.SH";
+  let page;
+  try { page = candlePageQuery(url.searchParams); }
+  catch { return Response.json({ error: 'K 线分页范围无效' }, { status: 400 }); }
+  const pageParams = page ? `&limit=${page.limit}${page.before === undefined ? '' : `&before=${page.before}`}` : '';
   const timeframe = url.searchParams.get("timeframe") ?? "1d";
   if (!isSupportedTimeframe(timeframe)) {
     return Response.json({ error: `不支持的周期：${timeframe}` }, { status: 400 });
@@ -273,29 +278,33 @@ export async function GET(request: Request) {
         candles: Array<Record<string, unknown>>;
         source: string;
         datasetVersion: string;
-      }>(`/candles?instrument=${encodeURIComponent(instrumentId)}&timeframe=${encodeURIComponent(timeframe)}&adjustmentType=${encodeURIComponent(adjustmentType)}`, 15000)
+      }>(`/candles?instrument=${encodeURIComponent(instrumentId)}&timeframe=${encodeURIComponent(timeframe)}&adjustmentType=${encodeURIComponent(adjustmentType)}${pageParams}`, 15000)
     : null;
+  if (local && page && 'hasBefore' in local) return Response.json(local);
   const rows = await db
     .prepare(`SELECT timestamp, open, high, low, close, volume, turnover
       FROM candles
       WHERE instrument_id = ? AND timeframe = ? AND adjustment_type = ?
-      ORDER BY timestamp ASC`)
-    .bind(instrumentId, timeframe, adjustmentType)
+      ${page?.before === undefined ? '' : 'AND timestamp < ?'}
+      ORDER BY timestamp ${page ? 'DESC LIMIT ?' : 'ASC'}`)
+    .bind(instrumentId, timeframe, adjustmentType, ...(page?.before === undefined ? [] : [page.before]), ...(page ? [page.limit + 1] : []))
     .all();
+  if (page) rows.results.reverse();
+  const databasePage = sliceCandlePage(rows.results as Array<{ timestamp: number }>, page);
 
   // A fresh install keeps a small CN sample in D1 while the optional local
   // market-data service has no imported files yet. Keep that sample usable
   // until local data actually contains bars; otherwise the default 600519
   // screen opens successfully but every new training attempt is rejected.
   if (local?.candles?.length || rows.results.length === 0) {
-    if (local) return Response.json(local);
+    if (local) return Response.json({ ...local, ...(page && !('hasBefore' in local) ? sliceCandlePage(local.candles as Array<{ timestamp: number }>, page) : {}) });
   }
 
   if (instrument && rows.results.length) {
-    return Response.json({ instrument, timeframe, adjustmentType, candles: rows.results });
+    return Response.json({ instrument, timeframe, adjustmentType, ...databasePage });
   }
   if (preferLocal) {
-    return Response.json({ instrument, timeframe, adjustmentType, candles: [] });
+    return Response.json({ instrument, timeframe, adjustmentType, candles: [], ...(page ? { hasBefore: false } : {}) });
   }
   const fallbackLocal = await readLocalDataJson<{
     instrument: Record<string, unknown>;
@@ -304,9 +313,9 @@ export async function GET(request: Request) {
     candles: Array<Record<string, unknown>>;
     source: string;
     datasetVersion: string;
-  }>(`/candles?instrument=${encodeURIComponent(instrumentId)}&timeframe=${encodeURIComponent(timeframe)}&adjustmentType=${encodeURIComponent(adjustmentType)}`, 15000);
-  if (fallbackLocal) return Response.json(fallbackLocal);
-  return Response.json({ instrument, timeframe, adjustmentType, candles: rows.results });
+  }>(`/candles?instrument=${encodeURIComponent(instrumentId)}&timeframe=${encodeURIComponent(timeframe)}&adjustmentType=${encodeURIComponent(adjustmentType)}${pageParams}`, 15000);
+  if (fallbackLocal) return Response.json({ ...fallbackLocal, ...(page && !('hasBefore' in fallbackLocal) ? sliceCandlePage(fallbackLocal.candles as Array<{ timestamp: number }>, page) : {}) });
+  return Response.json({ instrument, timeframe, adjustmentType, ...databasePage });
 }
 
 export async function POST(request: Request) {

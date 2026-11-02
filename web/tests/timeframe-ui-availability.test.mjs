@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
+import ts from 'typescript';
 
 const root = new URL("../app/", import.meta.url);
 const workbench = await readFile(new URL("components/TrainingWorkbench.tsx", root), "utf8");
@@ -20,7 +21,7 @@ test("training chart controls iterate the complete catalog and disable unavailab
   assert.doesNotMatch(workbench, /setRuleNotice\(`当前品种没有/);
 });
 
-test("every active snapshot session keeps its mode while changing the chart timeframe", () => {
+test("snapshot sessions and observation keep their mode while changing the chart timeframe", () => {
   const loadStart = workbench.indexOf("const loadTimeframeView = useCallback");
   const loadEnd = workbench.indexOf("const persistTrainingState", loadStart);
   const loader = workbench.slice(loadStart, loadEnd);
@@ -30,7 +31,18 @@ test("every active snapshot session keeps its mode while changing the chart time
 
   assert.match(loader, /if \(!dataSnapshotId\)/);
   assert.doesNotMatch(loader, /!trainingTask\?\.randomRun/);
-  assert.match(handler, /if \(dataSnapshotId\) \{\s*void loadTimeframeView\(nextTimeframe\);/);
+  const compiled = ts.transpileModule(handler, { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText;
+  for (const [snapshot, live, expected] of [['snapshot', false, 'view'], ['', true, 'view'], ['', false, 'training']]) {
+    const calls = [];
+    const change = new Function('currentAvailableTimeframes', 'dataSnapshotId', 'liveMode', 'loadTimeframeView', 'startFreshTraining', 'instrumentId', `${compiled}\nreturn handleTimeframeChange;`)(
+      ['1d', '1w'], snapshot, live,
+      period => calls.push(['view', period]), (instrument, period) => calls.push(['training', period]), 'EURUSD.FX',
+    );
+    change('1w');
+    assert.deepEqual(calls, [[expected, '1w']]);
+    change('1m');
+    assert.equal(calls.length, 1);
+  }
   assert.doesNotMatch(handler, /if \(trainingTask\?\.randomRun\)/);
 });
 

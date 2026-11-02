@@ -172,7 +172,7 @@ test("discards stale market loads when a newer random round starts", async () =>
 
   assert.match(workbench, /marketLoadRef\.current\.controller\?\.abort\(\)/);
   assert.match(workbench, /marketLoadRef\.current\.id !== requestId/);
-  assert.match(workbench, /requestInstrumentId = latestWatchRequest\?\.instrumentId[\s\S]*restoreRequest\?\.instrumentId[\s\S]*newTaskRequest\?\.instrumentId/);
+  assert.match(workbench, /requestInstrumentId = restoreRequest\?\.instrumentId[\s\S]*newTaskRequest\?\.instrumentId/);
   assert.match(workbench, /instrumentId: requestInstrumentId,[\s\S]{0,120}timeframe: requestTimeframe/);
 });
 

@@ -340,58 +340,24 @@ export function SettingsPanel({
                   >资金账户模式</button>
                 </div>
                 <div className="execution-settings-grid">
-                  <label>{draft.liveAccount.tradingMode === "capital" ? "A 股初始资金" : "A 股风险计算基准"}
-                    <input
-                      type="number"
-                      min="1000"
-                      step="1000"
-                      value={draft.liveAccount.tradingMode === "capital"
-                        ? draft.liveAccount.initialCapitalByMarket.CN
-                        : draft.liveAccount.riskCapitalByMarket.CN}
-                      onChange={(event) => onDraftChange((next) => {
-                        const amount = Math.max(1000, Number(event.target.value));
-                        const key = next.liveAccount.tradingMode === "capital"
-                          ? "initialCapitalByMarket"
-                          : "riskCapitalByMarket";
-                        return {
-                          ...next,
-                          liveAccount: {
-                            ...next.liveAccount,
-                            [key]: { ...next.liveAccount[key], CN: amount },
-                          },
-                        };
-                      })}
-                    />
-                  </label>
-                  <label>{draft.liveAccount.tradingMode === "capital" ? "美股初始资金" : "美股风险计算基准"}
-                    <input
-                      type="number"
-                      min="1000"
-                      step="1000"
-                      value={draft.liveAccount.tradingMode === "capital"
-                        ? draft.liveAccount.initialCapitalByMarket.US
-                        : draft.liveAccount.riskCapitalByMarket.US}
-                      onChange={(event) => onDraftChange((next) => {
-                        const amount = Math.max(1000, Number(event.target.value));
-                        const key = next.liveAccount.tradingMode === "capital"
-                          ? "initialCapitalByMarket"
-                          : "riskCapitalByMarket";
-                        return {
-                          ...next,
-                          liveAccount: {
-                            ...next.liveAccount,
-                            [key]: { ...next.liveAccount[key], US: amount },
-                          },
-                        };
-                      })}
-                    />
-                  </label>
+                  {(["CN", "US", "FX", "GOLD"] as const).map(market => {
+                    const capital = market === "FX" || market === "GOLD" || draft.liveAccount.tradingMode === "capital";
+                    const key = capital ? "initialCapitalByMarket" : "riskCapitalByMarket";
+                    const name = { CN: "A 股", US: "美股", FX: "外汇", GOLD: "黄金" }[market];
+                    return <label key={market} title={market === "FX" || market === "GOLD" ? "保证金资金账户，合约与换算参数使用外汇与黄金账户设置" : undefined}>
+                      {name}{capital ? "初始资金" : "风险计算基准"}
+                      <input type="number" min="1000" step="1000" value={draft.liveAccount[key][market]}
+                        onChange={event => { const amount = Math.max(1000, Number(event.target.value)); onDraftChange(next => ({
+                          ...next, liveAccount: { ...next.liveAccount, [key]: { ...next.liveAccount[key], [market]: amount } },
+                        })); }} />
+                    </label>;
+                  })}
                 </div>
 
                 <p className="settings-consequence">仅用于新账户，已有账户保留原配置。</p>
               </section>}
               {visibleIds.has("fx-account") && <section className="settings-rule settings-group" aria-labelledby="settings-group-fx-account" data-settings-group="fx-account">
-                <header className="settings-group-head"><div>{searching && <span className="settings-group-category">{groupCategory("fx-account")}</span>}<h4 id="settings-group-fx-account">{groupTitle("fx-account")}</h4></div><SettingsHelp label={`${groupTitle("fx-account")}说明`}><span>外汇和黄金训练固定使用保证金资金账户，不使用收益率模式。账户币种等于报价币时按 1:1 换算；外汇账户币种等于基础币时按汇价反算；其他情况使用上面的手动换算率。参数会随新训练冻结。</span></SettingsHelp></header>
+                <header className="settings-group-head"><div>{searching && <span className="settings-group-category">{groupCategory("fx-account")}</span>}<h4 id="settings-group-fx-account">{groupTitle("fx-account")}</h4></div><SettingsHelp label={`${groupTitle("fx-account")}说明`}><span>外汇和黄金训练及实时模拟固定使用保证金资金账户，不使用收益率模式。账户币种等于报价币时按 1:1 换算；外汇账户币种等于基础币时按汇价反算；其他情况使用上面的手动换算率。参数会随新训练或新实时模拟账户冻结。</span></SettingsHelp></header>
 
 
                 <div className="execution-settings-grid">

@@ -1,4 +1,5 @@
 import { shortcutActions, shortcutFromEvent, type ShortcutAction, type ShortcutSettings } from "./keyboardShortcuts.ts";
+import { createPressRepeat } from "./pressRepeat.ts";
 
 type TimerToken = ReturnType<typeof setTimeout> | number;
 export function isShortcutEditingTarget(target: EventTarget | null) {
@@ -15,16 +16,13 @@ export function installKeyboardShortcuts({ target, visibilityTarget = target, se
   setTimer?: (fn: () => void, delay: number) => TimerToken;
   clearTimer?: (token: TimerToken) => void;
 }) {
-  let timer: TimerToken | null = null;
   let active: { action: ShortcutAction; code: string } | null = null;
   const pressed = new Set<string>();
-  const cancel = () => { if (timer !== null) clearTimer(timer); timer = null; active = null; pressed.clear(); };
-  const repeat = () => {
-    timer = null;
-    if (!active || isBlocked() || !isAvailable(active.action)) { cancel(); return; }
-    if (onAction(active.action) === false) { cancel(); return; }
-    if (active) timer = setTimer(repeat, settings.repeatIntervalMs);
-  };
+  const repeat = createPressRepeat({ repeatIntervalMs: settings.repeatIntervalMs, setTimer, clearTimer,
+    isBlocked, isAvailable: () => Boolean(active && isAvailable(active.action)),
+    onAction: () => active ? onAction(active.action) : false,
+  });
+  const cancel = () => { repeat.cancel(); active = null; pressed.clear(); };
   const down = (raw: Event) => {
     const event = raw as KeyboardEvent;
     if (!settings.enabled || event.defaultPrevented || event.isComposing || isBlocked() || isShortcutEditingTarget(event.target)) { cancel(); return; }
@@ -40,10 +38,9 @@ export function installKeyboardShortcuts({ target, visibilityTarget = target, se
     event.preventDefault();
     if (event.repeat || pressed.has(event.code)) return;
     // A new action ends any preceding navigation hold. One press never starts two loops.
-    if (timer !== null) clearTimer(timer);
-    timer = null; active = null; pressed.add(event.code);
+    repeat.cancel(); active = null; pressed.add(event.code);
     if (onAction(action.id) === false) return;
-    if (action.repeat) { active = { action: action.id, code: event.code }; timer = setTimer(repeat, 350); }
+    if (action.repeat) { active = { action: action.id, code: event.code }; repeat.start(); }
   };
   const up = (raw: Event) => {
     const event = raw as KeyboardEvent;

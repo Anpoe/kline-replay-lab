@@ -24,8 +24,12 @@ export function canAggregateTimeframe(sourceTimeframe: string, targetTimeframe: 
   return canAggregateCatalogTimeframe(sourceTimeframe, targetTimeframe);
 }
 
+const localPartsFormatters = new Map<string, Intl.DateTimeFormat>();
+
 function localParts(timestamp: number, timeZone: string) {
-  const parts = new Intl.DateTimeFormat("en-CA", {
+  let formatter = localPartsFormatters.get(timeZone);
+  if (!formatter) {
+    formatter = new Intl.DateTimeFormat("en-CA", {
     timeZone,
     year: "numeric",
     month: "2-digit",
@@ -33,7 +37,12 @@ function localParts(timestamp: number, timeZone: string) {
     hour: "2-digit",
     minute: "2-digit",
     hourCycle: "h23",
-  }).formatToParts(new Date(timestamp));
+    });
+    // Bound process-wide reuse while keeping each market's calendar semantics.
+    if (localPartsFormatters.size >= 32) localPartsFormatters.delete(localPartsFormatters.keys().next().value!);
+    localPartsFormatters.set(timeZone, formatter);
+  }
+  const parts = formatter.formatToParts(new Date(timestamp));
   const values = Object.fromEntries(parts.map((part) => [part.type, part.value]));
   return {
     year: Number(values.year),

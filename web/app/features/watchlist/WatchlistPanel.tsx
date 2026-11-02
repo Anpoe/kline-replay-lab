@@ -57,7 +57,9 @@ export function WatchlistPanel(props: Props) {
       if (running || controller.signal.aborted) return;
       running = true;
       setLoading(true);
-      const next = await loadWatchlistQuotes(JSON.parse(quoteKey), fetch, controller.signal);
+      const next = await loadWatchlistQuotes(JSON.parse(quoteKey), fetch, controller.signal, partial => {
+        if (!controller.signal.aborted) setQuotes(previous => ({ ...previous, ...partial }));
+      });
       if (!controller.signal.aborted) { setQuotes(next); setLoading(false); }
       running = false;
     };
@@ -131,7 +133,7 @@ export function WatchlistPanel(props: Props) {
       {items.map((item, index) => {
         const quote = quotes[item.instrumentId];
         const hasChange = quote?.changePct != null && Number.isFinite(quote.changePct);
-        const status = loading ? '读取中' : quote?.error ? '读取失败' : quote?.close ? '缺少前收' : '缺少日线';
+        const status = quote?.error ? '读取失败' : quote?.close ? '缺少前收' : quote ? '缺少日线' : loading ? '读取中' : '缺少日线';
         const description = hasChange ? `最新可用交易日涨跌幅 ${quote.changePct!.toFixed(2)}%，行情时间 ${quote.timestamp ? new Date(quote.timestamp).toLocaleString('zh-CN') : '未知'}` : `${status}，可刷新重试或到“管理行情”补齐日线`;
         const favorite = props.favorites.some(existing => existing.instrumentId === item.instrumentId);
         return <div role="listitem" key={item.instrumentId}>
