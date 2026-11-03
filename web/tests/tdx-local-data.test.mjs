@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import http from "node:http";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -35,6 +35,33 @@ const sampleRows = [
   { date: 20260721, open: 10.5, high: 12, low: 10.2, close: 11.8, volume: 200 },
   { date: 20260727, open: 11.8, high: 12.2, low: 11, close: 11.2, volume: 300 },
 ];
+
+test("stored watchlist change uses the preceding updated session, not the archive tail", async context => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'kline-watchlist-previous-close-'));
+  const store = await new TdxLocalStore({ root, dailyQuotesClient: { close() {} } }).init();
+  context.after(async () => { store.close(); await rm(root, { recursive: true, force: true }); });
+  await writeFile(path.join(root, 'sample.day'), dayBuffer(sampleRows));
+  store.getManifest = async () => ({ incrementalSource: 'tdx-realtime', instruments: [{ id: '600519.SH', relativePath: 'sample.day' }] });
+  const db = store.ensureOverlayDb();
+  const insert = (timestamp, close, source = 'tdx-realtime-daily') => db.prepare(`INSERT INTO daily_overlay
+    (instrument_id, timestamp, open, high, low, close, source, imported_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?)`).run('600519.SH', timestamp, close, close, close, close, source, 'fixture');
+  let quote = (await store.getLatestCandles(['600519.SH']))[0];
+  assert.equal(quote.close, 11.2); assert.equal(quote.previousClose, 11.8);
+  insert(Date.UTC(2026, 6, 28), 12.1);
+  quote = (await store.getLatestCandles(['600519.SH']))[0];
+  assert.equal(quote.previousClose, 11.2);
+  insert(Date.UTC(2026, 6, 29), 11.5);
+  insert(Date.UTC(2026, 6, 30), 10.7);
+  insert(Date.UTC(2026, 6, 31), 99, 'tushare-daily');
+  quote = (await store.getLatestCandles(['600519.SH']))[0];
+  assert.equal(quote.timestamp, Date.UTC(2026, 6, 30));
+  assert.equal(quote.close, 10.7);
+  assert.equal(quote.previousClose, 11.5);
+  const withEntry = (await store.getLatestCandles(['600519.SH'], { '600519.SH': Date.UTC(2026, 6, 27) }))[0];
+  assert.equal(withEntry.previousClose, quote.previousClose);
+  assert.equal(withEntry.entryTimestamp, Date.UTC(2026, 6, 28));
+});
 
 test("TDX .day records decode and aggregate into calendar weeks", () => {
   const bars = parseTdxDayBuffer(dayBuffer(sampleRows));

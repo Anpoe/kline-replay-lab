@@ -2271,7 +2271,7 @@ export class TdxLocalStore {
             `).all(instrument.id, ...overlaySources)
           : this.ensureOverlayDb().prepare(`
               SELECT timestamp, open, high, low, close, volume, turnover
-              FROM daily_overlay WHERE instrument_id = ? AND source IN (${overlayPlaceholders}) ORDER BY timestamp DESC LIMIT 1
+              FROM daily_overlay WHERE instrument_id = ? AND source IN (${overlayPlaceholders}) ORDER BY timestamp DESC LIMIT 2
             `).all(instrument.id, ...overlaySources);
         for (const overlay of overlays) {
           merged.set(Number(overlay.timestamp), {
