@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { applyCorporateActionsBeforeBar } from "../app/lib/corporateActionExecution.ts";
 
 import {
   buildReviewSessionSummariesInBatches,
@@ -10,6 +11,30 @@ import {
   normalizeReviewError,
   visibleReviewSessionItems,
 } from "../app/features/review/reviewController.ts";
+
+test("empty completed A-share replay remains removable after automatic corporate actions", () => {
+  const timestamp = Date.parse('2021-10-11T00:00:00Z');
+  const result = applyCorporateActionsBeforeBar({
+    events: [{ id: 'empty-action', instrumentId: '000831.SZ', date: '2021-10-11', timestamp,
+      category: 1, label: 'D', description: '', cashPer10: 1, bonusSharesPer10: 0, rightsSharesPer10: 0, rightsPrice: 0 }],
+    positions: [], pendingOrders: [], barTimestamp: timestamp, previousTimestamp: timestamp - 86400000,
+    previousClose: 10, priceBasis: 'raw',
+  });
+  const automatic = { type: 'corporate_action_applied', payload: JSON.parse(JSON.stringify(result.appliedEvents[0])) };
+  const state = { positions: [], pendingOrders: [], executions: [], orderRejections: [], drawings: [], hasDecisionContent: false,
+    events: [{ type: 'session_created' }, automatic, { type: 'replay_advanced' }, { type: 'training_completed' }] };
+  assert.equal(result.appliedEvents.length, 1);
+  assert.equal(hasMeaningfulTrainingActivity(state), false);
+  for (const payload of [
+    { ...automatic.payload, quantityBefore: 100 }, { ...automatic.payload, quantityAfter: 100 },
+    { ...automatic.payload, positionIds: ['position'] }, { ...automatic.payload, cancelledOrderIds: ['order'] },
+    {}, null,
+  ]) assert.equal(hasMeaningfulTrainingActivity({ ...state, events: [{ ...automatic, payload }] }), true);
+  for (const key of ['positions', 'pendingOrders', 'executions', 'orderRejections', 'drawings']) {
+    assert.equal(hasMeaningfulTrainingActivity({ ...state, [key]: [{ id: 'user-action' }] }), true);
+  }
+  assert.equal(hasMeaningfulTrainingActivity({ ...state, hasDecisionContent: true }), true);
+});
 
 const sessions = [
   { id: "completed-plan", instrumentId: "600519.SH", timeframe: "1d", modeLabel: "随机训练", completed: true, hasPlan: true, patternNames: ["突破"] },

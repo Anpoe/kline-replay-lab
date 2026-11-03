@@ -1876,6 +1876,10 @@ export function TrainingWorkbench() {
   const [selectedPatternPresetId, setSelectedPatternPresetId] = useState(defaultPatternPresets[0].id);
   const [patternScanStatus, setPatternScanStatus] = useState("");
   const [startingTraining, setStartingTraining] = useState(false);
+  const trainingLaunchRef = useRef<{ busy: boolean; id: number }>({ busy: false, id: 0 });
+  useEffect(() => () => {
+    trainingLaunchRef.current = { busy: false, id: trainingLaunchRef.current.id + 1 };
+  }, []);
   const [taskDraft, setTaskDraft] = useState<TrainingTaskDraft>(defaultTrainingTaskDraft);
   const [setupInstrumentId, setSetupInstrumentId] = useState("600519.SH");
   const [setupError, setSetupError] = useState("");
@@ -1993,6 +1997,8 @@ export function TrainingWorkbench() {
   }, []);
 
   const preemptStartupRandom = useCallback(() => {
+    trainingLaunchRef.current = { busy: false, id: trainingLaunchRef.current.id + 1 };
+    setStartingTraining(false);
     startupRandomStartedRef.current = true;
     startupRandomCancelledRef.current = true;
     setStartupReady(true);
@@ -3937,7 +3943,9 @@ export function TrainingWorkbench() {
           const currentWindowTimestamps = data.candles
             .slice(nextTask.startCursor, nextTask.endCursor + 1)
             .map((bar) => bar.timestamp);
-          void reviewGateway.loadSessions<TrainingSession>(true, controller.signal)
+          void reviewGateway.loadSessions<TrainingSession>(true, controller.signal, {
+            instrumentId: requestInstrumentId, timeframe: requestTimeframe,
+          })
             .then((sessions) => {
               const candidates = sessions.flatMap((savedSession) => {
                 if (savedSession.id === nextSessionId
@@ -7325,18 +7333,10 @@ export function TrainingWorkbench() {
     resumeSession(nextSession, false, trainingNavigatorSessions);
   };
 
-  const resumeCurrentTraining = () => {
+  const viewCompletedTraining = () => {
+    preemptStartupRandom();
     setShowRandomComplete(false);
-    const now = new Date().toISOString();
-    resumeSession({
-      id: sessionId,
-      instrumentId,
-      timeframe,
-      dataSnapshotId: dataSnapshotId || undefined,
-      stateJson: JSON.stringify(trainingState),
-      createdAt: now,
-      updatedAt: now,
-    });
+    setQuickRandomError("");
   };
 
   const deleteTrainingSessions = async (summaries: TrainingSessionSummary[], emptyOnly = false) => {
@@ -9022,6 +9022,7 @@ export function TrainingWorkbench() {
   };
 
   const openTaskSetup = () => {
+    preemptStartupRandom();
     setTaskSetupKind("configured");
     const nextInstrumentId = availableInstruments.some((item) => item.id === appSettings.defaultInstrumentId)
       ? appSettings.defaultInstrumentId
@@ -9042,6 +9043,7 @@ export function TrainingWorkbench() {
   };
 
   const openRandomTraining = () => {
+    preemptStartupRandom();
     setTaskSetupKind("random");
     setTaskDraft({
       ...defaultTrainingTaskDraft,
@@ -9352,6 +9354,7 @@ export function TrainingWorkbench() {
   }, [appSettings.patternScanAttempts, createRandomWindowSnapshot, currentRandomConfig, findCandidatePatternMatch, patternPresets, randomCandidatePairs]);
 
   const startConfiguredTraining = async () => {
+    if (trainingLaunchRef.current.busy) return;
     let requestInstrumentId = setupInstrumentId;
     let requestTimeframe = setupTimeframe;
     let requestSnapshotId: string | undefined;
@@ -9395,6 +9398,8 @@ export function TrainingWorkbench() {
     draft = { ...draft, patternPresetIds: selectedPatternIds };
     const randomConfig = taskSetupKind === "random" ? currentRandomConfig() : undefined;
     preemptStartupRandom();
+    trainingLaunchRef.current.busy = true;
+    const requestId = trainingLaunchRef.current.id;
     setStartingTraining(true);
     setPatternScanStatus("");
     setSetupError("");
@@ -9437,10 +9442,16 @@ export function TrainingWorkbench() {
         requestSnapshotId = request.snapshotId;
         draft = request.draft;
       }
+      if (trainingLaunchRef.current.id !== requestId) return;
       launchTraining(requestInstrumentId, requestTimeframe, draft, requestSnapshotId);
+    } catch {
+      if (trainingLaunchRef.current.id === requestId) setSetupError("训练准备失败，请检查训练范围后重试。");
     } finally {
-      setStartingTraining(false);
-      setPatternScanStatus("");
+      if (trainingLaunchRef.current.id === requestId) {
+        trainingLaunchRef.current.busy = false;
+        setStartingTraining(false);
+        setPatternScanStatus("");
+      }
     }
   };
 
@@ -9461,9 +9472,43 @@ export function TrainingWorkbench() {
     });
   };
 
-  const startQuickRandomTraining = async () => {
-    if (startingTraining) return;
+  const startRandomTraining = async (draft: TrainingTaskDraft, randomConfig: RandomTrainingConfig) => {
+    if (trainingLaunchRef.current.busy || loading) return;
     preemptStartupRandom();
+    const requestId = trainingLaunchRef.current.id;
+    trainingLaunchRef.current.busy = true;
+    setStartingTraining(true);
+    setQuickRandomError("");
+    setPatternScanStatus("");
+    try {
+      const request = draft.patternPresetIds?.length
+        ? await resolvePatternRandomRequest(draft, randomConfig)
+        : await resolveRandomRequest(draft, randomConfig);
+      if (trainingLaunchRef.current.id !== requestId) return;
+      if (!request) {
+        setQuickRandomError(draft.patternPresetIds?.length
+          ? `没有找到“${patternPresets.find(preset => preset.id === draft.patternPresetIds?.[0])?.name ?? "所选形态"}”的训练片段，请调整随机范围或形态条件后重试。`
+          : "没有找到符合条件的训练片段，请调整随机范围后重试。");
+        if (!showRandomComplete) setMobileToolbarOpen(true);
+        return;
+      }
+      setMobileToolbarOpen(false);
+      launchTraining(request.instrumentId, request.timeframe, request.draft,
+        "snapshotId" in request ? request.snapshotId : undefined);
+    } catch {
+      if (trainingLaunchRef.current.id !== requestId) return;
+      setQuickRandomError("下一局准备失败，当前训练已保留，请重试或调整随机设置。");
+      if (!showRandomComplete) setMobileToolbarOpen(true);
+    } finally {
+      if (trainingLaunchRef.current.id === requestId) {
+        trainingLaunchRef.current.busy = false;
+        setStartingTraining(false);
+        setPatternScanStatus("");
+      }
+    }
+  };
+
+  const startQuickRandomTraining = async () => {
     const blind = quickRandomMode === "blind";
     const randomConfig = currentRandomConfig();
     const selectedPatternIds = availablePatternPresets.some((preset) => preset.id === quickRandomPatternPresetId)
@@ -9480,38 +9525,12 @@ export function TrainingWorkbench() {
       randomRun: true,
       patternPresetIds: selectedPatternIds,
     };
-    setStartingTraining(true);
-    setQuickRandomError("");
-    setPatternScanStatus("");
-    if (selectedPatternIds.length) setMobileToolbarOpen(true);
-    try {
-      const request = selectedPatternIds.length
-        ? await resolvePatternRandomRequest(draft, randomConfig)
-        : await resolveRandomRequest(draft, randomConfig);
-      if (!request) {
-        setQuickRandomError(selectedPatternIds.length
-          ? `服务端已完成有界扫描，但没有找到“${patternPresets.find((preset) => preset.id === quickRandomPatternPresetId)?.name ?? "所选形态"}”。5m 等短周期可降低趋势升幅阈值，或换一个形态。`
-          : "没有找到满足历史范围和流动性门槛的训练片段，请调整随机训练规则。");
-        setMobileToolbarOpen(true);
-        return;
-      }
-      setMobileToolbarOpen(false);
-      launchTraining(
-        request.instrumentId,
-        request.timeframe,
-        request.draft,
-        "snapshotId" in request ? request.snapshotId : undefined,
-      );
-    } finally {
-      setStartingTraining(false);
-      setPatternScanStatus("");
-    }
+    await startRandomTraining(draft, randomConfig);
   };
 
   const continueRandomTraining = async () => {
     const completedTask = trainingTask;
     if (!completedTask?.randomRun) return;
-    preemptStartupRandom();
     const randomConfig = completedTask.randomConfig ?? currentRandomConfig();
     const draft: TrainingTaskDraft = {
       ...defaultTrainingTaskDraft,
@@ -9525,21 +9544,7 @@ export function TrainingWorkbench() {
       patternPresetIds: completedTask.patternFilter?.presetIds,
       randomConfig,
     };
-    const request = draft.patternPresetIds?.length
-      ? await resolvePatternRandomRequest(draft, randomConfig)
-      : await resolveRandomRequest(draft, randomConfig);
-    if (!request) {
-      setShowRandomComplete(false);
-      openRandomTraining();
-      setSetupError("没有找到新的形态命中位置，请调整形态参数后再试。");
-      return;
-    }
-    launchTraining(
-      request.instrumentId,
-      request.timeframe,
-      request.draft,
-      "snapshotId" in request ? request.snapshotId : undefined,
-    );
+    await startRandomTraining(draft, randomConfig);
   };
 
   useEffect(() => {
@@ -9679,25 +9684,25 @@ export function TrainingWorkbench() {
       <aside className="main-rail">
         <button className="brand-mark" aria-label="K线训练营">K</button>
         <nav aria-label="主导航">
-          <button className={view === "replay" ? "active" : ""} onClick={() => setView("replay")}>
+          <button className={view === "replay" ? "active" : ""} onClick={() => { preemptStartupRandom(); setView("replay"); }}>
             <BarChart3 size={20} /><span>训练</span>
           </button>
-          <button className={view === "performance" ? "active" : ""} onClick={() => setView("performance")}>
+          <button className={view === "performance" ? "active" : ""} onClick={() => { preemptStartupRandom(); setView("performance"); }}>
             <Activity size={20} /><span>表现</span>
           </button>
-          <button className={view === "database" ? "active" : ""} onClick={() => setView("database")}>
+          <button className={view === "database" ? "active" : ""} onClick={() => { preemptStartupRandom(); setView("database"); }}>
             <Database size={20} /><span>数据</span>
           </button>
           <button
             className={view === "review" ? "active" : ""}
             disabled={reviewLocked}
             title={reviewLocked ? "盲测结束后才能查看复盘答案" : ""}
-            onClick={() => setView("review")}
+            onClick={() => { preemptStartupRandom(); setView("review"); }}
           >
             <BookOpenCheck size={20} /><span>复盘</span>
           </button>
           {desktopLayout && appSettings.mt4Enabled && (
-          <button className={view === "mt4" ? "active" : ""} onClick={() => setView("mt4")}>
+          <button className={view === "mt4" ? "active" : ""} onClick={() => { preemptStartupRandom(); setView("mt4"); }}>
             <TrendingUp size={20} /><span>MT4</span>
           </button>
           )}
@@ -9763,7 +9768,7 @@ export function TrainingWorkbench() {
               type="button"
               aria-label={startingTraining ? "正在筛选随机训练" : "立即开始随机训练"}
               title={startingTraining ? "正在筛选随机训练" : "立即开始随机训练"}
-              disabled={startingTraining}
+              disabled={startingTraining || loading}
               onClick={() => void startQuickRandomTraining()}
             >{startingTraining ? <Activity size={15} /> : <Shuffle size={15} />}</button>
             <button type="button" aria-label="新建 Replay 训练" title="新建 Replay 训练" onClick={openTaskSetup}><Play size={15} /></button>
@@ -9805,8 +9810,8 @@ export function TrainingWorkbench() {
               </div>
               <div className="mobile-random-mode" aria-label="随机训练方式">
                 <span>随机方式</span>
-                <button className={quickRandomMode === "free" ? "active" : ""} onClick={() => setQuickRandomMode("free")}>普通</button>
-                <button className={quickRandomMode === "blind" ? "active" : ""} onClick={() => setQuickRandomMode("blind")}>盲测</button>
+                <button className={quickRandomMode === "free" ? "active" : ""} onClick={() => { preemptStartupRandom(); setQuickRandomMode("free"); }}>普通</button>
+                <button className={quickRandomMode === "blind" ? "active" : ""} onClick={() => { preemptStartupRandom(); setQuickRandomMode("blind"); }}>盲测</button>
                 <button onClick={() => { setMobileToolbarOpen(false); openSettingsPanel("training"); }}>规则</button>
               </div>
               <label className="mobile-random-pattern">
@@ -10420,18 +10425,19 @@ export function TrainingWorkbench() {
         {showRandomComplete && trainingTask?.randomRun && (
           <div className="task-modal-backdrop">
             <section className="random-complete-modal" role="dialog" aria-modal="true" aria-labelledby="random-complete-title">
-              <button className="random-complete-close" aria-label="退出随机训练" onClick={() => setShowRandomComplete(false)}><X size={20} /></button>
+              <button className="random-complete-close" aria-label="退出随机训练" onClick={viewCompletedTraining}><X size={20} /></button>
               <span>RANDOM ROUND COMPLETE</span>
               <h2 id="random-complete-title">本局随机训练已结束</h2>
-              <p>{trainingTask.mode === "blind" ? "盲测答案现在已经解锁。" : "已到达本局设定的 K 线边界。"} 所有持仓已按最后一根收盘价自动平仓并保存，可以继续训练或抽取下一局。</p>
+              <p>{trainingTask.mode === "blind" ? "盲测答案现在已经解锁。" : "已到达本局设定的 K 线边界。"} 所有持仓已按最后一根收盘价自动平仓并保存，可以查看本局或抽取下一局。</p>
               <div className="random-complete-stats">
                 <div><span>{tradingMode === "capital" ? "账户总盈亏" : "总收益率"}</span><strong className={totalPnl >= 0 ? "up" : "down"}>{tradingMode === "capital" ? money(totalPnl) : percent(totalReturnPct)}</strong></div>
                 <div><span>{tradingMode === "capital" ? "账户权益" : "已实现收益率"}</span><strong>{tradingMode === "capital" ? money(equity) : percent(realizedReturnPct)}</strong></div>
                 <div><span>本局进度</span><strong>{currentTaskProgress.revealed}/{currentTaskProgress.total}</strong></div>
               </div>
+              {quickRandomError && <div className="task-error" role="alert">{quickRandomError}</div>}
               <div className="random-complete-actions">
-                <button className="resume-session" onClick={resumeCurrentTraining}><RotateCcw size={16} />继续训练</button>
-                <button className="primary-button" onClick={continueRandomTraining}><Shuffle size={16} />继续随机</button>
+                <button className="resume-session" onClick={viewCompletedTraining}><RotateCcw size={16} />查看本局</button>
+                <button className="primary-button" disabled={startingTraining || loading} onClick={continueRandomTraining}><Shuffle size={16} />{startingTraining ? "正在准备下一局…" : "继续随机"}</button>
               </div>
             </section>
           </div>
@@ -10686,7 +10692,7 @@ export function TrainingWorkbench() {
                     <small>已到达设定边界，所有持仓已按最后一根收盘价自动平仓并保存。</small>
                   </div>
                   <button className="ghost-button" onClick={resetTraining}><RotateCcw size={15} />按原条件重练</button>
-                  <button className="primary-button" onClick={() => setView("review")}><BookOpenCheck size={15} />查看复盘</button>
+                  <button className="primary-button" onClick={() => { preemptStartupRandom(); setView("review"); }}><BookOpenCheck size={15} />查看复盘</button>
                 </div>
               )}
 
@@ -11619,7 +11625,7 @@ export function TrainingWorkbench() {
                             event.stopPropagation();
                             resumeSession(summary.session, false, filteredSessionSummaries.map((item) => item.session));
                           }}
-                        ><RotateCcw size={14} />继续训练</button>
+                        ><RotateCcw size={14} />{summary.task?.status === "completed" ? "查看训练" : "继续训练"}</button>
                       </span>
                     </div>
                   ))}

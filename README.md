@@ -198,7 +198,7 @@ npm run verify
 生成正式发布包时请传入语义化版本号，例如：
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File launcher\build-release.ps1 -ReleaseVersion 0.1.14
+powershell -ExecutionPolicy Bypass -File launcher\build-release.ps1 -ReleaseVersion 0.1.15
 ```
 
 开发时通常需要分别启动本地数据服务和 WebUI：

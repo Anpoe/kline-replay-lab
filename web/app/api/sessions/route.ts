@@ -239,12 +239,17 @@ export async function GET(request: Request) {
   }
 
   const includeAll = searchParams.get("all") === "1";
+  const instrumentId = searchParams.get("instrument");
+  const timeframe = searchParams.get("timeframe");
   const rows = await db
     .prepare(`SELECT id, instrument_id AS instrumentId, timeframe,
       data_snapshot_id AS dataSnapshotId, state_json AS stateJson,
       created_at AS createdAt, updated_at AS updatedAt, deleted_at AS deletedAt
       FROM training_sessions WHERE ${visibilityClause}
+      ${instrumentId ? "AND instrument_id = ?" : ""}
+      ${timeframe ? "AND timeframe = ?" : ""}
       ORDER BY created_at DESC, id DESC${includeAll ? "" : " LIMIT 20"}`)
+    .bind(...(instrumentId ? [instrumentId] : []), ...(timeframe ? [timeframe] : []))
     .all();
   return Response.json({ sessions: rows.results });
 }

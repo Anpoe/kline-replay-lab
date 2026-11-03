@@ -16,6 +16,7 @@ function positionActions(position: ReviewPosition, actions: ReviewAction[]) {
 }
 
 function unitsAt(position: ReviewPosition, timestamp: number, actions: ReviewAction[]) {
+  if (!actions.length) return { entryPrice: position.entryPrice, qty: position.qty, dividend: 0 };
   const futureRatio = actions.filter(action => action.timestamp > timestamp).reduce((ratio, action) => ratio * action.ratio, 1);
   const dividend = position.side === "long" ? actions.filter(action => action.timestamp <= timestamp).reduce((sum, action, index) => {
     const ratioFromEvent = actions.slice(index).reduce((ratio, next) => ratio * next.ratio, 1);
@@ -257,13 +258,22 @@ function equityDrawdown(
   let drawdownPeakTimestamp: number | undefined;
   let troughTimestamp: number | undefined;
 
+  const preparedPositions = positions.map(position => {
+    const holdingActions = positionActions(position, actions);
+    const settledDividend = position.status === "closed" && position.exitTimestamp != null
+      ? unitsAt(position, position.exitTimestamp, holdingActions).dividend
+      : 0;
+    return { position, holdingActions, settledDividend };
+  });
+
   for (const bar of bars) {
-    const pnl = positions.reduce((sum, position) => {
+    const pnl = preparedPositions.reduce((sum, { position, holdingActions, settledDividend }) => {
       if (position.entryTimestamp > bar.timestamp) return sum;
-      const units = unitsAt(position, bar.timestamp, positionActions(position, actions));
       if (position.status === "closed" && position.exitTimestamp != null && position.exitTimestamp <= bar.timestamp) {
-        return sum + finite(position.realizedPnl) + units.dividend;
+        // Preserve addition order, including floating-point rounding.
+        return sum + finite(position.realizedPnl) + settledDividend;
       }
+      const units = unitsAt(position, bar.timestamp, holdingActions);
       const exitSide = position.side === "long" ? "sell" : "buy";
       const quotePrice = sourceQuotePrice(exitSide, bar.close, spreadBps, position.instrumentEconomics);
       const floating = accountPnl(

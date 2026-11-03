@@ -13,7 +13,7 @@ export type ReviewSessionActivityState = {
   executions: readonly unknown[];
   orderRejections: readonly unknown[];
   drawings: readonly unknown[];
-  events: readonly ({ type?: unknown } | null)[];
+  events: readonly ({ type?: unknown; payload?: unknown } | null)[];
   hasDecisionContent: boolean;
 };
 
@@ -38,11 +38,20 @@ export function hasMeaningfulTrainingActivity(state: ReviewSessionActivityState)
     || state.orderRejections.length > 0
     || state.drawings.length > 0
     || state.hasDecisionContent
-    || state.events.some((event) => (
-      !event
-      || typeof event.type !== "string"
-      || !passiveTrainingEventTypes.has(event.type)
-    ));
+    || state.events.some((event) => {
+      if (!event || typeof event.type !== "string") return true;
+      if (passiveTrainingEventTypes.has(event.type)) return false;
+      // Empty replay still records processed corporate actions for idempotency.
+      // Only explicit evidence of no position/order effects is safe to ignore.
+      if (event.type === "corporate_action_applied" && event.payload
+        && typeof event.payload === "object" && !Array.isArray(event.payload)) {
+        const payload = event.payload as Record<string, unknown>;
+        return !(payload.quantityBefore === 0 && payload.quantityAfter === 0
+          && Array.isArray(payload.positionIds) && payload.positionIds.length === 0
+          && Array.isArray(payload.cancelledOrderIds) && payload.cancelledOrderIds.length === 0);
+      }
+      return true;
+    });
 }
 
 type ReviewSessionSummaryBatchOptions = {

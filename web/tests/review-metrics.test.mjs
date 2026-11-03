@@ -12,6 +12,21 @@ const bars = [
   { timestamp: 5, open: 101, high: 104, low: 95, close: 96 },
 ];
 
+test("settled positions retain earned dividends but ignore later actions and price changes", () => {
+  const result = calculateDeterministicReviewMetrics({
+    bars: Array.from({ length: 8 }, (_, i) => ({ timestamp: i + 1, open: 10, high: 10, low: 1, close: i < 3 ? 10 : 1 })),
+    positions: [{ id: 'p', side: 'long', qty: 10, entryPrice: 10, entryTimestamp: 1,
+      status: 'closed', exitTimestamp: 3, exitPrice: 10, realizedPnl: -5 }],
+    initialCapital: 1000,
+    corporateActionEvents: [2, 5].map(timestamp => ({ type: 'corporate_action_applied', barTimestamp: timestamp,
+      payload: { eventId: String(timestamp), bonusSharesPer10: 0, cashPer10: timestamp === 2 ? 1 : 50, positionIds: ['p'] } })),
+  });
+  assert.equal(result.maxDrawdown, 5);
+  assert.equal(result.maxDrawdownPeakTimestamp, 2);
+  assert.equal(result.maxDrawdownTroughTimestamp, 3);
+  assert.equal(result.maxUnderwaterBars, 6);
+});
+
 test("review excursions and drawdown use each bar's share units across a 10转7 event", () => {
   const metrics = calculateDeterministicReviewMetrics({
     bars: [

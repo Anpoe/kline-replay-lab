@@ -60,10 +60,17 @@ async function requestJson<T>(
 }
 
 export function createReviewGateway(fetcher: ReviewGatewayFetch) {
-  const loadSessions = async <T = unknown>(includeAll = false, signal?: AbortSignal): Promise<T[]> => {
+  const loadSessions = async <T = unknown>(includeAll = false, signal?: AbortSignal,
+    scope?: { instrumentId: string; timeframe: string }): Promise<T[]> => {
+    const params = new URLSearchParams();
+    if (includeAll) params.set("all", "1");
+    if (scope) {
+      params.set("instrument", scope.instrumentId);
+      params.set("timeframe", scope.timeframe);
+    }
     const payload = await requestJson<SessionListPayload>(
       fetcher,
-      includeAll ? "/api/sessions?all=1" : "/api/sessions",
+      `/api/sessions${params.size ? `?${params}` : ""}`,
       withSignal({}, signal),
       "读取训练记录失败",
     );

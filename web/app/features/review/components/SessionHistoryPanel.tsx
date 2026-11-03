@@ -240,7 +240,7 @@ export function SessionHistoryPanel({
                 onClick={(event) => event.stopPropagation()}
                 onKeyDown={(event) => event.stopPropagation()}
               >
-                <button className="resume-session" disabled={batchDeleteRunning} onClick={() => onResume(item.id)}><RotateCcw size={13} />继续训练</button>
+                <button className="resume-session" disabled={batchDeleteRunning} onClick={() => onResume(item.id)}><RotateCcw size={13} />{item.completed ? "查看训练" : "继续训练"}</button>
                 <button className="delete-session" disabled={batchDeleteRunning} aria-label={`将 ${item.instrumentId} 训练移入回收站`} onClick={() => onDelete(item.id)}><Trash2 size={13} />移入回收站</button>
               </div>
             </div>

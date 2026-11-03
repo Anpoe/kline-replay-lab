@@ -26,6 +26,13 @@ test("loads sessions through the existing list endpoints", async () => {
   assert.equal(requests[1].input, "/api/sessions?all=1");
 });
 
+test("random duplicate checks request only the current instrument and execution timeframe", async () => {
+  let input;
+  const gateway = createReviewGateway(async url => { input = url; return response({ payload: { sessions: [] } }); });
+  await gateway.loadSessions(true, undefined, { instrumentId: '000831.SZ', timeframe: '1d' });
+  assert.equal(input, '/api/sessions?all=1&instrument=000831.SZ&timeframe=1d');
+});
+
 test("preserves session save, restore, and permanent-delete request shapes", async () => {
   const requests = [];
   const gateway = createReviewGateway(async (input, init) => {
