@@ -11,13 +11,16 @@ import type { ArchiveTrade, ArchiveContext, ArchiveDecisionPlan, DecisionPlanSou
 import type { Mt4Order } from "../mt4Contracts";
 import type { Mt4OrderProtectionLine } from '../mt4Protection.mjs';
 import { decisionRecord, decisionValue, mt4Draft, mt4PlanViews, ensureProtectiveAnalysis, applyEntryReceipt, linkDecisionTrade, type Mt4EntryReceipt } from "../mt4Analysis";
-import { DecisionPlanCard } from "../../../components/DecisionPlanCard";
+import { DecisionPlanCard, type ReasonTagsState } from "../../../components/DecisionPlanCard";
+import { mergeLegacyDecisionReasonTags } from "../../../lib/decisionPlan";
 import { ChartDrawingRail } from "../../../components/ChartDrawingRail";
 import { ChartDrawingTextEditor } from "../../../components/ChartDrawingTextEditor";
 import { DrawingObjectPanel } from "../../../components/DrawingObjectPanel";
 import { DrawingPropertyBar } from "../../../components/DrawingPropertyBar";
+import { drawingVisualStyles } from "../../../lib/drawingStyles";
 import { allDrawingTools, defaultDrawingTools, trainingPositionTool, type DrawingTool } from "../../../components/chartDrawingTools";
 import { useKeyboardShortcuts } from "../../../components/useKeyboardShortcuts";
+import type { ChartTradingAdapter } from "../../../components/ChartTradingMenu";
 import type { ShortcutAction, ShortcutSettings } from "../../../lib/keyboardShortcuts";
 import { KLineReplayChart, type DrawingRequest, type PersistedDrawing, type PriceSelectionMode, type ProtectionLine, type TradeMarker } from "../../../components/KLineReplayChart";
 import type { MacdSettings, MovingAverageSettings } from "../../../lib/chartIndicators";
@@ -35,14 +38,15 @@ function load(key: string) {
   catch { return { data: emptyAnalysis(), error: "已有绘图与决策记录无法读取。请先导出原记录，再保存新内容。", raw }; }
 }
 
-export function Mt4ChartWorkbench({ syncOrderPrices = true, accountKey, relatedOrders = [], onRelatedTradeSelect, onAnalysisChange, entryReceipt, sharedReasonTags, onReasonTagsChange, storageKey, initialAnalysis, persistedAnalysis, onPersist, onNotice, readOnly = false, showChartMarkers = true, planContext, archivedPlans = [], onOpenPlanSource, editingPlanId, liveOrderLines = [], onLiveOrderLineMove, tradeMarkers = [], onTradeSelect, focusTimestamp, onHistoryRange, bars, symbol, timeframe, digits, decisionOpen, emptyMessage, onOpenDecision, orderPriceSelection, orderPriceSelectionLabel, onOrderPriceSelect, onPlanProtectionChange, orderPrices, onCancelOrderPriceSelection, candleClock, movingAverageSettings, macdSettings, keyboardShortcuts, shortcutsEnabled = true }: {
+export function Mt4ChartWorkbench({ trading, syncOrderPrices = true, accountKey, relatedOrders = [], onRelatedTradeSelect, onAnalysisChange, entryReceipt, sharedReasonTags, reasonTagsState, onRetryReasonTags, deletedReasonTags, onReasonTagsChange, storageKey, initialAnalysis, persistedAnalysis, onPersist, onNotice, readOnly = false, showChartMarkers = true, planContext, archivedPlans = [], onOpenPlanSource, onClosePlanSource, editingPlanId, liveOrderLines = [], onLiveOrderLineMove, tradeMarkers = [], onTradeSelect, focusTimestamp, onHistoryRange, bars, symbol, timeframe, digits, decisionOpen, emptyMessage, onOpenDecision, orderPriceSelection, orderPriceSelectionLabel, onOrderPriceSelect, onPlanProtectionChange, orderPrices, onCancelOrderPriceSelection, candleClock, movingAverageSettings, macdSettings, keyboardShortcuts, shortcutsEnabled = true }: {
+  trading?: ChartTradingAdapter;
   syncOrderPrices?: boolean; accountKey: string; relatedOrders?: Mt4Order[]; onRelatedTradeSelect?: (order: Mt4Order, event: 'entry' | 'exit') => void;
   onAnalysisChange?: (key: string, value: Mt4Analysis | null) => void; entryReceipt?: Mt4EntryReceipt;
-  sharedReasonTags?: string[]; onReasonTagsChange?: (tags: string[]) => void;
+  sharedReasonTags?: string[]; reasonTagsState?: ReasonTagsState; onRetryReasonTags?: () => void; deletedReasonTags?: readonly string[]; onReasonTagsChange?: (tags: string[]) => void;
   keyboardShortcuts?: ShortcutSettings; shortcutsEnabled?: boolean;
   onNotice?: (message: string) => void;
   showChartMarkers?: boolean; planContext?: Pick<ArchiveContext, 'timeframe' | 'scope'>; archivedPlans?: ArchiveDecisionPlan[];
-  onOpenPlanSource?: (source: DecisionPlanSource) => void; editingPlanId?: string;
+  onOpenPlanSource?: (source: DecisionPlanSource) => void; onClosePlanSource?: () => void; editingPlanId?: string;
   liveOrderLines?: Mt4OrderProtectionLine[]; onLiveOrderLineMove?: (line: Mt4OrderProtectionLine, price: number) => boolean;
   initialAnalysis?: Mt4Analysis; persistedAnalysis?: Mt4Analysis | null; onPersist?: (next: Mt4Analysis) => void; readOnly?: boolean; tradeMarkers?: TradeMarker[]; onTradeSelect?: (id: string, event: "entry" | "exit") => void; focusTimestamp?: number;
   onHistoryRange?: (range: { before: boolean; after: boolean }) => void;
@@ -85,7 +89,7 @@ export function Mt4ChartWorkbench({ syncOrderPrices = true, accountKey, relatedO
     current.current = next; setAnalysis(next); return true;
   }, [readOnly, onPersist, storageKey]);
 
-  const pendingDecisionSave = useRef<{ id: string; record: string; draft: Mt4DecisionDraft; editor: string; returnDraft: Mt4DecisionDraft } | null>(null);
+  const pendingDecisionSave = useRef<{ id: string; record: string; draft: Mt4DecisionDraft; editor: string } | null>(null);
   const finishDecisionSave = useCallback((persisted: Mt4Analysis) => {
     const pendingSave = pendingDecisionSave.current;
     if (!pendingSave || JSON.stringify(persisted.decisions.find(item => item.id === pendingSave.id)) !== pendingSave.record) return;
@@ -93,7 +97,7 @@ export function Mt4ChartWorkbench({ syncOrderPrices = true, accountKey, relatedO
     const previous = current.current;
     if (JSON.stringify(previous.editor ?? null) !== pendingSave.editor) return;
     const currentValue = decisionValue(previous.draft);
-    const draft = draftAfterDecisionSaved(currentValue, decisionValue(pendingSave.draft), decisionValue(pendingSave.returnDraft));
+    const draft = draftAfterDecisionSaved(currentValue, decisionValue(pendingSave.draft));
     if (draft === currentValue) return;
     const next = { ...previous, draft: mt4Draft(draft) };
     delete next.editor;
@@ -144,7 +148,7 @@ export function Mt4ChartWorkbench({ syncOrderPrices = true, accountKey, relatedO
     if (next !== current.current) store(next);
   }, [entryReceipt, accountKey, symbol, timeframe, store]);
   const locateDecision = (record: DecisionRecord) => {
-    setSelectedDecisionId(record.id);
+    selectDecisionForEditing(record.id);
     const marker = decisionChartView([record], bars, { periodEnd: planPeriodEnd }).markers[0];
     if (!marker) { setError('这份决策的行情不在当前窗口，请在历史档案补取对应时段行情。'); return; }
     setDecisionFocus({ timestamp: marker.timestamp, nonce: ++nonce.current });
@@ -153,7 +157,7 @@ export function Mt4ChartWorkbench({ syncOrderPrices = true, accountKey, relatedO
     if (!window.confirm('确定删除这份决策吗？它会从图表标记与决策记录中移除，历史修订仍会保留。')) return;
     const next = deleteDecisionRecord(current.current, record.id);
     if (next.editor?.decisionId === record.id) { next.draft = next.editor.originalDraft; delete next.editor; }
-    if (store(next, true)) setSelectedDecisionId('');
+    if (store(next, true)) { setSelectedDecisionId(''); setPriceMode(null); setDrawingRequest(null); }
   };
   const linkedTradeSummary = (record: DecisionRecord) => {
     const links = analysis.tradeLinks?.filter(link => link.decisionId === record.id && link.accountKey === accountKey && link.symbol === symbol) ?? [];
@@ -180,7 +184,7 @@ export function Mt4ChartWorkbench({ syncOrderPrices = true, accountKey, relatedO
   const planViews = mt4PlanViews(analysis, planContext ?? { timeframe: Number(timeframeMinutes(timeframe)) || 43200 }, archivedPlans);
   const selectedPlan = planViews.find(view => view.record.id === selectedDecisionId);
   const planPeriodEnd = (timestamp: number) => mt4PeriodEnd(timestamp, Number(timeframeMinutes(timeframe)) || 43200);
-  const planChart = decisionChartView(planViews.map(view => view.record), bars, { selectedId: analysis.editor ? '' : selectedDecisionId, visible: showChartMarkers, periodEnd: planPeriodEnd });
+  const planChart = decisionChartView(planViews.map(view => view.record), bars, { selectedId: analysis.editor?.decisionId ?? selectedDecisionId, visible: showChartMarkers, periodEnd: planPeriodEnd });
   const orderPricesInitialized = useRef(false);
   const lastOrderProtection = useRef({ stopLoss: orderPrices.stopLoss, takeProfit: orderPrices.takeProfit });
   useEffect(() => {
@@ -201,13 +205,16 @@ export function Mt4ChartWorkbench({ syncOrderPrices = true, accountKey, relatedO
   const reasonTagsInitialized = useRef(false);
   useEffect(() => {
     if (!sharedReasonTags) return;
+    if (readOnly) return;
     if (!reasonTagsInitialized.current) {
       reasonTagsInitialized.current = true;
-      const merged = [...new Set([...sharedReasonTags, ...current.current.reasonTags])].slice(-30);
-      if (JSON.stringify(merged) !== JSON.stringify(sharedReasonTags)) { onReasonTagsChange?.(merged); return; }
+      // Preserve custom tags that predate shared preferences. Built-ins and
+      // explicitly removed custom tags must not be imported from old charts.
+      const merged = mergeLegacyDecisionReasonTags(sharedReasonTags, current.current.reasonTags, deletedReasonTags ?? []);
+      if (onReasonTagsChange && JSON.stringify(merged) !== JSON.stringify(sharedReasonTags)) { onReasonTagsChange(merged); return; }
     }
     if (JSON.stringify(sharedReasonTags) !== JSON.stringify(current.current.reasonTags)) store({ ...current.current, reasonTags: [...sharedReasonTags] });
-  }, [sharedReasonTags, onReasonTagsChange, store]);
+  }, [sharedReasonTags, reasonTagsState, onRetryReasonTags, deletedReasonTags, onReasonTagsChange, readOnly, store]);
 
 
   const withProtectiveDecision = (next: Mt4Analysis) => next.editor || !last ? next : ensureProtectiveAnalysis(next, { id: crypto.randomUUID(), recordedAt: Date.now(), candleTimestamp: last.timestamp, referencePrice: last.close });
@@ -229,7 +236,7 @@ export function Mt4ChartWorkbench({ syncOrderPrices = true, accountKey, relatedO
     const color = getComputedStyle(document.documentElement).getPropertyValue("--accent").trim();
     setPriceMode(null); setSelectedId(""); setTextOpen(false); setDrawingGroupOpen("");
     setDrawingRequest({ name, nonce: ++nonce.current, mode: drawingMagnetMode,
-      styles: { line: { color, size: 2, style: "solid" }, rect: { color: `${color}24`, borderColor: color, borderSize: 2 }, text: { color, size: 18 } },
+      styles: { ...drawingVisualStyles(undefined, color, 2), text: { color, size: 18 } },
       extendData: { toolLabel: label, toolKind: name === "trainingTextBox" ? "text" : name === "trainingRectangle" ? "rectangle" : name === "trainingPosition" ? "position" : "drawing", ...(annotation ? { text: annotation } : {}) } });
   };
   const beginSharedDrawing = (tool: DrawingTool) => {
@@ -249,13 +256,19 @@ export function Mt4ChartWorkbench({ syncOrderPrices = true, accountKey, relatedO
   const selectedStyles = (selectedDrawing?.styles ?? {}) as { line?: { color?: string; size?: number }; text?: { color?: string; size?: number }; rect?: Record<string, unknown> };
   const selectedText = String((selectedDrawing?.extendData as { text?: string } | undefined)?.text ?? "");
   const selectedColor = selectedStyles.text?.color ?? selectedStyles.line?.color ?? "#20c997";
-  const selectedWidth = selectedStyles.line?.size ?? 2;
+  const selectedWidth = selectedDrawing?.name === "trainingRectangle" ? Number(selectedStyles.rect?.borderSize ?? selectedStyles.line?.size ?? 2) : selectedStyles.line?.size ?? 2;
   const selectedTextSize = selectedStyles.text?.size ?? 18;
-  const changeVisual = (color: string, width: number) => { if (selectedDrawing) updateDrawing(selectedDrawing.id, { styles: { ...selectedStyles,
-    line: { ...selectedStyles.line, color, size: width }, text: { ...selectedStyles.text, color }, rect: { ...selectedStyles.rect, color: `${color}24`, borderColor: color, borderSize: width } } }); };
+  const changeVisual = (color: string, width: number) => {
+    if (!selectedDrawing) return;
+    const styles = drawingVisualStyles(selectedStyles, color, width);
+    updateDrawing(selectedDrawing.id, { styles });
+    setDrawingRequest(request => request?.name === selectedDrawing.name ? { ...request, styles } : request);
+  };
   const cancelEditor = () => {
     const previous = current.current.editor;
     if (previous) { const next = { ...current.current, draft: previous.originalDraft }; delete next.editor; store(next); onPlanProtectionChange({ stopLoss: next.draft.stopLoss, takeProfit: next.draft.takeProfit }); }
+    setSelectedDecisionId(''); setPriceMode(null); setDrawingRequest(null);
+    onClosePlanSource?.();
   };
   const beginEditor = useCallback((target: { timestamp: number; referencePrice: number }, record?: Mt4Decision) => {
     const previous = current.current;
@@ -264,6 +277,14 @@ export function Mt4ChartWorkbench({ syncOrderPrices = true, accountKey, relatedO
     setPriceMode(null); setDrawingRequest(null); setSelectedDecisionId(record?.id ?? ""); setBackfillAssociation(true);
     onOpenDecision();
   }, [store, onOpenDecision]);
+  const selectDecisionForEditing = (id: string) => {
+    const plan = planViews.find(view => view.record.id === id);
+    if (!plan) return;
+    if (readOnly) { setSelectedDecisionId(id); return; }
+    const record = current.current.decisions.find(item => item.id === id);
+    if (record) beginEditor({ timestamp: record.candleTimestamp, referencePrice: record.referencePrice }, record);
+    else onOpenPlanSource?.(plan.source);
+  };
   const startedPlanEdit = useRef('');
   useEffect(() => {
     if (!editingPlanId || readOnly || startedPlanEdit.current === editingPlanId) return;
@@ -287,7 +308,7 @@ export function Mt4ChartWorkbench({ syncOrderPrices = true, accountKey, relatedO
         }
       }
       const savedId = editor?.decisionId ?? next.decisions[0]?.id;
-      if (savedId) pendingDecisionSave.current = { id: savedId, record: JSON.stringify(next.decisions.find(item => item.id === savedId)), draft: structuredClone(current.current.draft), editor: JSON.stringify(editor ?? null), returnDraft: structuredClone(editor?.originalDraft ?? emptyAnalysis().draft) };
+      if (savedId) pendingDecisionSave.current = { id: savedId, record: JSON.stringify(next.decisions.find(item => item.id === savedId)), draft: structuredClone(current.current.draft), editor: JSON.stringify(editor ?? null) };
       if (store(next, true)) { setSelectedDecisionId(savedId ?? ""); if (!onPersist) { finishDecisionSave(next); onNotice?.(editor?.decisionId ? "决策已更新" : "决策已保存"); } }
     } catch (e) { setError(e instanceof Error ? e.message : "决策保存未完成，请保留当前内容并重试。"); }
   };
@@ -295,14 +316,7 @@ export function Mt4ChartWorkbench({ syncOrderPrices = true, accountKey, relatedO
     if (orderPriceSelection) { onOrderPriceSelect(orderPriceSelection, value); if (orderPriceSelection !== "entry-trigger" && !current.current.editor) updateDraft(orderPriceSelection === "stop-loss" ? { stopLoss: value.toFixed(digits) } : { takeProfit: value.toFixed(digits) }, true); return; }
     updateDraft(kind === "stop-loss" ? { stopLoss: value.toFixed(digits) } : { takeProfit: value.toFixed(digits) }, true); setPriceMode(null);
   };
-  const protectionLines: ProtectionLine[] = last ? ([
-    { kind: "stop-loss", value: analysis.draft.stopLoss, label: "计划止损" },
-    { kind: "take-profit", value: analysis.draft.takeProfit, label: "计划目标" },
-  ] as const).filter(p => Number(p.value) > 0).map(p => ({ id: `mt4-plan-${p.kind}`, kind: p.kind, price: Number(p.value), timestamp: last.timestamp, label: p.label, movable: !readOnly, source: "draft" })) : [];
-  if (last) for (const item of [{ kind: "stop-loss", price: orderPrices.stopLoss, label: "委托止损" }, { kind: "take-profit", price: orderPrices.takeProfit, label: "委托止盈" }, { kind: "entry-trigger", price: orderPrices.entry, label: "委托触发价" }] as const) {
-    if (item.price > 0 && !protectionLines.some(p => p.kind === item.kind && Math.abs(p.price - item.price) < 10 ** -digits / 2)) protectionLines.push({ id: `mt4-order-${item.kind}`, kind: item.kind, price: item.price, timestamp: last.timestamp, label: item.label, movable: true, source: "draft" });
-  }
-  protectionLines.push(...planChart.protectionLines);
+  const protectionLines: ProtectionLine[] = [...planChart.protectionLines];
   if (!readOnly) protectionLines.push(...liveOrderLines);
 
   const shortcutCursor = () => { onCancelOrderPriceSelection(); setDrawingRequest(null); setTextOpen(false); setPriceMode(null); setSelectedId(""); setDrawingGroupOpen(""); };
@@ -334,7 +348,6 @@ export function Mt4ChartWorkbench({ syncOrderPrices = true, accountKey, relatedO
         onClear={() => { changeDrawings([]); setDrawingRequest(null); setSelectedId(""); setRestoreNonce(n => n + 1); setClearNonce(n => n + 1); }} />
       {drawingObjectsOpen && <DrawingObjectPanel drawings={analysis.drawings} selectedId={selectedId} onSelect={setSelectedId} onUpdate={updateDrawing} onDelete={removeDrawing} onClose={() => setDrawingObjectsOpen(false)} />}
       {selectedDrawing && <DrawingPropertyBar drawing={selectedDrawing} text={selectedText} color={selectedColor} lineWidth={selectedWidth} textSize={selectedTextSize}
-        textSizeOptions={[...new Set([12, 14, 16, 18, 20, 24, 28, 32, selectedTextSize])].sort((a,b)=>a-b)}
         onText={text => updateDrawing(selectedDrawing.id, { extendData: { ...(selectedDrawing.extendData as object), text } })}
         onColor={color => changeVisual(color, selectedWidth)} onWidth={width => changeVisual(selectedColor, width)}
         onTextSize={size => updateDrawing(selectedDrawing.id, { styles: { ...selectedStyles, text: { ...selectedStyles.text, size } } })}
@@ -345,10 +358,21 @@ export function Mt4ChartWorkbench({ syncOrderPrices = true, accountKey, relatedO
         {bars.length ? <KLineReplayChart bars={bars} symbol={symbol} timeframe={timeframe} timezone="UTC" pricePrecision={digits} dataIndexOffset={0}
           keyboardShortcuts={keyboardShortcuts} shortcutsEnabled={shortcutsEnabled}
           movingAverageSettings={movingAverageSettings} macdSettings={macdSettings} drawingRequest={drawingRequest} clearNonce={clearNonce} drawings={readOnly ? analysis.drawings.map(d => ({ ...d, lock: true })) : analysis.drawings}
+          onDrawingCancel={() => setDrawingRequest(null)}
           selectedDrawingId={selectedId} drawingsRestoreNonce={restoreNonce} tradeMarkers={tradeMarkers} onTradeSelect={onTradeSelect} focusTimestamp={decisionFocus?.timestamp ?? focusTimestamp} focusNonce={decisionFocus?.nonce} decisionMarkers={planChart.markers}
           corporateActionMarkers={[]} protectionLines={protectionLines} priceSelectionMode={orderPriceSelection ?? priceMode} hideDate={false} hidePrice={false} enableCandleContextMenu
           latestCandleCountdown={countdown} liveUpdates onHistoryRange={onHistoryRange}
-          onDecisionSelect={id => setSelectedDecisionId(id)}
+          trading={readOnly || !trading ? undefined : { ...trading, onProtection: (kind, value, positionId) => {
+            const accepted = trading.onProtection(kind, value, positionId);
+            if (accepted && !positionId) {
+              const change = kind === "stop-loss" ? { stopLoss: value.toFixed(digits) } : { takeProfit: value.toFixed(digits) };
+              const editor = current.current.editor;
+              if (editor) store({ ...current.current, editor: { ...editor, originalDraft: { ...editor.originalDraft, ...change } } });
+              else updateDraft(change, true);
+            }
+            return accepted;
+          } }}
+          onDecisionSelect={selectDecisionForEditing}
           onCorporateActionSelect={noop} onProtectionPriceSelect={pickPrice} onProtectionLineMove={(line, price) => {
             if (readOnly) return false;
             if (orderPriceSelection || priceMode) return false;
@@ -358,17 +382,17 @@ export function Mt4ChartWorkbench({ syncOrderPrices = true, accountKey, relatedO
             return true;
           }} onCandleContextMenu={readOnly ? noop : target => beginEditor(target)}
           onDrawingsChange={readOnly ? noop : changeDrawings} onDrawingSelect={readOnly ? noop : id => setSelectedId(id ?? "")} /> : <div className="mt4-empty">{emptyMessage}</div>}
-        {showChartMarkers && selectedPlan && !analysis.editor && <DecisionDetails record={selectedPlan.record} dateLabel={decisionDate} priceLabel={value => value.toFixed(digits)}
+        {showChartMarkers && selectedPlan && <DecisionDetails record={selectedPlan.record} dateLabel={decisionDate} priceLabel={value => value.toFixed(digits)}
           onClose={() => setSelectedDecisionId('')} onLocate={() => locateDecision(selectedPlan.record)}
           onEdit={readOnly ? undefined : () => { const original = analysis.decisions.find(record => record.id === selectedPlan.record.id); if (original) beginEditor({ timestamp: original.candleTimestamp, referencePrice: original.referencePrice }, original); else onOpenPlanSource?.(selectedPlan.source); }}
-          onDelete={readOnly || !selectedPlan.local ? undefined : () => { const original = analysis.decisions.find(record => record.id === selectedPlan.record.id); if (original) deleteSavedDecision(original); }} linkedTrades={selectedPlan.local ? linkedTradeSummary(selectedPlan.record) : undefined} />}
+          onDelete={readOnly || !selectedPlan.local ? undefined : () => { const original = analysis.decisions.find(record => record.id === selectedPlan.record.id); if (original) deleteSavedDecision(original); }} linkedTradeCount={selectedLinks.length} />}
       </div>
       {textOpen && <ChartDrawingTextEditor className="drawing-text-editor mt4-text-editor" maxLength={500} value={text} onChange={setText}
         onPlace={() => { if (text.trim()) { startDrawing("trainingTextBox", "文字标记", text.trim()); setText(""); } }} onCancel={() => setTextOpen(false)} />}
 
       {(priceMode || orderPriceSelection) && <div className="mt4-pick-status" role="status">点击图表设置{orderPriceSelection ? orderPriceSelectionLabel ?? "委托价格" : priceMode === "stop-loss" ? "计划止损" : "计划目标"}<button aria-label="取消图表取价" onClick={() => { setPriceMode(null); onCancelOrderPriceSelection(); }}><X size={14} /></button></div>}
     </div>
-    {decisionOpen && !readOnly && <DecisionPlanCard className="mt4-decision-card" id="mt4-decision-card"
+    {decisionOpen && !readOnly && <DecisionPlanCard reasonTagsState={reasonTagsState ?? (onReasonTagsChange && !sharedReasonTags ? "loading" : "ready")} onRetryReasonTags={onRetryReasonTags} className="mt4-decision-card" id="mt4-decision-card"
       value={{ marketState: analysis.draft.marketState, location: analysis.draft.location, reasons: analysis.draft.reasons, stop: analysis.draft.stopLoss, target: analysis.draft.takeProfit, note: analysis.draft.note }}
       onChange={changes => { const { stop, target, ...rest } = changes; updateDraft({ ...rest, ...(stop != null ? { stopLoss: stop } : {}), ...(target != null ? { takeProfit: target } : {}) }); }}
       title={analysis.editor?.decisionId ? "编辑事前决策" : analysis.editor ? "补写事前决策" : "事前决策卡"}
@@ -381,6 +405,7 @@ export function Mt4ChartWorkbench({ syncOrderPrices = true, accountKey, relatedO
       selectedPrice={priceMode} drawingDisabled={!bars.length}
       onPickPrice={kind => { onCancelOrderPriceSelection(); setDrawingRequest(null); setPriceMode(current => current === kind ? null : kind); }} onDrawPosition={() => beginSharedDrawing(trainingPositionTool)}
       hasPosition={analysis.drawings.some(drawing => drawing.name === "trainingPosition")} submitDisabled={!bars.length && !analysis.editor} onSubmit={() => saveDecision(Date.now())}
+      onDelete={analysis.editor?.decisionId ? () => { const record = current.current.decisions.find(item => item.id === current.current.editor?.decisionId); if (record) deleteSavedDecision(record); } : undefined}
       submitLabel={analysis.editor?.decisionId ? "保存编辑" : analysis.editor ? "保存补写决策" : "保存事前决策"}
       context={<>
       {analysis.editor && !analysis.editor.decisionId && <label className="decision-backfill-toggle" title="把这根 K 线之后、下一份计划之前尚未关联的当前账户品种交易关联到本卡"><input type="checkbox" checked={backfillAssociation} onChange={event => setBackfillAssociation(event.target.checked)} />{backfillAssociation ? "保存并关联" : "只保存计划"}</label>}

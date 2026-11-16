@@ -1,4 +1,5 @@
 import { ensureSchema, getRawDb } from "../../../db/runtime";
+import { isDecisionReasonTagChanges, mergeSavedDecisionReasonTags } from "../../lib/decisionPlan";
 import {
   mergeHiddenBuiltInPatternPresets,
   PATTERN_PRESET_RESTORE_ACTION,
@@ -14,6 +15,7 @@ function withoutLegacyLiveState(value: unknown) {
   delete preferences.livePortfolios;
   delete preferences.liveWatchlist;
   delete preferences.patternPresetAction;
+  delete preferences.reasonTagChanges;
   return preferences;
 }
 
@@ -47,6 +49,10 @@ export async function PUT(request: Request) {
 
   const allowPatternPresetRestore = (preferences as { patternPresetAction?: unknown }).patternPresetAction
     === PATTERN_PRESET_RESTORE_ACTION;
+  const reasonTagChanges = (preferences as { reasonTagChanges?: unknown }).reasonTagChanges;
+  if (reasonTagChanges !== undefined && !isDecisionReasonTagChanges(reasonTagChanges)) {
+    return Response.json({ error: "交易理由标签修改格式不正确，请刷新后重试" }, { status: 400 });
+  }
   const db = getRawDb();
   for (let attempt = 0; attempt < MAX_SAVE_ATTEMPTS; attempt += 1) {
     const existingRow = await db
@@ -61,11 +67,17 @@ export async function PUT(request: Request) {
         existingPreferences = null;
       }
     }
-    const value = JSON.stringify(mergeHiddenBuiltInPatternPresets(
+    const mergedPreferences = mergeHiddenBuiltInPatternPresets(
       withoutLegacyLiveState(preferences),
       existingPreferences,
       allowPatternPresetRestore,
-    ));
+    ) as Record<string, unknown>;
+    let value: string;
+    try {
+      value = JSON.stringify(mergeSavedDecisionReasonTags(mergedPreferences, existingPreferences, reasonTagChanges));
+    } catch (error) {
+      return Response.json({ error: error instanceof Error ? error.message : "交易理由标签未保存，请重试" }, { status: 400 });
+    }
     if (new TextEncoder().encode(value).byteLength > MAX_PREFERENCES_BYTES) {
       return Response.json({ error: "设置内容过大" }, { status: 413 });
     }

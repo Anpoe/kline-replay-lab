@@ -74,7 +74,7 @@ export function normalizeMt4Snapshot(value) {
   });
   const sessionId = text(value.sessionId, "终端标识", 80);
   requireValue(/^[A-Za-z0-9-]+$/.test(sessionId), "终端标识无效");
-  return { ...(value.marketPollVersion === 1 ? { marketPollVersion: 1 } : {}), ...(value.commandPollVersion === 1 ? { commandPollVersion: 1 } : {}), protocolVersion: 1, executionVersion: number(value.executionVersion ?? 1, "交易功能版本", 1, 2), sessionId, capturedAt: number(value.capturedAt, "终端时间", 1), account, symbols,
+  return { ...(value.marketPollVersion === 1 ? { marketPollVersion: 1 } : {}), ...(value.commandPollVersion === 1 ? { commandPollVersion: 1 } : {}), protocolVersion: 1, executionVersion: number(value.executionVersion ?? 1, "交易功能版本", 1, 3), sessionId, capturedAt: number(value.capturedAt, "终端时间", 1), account, symbols,
     ...(value.serverUtcOffset == null ? {} : { serverUtcOffset: number(value.serverUtcOffset, "终端时差", -64800, 64800) }),
     orderCount: number(value.orderCount ?? value.orders?.length, "订单总数", 0, 1000000),
     orders: list(value.orders, 500, "活动订单").map(normalizeOrder), history: list(value.history, 50, "成交历史").map(normalizeOrder),
@@ -261,7 +261,15 @@ export class Mt4Bridge {
     } else {
       const order = this.snapshot.orders.find(o => o.ticket === c.ticket && o.symbol === c.symbol);
       requireValue(order && (c.type === "cancel" ? order.type >= 2 : c.type === "close" ? order.type < 2 : true), "该订单已变化，请重新读取 MT4", 409);
-      if (c.type === "protect") this.validateProtection(c, order.type % 2 === 0 ? "buy" : "sell", order.type < 2 ? order.type === 0 ? s.bid : s.ask : order.openPrice, s.stopLevel * s.point);
+      if (c.type === "protect") {
+        if (c.price > 0) {
+          requireValue(this.snapshot.executionVersion >= 3, "请更新 MT4 连接组件后修改挂单价格", 409);
+          requireValue(order.type >= 2 && order.type <= 5, "持仓开仓价格不可修改", 409);
+          const distance = Math.max(s.stopLevel * s.point, s.point * .1), reference = order.type % 2 === 0 ? s.ask : s.bid;
+          requireValue(order.type === 2 ? c.price <= reference - distance : order.type === 3 ? c.price >= reference + distance : order.type === 4 ? c.price >= reference + distance : c.price <= reference - distance, "挂单价格不符合方向或最小距离");
+        }
+        this.validateProtection(c, order.type % 2 === 0 ? "buy" : "sell", order.type < 2 ? order.type === 0 ? s.bid : s.ask : c.price || order.openPrice, s.stopLevel * s.point);
+      }
     }
     for (const price of [c.price, c.stopLoss, c.takeProfit]) {
       requireValue(Math.abs(price / s.point - Math.round(price / s.point)) < 1e-5, "价格精度不符合该品种报价");
@@ -325,6 +333,12 @@ export class Mt4Bridge {
         if (receipt.status === "unknown") this.enabled = false;
       }
       const c = this.enabled ? this.state.commands.find(c => c.status === "queued" || (c.status === "sent" && this.now() <= c.expiresAt)) : null;
+      if (c && c.type === "protect" && c.price > 0 && next.executionVersion < 3) {
+        const delivered = c.status === "sent";
+        c.status = delivered ? "unknown" : "failed";
+        c.error = delivered ? "连接组件已变化，请核对挂单价格后确认结果" : "连接组件已变化，挂单价格未修改；请更新后重试";
+        if (delivered) this.enabled = false;
+      }
       if (c && (c.sizingMode || c.gapMode) && next.executionVersion < 2) { c.status = "failed"; c.error = "连接 EA 版本已变化，指令未发送；请更新 EA 后重试"; }
       let wire = "";
       if (c && (c.status === "queued" || (c.status === "sent" && this.now() - (this.dispatchTimes.get(c.id) ?? 0) >= 200))) {

@@ -1,7 +1,8 @@
-import { Brush, Gauge, LineChart, Square, Tag, Target, TrendingDown, TrendingUp } from "lucide-react";
+import { Brush, Gauge, LineChart, Ruler, Square, Tag, Target, TrendingDown, TrendingUp } from "lucide-react";
 export type DrawingTool = {
   name: string;
   label: string;
+  description?: string;
   icon: typeof LineChart;
   kind?: "rectangle" | "position" | "text";
 };
@@ -36,6 +37,12 @@ export const drawingToolGroups: Array<{
     label: "斐波那契工具",
     icon: Target,
     tools: [{ name: "fibonacciLine", label: "斐波那契回撤", icon: Target }],
+  },
+  {
+    id: "measure",
+    label: "测量工具",
+    icon: Ruler,
+    tools: [{ name: "trainingMeasuredMove", label: "等幅测量（MM）", description: "先点起点（0），再点中点（0.5），自动推算等距目标（1）；拖动端点调整测量", icon: Ruler }],
   },
   {
     id: "shapes",

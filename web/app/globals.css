@@ -70,6 +70,37 @@
   .mobile-access-panel :is(.primary-button, .ghost-button, .danger-button), .mobile-access-modes > button, .mobile-access-disclosure > summary { min-height: 44px; }
 }
 
+/* Chart trading reuses settings popovers, semantic colors and compact form controls. */
+.chart-trading-menu { position: fixed; z-index: 14000; width: min(340px, calc(100vw - 16px)); max-height: calc(100dvh - 16px); overflow: auto; display: grid; gap: 8px; padding: 8px; border: 1px solid var(--line-strong); border-radius: 8px; color: var(--foreground); background: var(--surface); box-shadow: 0 8px 28px var(--background); font-size: 12px; }
+.chart-trading-heading { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.chart-trading-heading { padding-left: 6px; }
+.chart-trading-group { display: grid; gap: 2px; }
+.chart-trading-group + .chart-trading-group { padding-top: 6px; border-top: 1px solid var(--line); }
+.chart-trading-row { width: 100%; min-height: 36px; display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 8px; border: 1px solid transparent; border-radius: 5px; color: var(--foreground); background: transparent; text-align: left; cursor: pointer; font-size: 12px; }
+.chart-trading-row:hover { border-color: var(--line-strong); background: var(--surface-raised); }
+.chart-trading-row:disabled { opacity: .45; cursor: default; }
+.chart-trading-row.buy > span { color: var(--accent); }
+.chart-trading-row.sell > span { color: var(--danger); }
+.chart-trading-row strong { flex-shrink: 0; font-size: 12px; font-variant-numeric: tabular-nums; }
+.chart-trading-quantity { color: var(--muted); font-variant-numeric: tabular-nums; }
+.chart-trading-menu :is(.primary-button, .ghost-button) { min-height: 32px; padding: 6px 10px; font-size: 12px; }
+.chart-trading-heading .ghost-button { padding: 2px 8px; min-height: 26px; }
+.chart-trading-error { color: var(--danger); overflow-wrap: anywhere; }
+.chart-marker-label { color: var(--muted); padding: 4px 8px; overflow-wrap: anywhere; }
+.chart-marker-edit { display: flex; gap: 6px; padding: 4px; }
+.chart-marker-edit input { min-width: 0; width: 100%; height: 34px; padding: 6px 8px; color: var(--foreground); border: 1px solid var(--line-strong); border-radius: 6px; background: var(--surface-raised); }
+.chart-marker-edit button { flex-shrink: 0; }
+.order-protection-price { display: inline-flex; align-items: center; justify-content: flex-end; gap: 4px; max-width: 100%; font-variant-numeric: tabular-nums; }
+.order-protection-price + .order-protection-price { margin-left: 8px; }
+.order-protection-clear, .row-icon-action { display: inline-flex; flex: 0 0 auto; align-items: center; justify-content: center; width: 24px; height: 24px; padding: 0; border: 1px solid transparent; border-radius: 5px; color: var(--muted); background: transparent; cursor: pointer; }
+.order-protection-clear:hover, .row-icon-action:hover { color: var(--danger); border-color: var(--line-strong); background: var(--surface-raised); }
+.order-protection-clear:disabled, .row-icon-action:disabled { opacity: .45; cursor: default; }
+.order-protection-clear:focus-visible, .row-icon-action:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+@media (pointer: coarse) { .order-protection-clear, .row-icon-action { min-width: 32px; min-height: 32px; } }
+.chart-trading-decision { width: 100%; border-top: 1px solid var(--line); }
+.chart-trading-menu :is(button, select, input):focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+@media (pointer: coarse) { .chart-trading-menu :is(button, input, select) { min-height: 44px; } }
+
 /* MT4 follows the training workbench: full-width chart, compact account band and trade dock. */
 .content-page.mt4-page { min-width: 0; padding: 10px 12px; display: flex; flex-direction: column; gap: 8px; background: var(--background); }
 .mt4-page .page-heading { align-items: center; gap: 12px; flex-wrap: wrap; margin: 0; min-height: 36px; }
@@ -419,6 +450,10 @@
   --accent-soft: rgba(32, 201, 151, 0.13);
   --accent-strong: #33dfad;
   --danger: #ef6a68;
+  --warning: #e1c57f;
+  --drawing-blue: #2962ff;
+  --drawing-purple: #8f6ee8;
+  --warning-soft: rgba(241, 200, 106, .09);
   --scrollbar-track: rgba(8, 16, 18, .72);
   --scrollbar-thumb: rgba(111, 137, 132, .58);
   --scrollbar-thumb-hover: rgba(32, 201, 151, .72);
@@ -1106,10 +1141,22 @@ button { color: inherit; }
 .drawing-property-bar button:hover { color: #fff; background: rgba(255, 255, 255, .07); }
 .drawing-property-bar button.danger:hover { color: #ff8582; background: rgba(239, 83, 80, .12); }
 .drawing-property-bar select { height: 28px; padding: 0 22px 0 7px; color: #cbd8d5; background: #172326; border: 1px solid rgba(132, 154, 160, .2); border-radius: 5px; font-size: 10px; }
+.drawing-text-size-control { display: flex; align-items: center; flex: 0 0 auto; gap: 4px; height: 28px; color: var(--muted); font-size: 10px; }
+.drawing-text-size-control input[type="range"] { width: 80px; height: 26px; margin: 0; accent-color: var(--accent); cursor: pointer; }
+.drawing-text-size-control input[type="number"] { width: 60px; height: 26px; padding: 0 4px; color: var(--foreground); background: var(--surface-raised); border: 1px solid var(--line-strong); border-radius: 5px; font-size: 10px; }
+.drawing-text-size-control input:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
 .drawing-color-control { width: 26px; height: 26px; display: grid; place-items: center; cursor: pointer; }
 .drawing-color-control input { width: 20px; height: 20px; padding: 0; background: transparent; border: 0; cursor: pointer; }
 .drawing-color-control input::-webkit-color-swatch-wrapper { padding: 2px; }
 .drawing-color-control input::-webkit-color-swatch { border: 0; border-radius: 50%; }
+.drawing-color-trigger > span { width: 18px; height: 18px; border-radius: 50%; }
+/* Rectangle swatches reuse the compact property controls and semantic palette. */
+.drawing-color-palette { position: fixed; margin: 0; width: 216px; padding: 10px; border: 1px solid var(--line-strong); border-radius: 8px; color: var(--foreground); background: var(--surface); box-shadow: 0 8px 24px var(--background); }
+.drawing-color-presets { display: flex; align-items: center; justify-content: space-between; gap: 6px; }
+.drawing-color-presets > button { width: 24px; height: 24px; padding: 0; border: 1px solid var(--line-strong); border-radius: 50%; cursor: pointer; }
+.drawing-color-presets > button:focus-visible { outline: 2px solid var(--foreground); outline-offset: 3px; }
+.drawing-custom-color { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-top: 10px; color: var(--muted); font-size: 11px; }
+.drawing-custom-color input { width: 30px; height: 26px; padding: 1px; border: 1px solid var(--line); border-radius: 5px; background: var(--surface-raised); cursor: pointer; }
 .drawing-object-panel {
   position: absolute; top: 50px; right: 8px; z-index: 30; width: min(280px, calc(100% - 62px)); max-height: calc(100% - 60px); overflow: hidden;
   color: #dbe7e4; background: rgba(15, 24, 27, .97); border: 1px solid rgba(132, 154, 160, .24); border-radius: 8px; box-shadow: 0 16px 42px rgba(0, 0, 0, .42); backdrop-filter: blur(14px);
@@ -1165,7 +1212,7 @@ button { color: inherit; }
 }
 .price-selection-hint button { padding: 3px 6px; color: #a8bbb7; background: transparent; border: 1px solid var(--line-strong); border-radius: 5px; cursor: pointer; font-size: 9px; }
 .decision-chart-card {
-  position: absolute; left: 16px; top: 16px; z-index: 8; width: min(360px, calc(100% - 32px)); padding: 13px;
+  position: absolute; left: 16px; top: 16px; z-index: 8; width: min(320px, calc(100% - 32px)); padding: 11px;
   color: #dfe8e6; background: rgba(15, 24, 27, .96); border: 1px solid rgba(241, 200, 106, .35); border-radius: 10px;
   box-shadow: 0 14px 40px rgba(0, 0, 0, .28); backdrop-filter: blur(12px);
 }
@@ -1389,7 +1436,12 @@ button { color: inherit; }
 .shared-decision-card .decision-price-level { min-height: 54px; }
 .shared-decision-card .commit-plan { position: sticky; bottom: 0; z-index: 1; flex-shrink: 0; min-height: 40px; background: var(--accent); color: var(--background); box-shadow: 0 0 0 5px var(--surface-soft); }
 .shared-decision-card .commit-plan:hover { background: var(--accent-strong); }
+.decision-plan-actions { position: sticky; bottom: 0; z-index: 1; display: grid; gap: 6px; margin-top: auto; background: var(--surface-soft); box-shadow: 0 0 0 5px var(--surface-soft); }
+.shared-decision-card .decision-plan-actions .commit-plan { position: static; margin-top: 0; box-shadow: none; }
+.decision-delete-plan { display: inline-flex; align-items: center; justify-content: center; gap: 6px; min-height: 32px; padding: 6px 10px; color: var(--danger); background: transparent; border: 1px solid var(--line); border-radius: 7px; font-size: 11px; cursor: pointer; }
+.decision-delete-plan:hover { border-color: var(--danger); }
 .mt4-decision-card.shared-decision-card .commit-plan { margin-top: 0; }
+.mt4-decision-card .decision-plan-actions { margin-top: 0; }
 @media (max-width: 1250px) { .mt4-ohlc { display: none; } }
 @media (max-width: 760px) {
   .mt4-symbol-picker { flex: 1 1 160px; }
@@ -2556,6 +2608,7 @@ button { color: inherit; }
 .decision-chart-card { color: var(--text); background: var(--surface); border-color: var(--line); max-height: min(520px, calc(100% - 32px)); overflow: auto; }
 .decision-chart-card-head span, .decision-chart-tags span { color: var(--accent-strong); }
 .decision-chart-tags span { background: var(--accent-soft); border-color: var(--line); }
+.decision-chart-tags .decision-linked-tag { color: var(--warning); background: var(--warning-soft); border-color: var(--warning); }
 .decision-chart-levels strong, .decision-chart-card > p { color: var(--text); }
 .decision-chart-card-head .evidence-link { font: inherit; color: inherit; line-height: inherit; padding: 0; text-align: left; }
 .decision-history { min-width: 0; }

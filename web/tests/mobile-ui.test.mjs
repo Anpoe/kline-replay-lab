@@ -153,12 +153,13 @@ test("supports TradingView-style drawing groups, object management and drawing h
   assert.match(properties, /aria-label="文字大小"/);
   assert.match(rail, /aria-label="切换磁吸 OHLC"/);
   assert.match(objects, /aria-label="绘图对象列表"/);
-  assert.match(properties, /aria-label="线条粗细"/);
+  assert.match(properties, /aria-label=\{isRectangle \? "矩形边框" : "线条粗细"\}/);
+  assert.match(properties, /<option value=\{0\}>无边框<\/option>/);
   assert.match(workbench, /lock: !selectedDrawing\.lock/);
   assert.match(rail, /aria-label="撤销绘图"/);
   assert.match(rail, /aria-label="重做绘图"/);
   assert.match(workbench, /setDrawingsRestoreNonce\(\(nonce\) => nonce \+ 1\)/);
-  assert.match(chart, /name: "trainingRectangle"/);
+  assert.match(chart, /registerOverlay\(rectangleOverlay\)/);
   assert.match(chart, /registerPositionOverlay\("trainingPosition", "auto"\)/);
   assert.match(chart, /registerPositionOverlay\("trainingLongPosition", "long"\)/);
   assert.match(chart, /name: "trainingTextNote"/);
@@ -230,7 +231,7 @@ test("wires chart protection picking, trailing stops and risk sizing into the wo
   const sharedOrderControls = await readFile(new URL("app/components/OrderEntryControls.tsx", root), "utf8");
   assert.match(sharedOrderControls, /<select aria-label="开仓委托类型" value=\{order.value\} onChange=/);
   assert.doesNotMatch(workbench, /order=\{\{ value: liveMode \? "market" : orderType/);
-  assert.match(workbench, /const selectedOrderType: OrderType = orderType/);
+  assert.match(workbench, /const selectedOrderType: OrderType = chartOrder\?\.orderType \?\? orderType/);
   assert.match(workbench, /resolveLivePendingOrderPrice/);
   assert.match(settingsPanel, /<option value="limit">限价单（Limit Order）<\/option>/);
   assert.match(settingsPanel, /<option value="stop">突破单（Stop Order）<\/option>/);

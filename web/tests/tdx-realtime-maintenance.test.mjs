@@ -156,7 +156,11 @@ test('TDX historical daily incremental resumes from the last complete bar before
   assert.equal(completed.progress.unchangedBars, 1);
   assert.equal(completed.progress.receivedRows, 3);
   assert.equal(requested.length, 1);
-  assert.deepEqual(requested[0], { instrumentId: '000001.SZ', options: { assetType: 'stock', count: 64 } });
+  const { signal, onRetry, ...requestOptions } = requested[0].options;
+  assert.equal(requested[0].instrumentId, '000001.SZ');
+  assert.deepEqual(requestOptions, { assetType: 'stock', count: 64 });
+  assert.ok(signal instanceof AbortSignal);
+  assert.equal(typeof onRetry, 'function');
   const rows = store.ensureOverlayDb().prepare(`
     SELECT timestamp, close, volume FROM daily_overlay WHERE instrument_id = '000001.SZ' ORDER BY timestamp
   `).all();
@@ -989,7 +993,10 @@ test('TDX gap repair uses remote historical bars even when the manifest is alrea
   assert.equal(completed.progress.correctedBars, 1);
   assert.equal(completed.progress.unchangedBars, 1);
   assert.equal(requested.length, 1);
-  assert.deepEqual(requested[0].options, { assetType: 'stock', count: 800 });
+  const { signal, onRetry, ...requestOptions } = requested[0].options;
+  assert.deepEqual(requestOptions, { assetType: 'stock', count: 800 });
+  assert.ok(signal instanceof AbortSignal);
+  assert.equal(typeof onRetry, 'function');
   const row = store.ensureOverlayDb().prepare(
     'SELECT close, volume, source FROM daily_overlay WHERE instrument_id = ? AND timestamp = ?',
   ).get('000001.SZ', Date.UTC(2026, 8, 11));
@@ -1042,7 +1049,7 @@ test('TDX gap maintenance accepts rows for the selected non-stock categories', a
   assert.equal(row, undefined);
 });
 
-test('TDX realtime quote reads do not write a daily bar or advance its date', async t => {
+test('TDX display refresh reads stored complete daily bars without requesting external quotes', async t => {
   const root = await mkdtemp(path.join(os.tmpdir(), 'kline-tdx-realtime-quotes-'));
   const dayPath = path.join(root, 'tdx', 'day', 'sz', '000001.day');
   await mkdir(path.dirname(dayPath), { recursive: true });
@@ -1055,19 +1062,8 @@ test('TDX realtime quote reads do not write a daily bar or advance its date', as
     nowProvider: () => new Date('2026-09-15T10:00:00+08:00'),
     corporateActionsClient: { close() {} },
     dailyQuotesClient: {
-      async fetchDailyQuotes(instrumentIds) {
-        return instrumentIds.map((instrumentId) => ({
-          instrumentId,
-          active: true,
-          price: 10.2,
-          lastClose: 10,
-          open: 10.1,
-          high: 10.3,
-          low: 9.9,
-          volume: 1234,
-          turnover: 1250000,
-        }));
-      },
+      async fetchDailyQuotes() { throw new Error('展示刷新不得读取外部报价'); },
+      async fetchDailyBars() { throw new Error('展示刷新不得触发行情维护'); },
       close() {},
     },
   }).init();
@@ -1084,14 +1080,15 @@ test('TDX realtime quote reads do not write a daily bar or advance its date', as
     }],
   };
 
-  const prices = await store.getRealtimeQuotes(['000001.SZ']);
+  const prices = await store.getLatestCandles(['000001.SZ']);
   assert.equal(prices.length, 1);
-  assert.equal(prices[0].realtime, true);
+  assert.equal(prices[0].realtime, undefined);
   assert.equal(prices[0].timestamp, Date.UTC(2026, 8, 14));
-  assert.equal(prices[0].close, 10.2);
-  assert.equal(prices[0].volume, 123400);
-  assert.equal(prices[0].dailyBarClosed, false);
-  const recovered = await store.getRealtimeQuotes(
+  assert.equal(prices[0].close, 10);
+  assert.equal(prices[0].previousClose, 9.5);
+  assert.equal(prices[0].volume, 100000);
+  assert.equal(prices[0].closed, true);
+  const recovered = await store.getLatestCandles(
     ['000001.SZ'],
     { '000001.SZ': Date.UTC(2026, 8, 10) },
   );

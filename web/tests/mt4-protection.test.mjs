@@ -8,7 +8,7 @@ const edit={accountKey:'account-a',order:{...order},field:'stopLoss'};
 const input={state,edit,id:'protection-1',values:{stopLoss:'1992.50',takeProfit:'2040'}};
 
 const dragOrder={...order,openPrice:2000,lots:.1};
-const dragState={...state,selection:{symbol:'XAUUSD',timeframe:15},snapshot:{...state.snapshot,capturedAt:1000,chart:{symbol:'XAUUSD'},symbols:[{symbol:'XAUUSD',digits:2,bid:2001,ask:2002,quoteTime:1000}],orders:[dragOrder]}};
+const dragState={...state,selection:{symbol:'XAUUSD',timeframe:15},snapshot:{...state.snapshot,executionVersion:3,capturedAt:1000,chart:{symbol:'XAUUSD'},symbols:[{symbol:'XAUUSD',digits:2,bid:2001,ask:2002,quoteTime:1000}],orders:[dragOrder]}};
 const lines=(current=dragState,options={})=>protection.deriveMt4OrderProtectionLines({state:current,symbol:'XAUUSD',timestamp:1000000,digits:2,movable:true,...options});
 
 test('active orders have bound entry and protection lines independent from historical markers',()=>{
@@ -32,7 +32,7 @@ test('dragging an existing protection line changes only that order/field and pre
 });
 
 test('dragging an entry line creates the appropriate protection for buys, sells and pending orders without moving entry',()=>{
-  for(const type of [0,1,2,3,4,5]){
+  for(const type of [0,1]){
     const current={...dragState,snapshot:{...dragState.snapshot,orders:[{...dragOrder,type,stopLoss:0,takeProfit:0}]}};
     const line=lines(current)[0];
     for(const price of [1990,2030]){
@@ -47,6 +47,15 @@ test('dragging an entry line creates the appropriate protection for buys, sells 
   const profitable={...dragState,snapshot:{...dragState.snapshot,symbols:[{...dragState.snapshot.symbols[0],bid:2020,ask:2021}]}};
   const command=protection.prepareMt4ProtectionDrag({state:profitable,line:lines(profitable)[0],price:2010,id:'profit-stop'});
   assert.equal(command.stopLoss,2010);assert.equal(command.takeProfit,2030);
+});
+
+test('pending entry drags change only price with the same ticket and acknowledged protection',()=>{
+  for(const [type,price] of [[2,1995],[3,2020],[4,2020],[5,1995]]){
+    const current={...dragState,snapshot:{...dragState.snapshot,orders:[{...dragOrder,type,stopLoss:0,takeProfit:0}]}};
+    const line=lines(current)[0];const command=protection.prepareMt4ProtectionDrag({state:current,line,price,id:'modify'});
+    assert.equal(command.price,price);assert.equal(command.ticket,42);assert.equal(command.type,'protect');assert.equal(command.stopLoss,0);assert.equal(command.takeProfit,0);
+    assert.throws(()=>protection.prepareMt4ProtectionDrag({state:{...current,snapshot:{...current.snapshot,executionVersion:2}},line,price,id:'old'}),/更新/);
+  }
 });
 
 test('drag protection rejects stale bindings, unavailable quotes, disabled orders and changed chart/account',()=>{

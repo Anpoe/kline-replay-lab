@@ -4,13 +4,32 @@ import type { TrainingTask } from './trainingTasks.ts';
 export type TimestampedBar = { timestamp: number };
 type DrawingPoint = { timestamp?: number; dataIndex?: number; value?: number };
 
+/** Sub-bar coordinates for annotations; timestamps remain stable across paging and timeframes. */
+export function interpolatedDrawingIndex(bars: readonly TimestampedBar[], timestamp: number): number | undefined {
+  if (!bars.length || !Number.isFinite(timestamp)) return undefined;
+  if (bars.length === 1) return 0;
+  let left = 0, right = bars.length - 1;
+  while (left < right) {
+    const middle = Math.ceil((left + right) / 2);
+    if (bars[middle].timestamp <= timestamp) left = middle;
+    else right = middle - 1;
+  }
+  const index = Math.min(left, bars.length - 2);
+  const span = bars[index + 1].timestamp - bars[index].timestamp;
+  return span > 0 ? index + (timestamp - bars[index].timestamp) / span : index;
+}
+
 /** Adapt chart coordinates while keeping the existing drawing format and editor. */
-export function remapReplayDrawingPoints<T extends { points: DrawingPoint[] }>(
+export function remapReplayDrawingPoints<T extends { name?: string; points: DrawingPoint[] }>(
   drawing: T, source: readonly TimestampedBar[], target: readonly TimestampedBar[], sourceOffset = 0, targetOffset = 0,
 ): T {
   return { ...drawing, points: drawing.points.map(point => {
     const timestamp = point.timestamp ?? (point.dataIndex == null ? undefined : source[point.dataIndex - sourceOffset]?.timestamp);
     if (timestamp == null) return point;
+    if (drawing.name === "trainingTextBox") {
+      const index = interpolatedDrawingIndex(target, timestamp);
+      return index == null ? point : { ...point, timestamp, dataIndex: index + targetOffset };
+    }
     const index = findTimeframeViewCursor(target, timestamp);
     return index < 0 ? point : { ...point, timestamp: target[index].timestamp, dataIndex: index + targetOffset };
   }) };

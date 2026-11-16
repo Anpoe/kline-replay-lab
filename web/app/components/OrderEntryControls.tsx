@@ -1,8 +1,17 @@
 "use client";
 import type { ReactNode } from "react";
-import { MousePointer2, TrendingDown, TrendingUp, X } from "lucide-react";
+import { MousePointer2, Pencil, TrendingDown, TrendingUp, X } from "lucide-react";
 
 type Choice = { value: string; label: string; disabled?: boolean };
+
+export function OrderProtectionPrice({ label, value, prefix, disabled, onEdit, onClear }: {
+  label: string; value?: string; prefix?: string; disabled?: boolean;
+  onEdit?: (button: HTMLButtonElement) => void; onClear: () => void;
+}) {
+  return <span className="order-protection-price">{prefix && <span>{prefix}</span>}{onEdit
+    ? <button type="button" className="mt4-protection-price" aria-label={label + "，点击图表选价"} title="点击图表修改保护价" disabled={disabled} onClick={event => onEdit(event.currentTarget)}><span>{value || "—"}</span><Pencil size={11} aria-hidden="true" /></button>
+    : <span>{value || "—"}</span>}{value && <button type="button" className="order-protection-clear" aria-label={`删除${label}`} title={`删除${label}，保留另一侧保护价`} disabled={disabled} onClick={onClear}><X size={12} aria-hidden="true" /></button>}</span>;
+}
 export type OrderPricePickerProps = {
   label: string; value: string; selected: boolean; disabled?: boolean; title: string;
   pickLabel: string; clearLabel: string; onPick: () => void; onClear: () => void;

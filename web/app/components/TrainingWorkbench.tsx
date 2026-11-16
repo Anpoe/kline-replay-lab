@@ -81,18 +81,24 @@ import { useDesktopLayout } from "./useDesktopLayout";
 import { WatchlistPanel, type WatchlistSource } from "../features/watchlist/WatchlistPanel";
 import type { WatchlistItem, WatchlistQuote } from "../features/watchlist/watchlistController";
 import { allDrawingTools, trainingPositionTool, defaultDrawingTools, type DrawingTool } from "./chartDrawingTools";
+import { drawingVisualStyles } from "../lib/drawingStyles";
 import { DrawingObjectPanel } from "./DrawingObjectPanel";
 import { DrawingPropertyBar } from "./DrawingPropertyBar";
 import { ChartDrawingTextEditor } from "./ChartDrawingTextEditor";
 import { ChartDrawingRail } from "./ChartDrawingRail";
 import { DecisionPlanCard } from "./DecisionPlanCard";
 import { ChartMarkerToggle, DecisionDetails, DecisionHistory, DecisionTradeSummary } from "./DecisionReview";
-import { decisionChartView, commitDecisionRecord, ensureProtectiveDecisionRecord, decisionForEntry, hasDecisionPlanContent, draftAfterDecisionSaved, decisionProtectionFromDrawings, updateDecisionRecord, removeDecisionRecord, validateDecisionPlan, normalizeDecisionTag, latestEntryDecisionRecord, renameDecisionReason, type DecisionRecord } from "../lib/decisionWorkflow";
-import { decisionPlanScore, type DecisionPlanValue } from "../lib/decisionPlan";
+import { decisionChartView, commitDecisionRecord, ensureProtectiveDecisionRecord, decisionProtectionMatches, decisionForEntry, hasDecisionPlanContent, draftAfterDecisionSaved, decisionProtectionFromDrawings, updateDecisionRecord, removeDecisionRecord, validateDecisionPlan, normalizeDecisionTag, latestEntryDecisionRecord, renameDecisionReason, type DecisionRecord } from "../lib/decisionWorkflow";
+import { decisionPlanScore, updateDeletedDecisionReasonTags, type DecisionPlanValue, type DecisionReasonTagChanges } from "../lib/decisionPlan";
 import { ChartIndicatorEditor } from "./ChartIndicatorEditor";
 import { ChartIndicatorMenu } from "./ChartIndicatorMenu";
 import { ChartTimeframePicker } from "./ChartTimeframePicker";
-import { OrderEntryControls, OrderEntryActions } from "./OrderEntryControls";
+import { OrderEntryControls, OrderEntryActions, OrderProtectionPrice } from "./OrderEntryControls";
+import type { PendingOrderCancellation } from "./ChartTradingMenu";
+import { chartOrderLabel } from "../lib/chartTrading";
+import { entryProtectionError, pendingPriceError } from "../lib/orderPriceValidation";
+import { calculateOrderReservation } from "../lib/orderReservation";
+import { modifyPendingOrderFromTradingCommand } from "../lib/tradingCommands";
 import { Mt4Panel } from "../features/mt4/components/Mt4Panel";
 import { buildLiveAccountLifecycleCommand, livePortfolioMatchesScope, sharedLiveAccountEquity, type LiveAccountLifecycleType } from "../features/live/liveAccountController";
 import { PersonalSopRecommendations } from "../features/sop/components/PersonalSopRecommendations";
@@ -270,10 +276,6 @@ import {
 } from "../lib/tradingAccount";
 import {
   EXECUTION_ENGINE_VERSION,
-  estimatedBuyCashRequired,
-  executionFee,
-  executionPrice,
-  executionPriceFromQuote,
   executeBarStep,
   normalizeExecutionCostProfile,
   type ExecutionCostProfile,
@@ -300,7 +302,7 @@ import {
   marginAccountSnapshot,
   markToMarketPnl,
   pipValueInAccount,
-  requiredMargin,
+  sourceQuotePrice,
   type InstrumentEconomics,
 } from "../lib/fxTrading";
 import {
@@ -1011,6 +1013,8 @@ type SyncedPreferences = {
   movingAverageSettings: MovingAverageSettings;
   macdSettings?: MacdSettings;
   reasonTags?: string[];
+  deletedReasonTags?: string[];
+  reasonTagChanges?: DecisionReasonTagChanges;
   customReasonTags: string[];
   drawingPreferences: {
     magnetMode: "normal" | "weak_magnet" | "strong_magnet";
@@ -1302,19 +1306,6 @@ function normalizeAvailableInstrument(item: Instrument & { timeframes?: string[]
 }
 
 const coveragePageSize = 100;
-function drawingStyles(color: string, size: number) {
-  return {
-    line: { color, size, style: "solid" },
-    rect: {
-      color: `${color}24`,
-      borderColor: color,
-      borderSize: size,
-      borderStyle: "solid",
-    },
-    point: { color: "#0c1416", borderColor: color, borderSize: 2, radius: 4 },
-  };
-}
-
 function drawingsEqual(left: PersistedDrawing[], right: PersistedDrawing[]) {
   return left === right || JSON.stringify(left) === JSON.stringify(right);
 }
@@ -1733,6 +1724,10 @@ export function TrainingWorkbench() {
   const [orderStopLoss, setOrderStopLoss] = useState("");
   const [orderTakeProfit, setOrderTakeProfit] = useState("");
   const [protectionPriceSelection, setProtectionPriceSelection] = useState<PriceSelectionMode | null>(null);
+  const [protectionCommandRunning, setProtectionCommandRunning] = useState(false);
+  const protectionCommandLock = useRef(false);
+  const activeOrderInstrumentRef = useRef(instrument.id);
+  useEffect(() => { activeOrderInstrumentRef.current = instrument.id; }, [instrument.id]);
   const [orderPanelTab, setOrderPanelTab] = useState<"positions" | "pending" | "history">("positions");
   const [hoveredClosedPositionId, setHoveredClosedPositionId] = useState<string | null>(null);
   const [mobileOrdersExpanded, setMobileOrdersExpanded] = useState(false);
@@ -1774,7 +1769,13 @@ export function TrainingWorkbench() {
   const [randomTrainingPatternPresetIds, setRandomTrainingPatternPresetIds] = useState<string[]>([]);
   const [quickRandomError, setQuickRandomError] = useState("");
   const [decision, setDecision] = useState<Decision>(defaultDecision);
-  const [reasonTags, setReasonTags] = useState<string[]>(reasonOptions);
+  const [reasonTags, setReasonTags] = useState<string[]>([]);
+  const pendingReasonTagsRef = useRef<string[] | null>(null);
+  const pendingReasonTagChangesRef = useRef<DecisionReasonTagChanges | null>(null);
+  const deletedReasonTagsRef = useRef<string[]>([]);
+  const [deletedReasonTags, setDeletedReasonTags] = useState<string[]>([]);
+  const [reasonTagSaveError, setReasonTagSaveError] = useState(false);
+  const [reasonTagSaveRetryNonce, setReasonTagSaveRetryNonce] = useState(0);
   const [customReasonTags, setCustomReasonTags] = useState<string[]>([]);
   const [customReasonInput, setCustomReasonInput] = useState("");
   const [editingReasonTag, setEditingReasonTag] = useState("");
@@ -1929,6 +1930,7 @@ export function TrainingWorkbench() {
   const [startupReady, setStartupReady] = useState(false);
   const [settingsReady, setSettingsReady] = useState(false);
   const [syncedPreferencesReady, setSyncedPreferencesReady] = useState(false);
+  const [syncedPreferencesLoadError, setSyncedPreferencesLoadError] = useState(false);
   const [syncedPreferencesRetryNonce, setSyncedPreferencesRetryNonce] = useState(0);
   const [liveStateReady, setLiveStateReady] = useState(false);
   const [liveStateLoadError, setLiveStateLoadError] = useState(false);
@@ -1945,7 +1947,7 @@ export function TrainingWorkbench() {
   const appSettingsRef = useRef<AppSettings>(defaultAppSettings);
   const eventSequenceRef = useRef(0);
   const decisionPanelRef = useRef<HTMLElement | null>(null);
-  const decisionDraftBeforeBackfillRef = useRef<Decision | null>(null);
+  const [decisionDraftBeforeBackfill, setDecisionDraftBeforeBackfill] = useState<Decision | null>(null);
   const marketLoadRef = useRef<{ id: number; controller: AbortController | null }>({ id: 0, controller: null });
   const timeframeViewLoadRef = useRef<{ id: number; controller: AbortController | null }>({ id: 0, controller: null });
   const sessionSummaryLoadRef = useRef<{ id: number; controller: AbortController | null }>({ id: 0, controller: null });
@@ -2367,25 +2369,26 @@ export function TrainingWorkbench() {
     : tradingMode === "capital"
       ? Math.max(0, cashBalance)
       : Math.max(0, initialCapital + realizedPnl);
+  const currentEntryDecision = decisionTarget ? decisionDraftBeforeBackfill ?? defaultDecision : decision;
   const effectiveOrderStop = (() => {
     const entered = Number(orderStopLoss);
     if (Number.isFinite(entered) && entered > 0) return entered;
-    const planned = Number(decision.stop);
+    const planned = Number(currentEntryDecision.stop);
     return Number.isFinite(planned) && planned > 0 ? planned : undefined;
   })();
   const effectiveOrderTarget = (() => {
     const entered = Number(orderTakeProfit);
     if (Number.isFinite(entered) && entered > 0) return entered;
-    const planned = Number(decision.target);
+    const planned = Number(currentEntryDecision.target);
     return Number.isFinite(planned) && planned > 0 ? planned : undefined;
   })();
-  const riskSizingFor = (side: "buy" | "sell", entryRawPrice: number, stopLoss: number) => (
+  const riskSizingFor = (side: "buy" | "sell", entryRawPrice: number, stopLoss: number, entryOrderType = orderType) => (
     calculateRiskSizedQuantity({
       side,
       equity: riskBalance,
       riskPercent,
       entryRawPrice,
-      entryPriceBasis: orderType === "market" ? "source" : "quote",
+      entryPriceBasis: entryOrderType === "market" ? "source" : "quote",
       stopLoss,
       minimumQuantity: minimumBuyQuantity(marketRules),
       quantityStep: buyQuantityStep(marketRules),
@@ -2425,7 +2428,7 @@ export function TrainingWorkbench() {
       };
     }), [currentBar, executions, positions]);
   const decisionChart = useMemo(() => decisionChartView(decisionSubmissions, renderedChartBars, {
-    selectedId: editingDecisionId || hideTaskPrice ? '' : selectedDecisionId,
+    selectedId: hideTaskPrice ? '' : editingDecisionId || selectedDecisionId,
     currentTimestamp: currentBar?.timestamp ?? 0, visible: showChartMarkers, periodMs: timeframeLookbackMs(chartTimeframe) ?? undefined,
   }), [decisionSubmissions, renderedChartBars, editingDecisionId, hideTaskPrice, selectedDecisionId, currentBar, showChartMarkers, chartTimeframe]);
   const protectionLines = useMemo<ProtectionLine[]>(() => {
@@ -2511,7 +2514,7 @@ export function TrainingWorkbench() {
     pendingOrders,
     executions,
     orderRejections,
-    decision,
+    decision: currentEntryDecision,
     decisionSubmissions,
     orderQty,
     orderType,
@@ -2540,7 +2543,7 @@ export function TrainingWorkbench() {
       equity,
       cashBalance,
     },
-  }), [cashBalance, closedPositions.length, currentReviewMetrics, cursor, currentBar?.timestamp, dataSignature, dataSnapshotId, decision, decisionSubmissions, drawings, equity, events, executionProfile, executions, initialCapital, marketRules, openPnl, openPositions.length, orderQty, orderStopLoss, orderTakeProfit, orderTriggerPrice, orderType, orderRejections, pendingOrders, positionSizeMode, positions, randomSeed, realizedPnl, riskPercent, snapshotDataIndexOffset, snapshotHash, totalPnl, totalReturnPct, tradingMode, trainingTask]);
+  }), [cashBalance, closedPositions.length, currentReviewMetrics, cursor, currentBar?.timestamp, dataSignature, dataSnapshotId, currentEntryDecision, decisionSubmissions, drawings, equity, events, executionProfile, executions, initialCapital, marketRules, openPnl, openPositions.length, orderQty, orderStopLoss, orderTakeProfit, orderTriggerPrice, orderType, orderRejections, pendingOrders, positionSizeMode, positions, randomSeed, realizedPnl, riskPercent, snapshotDataIndexOffset, snapshotHash, totalPnl, totalReturnPct, tradingMode, trainingTask]);
   /* eslint-enable react-hooks/preserve-manual-memoization */
 
   // Cursor movement, playback, speed and derived review metrics are intentionally
@@ -2550,7 +2553,7 @@ export function TrainingWorkbench() {
     pendingOrders,
     executions,
     orderRejections,
-    decision,
+    decision: currentEntryDecision,
     decisionSubmissions,
     orderQty,
     orderType,
@@ -2567,7 +2570,7 @@ export function TrainingWorkbench() {
     cashBalance,
     dividendIncome,
     executionProfile,
-  }), [cashBalance, decision, decisionSubmissions, dividendIncome, drawings, executionProfile, executions, initialCapital, marketRules, orderQty, orderStopLoss, orderTakeProfit, orderTriggerPrice, orderType, orderRejections, pendingOrders, positionSizeMode, positions, riskPercent, tradingMode, trainingTask]);
+  }), [cashBalance, currentEntryDecision, decisionSubmissions, dividendIncome, drawings, executionProfile, executions, initialCapital, marketRules, orderQty, orderStopLoss, orderTakeProfit, orderTriggerPrice, orderType, orderRejections, pendingOrders, positionSizeMode, positions, riskPercent, tradingMode, trainingTask]);
 
   useEffect(() => {
     if (!liveStateHydratedRef.current || liveAccountCommandRunningRef.current) return;
@@ -2587,7 +2590,7 @@ export function TrainingWorkbench() {
     const hasLiveActivity = positions.length > 0
       || pendingOrders.length > 0
       || executions.length > 0
-      || hasDecisionContent(decision, decisionSubmissions);
+      || hasDecisionContent(currentEntryDecision, decisionSubmissions);
     if (!hasLiveActivity) {
       livePersistSignatureRef.current = "";
       const cleanupTimer = window.setTimeout(() => {
@@ -2683,9 +2686,9 @@ export function TrainingWorkbench() {
       ...(previousPortfolio?.corporateActionEvents?.length
         ? { corporateActionEvents: previousPortfolio.corporateActionEvents }
         : {}),
-      ...(hasDecisionContent(decision, decisionSubmissions)
+      ...(hasDecisionContent(currentEntryDecision, decisionSubmissions)
         ? {
-          decision: { ...decision, reasons: [...decision.reasons] },
+          decision: { ...currentEntryDecision, reasons: [...currentEntryDecision.reasons] },
           decisionSubmissions: decisionSubmissions.map((submission) => ({
             ...submission,
             decision: { ...submission.decision, reasons: [...submission.decision.reasons] },
@@ -2709,7 +2712,7 @@ export function TrainingWorkbench() {
       next[previousIndex] = nextRecord;
       return next;
     });
-  }, [cashBalance, currentBar, decision, decisionSubmissions, executions, initialCapital, instrument.id, liveContext, liveMode, loading, orderRejections, pendingOrders, positions, tradingMode, trainingReady]);
+  }, [cashBalance, currentBar, currentEntryDecision, decisionSubmissions, executions, initialCapital, instrument.id, liveContext, liveMode, loading, orderRejections, pendingOrders, positions, tradingMode, trainingReady]);
 
   useEffect(() => {
     const move = (event: PointerEvent) => {
@@ -2946,8 +2949,12 @@ export function TrainingWorkbench() {
       ...(options?.allowPatternPresetRestore ? { patternPresetAction: PATTERN_PRESET_RESTORE_ACTION } : {}),
       movingAverageSettings,
       macdSettings,
-      reasonTags,
-      customReasonTags,
+      reasonTags: pendingReasonTagsRef.current ?? reasonTags,
+      deletedReasonTags: deletedReasonTagsRef.current,
+      ...(pendingReasonTagChangesRef.current ? { reasonTagChanges: pendingReasonTagChangesRef.current } : {}),
+      customReasonTags: pendingReasonTagsRef.current
+        ? pendingReasonTagsRef.current.filter((tag) => !reasonOptions.includes(tag))
+        : customReasonTags,
       drawingPreferences: {
         magnetMode: drawingMagnetMode,
         color: drawingColor,
@@ -3063,14 +3070,23 @@ export function TrainingWorkbench() {
       settingsGateway.saveMacdSettings(nextMacd);
     }
     setQuickRandomMode(localRandomPreferences.quickRandomMode);
-    const syncedReasonTags = Array.isArray(stored.reasonTags)
+    // A confirm dialog can trigger a focus refresh before the debounced save.
+    // Keep local edits until the matching write has been acknowledged.
+    const syncedReasonTags = pendingReasonTagsRef.current ?? (Array.isArray(stored.reasonTags)
       ? normalizeReasonTags(stored.reasonTags)
       : normalizeReasonTags([
         ...reasonOptions,
         ...(Array.isArray(stored.customReasonTags) ? stored.customReasonTags : []),
-      ]);
-    setReasonTags(syncedReasonTags);
-    const syncedCustomReasonTags = syncedReasonTags.filter((tag) => !reasonOptions.includes(tag));
+      ]));
+    if (!pendingReasonTagsRef.current) {
+      deletedReasonTagsRef.current = Array.isArray(stored.deletedReasonTags)
+        ? [...new Set(stored.deletedReasonTags.filter((tag): tag is string => typeof tag === "string"))]
+        : [];
+      setDeletedReasonTags(deletedReasonTagsRef.current);
+    }
+    const availableReasonTags = syncedReasonTags.filter(tag => !deletedReasonTagsRef.current.includes(tag));
+    setReasonTags(availableReasonTags);
+    const syncedCustomReasonTags = availableReasonTags.filter((tag) => !reasonOptions.includes(tag));
     setCustomReasonTags(syncedCustomReasonTags);
     const drawingPreferences = stored.drawingPreferences;
     if (drawingPreferences && typeof drawingPreferences === "object") {
@@ -3177,8 +3193,8 @@ export function TrainingWorkbench() {
 
   useEffect(() => {
     const timer = window.setTimeout(() => {
-      setReasonTags([...reasonOptions]);
-      setCustomReasonTags([]);
+      // State defaults are initialized by useState. Re-running this effect
+      // during Fast Refresh must not replace hydrated tags with those defaults.
       setReasonTagsReady(true);
       setCustomReasonTagsReady(true);
     }, 0);
@@ -3253,6 +3269,7 @@ export function TrainingWorkbench() {
         syncedPreferencesRetryCountRef.current = 0;
         syncedPreferencesHydratedRef.current = true;
         setSyncedPreferencesReady(true);
+        setSyncedPreferencesLoadError(false);
       })
       .catch(() => {
         if (cancelled) return;
@@ -3261,6 +3278,7 @@ export function TrainingWorkbench() {
         syncedPreferencesLoadStartedRef.current = false;
         syncedPreferencesHydratedRef.current = false;
         setSyncedPreferencesReady(false);
+        setSyncedPreferencesLoadError(true);
         const retryDelay = Math.min(
           30_000,
           1_000 * (2 ** Math.min(syncedPreferencesRetryCountRef.current, 5)),
@@ -3282,6 +3300,7 @@ export function TrainingWorkbench() {
     const timer = window.setTimeout(() => {
       const saveRevision = patternPresetSaveRevisionRef.current;
       const trackingPatternSave = patternPresetsDirtyRef.current;
+      const pendingReasonTags = pendingReasonTagsRef.current;
       const allowPatternPresetRestore = trackingPatternSave && patternPresetRestoreRequestedRef.current;
       const preferences = buildSyncedPreferences(
         appSettingsRef.current,
@@ -3290,6 +3309,11 @@ export function TrainingWorkbench() {
       );
       void preferencesGateway.save(preferences)
         .then(() => {
+          if (pendingReasonTagsRef.current === pendingReasonTags) {
+            pendingReasonTagsRef.current = null;
+            pendingReasonTagChangesRef.current = null;
+            setReasonTagSaveError(false);
+          }
           if (trackingPatternSave && patternPresetSaveRevisionRef.current === saveRevision) {
             patternPresetsDirtyRef.current = false;
             settingsGateway.saveHiddenPatternPresetIds(hiddenBuiltInPatternPresetIds(preferences.patternPresets), {
@@ -3300,7 +3324,9 @@ export function TrainingWorkbench() {
           settingsGateway.removeLegacyCustomPatternPresets();
           settingsGateway.removeLegacyReasonTagPreferences();
         })
-        .catch(() => undefined);
+        .catch(() => {
+          if (pendingReasonTags && pendingReasonTagsRef.current === pendingReasonTags) setReasonTagSaveError(true);
+        });
     }, 350);
     return () => window.clearTimeout(timer);
   }, [
@@ -3309,6 +3335,7 @@ export function TrainingWorkbench() {
     preferencesGateway,
     settingsGateway,
     syncedPreferencesReady,
+    reasonTagSaveRetryNonce,
   ]);
 
   useEffect(() => {
@@ -3650,7 +3677,7 @@ export function TrainingWorkbench() {
     setDuplicateMarketWarning(null);
     setDecisionTarget(null);
     setEditingDecisionId("");
-    decisionDraftBeforeBackfillRef.current = null;
+    setDecisionDraftBeforeBackfill(null);
     saveCompletedTrainingRef.current = false;
     try {
       const requestedSnapshotId = restoreRequest?.state.dataSnapshotId
@@ -3871,7 +3898,7 @@ export function TrainingWorkbench() {
         setOpeningGapUnit(appSettingsRef.current.openingGapUnit);
         setOpeningGapThreshold(appSettingsRef.current.openingGapThreshold);
         setOpeningGapThresholdInput(appSettingsRef.current.openingGapThreshold.toFixed(OPENING_GAP_THRESHOLD_DECIMALS));
-        setOrderTriggerPrice(restoreRequest.state.orderTriggerPrice ?? "");
+        setOrderTriggerPrice("");
         setOrderStopLoss(restoreRequest.state.orderStopLoss ?? "");
         setOrderTakeProfit(restoreRequest.state.orderTakeProfit ?? "");
         setPositionSizeMode(restoreRequest.state.positionSizeMode);
@@ -4836,8 +4863,8 @@ export function TrainingWorkbench() {
     const nextCursor = rewindReplayCursor({ bars, cursor, startCursor: trainingTask?.startCursor ?? 0, stepBucketKey: chartStepBucketKey });
     if (nextCursor === cursor) return;
     if (decisionTarget && decisionTarget.dataIndex > nextCursor) {
-      if (decisionDraftBeforeBackfillRef.current) setDecision(decisionDraftBeforeBackfillRef.current);
-      decisionDraftBeforeBackfillRef.current = null;
+      if (decisionDraftBeforeBackfill) setDecision(decisionDraftBeforeBackfill);
+      setDecisionDraftBeforeBackfill(null);
       setDecisionTarget(null);
       setBackfillAssociation("associate");
       setEditingDecisionId("");
@@ -4870,9 +4897,14 @@ export function TrainingWorkbench() {
     return rounded.toFixed(instrument.pricePrecision);
   };
 
-  const ensureProtectiveDecisionCard = (stopLoss?: number, takeProfit?: number, reason = "protective_levels_attached_to_order"): string | undefined => {
+  const ensureProtectiveDecisionCard = (stopLoss?: number, takeProfit?: number, reason = "protective_levels_attached_to_order", draft = decision): string | undefined => {
     if (!currentBar || (stopLoss == null && takeProfit == null)) return undefined;
-    const base = reason === "protective_levels_attached_to_order" ? decisionForEntry(decision, decisionSubmissions, currentBar.timestamp) : decision;
+    if (reason === "protective_levels_attached_to_order" && !hasDecisionPlanContent(draft)) {
+      const existing = decisionSubmissions.find(item => !item.backfilled && item.barTimestamp === currentBar.timestamp
+        && decisionProtectionMatches(item.decision, stopLoss == null ? "" : protectionPriceText(stopLoss), takeProfit == null ? "" : protectionPriceText(takeProfit)));
+      if (existing) return existing.id;
+    }
+    const base = reason === "protective_levels_attached_to_order" ? decisionForEntry(draft, decisionSubmissions, currentBar.timestamp) : draft;
     const linkedDecision: Decision = { ...base, stop: stopLoss == null ? base.stop : protectionPriceText(stopLoss), target: takeProfit == null ? base.target : protectionPriceText(takeProfit), reasons: [...base.reasons] };
     if (reason !== "protective_levels_attached_to_order") setDecision(linkedDecision);
     const incoming: DecisionSubmission = { id: createUuid(), barTimestamp: currentBar.timestamp, cursor, referencePrice: currentBar.close, decision: linkedDecision, submittedAt: new Date().toISOString(), autoGenerated: true };
@@ -4883,9 +4915,15 @@ export function TrainingWorkbench() {
     return result.saved.id;
   };
 
-  const applyDraftProtectionPrice = (kind: PriceSelectionMode, rawPrice: number) => {
+  const applyDraftProtectionPrice = (kind: PriceSelectionMode, rawPrice: number, draft = decision) => {
     if (!Number.isFinite(rawPrice) || rawPrice <= 0) return false;
     const value = protectionPriceText(rawPrice);
+    if (decisionTarget && kind !== "entry-trigger") {
+      setDecision(current => ({ ...current, [kind === "stop-loss" ? "stop" : "target"]: value }));
+      setProtectionPriceSelection(null);
+      setSaveState("计划保护价已更新 · 保存后生效");
+      return true;
+    }
     if (kind === "stop-loss") {
       setOrderStopLoss(value);
       setDecision((current) => ({ ...current, stop: value }));
@@ -4902,6 +4940,7 @@ export function TrainingWorkbench() {
         kind === "stop-loss" ? Number(value) : undefined,
         kind === "take-profit" ? Number(value) : undefined,
         "protective_level_selected_on_chart",
+        draft,
       );
       appendEvent("protective_level_selected", { kind, price: Number(value), source: "chart" });
     } else {
@@ -4922,8 +4961,9 @@ export function TrainingWorkbench() {
     appendEvent("protective_level_cleared", { kind });
   };
 
-  const moveProtectionLine = (line: ProtectionLine, rawPrice: number) => {
+  const moveProtectionLine = (line: ProtectionLine, rawPrice: number | null) => {
     if (line.kind === "opening-gap-threshold") {
+      if (rawPrice == null) return false;
       if (!currentBar || openingGapMode === "off" || (!liveMode && trainingComplete)) return false;
       const threshold = openingGapThresholdFromPrice(currentBar.close, rawPrice, {
         mode: openingGapMode,
@@ -4942,13 +4982,17 @@ export function TrainingWorkbench() {
       appendEvent("opening_gap_threshold_moved", { mode: openingGapMode, unit: effectiveOpeningGapUnit, threshold });
       return true;
     }
-    if (line.source === "draft") return applyDraftProtectionPrice(line.kind, rawPrice);
-    if (!currentBar || !line.positionId || (!liveMode && trainingComplete)) return false;
-    const position = openPositions.find((item) => item.id === line.positionId);
+    if (line.source === "draft") return rawPrice == null ? false : applyDraftProtectionPrice(line.kind, rawPrice);
+    if (!currentBar || (!line.positionId && !line.orderId) || protectionCommandLock.current || (!liveMode && trainingComplete)) return false;
+    const position = line.orderId ? pendingOrders.find(item => item.id === line.orderId && item.action === "open") : openPositions.find((item) => item.id === line.positionId);
     if (!position) return false;
-    const value = Number(protectionPriceText(rawPrice));
+    const value = rawPrice == null ? null : Number(protectionPriceText(rawPrice));
     const previous = line.kind === "stop-loss" ? position.stopLoss : position.takeProfit;
-    if (line.kind === "stop-loss") {
+    if (line.orderId && value != null && "triggerPrice" in position) {
+      const error = entryProtectionError(position.side === "buy" ? "buy" : "sell", Number(position.triggerPrice), line.kind === "stop-loss" ? value : position.stopLoss, line.kind === "take-profit" ? value : position.takeProfit);
+      if (error) { setRuleNotice(error); return false; }
+    }
+    if (value != null && !line.orderId && line.kind === "stop-loss") {
       const onRiskSide = position.side === "long" ? value < currentBar.close : value > currentBar.close;
       const tightensRisk = previous == null
         || (position.side === "long" ? value >= previous : value <= previous);
@@ -4958,7 +5002,7 @@ export function TrainingWorkbench() {
           : "空头移动止损只能下移，且必须高于当前价");
         return false;
       }
-    } else {
+    } else if (value != null && !line.orderId) {
       const onProfitSide = position.side === "long" ? value > currentBar.close : value < currentBar.close;
       if (!onProfitSide) {
         setRuleNotice(position.side === "long" ? "多头止盈必须高于当前价" : "空头止盈必须低于当前价");
@@ -4980,7 +5024,7 @@ export function TrainingWorkbench() {
           instrumentId: instrument.id,
           timestamp: currentBar.timestamp,
           observedAccountVersion: currentLiveAccount.version,
-          positionId: position.id,
+          ...(line.orderId ? { orderId: position.id } : { positionId: position.id }),
           stopLoss: line.kind === "stop-loss" ? value : position.stopLoss ?? null,
           takeProfit: line.kind === "take-profit" ? value : position.takeProfit ?? null,
           marketRuleId: marketRules.id,
@@ -4988,6 +5032,7 @@ export function TrainingWorkbench() {
           executionProfileVersion: appSettingsRef.current.executionProfileVersion,
         });
         setSaveState("正在提交保护价修改命令…");
+        protectionCommandLock.current = true; setProtectionCommandRunning(true);
         void liveGateway.postCommand({
           ...protectionCommand,
           observedMarketRevision: currentLivePortfolio.lastProcessedRevision ?? null,
@@ -5016,7 +5061,7 @@ export function TrainingWorkbench() {
         }).catch((error) => {
           setRuleNotice(error instanceof Error ? error.message : "保护价修改失败，请刷新账户后重试");
           setSaveState("保护价未更新");
-        });
+        }).finally(() => { protectionCommandLock.current = false; setProtectionCommandRunning(false); });
         return true;
       }
       if (currentLivePortfolio?.accountId) {
@@ -5036,32 +5081,132 @@ export function TrainingWorkbench() {
       instrumentId: instrument.id,
       timestamp: currentBar.timestamp,
       observedAccountVersion: eventSequenceRef.current,
-      positionId: position.id,
+      ...(line.orderId ? { orderId: position.id } : { positionId: position.id }),
       stopLoss: line.kind === "stop-loss" ? value : position.stopLoss ?? null,
       takeProfit: line.kind === "take-profit" ? value : position.takeProfit ?? null,
       marketRuleId: marketRules.id,
       marketRuleVersion: marketRules.version,
     });
-    setPositions(modifyProtectionFromTradingCommand(positions, protectionCommand));
+    if (line.orderId) setPendingOrders(modifyProtectionFromTradingCommand(pendingOrders, protectionCommand, "order"));
+    else setPositions(modifyProtectionFromTradingCommand(positions, protectionCommand));
     setRuleNotice("");
     appendEvent(line.kind === "stop-loss" ? "trailing_stop_moved" : "take_profit_moved", {
       positionId: position.id,
       previousPrice: previous,
       nextPrice: value,
       side: position.side,
-      initialRisk: position.initialRisk,
+      initialRisk: "initialRisk" in position ? position.initialRisk : undefined,
       command: protectionCommand,
     }, currentBar.timestamp);
-    setSaveState(line.kind === "stop-loss" ? "移动止损已更新 · 将自动保存" : "止盈已更新 · 将自动保存");
+    setSaveState(value == null ? "保护价已移除 · 将自动保存" : line.kind === "stop-loss" ? "移动止损已更新 · 将自动保存" : "止盈已更新 · 将自动保存");
     return true;
   };
 
-  const queueOpenOrder = (side: "buy" | "sell") => {
+  const removeProtectionPrice = (id: string, target: "position" | "order", kind: ProtectionPriceKind) => moveProtectionLine({
+    id: `${id}:${kind}`, kind, price: 0, timestamp: currentBar?.timestamp ?? 0, label: "保护价", movable: true, source: "position",
+    ...(target === "order" ? { orderId: id } : { positionId: id }),
+  }, null);
+
+  const applyLiveOrderResult = (payload: unknown) => {
+    const result = payload as { account?: LiveAccountRecord; portfolios?: LivePortfolioRecord[] };
+    const updated = result.portfolios?.find(item => item.instrumentId === instrument.id);
+    if (!updated || !result.account) throw new Error("交易命令返回的账户快照不完整");
+    const portfolios = livePortfoliosRef.current.map(item => item.instrumentId === instrument.id ? { ...item, ...updated, id: instrument.id, instrumentId: instrument.id } : item);
+    const accounts = liveAccountsRef.current.map(item => item.id === result.account!.id ? result.account! : item);
+    livePortfoliosRef.current = portfolios; liveAccountsRef.current = accounts;
+    liveStatePersistedRef.current = { accounts, portfolios, watchlist: liveWatchlistRef.current };
+    setLivePortfolios(portfolios); setLiveAccounts(accounts);
+    if (activeOrderInstrumentRef.current === instrument.id) {
+      setPositions(updated.positions ?? []); setPendingOrders(updated.pendingOrders ?? []);
+      setExecutions(updated.executions ?? []); setOrderRejections(updated.orderRejections ?? []);
+    }
+  };
+
+  const movePendingOrderPrice = (line: ProtectionLine, rawPrice: number) => {
+    if (!currentBar || protectionCommandLock.current || loading || (!liveMode && trainingComplete)) return false;
+    const order = pendingOrders.find(item => item.id === line.orderId && item.action === "open");
+    if (!order || (order.orderType !== "limit" && order.orderType !== "stop")) { setRuleNotice("挂单已成交或撤销，请重新选择"); return false; }
+    try {
+      const price = Number(protectionPriceText(rawPrice));
+      const portfolio = livePortfoliosRef.current.find(item => item.instrumentId === instrument.id);
+      const account = liveAccountsRef.current.find(item => item.id === portfolio?.accountId);
+      const command = normalizeTradingCommand({ commandId: createUuid(), type: "modify-order", environment: liveMode ? "live" : "training",
+        accountId: liveMode ? account?.id ?? "" : `training:${sessionId}`, market: tradingCommandMarketFor(marketRules.market, instrument.id, instrument.market), instrumentId: instrument.id,
+        timestamp: currentBar.timestamp, observedAccountVersion: account?.version ?? eventSequenceRef.current, orderId: order.id, triggerPrice: price, expectedTriggerPrice: line.price });
+      const changed = modifyPendingOrderFromTradingCommand(pendingOrders, command, sourceQuotePrice(order.side, currentBar.close, executionProfile.spreadBps, instrumentEconomics), marketRules.priceTick);
+      const draft = decisionSubmissions.find(item => item.id === order.decisionSubmissionId)?.decision ?? currentEntryDecision;
+      const gate = evaluateEntryDiscipline(price, order.stopLoss, order.takeProfit, draft);
+      if (!gate.allowed) throw new Error(gate.checks.filter(item => item.status === "blocked").map(item => item.message).join("；") || "改单未通过交易纪律检查");
+      const reservation = calculateOrderReservation(order.side, order.orderType, price, order.qty, executionProfile, order.instrumentEconomics ?? instrumentEconomics);
+      if (marginInstrument && (reservation.requiredOrderMargin == null || !Number.isFinite(reservation.entryFee))) throw new Error("无法换算账户币种，请检查换算设置");
+      const required = marginInstrument ? reservation.reservedMargin : reservation.reservedCash;
+      if (tradingMode === "capital" && required > availableBuyingPower + Number(order.reservedMargin ?? 0) + Number(order.reservedCash ?? 0) + 0.000001) throw new Error("当前可用资金不足以修改挂单价格");
+      if (liveMode) {
+        if (!portfolio || !account) throw new Error("账户正在恢复，请重新读取后修改");
+        protectionCommandLock.current = true; setProtectionCommandRunning(true); setSaveState("正在修改挂单价格…");
+        void liveGateway.postCommand({ ...command, observedMarketRevision: portfolio.lastProcessedRevision ?? null }).then(payload => {
+          applyLiveOrderResult(payload); setRuleNotice(""); setSaveState("挂单价格已更新");
+        }).catch(error => setRuleNotice(error instanceof Error ? error.message : "挂单价格未修改，请重新读取后重试"))
+          .finally(() => { protectionCommandLock.current = false; setProtectionCommandRunning(false); });
+      } else {
+        setPendingOrders(changed.map(item => item.id === order.id ? { ...item, reservedCash: reservation.reservedCash, reservedMargin: reservation.reservedMargin || undefined } : item));
+        appendEvent("order_modified", { orderId: order.id, previousPrice: order.triggerPrice, nextPrice: price, command });
+        setRuleNotice(""); setSaveState("挂单价格已更新 · 将自动保存");
+      }
+      return true;
+    } catch (error) {
+      rejectOrderAttempt({ ok: false, code: "invalid_pending_modification", message: error instanceof Error ? error.message : "挂单价格未修改，请重新选择" }, { orderId: order.id, action: "modify" });
+      return false;
+    }
+  };
+
+  const evaluateEntryDiscipline = (expectedEntry: number, stopLoss: number | undefined, takeProfit: number | undefined, entryDraft: Decision) => {
+    const patternFilter = trainingTask?.patternFilter;
+    const currentPatternNames = patternFilter?.matchedPresetIds.length
+      ? patternFilter.matchedPresetIds.map((id) => {
+          const index = patternFilter.presetIds.indexOf(id);
+          return patternFilter.presetNames[index] ?? id;
+        })
+      : patternFilter?.presetNames ?? [];
+    const plannedRisk = stopLoss == null ? 0 : Math.abs(expectedEntry - stopLoss);
+    const plannedReward = takeProfit == null ? 0 : Math.abs(takeProfit - expectedEntry);
+    const sopInstrument = deriveSopInstrumentContext(
+      bars,
+      cursor,
+      instrument.timezone,
+      timeframe,
+      { market: instrument.market, entryPrice: expectedEntry, marketCap: instrument.marketCap },
+    );
+    const entryDecision = decisionForEntry(entryDraft, decisionSubmissions, currentBar!.timestamp);
+    return evaluateDisciplineGate({
+      strictModeEnabled: appSettingsRef.current.strictModeEnabled,
+      requirePretradePlan: appSettingsRef.current.requirePretradePlan,
+      requiredPretradeFields: appSettingsRef.current.requiredPretradeFields,
+      sopCheckEnabled: appSettingsRef.current.sopCheckEnabled,
+      personalSopCheckEnabled: appSettingsRef.current.personalSopCheckEnabled,
+      activePersonalSopRule: appSettingsRef.current.activePersonalSopRule,
+      scope: {
+        market: performanceMarketCode(instrument.market, instrument.id),
+        timeframe,
+        instrumentId: instrument.id,
+      },
+      decision: {
+        ...entryDecision,
+        score: decisionScore(entryDecision),
+      },
+      patterns: currentPatternNames,
+      instrument: sopInstrument,
+      riskReward: plannedRisk > 0 && plannedReward > 0 ? plannedReward / plannedRisk : undefined,
+    });
+  };
+
+  const queueOpenOrder = (side: "buy" | "sell", chartOrder?: { orderType: "limit" | "stop"; triggerPrice: number }) => {
+    const entryDraft = currentEntryDecision;
     let qty = orderQty;
     if (!currentBar || (positionSizeMode !== "risk-percent" && qty <= 0)
       || (!liveMode && (cursor >= (trainingTask?.endCursor ?? bars.length - 1) || trainingComplete))) return;
-    const selectedOrderType: OrderType = orderType;
-    const triggerPrice = selectedOrderType === "market" ? undefined : Number(orderTriggerPrice);
+    const selectedOrderType: OrderType = chartOrder?.orderType ?? orderType;
+    const triggerPrice = selectedOrderType === "market" ? undefined : chartOrder?.triggerPrice ?? Number(orderTriggerPrice);
     if (selectedOrderType !== "market" && (!Number.isFinite(triggerPrice) || Number(triggerPrice) <= 0)) {
       rejectOrderAttempt({
         ok: false,
@@ -5070,8 +5215,8 @@ export function TrainingWorkbench() {
       }, { action: "open", side, qty, orderType: selectedOrderType });
       return;
     }
-    const decisionStop = Number(decision.stop);
-    const decisionTargetPrice = Number(decision.target);
+    const decisionStop = Number(entryDraft.stop);
+    const decisionTargetPrice = Number(entryDraft.target);
     const enteredStop = Number(orderStopLoss);
     const enteredTarget = Number(orderTakeProfit);
     const stopLoss = Number.isFinite(enteredStop) && enteredStop > 0
@@ -5081,20 +5226,18 @@ export function TrainingWorkbench() {
       ? enteredTarget
       : Number.isFinite(decisionTargetPrice) && decisionTargetPrice > 0 ? decisionTargetPrice : undefined;
     const expectedEntry = triggerPrice ?? currentBar.close;
-    const invalidStop = stopLoss != null && (side === "buy" ? stopLoss >= expectedEntry : stopLoss <= expectedEntry);
-    const invalidTarget = takeProfit != null && (side === "buy" ? takeProfit <= expectedEntry : takeProfit >= expectedEntry);
-    if (invalidStop || invalidTarget) {
+    const protectiveError = entryProtectionError(side, expectedEntry, stopLoss, takeProfit);
+    const conditionalError = selectedOrderType === "market" ? "" : pendingPriceError(side, selectedOrderType, expectedEntry, sourceQuotePrice(side, currentBar.close, executionProfile.spreadBps, instrumentEconomics));
+    if (protectiveError || conditionalError) {
       rejectOrderAttempt({
         ok: false,
         code: "invalid_protective_level",
-        message: side === "buy"
-          ? "多头止损应低于预计入场价，止盈应高于预计入场价"
-          : "空头止损应高于预计入场价，止盈应低于预计入场价",
+        message: protectiveError || conditionalError,
       }, { action: "open", side, qty, stopLoss, takeProfit, expectedEntry });
       return;
     }
     const riskSizing = positionSizeMode === "risk-percent"
-      ? stopLoss == null ? null : riskSizingFor(side, expectedEntry, stopLoss)
+      ? stopLoss == null ? null : riskSizingFor(side, expectedEntry, stopLoss, selectedOrderType)
       : null;
     if (positionSizeMode === "risk-percent") {
       if (stopLoss == null) {
@@ -5115,43 +5258,7 @@ export function TrainingWorkbench() {
       }
       qty = riskSizing.quantity;
     }
-    const patternFilter = trainingTask?.patternFilter;
-    const currentPatternNames = patternFilter?.matchedPresetIds.length
-      ? patternFilter.matchedPresetIds.map((id) => {
-          const index = patternFilter.presetIds.indexOf(id);
-          return patternFilter.presetNames[index] ?? id;
-        })
-      : patternFilter?.presetNames ?? [];
-    const plannedRisk = stopLoss == null ? 0 : Math.abs(expectedEntry - stopLoss);
-    const plannedReward = takeProfit == null ? 0 : Math.abs(takeProfit - expectedEntry);
-    const sopInstrument = deriveSopInstrumentContext(
-      bars,
-      cursor,
-      instrument.timezone,
-      timeframe,
-      { market: instrument.market, entryPrice: expectedEntry, marketCap: instrument.marketCap },
-    );
-    const entryDecision = decisionForEntry(decision, decisionSubmissions, currentBar.timestamp);
-    const disciplineGate = evaluateDisciplineGate({
-      strictModeEnabled: appSettingsRef.current.strictModeEnabled,
-      requirePretradePlan: appSettingsRef.current.requirePretradePlan,
-      requiredPretradeFields: appSettingsRef.current.requiredPretradeFields,
-      sopCheckEnabled: appSettingsRef.current.sopCheckEnabled,
-      personalSopCheckEnabled: appSettingsRef.current.personalSopCheckEnabled,
-      activePersonalSopRule: appSettingsRef.current.activePersonalSopRule,
-      scope: {
-        market: performanceMarketCode(instrument.market, instrument.id),
-        timeframe,
-        instrumentId: instrument.id,
-      },
-      decision: {
-        ...entryDecision,
-        score: decisionScore(entryDecision),
-      },
-      patterns: currentPatternNames,
-      instrument: sopInstrument,
-      riskReward: plannedRisk > 0 && plannedReward > 0 ? plannedReward / plannedRisk : undefined,
-    });
+    const disciplineGate = evaluateEntryDiscipline(expectedEntry, stopLoss, takeProfit, entryDraft);
     if (!disciplineGate.allowed) {
       const blockedMessage = disciplineGate.checks
         .filter((check) => check.status === "blocked")
@@ -5179,11 +5286,7 @@ export function TrainingWorkbench() {
     const activeExecutionProfile = executionProfile;
     const orderEconomics = marketRules.instrumentEconomics;
     const marginMode = isMarginEconomics(orderEconomics);
-    const expectedExecutionPrice = marginMode && selectedOrderType !== "market"
-      ? executionPriceFromQuote(side, expectedEntry, activeExecutionProfile)
-      : executionPrice(side, expectedEntry, activeExecutionProfile, orderEconomics);
-    const entryFee = executionFee(expectedExecutionPrice, qty, activeExecutionProfile, orderEconomics);
-    const requiredOrderMargin = requiredMargin(expectedExecutionPrice, qty, orderEconomics);
+    const { entryFee, requiredOrderMargin, reservedMargin, reservedCash } = calculateOrderReservation(side, selectedOrderType, expectedEntry, qty, activeExecutionProfile, orderEconomics);
     if (marginMode && (requiredOrderMargin == null || !Number.isFinite(entryFee))) {
       rejectOrderAttempt({
         ok: false,
@@ -5192,10 +5295,6 @@ export function TrainingWorkbench() {
       }, { action: "open", side, qty, accountCurrency: orderEconomics?.accountCurrency });
       return;
     }
-    const reservedMargin = marginMode ? Number(requiredOrderMargin) + entryFee : 0;
-    const reservedCash = !marginMode && side === "buy"
-      ? estimatedBuyCashRequired(expectedEntry, qty, activeExecutionProfile, orderEconomics)
-      : 0;
     const requiredBuyingPower = marginMode ? reservedMargin : reservedCash;
     if (tradingMode === "capital" && requiredBuyingPower > availableBuyingPower + 0.000001) {
       rejectOrderAttempt({
@@ -5208,7 +5307,7 @@ export function TrainingWorkbench() {
       return;
     }
     const protectiveDecisionId = !liveMode
-      ? ensureProtectiveDecisionCard(stopLoss, takeProfit)
+      ? ensureProtectiveDecisionCard(stopLoss, takeProfit, "protective_levels_attached_to_order", entryDraft)
       : undefined;
     const decisionSubmissionId = protectiveDecisionId
       ?? latestEntryDecisionId(decisionSubmissions, currentBar.timestamp);
@@ -5441,15 +5540,21 @@ export function TrainingWorkbench() {
       } else if (currentLivePortfolio.accountId) {
         setRuleNotice("实时模拟账户正在恢复，请刷新账户后重试");
         setSaveState("交易命令未提交");
+        return false;
       } else {
         setRuleNotice(currentLivePortfolio?.accountId
           ? "实时模拟账户正在恢复，请刷新账户后重试"
           : "当前标的尚未关联可交易的实时模拟账户，无法下单");
         setSaveState("交易命令未提交");
+        return false;
       }
-      return;
+      return true;
     }
     setPendingOrders((items) => [...items, order]);
+    if (protectiveDecisionId) {
+      setDecision(current => current === entryDraft ? draftAfterDecisionSaved(current, entryDraft) : current);
+      setDecisionDraftBeforeBackfill(current => current === entryDraft ? draftAfterDecisionSaved(current, entryDraft) : current);
+    }
     setRuleNotice(disciplineWarning);
     appendEvent("order_queued", {
       order,
@@ -5462,6 +5567,7 @@ export function TrainingWorkbench() {
     });
     setOrderPanelTab("pending");
     setSaveState("有未保存更改");
+    return true;
   };
 
   const queueClosePosition = (positionId: string) => {
@@ -5801,6 +5907,7 @@ export function TrainingWorkbench() {
 
   const cancelPendingOrder = (orderId: string) => {
     const order = pendingOrders.find((item) => item.id === orderId);
+    if (!order || protectionCommandLock.current) return false;
     if (liveMode) {
       const currentLivePortfolio = livePortfoliosRef.current.find((item) => item.instrumentId === instrument.id);
       const currentLiveAccount = currentLivePortfolio?.accountId
@@ -5821,7 +5928,8 @@ export function TrainingWorkbench() {
           executionProfileVersion: appSettingsRef.current.executionProfileVersion,
         });
         setSaveState("正在提交撤单命令…");
-        void liveGateway.postCommand({
+        protectionCommandLock.current = true; setProtectionCommandRunning(true);
+        return liveGateway.postCommand({
           ...cancelCommand,
           observedMarketRevision: currentLivePortfolio.lastProcessedRevision ?? null,
         }).then((payload) => {
@@ -5848,11 +5956,12 @@ export function TrainingWorkbench() {
           setOrderRejections(updatedPortfolio.orderRejections ?? []);
           appendEvent("order_cancelled", { orderId, order, commandId }, currentBar?.timestamp);
           setSaveState("委托已撤销");
+          return true;
         }).catch((error) => {
           setRuleNotice(error instanceof Error ? error.message : "撤单命令提交失败，请刷新账户后重试");
           setSaveState("撤单命令未提交");
-        });
-        return;
+          return false;
+        }).finally(() => { protectionCommandLock.current = false; setProtectionCommandRunning(false); });
       }
       setRuleNotice(currentLivePortfolio?.accountId
         ? "实时模拟账户正在恢复，请刷新账户后重试"
@@ -5874,6 +5983,7 @@ export function TrainingWorkbench() {
     setPendingOrders(cancelPendingOrderFromTradingCommand(pendingOrders, cancelCommand));
     appendEvent("order_cancelled", { orderId, order, command: cancelCommand });
     setSaveState("有未保存更改");
+    return true;
   };
 
   const runLiveAccountCommand = (
@@ -7190,7 +7300,7 @@ export function TrainingWorkbench() {
     setSelectedDecisionId("");
     setDecisionTarget(null);
     setEditingDecisionId("");
-    decisionDraftBeforeBackfillRef.current = null;
+    setDecisionDraftBeforeBackfill(null);
     setOrderQty(configuredDefaultOrderQuantity(appSettingsRef.current, instrument.market, instrument.id, marketRules));
     setPositionSizeMode(appSettingsRef.current.positionSizeMode);
     setRiskPercent(appSettingsRef.current.riskPercent);
@@ -7229,7 +7339,7 @@ export function TrainingWorkbench() {
       return;
     }
     if (liveMode) {
-      const hasContent = hasDecisionContent(decision, decisionSubmissions);
+      const hasContent = hasDecisionContent(currentEntryDecision, decisionSubmissions);
       if (liveContext && currentBar && hasContent) {
         const savedAt = new Date().toISOString();
         const existingPortfolio = livePortfoliosRef.current.find((item) => item.instrumentId === liveContext.instrumentId);
@@ -7252,7 +7362,7 @@ export function TrainingWorkbench() {
           tradingMode,
           initialCapital,
           cashBalance,
-          decision: { ...decision, reasons: [...decision.reasons] },
+          decision: { ...currentEntryDecision, reasons: [...currentEntryDecision.reasons] },
           decisionSubmissions: decisionSubmissions.map((submission) => ({
             ...submission,
             decision: { ...submission.decision, reasons: [...submission.decision.reasons] },
@@ -7395,6 +7505,17 @@ export function TrainingWorkbench() {
 
   const commitReasonTags = (value: string[]) => {
     const nextTags = normalizeReasonTags(value);
+    const previousTags = pendingReasonTagsRef.current ?? reasonTags;
+    const added = nextTags.filter(tag => !previousTags.includes(tag));
+    const removed = previousTags.filter(tag => !nextTags.includes(tag));
+    const pending = pendingReasonTagChangesRef.current;
+    pendingReasonTagChangesRef.current = {
+      added: [...new Set([...(pending?.added ?? []), ...added])].filter(tag => !removed.includes(tag)),
+      removed: [...new Set([...(pending?.removed ?? []), ...removed])].filter(tag => !added.includes(tag)),
+    };
+    deletedReasonTagsRef.current = updateDeletedDecisionReasonTags(previousTags, nextTags, deletedReasonTagsRef.current);
+    setDeletedReasonTags(deletedReasonTagsRef.current);
+    pendingReasonTagsRef.current = nextTags;
     setReasonTags(nextTags);
     setCustomReasonTags(nextTags.filter((tag) => !reasonOptions.includes(tag)));
   };
@@ -7432,11 +7553,11 @@ export function TrainingWorkbench() {
     }
     commitReasonTags(reasonTags.map((tag) => tag === previousTag ? nextTag : tag));
     setDecision(current => renameDecisionReason(current, previousTag, nextTag));
-    if (decisionDraftBeforeBackfillRef.current) {
-      decisionDraftBeforeBackfillRef.current = {
-        ...decisionDraftBeforeBackfillRef.current,
-        reasons: decisionDraftBeforeBackfillRef.current.reasons.map((reason) => reason === previousTag ? nextTag : reason),
-      };
+    if (decisionDraftBeforeBackfill) {
+      setDecisionDraftBeforeBackfill({
+        ...decisionDraftBeforeBackfill,
+        reasons: decisionDraftBeforeBackfill.reasons.map((reason) => reason === previousTag ? nextTag : reason),
+      });
     }
     const affectedSubmissionCount = decisionSubmissions.filter((submission) => submission.decision.reasons.includes(previousTag)).length;
     setDecisionSubmissions((items) => items.map((submission) => submission.decision.reasons.includes(previousTag)
@@ -7461,18 +7582,18 @@ export function TrainingWorkbench() {
       ...current,
       reasons: current.reasons.filter((reason) => reason !== tag),
     }));
-    if (decisionDraftBeforeBackfillRef.current) {
-      decisionDraftBeforeBackfillRef.current = {
-        ...decisionDraftBeforeBackfillRef.current,
-        reasons: decisionDraftBeforeBackfillRef.current.reasons.filter((reason) => reason !== tag),
-      };
+    if (decisionDraftBeforeBackfill) {
+      setDecisionDraftBeforeBackfill({
+        ...decisionDraftBeforeBackfill,
+        reasons: decisionDraftBeforeBackfill.reasons.filter((reason) => reason !== tag),
+      });
     }
     if (editingReasonTag === tag) cancelEditReasonTag();
     appendEvent("reason_tag_deleted", { tag });
     setSaveState(`交易理由标签“${tag}”已删除 · 历史决策保留原记录`);
   };
 
-  const openDecisionForCandle = useCallback((target: CandleContextTarget) => {
+  const openDecisionForCandle = useCallback((target: CandleContextTarget, options?: { preserveChartViewport?: boolean }) => {
     const targetCursor = showingCanonicalChart
       ? bars.findIndex((bar) => bar.timestamp === target.timestamp)
       : findTimeframeViewCursor(bars, Math.min(bars[cursor]?.timestamp ?? 0,
@@ -7481,12 +7602,16 @@ export function TrainingWorkbench() {
     if (targetCursor < 0 || targetCursor > cursor) return;
     const targetBar = bars[targetCursor];
     if (!decisionTarget) {
-      decisionDraftBeforeBackfillRef.current = {
+      setDecisionDraftBeforeBackfill({
         ...decision,
         reasons: [...decision.reasons],
-      };
-      setDecision(defaultDecision);
+      });
+      if (options?.preserveChartViewport) {
+        if (!orderStopLoss && Number(decision.stop) > 0) setOrderStopLoss(decision.stop);
+        if (!orderTakeProfit && Number(decision.target) > 0) setOrderTakeProfit(decision.target);
+      }
     }
+    if (!decisionTarget || editingDecisionId) setDecision(defaultDecision);
     setEditingDecisionId("");
     setBackfillAssociation("associate");
     setDecisionTarget({
@@ -7497,29 +7622,32 @@ export function TrainingWorkbench() {
     setSelectedDecisionId("");
     setPlaying(false);
     setSaveState("正在补写历史 K 线决策");
-    requestAnimationFrame(() => decisionPanelRef.current?.scrollIntoView({ behavior: "smooth", block: "nearest" }));
-  }, [bars, chartTimeframe, cursor, decision, decisionTarget, instrument.id, instrument.market, instrument.timezone, showingCanonicalChart]);
+    if (!options?.preserveChartViewport) requestAnimationFrame(() => decisionPanelRef.current?.scrollIntoView({ behavior: "smooth", block: "nearest" }));
+  }, [bars, chartTimeframe, cursor, decision, decisionDraftBeforeBackfill, decisionTarget, editingDecisionId, instrument.id, instrument.market, instrument.timezone, orderStopLoss, orderTakeProfit, showingCanonicalChart]);
 
   const cancelDecisionBackfill = () => {
-    if (decisionDraftBeforeBackfillRef.current) setDecision(decisionDraftBeforeBackfillRef.current);
-    decisionDraftBeforeBackfillRef.current = null;
+    if (decisionDraftBeforeBackfill) setDecision(decisionDraftBeforeBackfill);
+    setDecisionDraftBeforeBackfill(null);
     setDecisionTarget(null);
     setBackfillAssociation("associate");
     setEditingDecisionId("");
+    setSelectedDecisionId("");
+    setProtectionPriceSelection(null);
+    setDrawingRequest(null);
     setSaveState("已取消补写，原决策草稿已恢复");
   };
 
-  const editDecision = useCallback((submission: DecisionSubmission) => {
-    const targetBar = bars[submission.cursor] ?? bars.find((bar) => bar.timestamp === submission.barTimestamp);
-    const targetCursor = targetBar ? bars.indexOf(targetBar) : submission.cursor;
+  const editDecision = useCallback((submission: DecisionSubmission, options?: { preserveChartViewport?: boolean }) => {
+    const targetCursor = bars.findIndex(bar => bar.timestamp === submission.barTimestamp);
+    const targetBar = bars[targetCursor];
     if (!targetBar || targetCursor < 0 || targetCursor > cursor) {
       setSaveState("这份决策对应的 K 线当前不可见，暂时无法编辑");
       return;
     }
-    decisionDraftBeforeBackfillRef.current = {
+    if (!decisionDraftBeforeBackfill) setDecisionDraftBeforeBackfill({
       ...decision,
       reasons: [...decision.reasons],
-    };
+    });
     setEditingDecisionId(submission.id);
     setDecision({ ...submission.decision, reasons: [...submission.decision.reasons] });
     setDecisionTarget({
@@ -7527,21 +7655,19 @@ export function TrainingWorkbench() {
       timestamp: targetBar.timestamp,
       referencePrice: targetBar.close,
     });
-    setSelectedDecisionId("");
+    setSelectedDecisionId(submission.id);
+    setProtectionPriceSelection(null);
+    setDrawingRequest(null);
     setPlaying(false);
     setSaveState("正在编辑事前决策");
-    requestAnimationFrame(() => decisionPanelRef.current?.scrollIntoView({ behavior: "smooth", block: "nearest" }));
-  }, [bars, cursor, decision]);
+    if (!options?.preserveChartViewport) requestAnimationFrame(() => decisionPanelRef.current?.scrollIntoView({ behavior: "smooth", block: "nearest" }));
+  }, [bars, cursor, decision, decisionDraftBeforeBackfill]);
 
   const deleteDecision = (submission: DecisionSubmission) => {
     if (!window.confirm("确定删除这份决策吗？删除后会从盘面标记和复盘记录中移除，但删除事件仍会保留在训练审计日志中。")) return;
     setDecisionSubmissions((items) => removeDecisionRecord(items, submission.id));
     if (editingDecisionId === submission.id) {
-      if (decisionDraftBeforeBackfillRef.current) setDecision(decisionDraftBeforeBackfillRef.current);
-      decisionDraftBeforeBackfillRef.current = null;
-      setDecisionTarget(null);
-      setBackfillAssociation("associate");
-      setEditingDecisionId("");
+      cancelDecisionBackfill();
     }
     setSelectedDecisionId("");
     appendEvent("decision_deleted", {
@@ -7554,7 +7680,11 @@ export function TrainingWorkbench() {
     setSaveState("决策已删除 · 将自动保存");
   };
 
-  const locateDecision = (record: DecisionRecord) => { openReviewEvidence(record.barTimestamp, "计划"); setSelectedDecisionId(record.id); };
+  const selectDecisionForEditing = (id: string) => {
+    const submission = decisionSubmissions.find(item => item.id === id);
+    if (submission) editDecision(submission, { preserveChartViewport: true });
+  };
+  const locateDecision = (record: DecisionRecord) => { openReviewEvidence(record.barTimestamp, "计划"); selectDecisionForEditing(record.id); };
 
   const submitDecision = () => {
     const editingSubmission = editingDecisionId
@@ -7588,9 +7718,8 @@ export function TrainingWorkbench() {
         decision: nextDecision,
         backfilled: Boolean(editingSubmission.backfilled),
       }, editingSubmission.barTimestamp);
-      const returnDraft = decisionDraftBeforeBackfillRef.current ?? undefined;
-      setDecision(current => draftAfterDecisionSaved(current, nextDecision, returnDraft));
-      decisionDraftBeforeBackfillRef.current = null;
+      setDecision(current => draftAfterDecisionSaved(current, nextDecision));
+      setDecisionDraftBeforeBackfill(null);
       setDecisionTarget(null);
       setBackfillAssociation("associate");
       setEditingDecisionId("");
@@ -7638,8 +7767,8 @@ export function TrainingWorkbench() {
       associatedPositionIds: associatedBackfillPositionIds,
     }, targetBar.timestamp);
     if (backfillTarget) {
-      if (decisionDraftBeforeBackfillRef.current) setDecision(decisionDraftBeforeBackfillRef.current);
-      decisionDraftBeforeBackfillRef.current = null;
+      setDecision(current => draftAfterDecisionSaved(current, submission.decision));
+      setDecisionDraftBeforeBackfill(null);
       setDecisionTarget(null);
       setBackfillAssociation("associate");
       setSaveState(trainingComplete ? "补写决策已加入 · 将自动保存" : "补写决策已保存 · 回放位置未改变");
@@ -7712,6 +7841,7 @@ export function TrainingWorkbench() {
     const protection = decisionProtectionFromDrawings(drawings, nextDrawings);
     if (!protection) return;
     const stop = protection.stop?.toFixed(instrument.pricePrecision) ?? '', target = protection.target?.toFixed(instrument.pricePrecision) ?? '';
+    if (decisionTarget) { setDecision(current => ({ ...current, stop, target })); setSaveState('计划保护价已更新 · 保存后生效'); return; }
     setOrderStopLoss(stop); setOrderTakeProfit(target);
     setDecision(current => ({ ...current, stop, target }));
     if (protection.stop != null || protection.target != null) ensureProtectiveDecisionCard(protection.stop, protection.target, 'protective_levels_drawn_on_chart');
@@ -7745,6 +7875,7 @@ export function TrainingWorkbench() {
   };
 
   const beginDrawing = (tool: DrawingTool) => {
+    setProtectionPriceSelection(null);
     setDrawingGroupOpen("");
     setSelectedDrawingId("");
     if (tool.name === "trainingTextBox") {
@@ -7757,7 +7888,7 @@ export function TrainingWorkbench() {
       name: tool.name,
       nonce: (request?.nonce ?? 0) + 1,
       mode: drawingMagnetMode,
-      styles: drawingStyles(drawingColor, drawingLineWidth),
+      styles: drawingVisualStyles(undefined, drawingColor, drawingLineWidth),
       extendData: { toolLabel: tool.label, toolKind: tool.kind ?? "drawing" },
     }));
   };
@@ -7772,7 +7903,7 @@ export function TrainingWorkbench() {
       nonce: (request?.nonce ?? 0) + 1,
       mode: "normal",
       styles: {
-        ...drawingStyles(drawingColor, drawingLineWidth),
+        ...drawingVisualStyles(undefined, drawingColor, drawingLineWidth),
         text: { color: drawingColor, size: 18 },
       },
       extendData: { toolLabel: "文字标记", toolKind: "text", text },
@@ -7794,26 +7925,9 @@ export function TrainingWorkbench() {
   const updateDrawingVisualStyle = (drawingId: string, color: string, size: number) => {
     const selected = drawings.find((drawing) => drawing.id === drawingId);
     if (!selected) return;
-    const existing = selected.styles && typeof selected.styles === "object"
-      ? selected.styles as Record<string, unknown>
-      : {};
-    const existingLine = existing.line && typeof existing.line === "object"
-      ? existing.line as Record<string, unknown>
-      : {};
-    const existingRect = existing.rect && typeof existing.rect === "object"
-      ? existing.rect as Record<string, unknown>
-      : {};
-    const existingText = existing.text && typeof existing.text === "object"
-      ? existing.text as Record<string, unknown>
-      : {};
-    updateDrawing(drawingId, {
-      styles: {
-        ...existing,
-        line: { ...existingLine, color, size },
-        rect: { ...existingRect, color: `${color}24`, borderColor: color, borderSize: size },
-        text: { ...existingText, color },
-      },
-    });
+    const styles = drawingVisualStyles(selected.styles, color, size);
+    updateDrawing(drawingId, { styles });
+    setDrawingRequest(request => request?.name === selected.name ? { ...request, styles } : request);
   };
 
   const updateDrawingTextSize = (drawingId: string, size: number) => {
@@ -7876,12 +7990,10 @@ export function TrainingWorkbench() {
   const selectedDrawingColor = selectedDrawing?.name === "trainingTextBox"
     ? selectedDrawingStyles.text?.color ?? selectedDrawingStyles.line?.color ?? drawingColor
     : selectedDrawingStyles.line?.color ?? selectedDrawingStyles.rect?.borderColor ?? drawingColor;
-  const selectedDrawingWidth = selectedDrawingStyles.line?.size ?? selectedDrawingStyles.rect?.borderSize ?? drawingLineWidth;
+  const selectedDrawingWidth = selectedDrawing?.name === "trainingRectangle"
+    ? selectedDrawingStyles.rect?.borderSize ?? selectedDrawingStyles.line?.size ?? drawingLineWidth
+    : selectedDrawingStyles.line?.size ?? drawingLineWidth;
   const selectedDrawingTextSize = selectedDrawingStyles.text?.size ?? 18;
-  const drawingTextSizeOptions = Array.from(new Set([
-    12, 14, 16, 18, 22, 28, 36, 48,
-    selectedDrawingTextSize,
-  ])).sort((left, right) => left - right);
   const selectedDrawingText = selectedDrawing?.extendData && typeof selectedDrawing.extendData === "object"
     ? String((selectedDrawing.extendData as { text?: unknown }).text ?? "")
     : "";
@@ -9640,6 +9752,14 @@ export function TrainingWorkbench() {
   const shortcutReplayAvailable = view === "replay" && !liveMode && !trashPreview && !loading && !chartViewLoading;
   const replayNextAvailable = shortcutReplayAvailable && !playbackDisabled && cursor < (trainingTask?.endCursor ?? bars.length - 1);
   const shortcutTradeAvailable = view === "replay" && !loading && !trashPreview && Boolean(currentBar) && (liveMode || !trainingComplete);
+  const chartTradingScope = `${sessionId}:${instrument.id}:${chartTimeframe}:${liveMode ? currentLiveExecutionAccount?.id ?? "live" : "training"}`;
+  const chartPendingCancellation: PendingOrderCancellation = {
+    scope: chartTradingScope, drawLines: true, disabled: loading || Boolean(trashPreview) || protectionCommandRunning,
+    error: ruleNotice, onCancel: cancelPendingOrder,
+    orders: pendingOrders.flatMap(order => order.action === "open" && (order.orderType === "limit" || order.orderType === "stop") && order.triggerPrice ? [{
+      id: order.id, price: order.triggerPrice, stopLoss: order.stopLoss, takeProfit: order.takeProfit, label: `#${order.id.slice(0, 6)} ${chartOrderLabel({ side: order.side, orderType: order.orderType })} ${order.qty}${marginInstrument ? "手" : "股"} · ${trainingPriceLabel(order.triggerPrice)}`,
+    }] : []),
+  };
   const changeShortcutTimeframe = (direction: number) => {
     const index = Math.max(0, currentAvailableTimeframes.indexOf(chartTimeframe));
     handleTimeframeChange(currentAvailableTimeframes[(index + direction + currentAvailableTimeframes.length) % currentAvailableTimeframes.length]);
@@ -9679,6 +9799,9 @@ export function TrainingWorkbench() {
     onAction: () => { const handler = shortcutHandlers.replayNext; if (!handler?.enabled) return false; handler.run(); return true; },
   });
 
+  const reasonTagsState = syncedPreferencesReady ? "ready" : syncedPreferencesLoadError ? "error" : "loading";
+  const retryReasonTags = () => { setSyncedPreferencesLoadError(false); setSyncedPreferencesRetryNonce(value => value + 1); };
+
   return (
     <div className="app-shell">
       <aside className="main-rail">
@@ -9716,7 +9839,11 @@ export function TrainingWorkbench() {
       </aside>
 
       <main className="workspace">
-        {desktopLayout && appSettings.mt4Enabled && view === "mt4" && <Mt4Panel disciplineSettings={appSettings} sharedReasonTags={reasonTags} onReasonTagsChange={commitReasonTags} chartMotion={appSettings.mt4ChartMotion} keyboardShortcuts={appSettings.shortcuts} shortcutsEnabled={shortcutsEnabled} />}
+        {reasonTagSaveError && <div className="task-error" role="alert">
+          <strong>交易理由标签尚未保存，当前页面保留本次修改。</strong>
+          <button type="button" className="ghost-button" onClick={() => { setReasonTagSaveError(false); setReasonTagSaveRetryNonce(value => value + 1); }}>重试保存</button>
+        </div>}
+        {desktopLayout && appSettings.mt4Enabled && view === "mt4" && <Mt4Panel disciplineSettings={appSettings} reasonTagsState={reasonTagsState} onRetryReasonTags={retryReasonTags} sharedReasonTags={syncedPreferencesReady ? reasonTags : undefined} deletedReasonTags={deletedReasonTags} onReasonTagsChange={commitReasonTags} chartMotion={appSettings.mt4ChartMotion} keyboardShortcuts={appSettings.shortcuts} shortcutsEnabled={shortcutsEnabled} />}
         {view === "replay" && (
           <header className="topbar">
           <div className="instrument-selectors">
@@ -10536,8 +10663,8 @@ export function TrainingWorkbench() {
               )}
 
               <div className="chart-area" ref={chartAreaRef}>
-                <ChartDrawingRail observing={!chartTrainingInteractive} cursorActive={!selectedDrawingId && !drawingGroupOpen && !drawingRequest && !drawingTextOpen}
-                  onCursor={() => { setDrawingRequest(null); setDrawingTextOpen(false); setSelectedDrawingId(""); setDrawingGroupOpen(""); }}
+                <ChartDrawingRail observing={!chartTrainingInteractive} cursorActive={!drawingRequest && !drawingTextOpen && !protectionPriceSelection}
+                  onCursor={() => { setDrawingRequest(null); setDrawingTextOpen(false); setSelectedDrawingId(""); setDrawingGroupOpen(""); setProtectionPriceSelection(null); }}
                   activeTool={drawingRequest?.name} groupTools={groupDrawingTools} openGroup={drawingGroupOpen} onOpenGroup={setDrawingGroupOpen}
                   onSelectTool={beginDrawing} onGroupTool={(group, tool) => setGroupDrawingTools(current => ({ ...current, [group]: tool }))}
                   magnetMode={drawingMagnetMode} onMagnetMode={setDrawingMagnetMode} canUndo={!!drawingUndoStack.length} canRedo={!!drawingRedoStack.length}
@@ -10547,10 +10674,10 @@ export function TrainingWorkbench() {
                 {drawingTextOpen && <ChartDrawingTextEditor value={drawingText} onChange={setDrawingText} onPlace={beginTextDrawing} onCancel={() => setDrawingTextOpen(false)} />}
 
                 {selectedDrawing && <DrawingPropertyBar drawing={selectedDrawing} text={selectedDrawingText} color={selectedDrawingInputColor}
-                  lineWidth={selectedDrawingWidth} textSize={selectedDrawingTextSize} textSizeOptions={drawingTextSizeOptions}
+                  lineWidth={selectedDrawingWidth} textSize={selectedDrawingTextSize}
                   onText={value => updateDrawingTextContent(selectedDrawing.id, value)}
                   onColor={value => { setDrawingColor(value); updateDrawingVisualStyle(selectedDrawing.id, value, selectedDrawingWidth); }}
-                  onWidth={value => { setDrawingLineWidth(value); updateDrawingVisualStyle(selectedDrawing.id, selectedDrawingInputColor, value); }}
+                  onWidth={value => { if (value > 0) setDrawingLineWidth(value); updateDrawingVisualStyle(selectedDrawing.id, selectedDrawingInputColor, value); }}
                   onTextSize={value => updateDrawingTextSize(selectedDrawing.id, value)} onLock={() => updateDrawing(selectedDrawing.id, { lock: !selectedDrawing.lock })}
                   onVisible={() => updateDrawing(selectedDrawing.id, { visible: !selectedDrawing.visible })} onDelete={() => removeDrawing(selectedDrawing.id)} onClose={() => setSelectedDrawingId("")} />}
                 {drawingObjectsOpen && <DrawingObjectPanel drawings={drawings} selectedId={selectedDrawingId} onSelect={setSelectedDrawingId}
@@ -10575,6 +10702,7 @@ export function TrainingWorkbench() {
                       movingAverageSettings={movingAverageSettings}
                       macdSettings={macdSettings}
                       drawingRequest={chartTrainingInteractive ? drawingRequest : null}
+                      onDrawingCancel={() => setDrawingRequest(null)}
                       clearNonce={clearNonce}
                       tradeMarkers={showChartMarkers ? tradeMarkers : []}
                       decisionMarkers={decisionMarkers}
@@ -10586,11 +10714,43 @@ export function TrainingWorkbench() {
                       drawingsRestoreNonce={chartTrainingInteractive ? drawingsRestoreNonce : 0}
                       hideDate={hideTaskDate}
                       hidePrice={hideTaskPrice}
-                      onDecisionSelect={setSelectedDecisionId}
+                      onDecisionSelect={trashPreview ? setSelectedDecisionId : selectDecisionForEditing}
                       onCorporateActionSelect={setSelectedCorporateActionId}
                       onProtectionPriceSelect={chartTrainingInteractive ? applyDraftProtectionPrice : ignoreProtectionPriceSelect}
                       onProtectionLineMove={chartTrainingInteractive ? moveProtectionLine : rejectProtectionLineMove}
                       onCandleContextMenu={chartTrainingInteractive ? openDecisionForCandle : ignoreCandleContextMenu}
+                      trading={chartTrainingInteractive && !trashPreview ? {
+                        scope: chartTradingScope, cancellation: chartPendingCancellation,
+                        onMarkerAction: (line, price) => {
+                          if (line.kind === "entry-trigger" && line.orderId && price != null) return movePendingOrderPrice(line, price);
+                          if ((line.kind === "stop-loss" || line.kind === "take-profit") && (line.positionId || line.orderId)) return moveProtectionLine(line, price);
+                          return false;
+                        },
+                        disabled: loading || !currentBar || !marketRules.tradingEnabled || (!liveMode && trainingComplete) || protectionCommandRunning,
+                        disabledReason: loading ? "行情正在读取，请稍后重试" : !marketRules.tradingEnabled ? tradingDisabledReason : !liveMode && trainingComplete ? "训练已结束，请开始新的训练后下单" : "",
+                        sellDisabled: !marketRules.allowShort, error: ruleNotice,
+                        buyReference: sourceQuotePrice("buy", currentBar?.close ?? 0, executionProfile.spreadBps, instrumentEconomics),
+                        sellReference: sourceQuotePrice("sell", currentBar?.close ?? 0, executionProfile.spreadBps, instrumentEconomics),
+                        onOpen: () => setPlaying(false),
+                        normalizePrice: price => Number(protectionPriceText(price)),
+                        positions: openPositions.map((position, index) => ({ id: position.id, label: `#${index + 1} ${position.side === "long" ? "买入" : "卖出"} ${position.qty}${marginInstrument ? "手" : "股"}`, side: position.side, referencePrice: currentBar?.close ?? 0 })),
+                        quantity: { value: orderQty, unit: marginInstrument ? "手" : "股" },
+                        previewQuantity: positionSizeMode === "risk-percent" ? (choice, price) => effectiveOrderStop ? riskSizingFor(choice.side, price, effectiveOrderStop, choice.orderType)?.quantity ?? "" : "" : undefined,
+                        onOrder: (choice, rawPrice) => {
+                          const price = Number(protectionPriceText(rawPrice));
+                          return queueOpenOrder(choice.side, { orderType: choice.orderType, triggerPrice: price });
+                        },
+                        onProtection: (kind, price, positionId) => {
+                          if (!positionId) {
+                            const draft = currentEntryDecision;
+                            if (decisionTarget) cancelDecisionBackfill();
+                            return applyDraftProtectionPrice(kind, price, draft);
+                          }
+                          const position = openPositions.find(item => item.id === positionId);
+                          if (!position) { setRuleNotice("持仓已变化，请重新选择后修改保护价"); return false; }
+                          return moveProtectionLine({ id: `${position.id}:${kind}`, kind, price, timestamp: position.entryTimestamp, label: "持仓保护价", movable: true, source: "position", positionId, side: position.side }, price);
+                        },
+                      } : undefined}
                       onDrawingsChange={chartTrainingInteractive ? handleChartDrawingsChange : ignoreDrawingsChange}
                       onDrawingSelect={chartTrainingInteractive ? (id) => setSelectedDrawingId(id ?? "") : ignoreDrawingSelect}
                     />
@@ -10614,7 +10774,7 @@ export function TrainingWorkbench() {
                     priceLabel={value => value.toFixed(instrument.pricePrecision)} hidePrice={hideTaskPrice}
                     onClose={() => setSelectedDecisionId('')} onLocate={() => locateDecision(selectedDecision)}
                     onEdit={() => editDecision(selectedDecision)} onDelete={() => deleteDecision(selectedDecision)}
-                    linkedTrades={<DecisionLinkedTradeSummary positions={linkedDecisionPositions} tradingMode={tradingMode} marginInstrument={marginInstrument} dateLabel={trainingDateLabel} priceLabel={trainingPriceLabel} onEvidence={openReviewEvidence} compact />}
+                    linkedTradeCount={linkedDecisionPositions.length}
                   />}
                   <div className="replay-watermark">{liveMode ? "WATCH · 最新行情" : `REPLAY · ${trainingComplete ? "未来已揭示" : "未来已隐藏"}`} · {chartTimeZoneLabel(activeChartTimeZone)}</div>
                   <div className="chart-touch-hint">长按 K 线补写决策</div>
@@ -10729,7 +10889,7 @@ export function TrainingWorkbench() {
                   </div>
                   <OrderEntryControls
                     sizing={{ value: positionSizeMode, options: [{ value: "fixed", label: "固定数量" }, { value: "risk-percent", label: "按止损风险（余额%）" }], onChange: value => { const mode = value as PositionSizeMode; setPositionSizeMode(mode); rememberOrderEntryPreference({ positionSizeMode: mode }); } }}
-                    order={{ value: orderType, options: [{ value: "market", label: "市价 · 下一根开盘" }, { value: "limit", label: "限价单（Limit Order）" }, { value: "stop", label: "突破单（Stop Order）" }], onChange: value => { const type = value as OrderType; setOrderType(type); rememberOrderEntryPreference({ orderType: type }); } }}
+                    order={{ value: orderType, options: [{ value: "market", label: "市价 · 下一根开盘" }, { value: "limit", label: "限价单（Limit Order）" }, { value: "stop", label: "突破单（Stop Order）" }], onChange: value => { const type = value as OrderType; setOrderType(type); setOrderTriggerPrice(""); rememberOrderEntryPreference({ orderType: type }); } }}
                     gap={{ mode: openingGapMode, title: "按顺序点击：高开不买、低开不买、取消此功能", onChange: () => { const nextMode = nextOpeningGapMode(openingGapMode); setOpeningGapMode(nextMode); rememberOrderEntryPreference({ openingGapMode: nextMode }); } }}
                     riskField={positionSizeMode === "risk-percent" && <label>单笔风险（余额%）
                     <input aria-label="单笔风险百分比" type="number" min="0.1" max="100" step="0.1" value={riskPercent} onChange={(event) => {
@@ -10782,7 +10942,7 @@ export function TrainingWorkbench() {
                     entryField={orderType !== "market" && (
                     <label>触发价
                       <span className="entry-trigger-control">
-                        <input aria-label="委托触发价" type={hideTaskPrice ? "password" : "number"} inputMode="decimal" min="0" step="any" value={orderTriggerPrice} onChange={(event) => setOrderTriggerPrice(event.target.value)} placeholder={hideTaskPrice ? "•••" : currentBar?.close.toFixed(instrument.pricePrecision)} />
+                        <input aria-label="委托触发价" type={hideTaskPrice ? "password" : "number"} inputMode="decimal" min="0" step="any" value={orderTriggerPrice} onChange={(event) => setOrderTriggerPrice(event.target.value)} placeholder={hideTaskPrice ? "•••" : "请选择触发价"} />
                         <button
                           aria-label="在图表选择委托触发价"
                           aria-pressed={protectionPriceSelection === "entry-trigger"}
@@ -10903,7 +11063,7 @@ export function TrainingWorkbench() {
                               <td data-label="数量">{marginInstrument ? `${position.qty.toFixed(2)} 手` : position.qty}</td>
                               <td data-label="开仓时间"><span>{trainingDateLabel(position.entryTimestamp)}</span>{holdingStatus?.overMax && <small className="position-sop-warning">超出 SOP {holdingAge} / {activeRule?.management.holdingBarsMax} 根</small>}</td>
                               <td data-label="成本价">{trainingPriceLabel(position.entryPrice)}</td>
-                              <td data-label="保护价">损 {trainingPriceLabel(position.stopLoss)} / 盈 {trainingPriceLabel(position.takeProfit)}</td>
+                              <td data-label="保护价"><OrderProtectionPrice prefix="损" label={`持仓 ${position.id.slice(0, 6)} 止损`} value={position.stopLoss ? trainingPriceLabel(position.stopLoss) : undefined} disabled={loading || protectionCommandRunning || (!liveMode && trainingComplete)} onClear={() => removeProtectionPrice(position.id, "position", "stop-loss")} /><OrderProtectionPrice prefix="盈" label={`持仓 ${position.id.slice(0, 6)} 止盈`} value={position.takeProfit ? trainingPriceLabel(position.takeProfit) : undefined} disabled={loading || protectionCommandRunning || (!liveMode && trainingComplete)} onClear={() => removeProtectionPrice(position.id, "position", "take-profit")} /></td>
                               <td data-label="现价">{trainingPriceLabel(currentBar?.close)}</td>
                               <td data-label="浮动盈亏"><strong className={pnl >= 0 ? "up" : "down"}>{tradingMode === "capital" ? money(pnl) : percent(positionReturn)}</strong></td>
                               <td data-label="操作"><button
@@ -10920,7 +11080,7 @@ export function TrainingWorkbench() {
 
                     {orderPanelTab === "pending" && (
                       <table className="orders-table">
-                        <thead><tr><th>委托</th><th>动作</th><th>方向</th><th>数量</th><th>提交时间</th><th>关联仓位</th><th>成交规则</th><th>操作</th></tr></thead>
+                        <thead><tr><th>委托</th><th>动作</th><th>方向</th><th>数量</th><th>提交时间</th><th>关联仓位</th><th>成交规则</th><th>止损</th><th>止盈</th><th>操作</th></tr></thead>
                         <tbody>{pendingOrders.length ? pendingOrders.map((order) => (
                           <tr key={order.id}>
                             <td data-label="委托"><span className="position-id">#{order.id.slice(0, 6)}</span></td>
@@ -10933,10 +11093,12 @@ export function TrainingWorkbench() {
                             <td data-label="关联仓位">#{order.positionId.slice(0, 6)}</td>
                             <td data-label="成交规则">{order.executeAtTimestamp
                               ? `${trainingDateLabel(order.executeAtTimestamp)} 开盘`
-                              : `${orderTypeLabel(order.orderType)}${order.triggerPrice ? ` @ ${trainingPriceLabel(order.triggerPrice)}` : ""}`}{order.stopLoss || order.takeProfit ? ` · 损 ${trainingPriceLabel(order.stopLoss)} / 盈 ${trainingPriceLabel(order.takeProfit)}` : ""} · {order.ruleVersion ?? "旧规则"}</td>
-                            <td data-label="操作"><button className="row-action danger" onClick={() => cancelPendingOrder(order.id)}>撤单</button></td>
+                              : `${orderTypeLabel(order.orderType)}${order.triggerPrice ? ` @ ${trainingPriceLabel(order.triggerPrice)}` : ""}`} · {order.ruleVersion ?? "旧规则"}</td>
+                            <td data-label="止损"><OrderProtectionPrice label={`委托 ${order.id.slice(0, 6)} 止损`} value={order.stopLoss ? trainingPriceLabel(order.stopLoss) : undefined} disabled={loading || protectionCommandRunning || (!liveMode && trainingComplete)} onClear={() => removeProtectionPrice(order.id, "order", "stop-loss")} /></td>
+                            <td data-label="止盈"><OrderProtectionPrice label={`委托 ${order.id.slice(0, 6)} 止盈`} value={order.takeProfit ? trainingPriceLabel(order.takeProfit) : undefined} disabled={loading || protectionCommandRunning || (!liveMode && trainingComplete)} onClear={() => removeProtectionPrice(order.id, "order", "take-profit")} /></td>
+                            <td data-label="操作"><button type="button" className="row-icon-action" title="撤销此笔待成交委托" aria-label={`撤销委托 ${order.id.slice(0, 6)}`} disabled={chartPendingCancellation.disabled} onClick={() => void cancelPendingOrder(order.id)}><X size={14} aria-hidden="true" /></button></td>
                           </tr>
-                        )) : <tr><td className="orders-empty" colSpan={8}>暂无待成交委托。</td></tr>}</tbody>
+                        )) : <tr><td className="orders-empty" colSpan={10}>暂无待成交委托。</td></tr>}</tbody>
                       </table>
                     )}
 
@@ -10976,7 +11138,7 @@ export function TrainingWorkbench() {
               </div>
             </section>
 
-            <DecisionPlanCard panelRef={decisionPanelRef} value={decision} reasonTags={reasonTags}
+            <DecisionPlanCard reasonTagsState={reasonTagsState} onRetryReasonTags={retryReasonTags} panelRef={decisionPanelRef} value={decision} reasonTags={reasonTags}
               onChange={changes => { for (const key of Object.keys(changes) as (keyof Decision)[]) { const value = changes[key]; if (value != null) updateDecision(key, value); } }}
               title={editingDecisionId ? "编辑事前决策" : decisionTarget ? "补写事前决策" : "事前决策卡"}
               hint="先写计划，再揭示下一根" notice={editingDecisionId ? "修改后会替换原记录，并保留原 K 线绑定" : decisionTarget ? "仅补充记录，不回退行情，也不改变持仓" : undefined}
@@ -10987,6 +11149,7 @@ export function TrainingWorkbench() {
               onPickPrice={kind => setProtectionPriceSelection(current => current === kind ? null : kind)} onDrawPosition={() => beginDrawing(trainingPositionTool)}
               hasPosition={drawings.some(drawing => drawing.name === "trainingPosition")}
               submitDisabled={trainingComplete && !decisionTarget} onSubmit={submitDecision}
+              onDelete={editingDecisionId ? () => { const record = decisionSubmissions.find(item => item.id === editingDecisionId); if (record) deleteDecision(record); } : undefined}
               submitLabel={editingDecisionId ? "保存编辑" : decisionTarget ? backfillCandidates.length && backfillAssociation === "associate" ? "保存并关联" : "只保存计划" : trainingComplete ? "训练已结束" : "提交决策并揭示下一根"}
               history={<DecisionHistory records={decisionSubmissions.filter(item => !currentBar || item.barTimestamp <= currentBar.timestamp)}
                 dateLabel={timestamp => hideTaskDate ? '已保存 K 线' : formatDate(timestamp, timeframe, activeChartTimeZone)}

@@ -2,6 +2,9 @@
 
 import { chartShiftPlacement, isCandleInViewport } from "../lib/chartViewport.mjs";
 import { incrementalBarUpdates } from "../lib/chartBarUpdates.mjs";
+import { interpolatedDrawingIndex } from "../lib/timeframeView.ts";
+import { measuredMoveOverlay } from "../lib/measuredMove.ts";
+import { rectangleControlPoints, rectangleOverlay } from "../lib/rectangleDrawing";
 
 import {
   useCallback,
@@ -18,6 +21,8 @@ import type { TimeframeId } from "../lib/timeframeCatalog";
 import type { CorporateActionMarker } from "../lib/corporateActions";
 import type { ShortcutSettings } from "../lib/keyboardShortcuts";
 import { useKeyboardShortcuts } from "./useKeyboardShortcuts";
+import { ChartTradingMenu, type ChartTradingAdapter, type ChartTradingTarget } from "./ChartTradingMenu";
+import { pendingOrderIdsAtPrice, protectionKindAtPrice } from "../lib/chartTrading";
 
 export type { ProtectionLine, ProtectionPriceKind } from "../lib/tradeProtection";
 
@@ -179,50 +184,12 @@ const overlayHoverIgnoreEvents: OverlayIgnoreEvent[] = [
   "onPressedMoveEnd",
 ];
 
-function rgbaFromHex(hex: string, alpha: number) {
-  const value = hex.replace("#", "");
-  if (!/^[0-9a-f]{6}$/i.test(value)) return `rgba(41, 98, 255, ${alpha})`;
-  const red = Number.parseInt(value.slice(0, 2), 16);
-  const green = Number.parseInt(value.slice(2, 4), 16);
-  const blue = Number.parseInt(value.slice(4, 6), 16);
-  return `rgba(${red}, ${green}, ${blue}, ${alpha})`;
-}
-
 function ensureTrainingDrawingOverlays(registerOverlay: (template: OverlayTemplate) => void) {
   if (trainingDrawingOverlaysRegistered) return;
 
-  registerOverlay({
-    name: "trainingRectangle",
-    totalStep: 3,
-    needDefaultPointFigure: true,
-    needDefaultXAxisFigure: true,
-    needDefaultYAxisFigure: true,
-    createPointFigures: ({ overlay, coordinates }) => {
-      if (coordinates.length < 2) return [];
-      const start = coordinates[0];
-      const end = coordinates[1];
-      const styles = (overlay.styles ?? {}) as FigureStyleBag;
-      const lineColor = styles.line?.color ?? styles.rect?.borderColor ?? "#2962ff";
-      return [{
-        type: "rect",
-        attrs: {
-          x: Math.min(start.x, end.x),
-          y: Math.min(start.y, end.y),
-          width: Math.abs(end.x - start.x),
-          height: Math.abs(end.y - start.y),
-        },
-        styles: {
-          style: "stroke_fill",
-          color: styles.rect?.color ?? rgbaFromHex(lineColor, 0.14),
-          borderColor: styles.rect?.borderColor ?? lineColor,
-          borderSize: styles.rect?.borderSize ?? styles.line?.size ?? 2,
-          borderStyle: styles.rect?.borderStyle ?? "solid",
-          borderDashedValue: styles.rect?.borderDashedValue ?? [4, 4],
-        },
-        ignoreEvent: overlayIgnoreEvents,
-      }];
-    },
-  });
+  registerOverlay(measuredMoveOverlay);
+
+  registerOverlay(rectangleOverlay);
 
   const registerPositionOverlay = (name: string, direction: "long" | "short" | "auto") => {
     registerOverlay({
@@ -427,7 +394,7 @@ function ensureTrainingDrawingOverlays(registerOverlay: (template: OverlayTempla
       const top = Math.min(start.y, end.y);
       const width = Math.max(36, Math.abs(end.x - start.x));
       const height = Math.max(fontSize + 16, Math.abs(end.y - start.y));
-      const lineHeight = Math.max(14, Math.round(fontSize * 1.35));
+      const lineHeight = Math.max(14, fontSize * 1.35);
       const maxCharacters = Math.max(2, Math.floor((width - 14) / Math.max(5, fontSize * 0.62)));
       const maxLines = Math.max(1, Math.floor((height - 12) / lineHeight));
       const wrappedLines = text.split("\n").flatMap((paragraph) => {
@@ -496,6 +463,14 @@ function ensureProtectionLineOverlay(registerOverlay: (template: OverlayTemplate
       const point = coordinates[0];
       const data = overlay.extendData as (ProtectionLine & { hovered?: boolean }) | null;
       if (!point || !data) return [];
+      if (data.id.startsWith("current-price:")) return [{
+        type: "line",
+        attrs: { coordinates: [{ x: 0, y: point.y }, { x: bounding.width, y: point.y }] },
+        styles: { color: "rgba(0, 0, 0, 0)", size: 10 },
+      }, ...(data.hovered ? [{
+        type: "text", attrs: { x: 8, y: point.y - 5, text: data.hint ?? "", align: "left", baseline: "bottom" },
+        styles: { color: "#24d6a2", size: 11, backgroundColor: "rgba(8, 16, 18, .82)", paddingLeft: 4, paddingRight: 4 },
+      } as OverlayFigure] : [])];
       const stop = data.kind === "stop-loss";
       const color = data.kind === "opening-gap-threshold"
         ? "#e1c57f"
@@ -847,17 +822,20 @@ function syncProtectionLines(
   chart: Chart,
   protectionLines: ProtectionLine[],
   onMove: (line: ProtectionLine, price: number) => boolean,
+  groupId = PROTECTION_LINE_GROUP,
+  onContext?: (line: ProtectionLine) => void,
 ) {
-  chart.removeOverlay({ groupId: PROTECTION_LINE_GROUP });
+  chart.removeOverlay({ groupId });
   protectionLines.forEach((line) => {
     chart.createOverlay({
       id: `protection:${line.id}`,
       name: "trainingProtectionLine",
-      groupId: PROTECTION_LINE_GROUP,
+      groupId,
       points: [{ timestamp: line.timestamp, value: line.price }],
       extendData: line,
       lock: !line.movable,
       zLevel: line.source === 'position' ? 30 : 29,
+      onRightClick: event => { event.preventDefault?.(); onContext?.(event.overlay.extendData as ProtectionLine); },
       onPressedMoveEnd: ({ chart: eventChart, overlay }) => {
         const nextPrice = Number(overlay.points[0]?.value);
         if (Number.isFinite(nextPrice) && nextPrice > 0 && onMove(line, nextPrice)) return;
@@ -884,6 +862,32 @@ function protectionLineSignature(protectionLines: ProtectionLine[]) {
     .join("|");
 }
 
+// This hit area follows the native last-price line. Dragging never moves the quote.
+function syncCurrentPriceLine(chart: Chart, line: ProtectionLine | null, onMove: (line: ProtectionLine, price: number) => void, dragging: { current: boolean }) {
+  const groupId = "current-price-drag";
+  if (!line) { chart.removeOverlay({ groupId }); dragging.current = false; return; }
+  const id = `protection:${line.id}`;
+  if (chart.getOverlays({ id })[0]) {
+    chart.overrideOverlay({ id, extendData: line, ...(!dragging.current ? { points: [{ timestamp: line.timestamp, value: line.price }] } : {}) });
+    return;
+  }
+  chart.removeOverlay({ groupId }); dragging.current = false;
+  let dragStartPrice = line.price;
+  chart.createOverlay({ id, name: "trainingProtectionLine", groupId, points: [{ timestamp: line.timestamp, value: line.price }],
+    extendData: line, lock: false, needDefaultPointFigure: false, zLevel: 28,
+    onPressedMoveStart: ({ overlay }) => { dragging.current = true; dragStartPrice = Number(overlay.points[0]?.value); },
+    onRightClick: event => event.preventDefault?.(),
+    onPressedMoveEnd: ({ chart: eventChart, overlay }) => {
+      dragging.current = false;
+      const current = eventChart.getOverlays({ id })[0]?.extendData as ProtectionLine | undefined;
+      if (!current) return;
+      const price = Number(overlay.points[0]?.value);
+      eventChart.overrideOverlay({ id, points: [{ timestamp: current.timestamp, value: current.price }] });
+      if (Number.isFinite(price) && price > 0 && Math.abs(price - dragStartPrice) > Number.EPSILON * Math.max(1, price)) onMove(current, price);
+    },
+  });
+}
+
 function serializeDrawing(overlay: Overlay, dataIndexOffset: number): PersistedDrawing {
   const rawExtendData = overlay.extendData ?? undefined;
   const extendData = ["trainingPosition", "trainingLongPosition", "trainingShortPosition"].includes(overlay.name)
@@ -894,7 +898,7 @@ function serializeDrawing(overlay: Overlay, dataIndexOffset: number): PersistedD
     id: overlay.id,
     name: overlay.name,
     paneId: overlay.paneId,
-    points: overlay.points.map((point) => ({
+    points: (overlay.name === "trainingRectangle" ? overlay.points.slice(0, 2) : overlay.points).map((point) => ({
       dataIndex: point.dataIndex == null ? undefined : point.dataIndex + dataIndexOffset,
       timestamp: point.timestamp,
       value: point.value,
@@ -929,7 +933,10 @@ function positiveNumber(value: unknown) {
 function syncTrainingTextBoxScale(chart: Chart, overlay: Overlay, initializeBase = false) {
   if (overlay.name !== "trainingTextBox" || overlay.points.length < 2) return;
 
-  const converted = chart.convertToPixel(overlay.points, { paneId: overlay.paneId });
+  const converted = chart.convertToPixel(overlay.points.map(point => ({
+    dataIndex: point.timestamp == null ? point.dataIndex : interpolatedDrawingIndex(chart.getDataList(), point.timestamp),
+    value: point.value,
+  })), { paneId: overlay.paneId });
   const coordinates = (Array.isArray(converted) ? converted : [converted]) as Array<Partial<{ x: number; y: number }> >;
   const start = coordinates[0];
   const end = coordinates[1];
@@ -953,21 +960,21 @@ function syncTrainingTextBoxScale(chart: Chart, overlay: Overlay, initializeBase
   const baseHeight = positiveNumber(data.textBaseHeight);
   const inferredWidth = Math.max(36, text.length * currentSize * 0.62 + 14);
   const inferredHeight = Math.max(24, currentSize + 16);
-  const effectiveBaseWidth = baseWidth ?? (initializeBase ? width : inferredWidth);
-  const effectiveBaseHeight = baseHeight ?? (initializeBase ? height : inferredHeight);
-  const effectiveBaseSize = baseSize ?? currentSize;
+  const effectiveBaseWidth = initializeBase ? width : baseWidth ?? inferredWidth;
+  const effectiveBaseHeight = initializeBase ? height : baseHeight ?? inferredHeight;
+  const effectiveBaseSize = initializeBase ? currentSize : baseSize ?? currentSize;
   const shouldScale = !initializeBase && baseWidth != null && baseHeight != null && baseSize != null;
 
   let nextSize = currentSize;
   if (shouldScale) {
     const scaleX = width / effectiveBaseWidth;
     const scaleY = height / effectiveBaseHeight;
-    const xChanged = Math.abs(scaleX - 1) > 0.02;
-    const yChanged = Math.abs(scaleY - 1) > 0.02;
+    const xChanged = Math.abs(width - effectiveBaseWidth) > 0.01;
+    const yChanged = Math.abs(height - effectiveBaseHeight) > 0.01;
     const scale = xChanged && yChanged
       ? Math.sqrt(scaleX * scaleY)
       : xChanged ? scaleX : scaleY;
-    nextSize = Math.max(10, Math.min(96, Math.round(effectiveBaseSize * scale)));
+    nextSize = Math.max(10, Math.min(96, effectiveBaseSize * scale));
   }
 
   const nextStyles = {
@@ -991,14 +998,22 @@ function syncTrainingTextBoxScale(chart: Chart, overlay: Overlay, initializeBase
     textBaseSize: effectiveBaseSize,
   };
   const missingBaseline = baseWidth == null || baseHeight == null || baseSize == null;
-  if (missingBaseline || nextSize !== currentSize) {
+  if (initializeBase || missingBaseline || nextSize !== currentSize) {
     chart.overrideOverlay({ id: overlay.id, styles: nextStyles, extendData: nextData });
   }
 }
 
 function getPersistedDrawings(chart: Chart, dataIndexOffset: number) {
   return chart.getOverlays({ groupId: USER_DRAWING_GROUP })
+    .filter(overlay => overlay.currentStep === -1)
     .map((overlay) => serializeDrawing(overlay, dataIndexOffset));
+}
+
+/** Use the chart's native sub-bar drag support after the two-point text placement finishes. */
+function enableTextBoxFreeMovement(overlay: Overlay) {
+  if (overlay.name !== "trainingTextBox") return;
+  overlay.drawingMode = "continuous";
+  overlay.mode = "normal";
 }
 
 const periods: Record<TimeframeId, Period> = {
@@ -1050,6 +1065,8 @@ export function KLineReplayChart({
   onCandleContextMenu,
   onDrawingsChange,
   onDrawingSelect,
+  onDrawingCancel,
+  trading,
 }: {
   keyboardShortcuts?: ShortcutSettings;
   shortcutsEnabled?: boolean;
@@ -1084,9 +1101,11 @@ export function KLineReplayChart({
   onCorporateActionSelect: (id: string) => void;
   onProtectionPriceSelect: (kind: PriceSelectionMode, price: number) => void;
   onProtectionLineMove: (line: ProtectionLine, price: number) => boolean;
-  onCandleContextMenu: (target: CandleContextTarget) => void;
+  onCandleContextMenu: (target: CandleContextTarget, options?: { preserveChartViewport?: boolean }) => void;
   onDrawingsChange: (drawings: PersistedDrawing[]) => void;
   onDrawingSelect: (id: string | null) => void;
+  onDrawingCancel?: () => void;
+  trading?: ChartTradingAdapter;
 }) {
   const containerRef = useRef<HTMLDivElement>(null);
   const chartRef = useRef<Chart | null>(null);
@@ -1117,9 +1136,17 @@ export function KLineReplayChart({
   const onCorporateActionSelectRef = useRef(onCorporateActionSelect);
   const onProtectionPriceSelectRef = useRef(onProtectionPriceSelect);
   const onProtectionLineMoveRef = useRef(onProtectionLineMove);
+  const contextOperationRef = useRef<{ kind: "marker"; line: ProtectionLine } | { kind: "drawing" | "price-selection" } | null>(null);
+  const rememberMarkerContext = useCallback((line: ProtectionLine) => { contextOperationRef.current = { kind: "marker", line }; }, []);
+  // Native overlay right-clicks run on mousedown, before the DOM contextmenu.
+  // Do not prevent their default action: drawings still delete/cancel normally.
+  const rememberDrawingContext = useCallback(() => { contextOperationRef.current = { kind: "drawing" }; }, []);
   const onCandleContextMenuRef = useRef(onCandleContextMenu);
   const onDrawingsChangeRef = useRef(onDrawingsChange);
   const onDrawingSelectRef = useRef(onDrawingSelect);
+  const onDrawingCancelRef = useRef(onDrawingCancel);
+  const drawingRequestRef = useRef(drawingRequest);
+  const drawingKey = drawingRequest ? `${drawingRequest.name}:${drawingRequest.nonce}` : "";
   const suppressDrawingEventsRef = useRef(false);
   const longPressTimerRef = useRef<number | null>(null);
   const touchStartRef = useRef<{ x: number; y: number } | null>(null);
@@ -1129,6 +1156,45 @@ export function KLineReplayChart({
   const followLatestRef = useRef(true);
   const applyingViewportRef = useRef(false);
   const [shiftHandle, setShiftHandle] = useState({ x: 0, percent: 20 });
+  const [tradingTarget, setTradingTarget] = useState<ChartTradingTarget | null>(null);
+  const tradingContext = `${trading?.scope ?? ""}:${drawingActive}:${priceSelectionMode ?? ""}`;
+  const [menuContext, setMenuContext] = useState(tradingContext);
+  if (menuContext !== tradingContext) { setMenuContext(tradingContext); setTradingTarget(null); }
+  const closeTradingMenu = useCallback(() => setTradingTarget(null), []);
+  const tradingRef = useRef(trading);
+  const currentPriceDraggingRef = useRef(false);
+  const currentPriceMoveRef = useRef<(line: ProtectionLine, price: number) => void>(() => {});
+  useEffect(() => { tradingRef.current = trading; }, [trading]);
+  useEffect(() => {
+    currentPriceMoveRef.current = (line, rawPrice) => {
+      const latest = tradingRef.current;
+      if (!latest || latest.disabled || line.id !== `current-price:${latest.scope}`) return;
+      const price = latest.normalizePrice?.(rawPrice) ?? Number(rawPrice.toFixed(pricePrecision));
+      const bounds = containerRef.current?.getBoundingClientRect();
+      if (!bounds || !latest.positions.length) return;
+      latest.onOpen?.();
+      if (latest.positions.length === 1) {
+        const position = latest.positions[0];
+        const kind = protectionKindAtPrice(position.side, price, position.referencePrice);
+        if (kind) latest.onProtection(kind, price, position.id);
+      } else setTradingTarget({ x: bounds.right - 280, y: bounds.top + 80, price, scope: latest.scope, candle: null, protectionOnly: true });
+    };
+  }, [pricePrecision]);
+  const refreshCurrentPriceLine = useCallback((chart: Chart) => {
+    const latest = tradingRef.current, last = barsRef.current.at(-1);
+    const line: ProtectionLine | null = latest && !latest.disabled && latest.positions.length && last && !drawingActive && !priceSelectionMode
+      ? { id: `current-price:${latest.scope}`, kind: "entry-trigger", price: last.close, timestamp: last.timestamp, label: "现价", hint: "拖动设置持仓止损或止盈", source: "rule", movable: true }
+      : null;
+    syncCurrentPriceLine(chart, line, (line, price) => currentPriceMoveRef.current(line, price), currentPriceDraggingRef);
+    const cancellation = latest?.cancellation;
+    const pendingLines: ProtectionLine[] = cancellation?.drawLines && last ? cancellation.orders.flatMap(order => [
+      { id: `pending:${cancellation.scope}:${order.id}`, kind: "entry-trigger" as const, price: order.price, label: order.label },
+      ...(order.stopLoss ? [{ id: `pending:${cancellation.scope}:${order.id}:stop-loss`, kind: "stop-loss" as const, price: order.stopLoss, label: `${order.label.split(" ")[0]} SL · ${order.stopLoss.toFixed(pricePrecision)}` }] : []),
+      ...(order.takeProfit ? [{ id: `pending:${cancellation.scope}:${order.id}:take-profit`, kind: "take-profit" as const, price: order.takeProfit, label: `${order.label.split(" ")[0]} TP · ${order.takeProfit.toFixed(pricePrecision)}` }] : []),
+    ].map(line => ({ ...line, timestamp: last.timestamp, hint: "拖动修改价格，右键管理订单", source: "order" as const, movable: !cancellation.disabled, orderId: order.id }))) : [];
+    syncProtectionLines(chart, pendingLines, (line, price) => tradingRef.current?.onMarkerAction?.(line, price) ?? false, "pending-order-lines", rememberMarkerContext);
+  }, [drawingActive, priceSelectionMode, pricePrecision, rememberMarkerContext]);
+  const refreshCurrentPriceLineRef = useRef(refreshCurrentPriceLine);
 
   useKeyboardShortcuts({ settings: keyboardShortcuts, enabled: shortcutsEnabled, contextKey: `${symbol}:${timeframe}`,
     isAvailable: action => ["chartLeft", "chartRight", "chartZoomIn", "chartZoomOut", "chartLatest"].includes(action)
@@ -1199,32 +1265,40 @@ export function KLineReplayChart({
     alignViewport(chart);
   }, [alignViewport]);
 
-  const createPersistedDrawing = useCallback((chart: Chart, drawing: PersistedDrawing) => chart.createOverlay({
+  const createPersistedDrawing = useCallback((chart: Chart, drawing: PersistedDrawing) => {
+    const id = chart.createOverlay({
     id: drawing.id,
     name: drawing.name,
     groupId: USER_DRAWING_GROUP,
     paneId: drawing.paneId,
-    points: drawing.points.map(point => {
+    points: (drawing.name === "trainingRectangle" ? rectangleControlPoints(drawing.points) : drawing.points).map(point => {
+      if (drawing.name === "trainingTextBox" && point.timestamp != null) {
+        return { ...point, dataIndex: interpolatedDrawingIndex(chart.getDataList(), point.timestamp) };
+      }
       const index = point.timestamp == null ? -1 : chart.getDataList().findIndex(bar => bar.timestamp === point.timestamp);
       return { ...point, dataIndex: index >= 0 ? index : point.dataIndex == null ? undefined : point.dataIndex - dataIndexOffsetRef.current };
     }),
-    needDefaultPointFigure: drawing.name === "trainingTextBox"
-      ? drawing.id === selectedTrainingTextId
-      : undefined,
+    ...(drawing.name === "trainingTextBox" ? { needDefaultPointFigure: drawing.id === selectedTrainingTextId } : {}),
     lock: drawing.lock,
     visible: drawing.visible,
     zLevel: drawing.zLevel,
     mode: drawing.mode,
     styles: drawing.styles as OverlayCreate["styles"],
     extendData: drawing.extendData,
+    onRightClick: rememberDrawingContext,
     onDrawEnd: ({ chart: eventChart, overlay }) => {
+      enableTextBoxFreeMovement(overlay);
       syncTrainingTextBoxScale(eventChart, overlay, true);
       if (!suppressDrawingEventsRef.current) {
         onDrawingsChangeRef.current(getPersistedDrawings(eventChart, dataIndexOffsetRef.current));
       }
     },
-    onPressedMoveEnd: ({ chart: eventChart, overlay }) => {
-      syncTrainingTextBoxScale(eventChart, overlay);
+    onPressedMoveStart: ({ chart: eventChart, overlay }) => syncTrainingTextBoxScale(eventChart, overlay, true),
+    onPressedMoving: ({ chart: eventChart, overlay, figure }) => {
+      if (figure?.type === "circle") syncTrainingTextBoxScale(eventChart, overlay);
+    },
+    onPressedMoveEnd: ({ chart: eventChart, overlay, figure }) => {
+      if (figure?.type === "circle") syncTrainingTextBoxScale(eventChart, overlay);
       if (!suppressDrawingEventsRef.current) {
         onDrawingsChangeRef.current(getPersistedDrawings(eventChart, dataIndexOffsetRef.current));
       }
@@ -1252,11 +1326,14 @@ export function KLineReplayChart({
         getPersistedDrawings(eventChart, dataIndexOffsetRef.current),
       ));
     },
-  }), []);
+    });
+    if (typeof id === "string") chart.getOverlays({ id }).forEach(enableTextBoxFreeMovement);
+    return id;
+  }, [rememberDrawingContext]);
 
   const restoreDrawings = useCallback((chart: Chart, nextDrawings: PersistedDrawing[]) => {
     suppressDrawingEventsRef.current = true;
-    chart.removeOverlay({ groupId: USER_DRAWING_GROUP });
+    chart.getOverlays({ groupId: USER_DRAWING_GROUP }).filter(overlay => overlay.currentStep === -1).forEach(overlay => chart.removeOverlay({ id: overlay.id }));
     nextDrawings.forEach((drawing) => createPersistedDrawing(chart, drawing));
     suppressDrawingEventsRef.current = false;
   }, [createPersistedDrawing]);
@@ -1308,6 +1385,7 @@ export function KLineReplayChart({
             },
             tooltip: {
               showRule: hideDate || hidePrice ? "none" : "follow_cross",
+              title: { show: false },
               text: { color: "#aab6ba" },
             } as LegacyCandleTooltipStyle,
           },
@@ -1397,7 +1475,8 @@ export function KLineReplayChart({
       syncedDecisionMarkersRef.current = decisionMarkerSignature(decisionMarkersRef.current);
       syncCorporateActionMarkers(chart, corporateActionMarkersRef.current, (id) => onCorporateActionSelectRef.current(id));
       syncedCorporateActionMarkersRef.current = corporateActionMarkerSignature(corporateActionMarkersRef.current);
-      syncProtectionLines(chart, protectionLinesRef.current, (line, price) => onProtectionLineMoveRef.current(line, price));
+      syncProtectionLines(chart, protectionLinesRef.current, (line, price) => onProtectionLineMoveRef.current(line, price), PROTECTION_LINE_GROUP, rememberMarkerContext);
+      refreshCurrentPriceLineRef.current(chart);
       syncedProtectionLinesRef.current = protectionLineSignature(protectionLinesRef.current);
       restoreDrawings(chart, drawingsRef.current);
       const latestCandleVisible = () => {
@@ -1475,7 +1554,7 @@ export function KLineReplayChart({
       syncedCorporateActionMarkersRef.current = "";
       syncedProtectionLinesRef.current = "";
     };
-  }, [alignViewport, applyResponsiveViewport, hideDate, hidePrice, pricePrecision, restoreDrawings, symbol, timeframe, timezone]);
+  }, [alignViewport, applyResponsiveViewport, hideDate, hidePrice, pricePrecision, rememberMarkerContext, restoreDrawings, symbol, timeframe, timezone]);
 
   useEffect(() => {
     barsRef.current = bars;
@@ -1496,7 +1575,9 @@ export function KLineReplayChart({
       const indexes = new Map(bars.map((bar, index) => [bar.timestamp, index]));
       chart.getOverlays({ groupId: USER_DRAWING_GROUP }).forEach(overlay => chart.overrideOverlay({
         id: overlay.id,
-        points: overlay.points.map(point => ({ ...point, dataIndex: point.timestamp == null ? point.dataIndex : indexes.get(point.timestamp) ?? point.dataIndex })),
+        points: overlay.points.map(point => ({ ...point, dataIndex: point.timestamp == null ? point.dataIndex
+          : overlay.name === "trainingTextBox" ? interpolatedDrawingIndex(bars, point.timestamp)
+          : indexes.get(point.timestamp) ?? point.dataIndex })),
       }));
     };
     const restoreViewport = () => {
@@ -1611,10 +1692,16 @@ export function KLineReplayChart({
         chartRef.current,
         protectionLines,
         (line, price) => onProtectionLineMoveRef.current(line, price),
+        PROTECTION_LINE_GROUP, rememberMarkerContext,
       );
       syncedProtectionLinesRef.current = signature;
     }
-  }, [protectionLines]);
+  }, [protectionLines, rememberMarkerContext]);
+
+  useEffect(() => {
+    refreshCurrentPriceLineRef.current = refreshCurrentPriceLine;
+    if (chartRef.current) refreshCurrentPriceLine(chartRef.current);
+  }, [trading, bars, refreshCurrentPriceLine]);
 
   useEffect(() => {
     drawingsRef.current = drawings;
@@ -1642,6 +1729,16 @@ export function KLineReplayChart({
   useEffect(() => {
     onDrawingSelectRef.current = onDrawingSelect;
   }, [onDrawingSelect]);
+
+  useEffect(() => { onDrawingCancelRef.current = onDrawingCancel; }, [onDrawingCancel]);
+  useEffect(() => { if (priceSelectionMode && drawingKey) onDrawingCancelRef.current?.(); }, [drawingKey, priceSelectionMode]);
+  useEffect(() => {
+    drawingRequestRef.current = drawingRequest;
+    if (!drawingRequest) return;
+    chartRef.current?.getOverlays({ groupId: USER_DRAWING_GROUP }).filter(overlay => overlay.currentStep !== -1).forEach(overlay => {
+      chartRef.current?.overrideOverlay({ id: overlay.id, styles: drawingRequest.styles as OverlayCreate["styles"], mode: drawingRequest.mode ?? "normal" });
+    });
+  }, [drawingRequest]);
 
   useEffect(() => {
     onDecisionSelectRef.current = onDecisionSelect;
@@ -1671,61 +1768,89 @@ export function KLineReplayChart({
   }, [onCandleContextMenu]);
 
   useEffect(() => {
-    if (!drawingRequest || !chartRef.current) return;
+    if (!drawingKey || !chartRef.current) return;
     const chart = chartRef.current;
     setDrawingInteraction(true, chart);
-    const finishDrawing = () => setDrawingInteraction(false, chart);
-    const overlayId = chart.createOverlay({
-      name: drawingRequest.name,
-      groupId: USER_DRAWING_GROUP,
-      needDefaultPointFigure: drawingRequest.name === "trainingTextBox" ? false : undefined,
-      mode: drawingRequest.mode ?? "normal",
-      modeSensitivity: 8,
-      styles: drawingRequest.styles as OverlayCreate["styles"],
-      extendData: drawingRequest.extendData,
-      onDrawEnd: ({ chart: eventChart, overlay }) => {
-        syncTrainingTextBoxScale(eventChart, overlay, true);
-        selectedTrainingTextId = overlay.name === "trainingTextBox" ? overlay.id : "";
-        eventChart.overrideOverlay({
-          id: overlay.id,
-          ...(overlay.name === "trainingTextBox" ? { needDefaultPointFigure: true } : {}),
-        });
-        onDrawingsChangeRef.current(getPersistedDrawings(eventChart, dataIndexOffsetRef.current));
-        onDrawingSelectRef.current(overlay.id);
-        finishDrawing();
-      },
-      onPressedMoveEnd: ({ chart: eventChart, overlay }) => {
-        syncTrainingTextBoxScale(eventChart, overlay);
-        onDrawingsChangeRef.current(getPersistedDrawings(eventChart, dataIndexOffsetRef.current));
-      },
-      onSelected: ({ chart, overlay }) => {
-        selectedTrainingTextId = overlay.name === "trainingTextBox" ? overlay.id : "";
-        syncTrainingTextBoxScale(chart, overlay, true);
-        chart.overrideOverlay({
-          id: overlay.id,
-          ...(overlay.name === "trainingTextBox" ? { needDefaultPointFigure: true } : {}),
-        });
-        onDrawingSelectRef.current(overlay.id);
-      },
-      onDeselected: ({ chart, overlay }) => {
-        selectedTrainingTextId = "";
-        chart.overrideOverlay({
-          id: overlay.id,
-          ...(overlay.name === "trainingTextBox" ? { needDefaultPointFigure: false } : {}),
-        });
-        onDrawingSelectRef.current(null);
-      },
-      onRemoved: ({ chart: eventChart }) => {
-        if (!suppressDrawingEventsRef.current) {
-          queueMicrotask(() => onDrawingsChangeRef.current(
-            getPersistedDrawings(eventChart, dataIndexOffsetRef.current),
-          ));
-        }
-        finishDrawing();
-      },
-    });
-    if (!overlayId) finishDrawing();
-  }, [drawingRequest, setDrawingInteraction]);
+    let disposed = false;
+    let pendingId: string | null = null;
+    const finishDrawing = () => {
+      if (disposed) return;
+      disposed = true;
+      setDrawingInteraction(false, chart);
+      onDrawingCancelRef.current?.();
+    };
+    const createNext = () => {
+      const drawingRequest = drawingRequestRef.current;
+      if (disposed || !drawingRequest) return;
+      const overlayId = chart.createOverlay({
+        name: drawingRequest.name,
+        groupId: USER_DRAWING_GROUP,
+        ...(drawingRequest.name === "trainingTextBox" ? { needDefaultPointFigure: false } : {}),
+        mode: drawingRequest.mode ?? "normal",
+        modeSensitivity: 8,
+        styles: drawingRequest.styles as OverlayCreate["styles"],
+        extendData: drawingRequest.extendData,
+        onRightClick: rememberDrawingContext,
+        onDrawEnd: ({ chart: eventChart, overlay }) => {
+          enableTextBoxFreeMovement(overlay);
+          syncTrainingTextBoxScale(eventChart, overlay, true);
+          selectedTrainingTextId = overlay.name === "trainingTextBox" ? overlay.id : "";
+          eventChart.overrideOverlay({
+            id: overlay.id,
+            ...(overlay.name === "trainingTextBox" ? { needDefaultPointFigure: true } : {}),
+          });
+          onDrawingsChangeRef.current(getPersistedDrawings(eventChart, dataIndexOffsetRef.current));
+          onDrawingSelectRef.current(overlay.id);
+          pendingId = null;
+          queueMicrotask(createNext);
+        },
+        onPressedMoveStart: ({ chart: eventChart, overlay }) => syncTrainingTextBoxScale(eventChart, overlay, true),
+        onPressedMoving: ({ chart: eventChart, overlay, figure }) => {
+          if (figure?.type === "circle") syncTrainingTextBoxScale(eventChart, overlay);
+        },
+        onPressedMoveEnd: ({ chart: eventChart, overlay, figure }) => {
+          if (figure?.type === "circle") syncTrainingTextBoxScale(eventChart, overlay);
+          onDrawingsChangeRef.current(getPersistedDrawings(eventChart, dataIndexOffsetRef.current));
+        },
+        onSelected: ({ chart, overlay }) => {
+          selectedTrainingTextId = overlay.name === "trainingTextBox" ? overlay.id : "";
+          syncTrainingTextBoxScale(chart, overlay, true);
+          chart.overrideOverlay({
+            id: overlay.id,
+            ...(overlay.name === "trainingTextBox" ? { needDefaultPointFigure: true } : {}),
+          });
+          onDrawingSelectRef.current(overlay.id);
+        },
+        onDeselected: ({ chart, overlay }) => {
+          selectedTrainingTextId = "";
+          chart.overrideOverlay({
+            id: overlay.id,
+            ...(overlay.name === "trainingTextBox" ? { needDefaultPointFigure: false } : {}),
+          });
+          onDrawingSelectRef.current(null);
+        },
+        onRemoved: ({ chart: eventChart, overlay }) => {
+          if (!suppressDrawingEventsRef.current) {
+            queueMicrotask(() => onDrawingsChangeRef.current(
+              getPersistedDrawings(eventChart, dataIndexOffsetRef.current),
+            ));
+          }
+          if (!suppressDrawingEventsRef.current && overlay.id === pendingId) finishDrawing();
+        },
+      });
+      pendingId = typeof overlayId === "string" ? overlayId : null;
+      if (!pendingId) finishDrawing();
+    };
+    createNext();
+    return () => {
+      disposed = true;
+      const suppressed = suppressDrawingEventsRef.current;
+      suppressDrawingEventsRef.current = true;
+      try { if (pendingId) chart.removeOverlay({ id: pendingId }); }
+      finally { suppressDrawingEventsRef.current = suppressed; }
+      setDrawingInteraction(false, chart);
+    };
+  }, [drawingKey, rememberDrawingContext, setDrawingInteraction]);
 
   useEffect(() => {
     if (!drawingsRestoreNonce || !chartRef.current) return;
@@ -1738,6 +1863,7 @@ export function KLineReplayChart({
     chartRef.current.removeOverlay({ groupId: USER_DRAWING_GROUP });
     suppressDrawingEventsRef.current = false;
     setDrawingInteraction(false);
+    onDrawingCancelRef.current?.();
   }, [clearNonce, setDrawingInteraction]);
 
   useEffect(() => {
@@ -1763,7 +1889,7 @@ export function KLineReplayChart({
     const candlePane = chart.getSize("candle_pane", "root");
     const x = clientX - bounds.left;
     const y = clientY - bounds.top;
-    if (!candlePane || y < candlePane.top || y > candlePane.top + candlePane.height) return null;
+    if (!candlePane || x < 0 || x > (chart.getSize("candle_pane", "main")?.width ?? candlePane.width) || y < candlePane.top || y > candlePane.top + candlePane.height) return null;
 
     const converted = chart.convertFromPixel([{ x, y }], { paneId: "candle_pane" });
     const point = Array.isArray(converted) ? converted[0] : converted;
@@ -1786,19 +1912,19 @@ export function KLineReplayChart({
     const candlePane = chart.getSize("candle_pane", "root");
     const x = clientX - bounds.left;
     const y = clientY - bounds.top;
-    if (!candlePane || y < candlePane.top || y > candlePane.top + candlePane.height) return null;
+    if (!candlePane || x < 0 || x > (chart.getSize("candle_pane", "main")?.width ?? candlePane.width) || y < candlePane.top || y > candlePane.top + candlePane.height) return null;
     const converted = chart.convertFromPixel([{ x, y }], { paneId: "candle_pane" });
     const point = Array.isArray(converted) ? converted[0] : converted;
     const value = Number(point?.value);
     return Number.isFinite(value) && value > 0 ? value : null;
   };
 
-  const triggerCandleContext = (target: CandleContextTarget) => {
+  const triggerCandleContext = (target: CandleContextTarget, options?: { preserveChartViewport?: boolean }) => {
     const now = Date.now();
     const previous = lastContextTriggerRef.current;
-    if (previous?.timestamp === target.timestamp && now - previous.triggeredAt < 900) return;
+    if (!options?.preserveChartViewport && previous?.timestamp === target.timestamp && now - previous.triggeredAt < 900) return;
     lastContextTriggerRef.current = { timestamp: target.timestamp, triggeredAt: now };
-    onCandleContextMenuRef.current(target);
+    onCandleContextMenuRef.current(target, options);
   };
 
   const cancelLongPress = () => {
@@ -1807,19 +1933,41 @@ export function KLineReplayChart({
     touchStartRef.current = null;
   };
 
+  const handleContextMouseDown = (event: ReactMouseEvent<HTMLDivElement>) => {
+    if (event.button !== 2) return;
+    contextOperationRef.current = drawingActive ? { kind: "drawing" } : priceSelectionMode ? { kind: "price-selection" } : null;
+    setTradingTarget(null);
+  };
+
   const handleContextMenu = (event: ReactMouseEvent<HTMLDivElement>) => {
-    if (!enableCandleContextMenu) {
-      event.preventDefault();
+    event.preventDefault();
+    cancelLongPress();
+    const operation = contextOperationRef.current;
+    contextOperationRef.current = null;
+    if (!enableCandleContextMenu || drawingActive || priceSelectionMode || (operation && operation.kind !== "marker")) {
+      setTradingTarget(null);
       return;
     }
-    if (drawingActive) {
-      event.preventDefault();
+    if (operation?.kind === "marker") {
+      if (trading) {
+        trading.onOpen?.();
+        setTradingTarget({ x: event.clientX, y: event.clientY, price: operation.line.price, scope: trading.scope, candle: null, marker: operation.line });
+      } else setTradingTarget(null);
+      return;
+    }
+    if (trading) {
+      const rawPrice = resolvePriceAt(event.clientX, event.clientY);
+      if (rawPrice == null) return;
+      trading.onOpen?.();
+      const tolerance = Math.abs((resolvePriceAt(event.clientX, event.clientY + 6) ?? resolvePriceAt(event.clientX, event.clientY - 6) ?? rawPrice) - rawPrice);
+      const cancelIds = pendingOrderIdsAtPrice(trading.cancellation?.orders ?? [], rawPrice, tolerance);
+      const candle = resolveCandleAt(event.clientX, event.clientY);
+      setTradingTarget({ x: event.clientX, y: event.clientY, price: trading.normalizePrice?.(rawPrice) ?? Number(rawPrice.toFixed(pricePrecision)), scope: trading.scope, candle, ...(cancelIds.length ? { cancelIds } : {}) });
+      if (candle && !cancelIds.length) triggerCandleContext(candle, { preserveChartViewport: true });
       return;
     }
     const target = resolveCandleAt(event.clientX, event.clientY);
     if (!target) return;
-    event.preventDefault();
-    cancelLongPress();
     triggerCandleContext(target);
   };
 
@@ -1876,14 +2024,15 @@ export function KLineReplayChart({
       : priceSelectionMode
         ? `${symbol} K线图，点击选择${priceSelectionLabel}`
         : enableCandleContextMenu
-          ? symbol + " K线图，右键或长按已揭示的 K 线可补写事前决策"
+          ? symbol + (trading ? " K线图，右键同时打开交易菜单和补写事前决策，长按 K 线补写事前决策" : " K线图，右键或长按已揭示的 K 线可补写事前决策")
           : symbol + " K线图，仅用于查看和添加图表标记"}
     title={drawingActive
       ? "正在绘图：拖动手指不会滚动页面或平移图表"
       : priceSelectionMode
         ? `点击图表选择${priceSelectionLabel}`
-        : enableCandleContextMenu ? "右键或长按已揭示的 K 线可补写事前决策" : "仅用于查看行情和添加图表标记"}
+        : enableCandleContextMenu ? trading ? undefined : "右键或长按已揭示的 K 线可补写事前决策" : "仅用于查看行情和添加图表标记"}
     onClickCapture={handleClick}
+    onMouseDownCapture={handleContextMouseDown}
     onContextMenu={handleContextMenu}
     onPointerDown={handlePointerDown}
     onPointerMove={handlePointerMove}
@@ -1893,7 +2042,7 @@ export function KLineReplayChart({
       cancelLongPress();
       onCorporateActionSelectRef.current("");
     }}
-  />{shiftHandle.x > 0 && <button className="chart-shift-handle" style={{ left: shiftHandle.x }}
+  />{trading && tradingTarget?.scope === trading.scope && <ChartTradingMenu key={`${tradingTarget.x}:${tradingTarget.y}:${tradingTarget.price}:${tradingTarget.protectionOnly}:${tradingTarget.marker?.id}`} target={tradingTarget} trading={trading} priceLabel={hidePrice ? "—" : tradingTarget.price.toFixed(pricePrecision)} onDecision={onCandleContextMenu} onClose={closeTradingMenu} />}{shiftHandle.x > 0 && <button className="chart-shift-handle" style={{ left: shiftHandle.x }}
     role="slider" aria-label="平移图表" aria-valuemin={50} aria-valuemax={95} aria-valuenow={100 - shiftHandle.percent}
     aria-valuetext={`右侧留白 ${Math.round(shiftHandle.percent)}%`} title="拖动三角设置留白；最新 K 线可见时缩放对齐，换根自动对齐；方向键微调，双击恢复"
     onPointerDown={event => { event.preventDefault(); event.currentTarget.setPointerCapture(event.pointerId); }}

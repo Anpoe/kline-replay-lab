@@ -255,10 +255,8 @@ const server = http.createServer(async (request, response) => {
         incrementalEnabled: Boolean(dataset?.incrementalSource && dataset.incrementalSource !== "none"),
         includeCorporateActions: dataset?.includeCorporateActions === true,
         latestClosedDate: store.getLatestClosedTradeDate ? await store.getLatestClosedTradeDate() : null,
-        realtimeQuotes: activeSource === "tdx",
-        realtimeUpdateEligible: activeSource === "tdx" && store.isRealtimeUpdateEligible
-          ? store.isRealtimeUpdateEligible()
-          : false,
+        realtimeQuotes: false,
+        realtimeUpdateEligible: false,
       });
     }
     if (request.method === "GET" && url.pathname === "/quality/cn") {
@@ -361,26 +359,6 @@ const server = http.createServer(async (request, response) => {
         Array.isArray(payload.instrumentIds) ? payload.instrumentIds : [],
         payload.entryAfter && typeof payload.entryAfter === "object" ? payload.entryAfter : {},
       ) });
-    }
-    if (request.method === "POST" && url.pathname === "/quotes/realtime") {
-      const payload = await readJson(request);
-      const instrumentIds = Array.isArray(payload.instrumentIds) ? payload.instrumentIds : [];
-      const entryAfter = payload.entryAfter && typeof payload.entryAfter === "object"
-        ? payload.entryAfter
-        : {};
-      if (activeSource !== "tdx") {
-        return send(response, 200, {
-          activeSource,
-          prices: await store.getLatestCandles(instrumentIds, entryAfter),
-        });
-      }
-      return send(response, 200, {
-        activeSource,
-        prices: await stores.tdx.getRealtimeQuotes(
-          instrumentIds,
-          entryAfter,
-        ),
-      });
     }
     if (request.method === "POST" && url.pathname === "/scan/latest") {
       return send(response, 200, { ...await store.scanLatest(await readJson(request)), breakoutStdDevVersion: 1, standardDeviationConditionVersion: 1 });

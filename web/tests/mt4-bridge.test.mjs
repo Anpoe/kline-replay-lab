@@ -14,6 +14,16 @@ function snapshot(overrides = {}) {
       equity: 10000, margin: 0, freeMargin: 10000, profit: 0, connected: true, tradeAllowed: true, allowReal: false },
     symbols: [quote], orders: [], history: [], chart: { symbol: "EURUSD.a", timeframe: 5, bars: [] }, receipts: [], ...overrides };
 }
+
+test('pending modification requires a capable terminal, preserves ticket and protections, and refuses position entry edits',async t=>{
+  const f=await fixture(t),order={ticket:42,symbol:quote.symbol,type:2,lots:.1,openPrice:1.09,stopLoss:1.08,takeProfit:1.12,profit:0,swap:0,commission:0,openTime:1799990000,closeTime:0,closePrice:0,magic:1};
+  await f.heartbeat(snapshot({executionVersion:2,orders:[order]}));await f.enable();
+  const edit={type:'protect',ticket:42,price:1.095,stopLoss:1.08,takeProfit:1.12};
+  await assert.rejects(()=>f.command(undefined,edit),/更新/);
+  await f.heartbeat(snapshot({executionVersion:3,orders:[order]}));
+  await assert.rejects(()=>f.command(undefined,{...edit,price:1.11}),/方向/);
+  const queued=await f.command(undefined,edit);assert.equal(queued.commands[0].ticket,42);assert.equal(queued.commands[0].price,1.095);assert.equal(queued.commands[0].stopLoss,1.08);
+});
 async function fixture(t) {
   const root = await mkdtemp(path.join(os.tmpdir(), "kline-mt4-"));
   let time = 1800000000000;
@@ -27,6 +37,20 @@ async function fixture(t) {
     lots: 0.01, price: 0, stopLoss: 0, takeProfit: 0, slippage: 20, ...fields } });
   return { bridge, root, pairing, heartbeat, enable, command, advance: ms => { time += ms; } };
 }
+
+test("pending-price capability downgrade never retries a delivered command", async t => {
+  for (const delivered of [false, true]) {
+    const f = await fixture(t);
+    const order = { ticket: 42, symbol: quote.symbol, type: 2, lots: .1, openPrice: 1.09, stopLoss: 1.08, takeProfit: 1.12, profit: 0, swap: 0, commission: 0, openTime: 1799990000, closeTime: 0, closePrice: 0, magic: 1 };
+    const data = snapshot({ executionVersion: 3, orders: [order] });
+    await f.heartbeat(data); await f.enable();
+    await f.command(undefined, { type: "protect", ticket: 42, price: 1.095, stopLoss: 1.08, takeProfit: 1.12 });
+    if (delivered) assert.ok((await f.heartbeat(data)).wire);
+    assert.equal((await f.heartbeat({ ...data, executionVersion: 2 })).wire, "");
+    assert.equal(f.bridge.status().commands[0].status, delivered ? "unknown" : "failed");
+    assert.equal((await f.heartbeat(data)).wire, "");
+  }
+});
 test("first use pairs, validates snapshots and requires explicit enable", async t => {
   const f = await fixture(t);
   assert.equal(f.bridge.status().connection, "waiting");

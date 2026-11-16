@@ -246,7 +246,7 @@ string ReceiptsJson() {
   return "[" + result + "]";
 }
 string SnapshotJson(bool full = true) {
-  return "{\"protocolVersion\":1,\"executionVersion\":2,\"commandPollVersion\":1,\"marketPollVersion\":1,\"archiveVersion\":1,\"historyTotal\":" + IntegerToString(OrdersHistoryTotal()) + ",\"archiveResponse\":" + (full && archiveResult != "" ? archiveResult : "null") + ",\"sessionId\":" + J(sessionId) + ",\"capturedAt\":" + IntegerToString((long)TimeGMT()) +
+  return "{\"protocolVersion\":1,\"executionVersion\":3,\"commandPollVersion\":1,\"marketPollVersion\":1,\"archiveVersion\":1,\"historyTotal\":" + IntegerToString(OrdersHistoryTotal()) + ",\"archiveResponse\":" + (full && archiveResult != "" ? archiveResult : "null") + ",\"sessionId\":" + J(sessionId) + ",\"capturedAt\":" + IntegerToString((long)TimeGMT()) +
     ",\"serverUtcOffset\":" + (timeReady ? IntegerToString(serverOffset) : "null") +
     ",\"account\":{\"login\":" + J(IntegerToString(AccountNumber())) + ",\"server\":" + J(AccountServer()) + ",\"mode\":" + J(Mode()) +
     ",\"currency\":" + J(AccountCurrency()) + ",\"balance\":" + N(AccountBalance()) + ",\"equity\":" + N(AccountEquity()) +
@@ -329,6 +329,7 @@ void Execute(string wire) {
   if(bid <= 0 || ask <= 0 || point <= 0 || (long)TimeGMT() - Utc((datetime)MarketInfo(symbol, MODE_TIME)) > 30) { Failure(id, ticket, "Quote is stale; wait for MT4 update"); return; }
   int digits = (int)MarketInfo(symbol, MODE_DIGITS), slippage = (int)StringToInteger(fields[14]);
   double lots = StringToDouble(fields[10]), price = StringToDouble(fields[11]), sl = StringToDouble(fields[12]), tp = StringToDouble(fields[13]);
+  bool modifyPendingPrice = action == "protect" && price > 0;
   int type = fields[8] == "buy" ? OP_BUY : OP_SELL;
   if(slippage < 0 || slippage > 1000 || sl < 0 || tp < 0) { Failure(id, ticket, "Invalid protection or slippage"); return; }
   if(action == "open") {
@@ -361,11 +362,17 @@ void Execute(string wire) {
     if(free <= 0 || GetLastError() == 134) { Failure(id, ticket, "Insufficient free margin"); return; }
   } else {
     if(!OrderSelect(ticket, SELECT_BY_TICKET) || OrderCloseTime() != 0 || OrderSymbol() != symbol) { Failure(id, ticket, "Order changed; refresh MT4 orders"); return; }
-    type = OrderType(); lots = OrderLots(); price = OrderOpenPrice();
+    type = OrderType(); lots = OrderLots();
+    if(modifyPendingPrice && type < 2) { Failure(id, ticket, "Position entry price cannot be modified"); return; }
+    if(!modifyPendingPrice) price = OrderOpenPrice();
     if((action == "close" && type > 1) || (action == "cancel" && type < 2) || (action != "close" && action != "cancel" && action != "protect")) { Failure(id, ticket, "Action does not match order type"); return; }
   }
   if(action == "open" || action == "protect") {
     bool buy = type % 2 == 0; double distance = MarketInfo(symbol, MODE_STOPLEVEL) * point;
+    if(modifyPendingPrice) {
+      double minimum = MathMax(distance, point * 0.1);
+      if((type == OP_BUYLIMIT && price > ask - minimum) || (type == OP_SELLLIMIT && price < bid + minimum) || (type == OP_BUYSTOP && price < ask + minimum) || (type == OP_SELLSTOP && price > bid - minimum)) { Failure(id, ticket, "Pending order price is invalid"); return; }
+    }
     double reference = type < 2 ? buy ? bid : ask : price;
     if((sl > 0 && (buy ? reference - sl : sl - reference) < MathMax(distance, point * 0.1)) ||
        (tp > 0 && (buy ? tp - reference : reference - tp) < MathMax(distance, point * 0.1))) { Failure(id, ticket, "Protection distance or direction is invalid"); return; }

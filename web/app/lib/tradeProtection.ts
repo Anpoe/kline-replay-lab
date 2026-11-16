@@ -15,8 +15,9 @@ export type ProtectionLine = {
   label: string;
   hint?: string;
   movable: boolean;
-  source: "draft" | "position" | "rule" | "plan";
+  source: "draft" | "position" | "rule" | "plan" | "order";
   positionId?: string;
+  orderId?: string;
   side?: "long" | "short";
 };
 
@@ -90,10 +91,6 @@ export function deriveProtectionLines({
   openingGapMode,
   openingGapUnit,
   openingGapThreshold,
-  draftTriggerPrice,
-  draftTriggerOrderType,
-  draftStopLoss,
-  draftTakeProfit,
   positions,
   hoveredClosedPositionId,
   movable,
@@ -104,9 +101,6 @@ export function deriveProtectionLines({
     unit: openingGapUnit,
     threshold: openingGapThreshold,
   });
-  const triggerPrice = positivePrice(draftTriggerPrice);
-  const stopLoss = positivePrice(draftStopLoss);
-  const takeProfit = positivePrice(draftTakeProfit);
 
   if (openingGapPrice != null) lines.push({
     id: "opening-gap-threshold",
@@ -116,37 +110,6 @@ export function deriveProtectionLines({
     label: openingGapMode === "low" ? "低开不买阈值" : "高开不买阈值",
     movable,
     source: "rule",
-  });
-  if (triggerPrice != null) lines.push({
-    id: "draft-entry-trigger",
-    kind: "entry-trigger",
-    price: triggerPrice,
-    timestamp: currentTimestamp,
-    label: draftTriggerOrderType === "stop"
-      ? "突破单（Stop Order）"
-      : draftTriggerOrderType === "limit"
-        ? "限价单（Limit Order）"
-        : "计划触发",
-    movable,
-    source: "draft",
-  });
-  if (stopLoss != null) lines.push({
-    id: "draft-stop-loss",
-    kind: "stop-loss",
-    price: stopLoss,
-    timestamp: currentTimestamp,
-    label: "计划 SL",
-    movable,
-    source: "draft",
-  });
-  if (takeProfit != null) lines.push({
-    id: "draft-take-profit",
-    kind: "take-profit",
-    price: takeProfit,
-    timestamp: currentTimestamp,
-    label: "计划 TP",
-    movable,
-    source: "draft",
   });
 
   positions

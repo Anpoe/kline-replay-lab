@@ -1,3 +1,23 @@
+import { entryProtectionError, pendingPriceError } from '../../lib/orderPriceValidation.ts';
+
+export const pendingOrderIdentity = order => `${order.ticket}:${order.openTime}:${order.type}`;
+
+export function prepareMt4PendingPrice({ state, line, price, id }) {
+  if (!line.movable || (state?.snapshot?.executionVersion ?? 1) < 3) throw new Error('请更新 MT4 连接组件后修改挂单价格。');
+  const order = state?.snapshot?.orders.find(order => order.ticket === line.order.ticket && order.symbol === line.order.symbol);
+  if (!order || order.type < 2 || order.type > 5 || order.openPrice !== line.order.openPrice) throw new Error('挂单已变化或已成交，请重新读取后修改。');
+  prepareMt4Protection({ state, edit: { accountKey: line.accountKey, order: line.order, field: 'both' }, values: { stopLoss: String(order.stopLoss), takeProfit: String(order.takeProfit) }, id });
+  if (state.selection.symbol !== order.symbol || state.snapshot.chart.symbol !== order.symbol) throw new Error('图表品种已变化，请重新选择挂单。');
+  const symbol = state.snapshot.symbols.find(item => item.symbol === order.symbol);
+  if (!symbol || !(symbol.bid > 0 && symbol.ask > 0 && symbol.quoteTime > 0) || state.snapshot.capturedAt - symbol.quoteTime > 30) throw new Error('报价已过期，请重新读取 MT4 后重试。');
+  price = Number(Number(price).toFixed(symbol.digits));
+  const side = order.type % 2 === 0 ? 'buy' : 'sell';
+  const error = pendingPriceError(side, order.type <= 3 ? 'limit' : 'stop', price, side === 'buy' ? symbol.ask : symbol.bid) || entryProtectionError(side, price, order.stopLoss, order.takeProfit);
+  if (error) throw new Error(error);
+  if (price === order.openPrice) return null;
+  return { id, accountKey: line.accountKey, type: 'protect', symbol: order.symbol, ticket: order.ticket, price, stopLoss: order.stopLoss, takeProfit: order.takeProfit };
+}
+
 /** Prepare one protection change against the latest acknowledged account/order. */
 export function prepareMt4Protection({ state, edit, values, remove, id }) {
   if (!state || state.accountKey !== edit.accountKey) throw new Error('账户已变化，请重新打开订单后修改。');
@@ -27,22 +47,25 @@ export function deriveMt4OrderProtectionLines({ state, symbol, timestamp, digits
     const waiting = pending?.type === 'protect' && pending.accountKey === state.accountKey && pending.symbol === symbol && pending.ticket === order.ticket && (!pending.status || ['queued', 'sent'].includes(pending.status));
     return ['entry', 'stopLoss', 'takeProfit'].flatMap(field => {
       const current = field === 'entry' ? order.openPrice : order[field];
-      const changed = waiting && field !== 'entry' && pending[field] != null && pending[field] !== current;
-      const price = changed ? pending[field] : current;
+      const pendingValue = field === 'entry' ? pending?.price : pending?.[field];
+      const changed = waiting && pendingValue > 0 && pendingValue !== current;
+      const price = changed ? pendingValue : current;
       if (!(price > 0) || !Number.isFinite(price)) return [];
       const label = field === 'entry' ? (order.type <= 1 ? buy ? '买入' : '卖出' : buy ? '买入挂单' : '卖出挂单') : field === 'stopLoss' ? '止损' : '止盈';
       return [{ id: `mt4-position:${state.accountKey}:${encodeURIComponent(symbol)}:${order.ticket}:${order.openTime}:${order.type}:${order.openPrice}:${field}`,
         accountKey: state.accountKey, order: { ...order }, field,
+        ...(order.type >= 2 ? { orderId: pendingOrderIdentity(order) } : {}),
         kind: field === 'entry' ? 'entry-trigger' : field === 'stopLoss' ? 'stop-loss' : 'take-profit',
         price, timestamp, label: `#${order.ticket} ${label} · ${price.toFixed(digits)}${changed ? ' · 等待确认' : ''}`,
-        hint: waiting ? '等待 MT4 确认后可继续修改' : movable ? field === 'entry' ? '拖动设置止损或止盈，松手提交到 MT4' : `拖动修改${label}，松手提交到 MT4` : '当前不可拖动，请核对连接与交易状态',
-        source: 'position', positionId: String(order.ticket), side: buy ? 'long' : 'short', movable: movable && !waiting }];
+        hint: waiting ? '等待 MT4 确认后可继续修改' : field === 'entry' && order.type >= 2 ? (state.snapshot.executionVersion >= 3 ? '拖动修改挂单价格，右键管理挂单' : '请更新 MT4 连接组件以修改挂单价格') : movable ? field === 'entry' ? '拖动设置止损或止盈，松手提交到 MT4' : `拖动修改${label}，松手提交到 MT4` : '当前不可拖动，请核对连接与交易状态',
+        source: 'position', positionId: String(order.ticket), side: buy ? 'long' : 'short', movable: movable && !waiting && !(field === 'entry' && order.type >= 2 && (state.snapshot.executionVersion ?? 1) < 3) }];
     });
   });
 }
 
-/** A chart drag changes protection only. The order entry price is never modified. */
+/** Drag pending entries to reprice; filled entries create protection without moving the fill. */
 export function prepareMt4ProtectionDrag({ state, line, price, id }) {
+  if (line.field === 'entry' && line.order.type >= 2) return prepareMt4PendingPrice({ state, line, price, id });
   if (!line.movable) throw new Error('当前订单暂不可拖动，请先等待处理完成并开启交易。');
   if (!state || state.accountKey !== line.accountKey) throw new Error('账户已变化，请重新读取订单后修改。');
   if (state.selection.symbol !== line.order.symbol || state.snapshot?.chart.symbol !== line.order.symbol) throw new Error('图表品种已变化，请重新读取订单后修改。');

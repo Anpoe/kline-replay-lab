@@ -10,10 +10,10 @@ export function ChartDrawingRail({ className = "drawing-rail", observing, cursor
 }) {
   const groupIndex = drawingToolGroups.findIndex(g => g.id === openGroup), expanded = drawingToolGroups[groupIndex];
   return <><div className={`${className}${observing ? " observation-only" : ""}`} aria-label="画图工具" data-shared-drawing-tools>
-    <button type="button" className={cursorActive ? "active" : ""} aria-label="光标" title="光标" onClick={onCursor}><MousePointer2 size={18} /></button>
+    <button type="button" className={cursorActive ? "active" : ""} aria-pressed={cursorActive} aria-label="光标" title="光标" onClick={onCursor}><MousePointer2 size={18} /></button>
     {drawingToolGroups.map(group => {
       const tool = group.tools.find(t => t.name === groupTools[group.id]) ?? group.tools[0], Icon = tool.icon;
-      const button = <button type="button" disabled={disabled} className={openGroup === group.id || activeTool === tool.name ? "active" : ""} title={tool.label} aria-label={tool.label} onClick={() => onSelectTool(tool)}><Icon size={18} /></button>;
+      const button = <button type="button" disabled={disabled} className={activeTool === tool.name ? "active" : ""} aria-pressed={activeTool === tool.name} title={tool.description ? `${tool.label}：${tool.description}` : tool.label} aria-label={tool.label} onClick={() => onSelectTool(tool)}><Icon size={18} /></button>;
       return group.tools.length === 1 ? <span className="drawing-tool-single" key={group.id}>{button}</span>
         : <div className="drawing-tool-group" key={group.id}>{button}<button type="button" className="drawing-group-trigger" disabled={disabled} aria-label={`展开${group.label}`} title={`展开${group.label}`} onClick={() => onOpenGroup(openGroup === group.id ? "" : group.id)}><ChevronRight size={9} /></button></div>;
     })}

@@ -1,6 +1,7 @@
 import net from "node:net";
 import { promisify } from "node:util";
 import { inflate } from "node:zlib";
+import { setTimeout as wait } from "node:timers/promises";
 
 const inflateAsync = promisify(inflate);
 const RESPONSE_HEADER_BYTES = 16;
@@ -42,6 +43,8 @@ const DEFAULT_HOSTS = [
   ["218.6.170.47", 7709],
 ];
 const MAX_QUOTE_HOST_ATTEMPTS = 8;
+const DEFAULT_RETRY_DELAY_MS = 1_500;
+const MAX_RETRY_DELAY_MS = 30_000;
 const SETUP_PACKETS = [
   Buffer.from("0c0218930001030003000d0001", "hex"),
   Buffer.from("0c0218940001030003000d0002", "hex"),
@@ -355,6 +358,31 @@ export class TdxCorporateActionsClient {
     this.readWaiter = null;
     this.closed = false;
     this.hostCursor = 0;
+    this.requestTail = Promise.resolve();
+    this.closeController = new AbortController();
+    this.retryDelayMs = options.retryDelayMs ?? DEFAULT_RETRY_DELAY_MS;
+  }
+
+  enqueueRequest(operation, signal) {
+    // A TDX socket has one response stream, including its setup packets. Keep
+    // the whole operation (connect, request, retry/reset) under the same gate.
+    const request = this.requestTail.then(async () => {
+      const requestSignal = signal
+        ? AbortSignal.any([signal, this.closeController.signal])
+        : this.closeController.signal;
+      requestSignal.throwIfAborted();
+      const abort = () => this.reset(requestSignal.reason);
+      requestSignal.addEventListener("abort", abort, { once: true });
+      try {
+        const result = await operation(requestSignal);
+        requestSignal.throwIfAborted();
+        return result;
+      } finally {
+        requestSignal.removeEventListener("abort", abort);
+      }
+    });
+    this.requestTail = request.catch(() => undefined);
+    return request;
   }
 
   getSocketError(message) {
@@ -437,18 +465,26 @@ export class TdxCorporateActionsClient {
         if (settled) return;
         settled = true;
         clearTimeout(timer);
+        socket.off("connect", onConnect);
+        socket.off("error", onError);
+        socket.off("close", onClose);
         if (error) reject(error);
         else resolve();
       };
+      const onConnect = () => finish();
+      const onError = error => finish(error);
+      const onClose = () => finish(new Error("TDX 行情连接已断开"));
       const timer = setTimeout(() => finish(new Error("连接超时")), this.timeoutMs);
-      socket.once("connect", () => finish());
-      socket.once("error", error => finish(error));
+      socket.once("connect", onConnect);
+      socket.once("error", onError);
+      socket.once("close", onClose);
     });
   }
 
-  async connectCandidates() {
+  async connectCandidates(signal) {
     let lastError = null;
     for (let offset = 0; offset < this.hosts.length; offset += 1) {
+      signal?.throwIfAborted();
       const index = (this.hostCursor + offset) % this.hosts.length;
       const [host, port] = this.hosts[index];
       try {
@@ -459,6 +495,7 @@ export class TdxCorporateActionsClient {
       } catch (error) {
         lastError = error;
         this.reset(error);
+        signal?.throwIfAborted();
       }
     }
     throw new Error(lastError
@@ -466,11 +503,11 @@ export class TdxCorporateActionsClient {
       : "暂时无法连接 TDX 行情服务，请检查网络后重试");
   }
 
-  connect() {
+  connect(signal) {
     if (this.closed) return Promise.reject(new Error("TDX 行情服务已关闭"));
     if (this.socket && !this.socket.destroyed) return Promise.resolve();
     if (!this.connecting) {
-      this.connecting = this.connectCandidates().finally(() => { this.connecting = null; });
+      this.connecting = this.connectCandidates(signal).finally(() => { this.connecting = null; });
     }
     return this.connecting;
   }
@@ -493,19 +530,22 @@ export class TdxCorporateActionsClient {
 
   async fetchEvents(instrumentId) {
     buildTdxCorporateActionsRequest(instrumentId);
-    for (let attempt = 0; attempt < 2; attempt += 1) {
-      try {
-        await this.connect();
-        const body = await this.requestResponse(buildTdxCorporateActionsRequest(instrumentId));
-        return parseTdxCorporateActionsResponse(body);
-      } catch (error) {
-        this.reset(error);
-        if (attempt === 1 || this.closed) {
-          throw new Error(`权息数据请求失败：${errorMessage(error)}`);
+    return this.enqueueRequest(async signal => {
+      for (let attempt = 0; attempt < 2; attempt += 1) {
+        try {
+          await this.connect(signal);
+          const body = await this.requestResponse(buildTdxCorporateActionsRequest(instrumentId));
+          return parseTdxCorporateActionsResponse(body);
+        } catch (error) {
+          this.reset(error);
+          signal.throwIfAborted();
+          if (attempt === 1 || this.closed) {
+            throw new Error(`权息数据请求失败：${errorMessage(error)}`);
+          }
         }
       }
-    }
-    throw new Error("权息数据请求失败");
+      throw new Error("权息数据请求失败");
+    });
   }
 
   async fetchDailyQuotes(instrumentIds) {
@@ -518,62 +558,76 @@ export class TdxCorporateActionsClient {
       const stock = normalizeSecurityQuoteInstrumentId(instrumentId);
       return [stock.code, stock.instrumentId];
     }));
-    let lastError = null;
-    const hostAttempts = Math.min(
-      Math.max(1, this.hosts.length),
-      MAX_QUOTE_HOST_ATTEMPTS,
-    );
-    for (let attempt = 0; attempt < hostAttempts; attempt += 1) {
-      try {
-        await this.connect();
-        const rows = parseTdxSecurityQuotesResponse(await this.requestResponse(request));
-        if (rows.length === 0) {
-          lastError = new Error("行情节点未返回实时数据");
-          this.reset(lastError);
-          continue;
+    return this.enqueueRequest(async signal => {
+      let lastError = null;
+      const hostAttempts = Math.min(
+        Math.max(1, this.hosts.length),
+        MAX_QUOTE_HOST_ATTEMPTS,
+      );
+      for (let attempt = 0; attempt < hostAttempts; attempt += 1) {
+        try {
+          await this.connect(signal);
+          const rows = parseTdxSecurityQuotesResponse(await this.requestResponse(request));
+          if (rows.length === 0) {
+            lastError = new Error("行情节点未返回实时数据");
+            this.reset(lastError);
+            continue;
+          }
+          return rows.map((row) => ({
+            ...row,
+            instrumentId: requested.get(`${row.market}:${row.code}`)
+              ?? requestedByCode.get(row.code)
+              ?? row.instrumentId,
+          }));
+        } catch (error) {
+          lastError = error;
+          this.reset(error);
+          signal.throwIfAborted();
+          if (this.closed) break;
         }
-        return rows.map((row) => ({
-          ...row,
-          instrumentId: requested.get(`${row.market}:${row.code}`)
-            ?? requestedByCode.get(row.code)
-            ?? row.instrumentId,
-        }));
-      } catch (error) {
-        lastError = error;
-        this.reset(error);
-        if (this.closed) break;
       }
-    }
-    throw new Error(`实时日线行情请求失败：${errorMessage(lastError ?? new Error("未返回可用实时数据"))}`);
+      throw new Error(`实时日线行情请求失败：${errorMessage(lastError ?? new Error("未返回可用实时数据"))}`);
+    });
   }
 
-  async fetchDailyBars(instrumentId, { assetType = "stock", start = 0, count = 800 } = {}) {
+  async fetchDailyBars(instrumentId, { assetType = "stock", start = 0, count = 800, signal, onRetry } = {}) {
     const request = buildTdxSecurityBarsRequest(instrumentId, { start, count });
-    let lastError = null;
-    const hostAttempts = Math.min(
-      Math.max(1, this.hosts.length),
-      MAX_QUOTE_HOST_ATTEMPTS,
-    );
-    for (let attempt = 0; attempt < hostAttempts; attempt += 1) {
-      try {
-        await this.connect();
-        const rows = parseTdxSecurityBarsResponse(
-          await this.requestResponse(request),
-          { assetType },
-        );
-        return rows.map((row) => ({ instrumentId, ...row }));
-      } catch (error) {
-        lastError = error;
-        this.reset(error);
-        if (this.closed) break;
+    return this.enqueueRequest(async requestSignal => {
+      let lastError = null;
+      const hostAttempts = Math.min(
+        Math.max(3, this.hosts.length),
+        MAX_QUOTE_HOST_ATTEMPTS,
+      );
+      for (let attempt = 0; attempt < hostAttempts; attempt += 1) {
+        requestSignal.throwIfAborted();
+        try {
+          await this.connect(requestSignal);
+          requestSignal.throwIfAborted();
+          const rows = parseTdxSecurityBarsResponse(
+            await this.requestResponse(request),
+            { assetType },
+          );
+          return rows.map((row) => ({ instrumentId, ...row }));
+        } catch (error) {
+          lastError = error;
+          this.reset(error);
+          requestSignal.throwIfAborted();
+          if (this.closed || attempt + 1 === hostAttempts) break;
+        }
+        const delayMs = Math.min(MAX_RETRY_DELAY_MS, this.retryDelayMs * (2 ** attempt));
+        await onRetry?.({ delayMs, attempt: attempt + 2, maxAttempts: hostAttempts });
+        await wait(delayMs, undefined, { signal: requestSignal });
       }
-    }
-    throw new Error(`历史日线请求失败：${errorMessage(lastError ?? new Error("未返回可用历史日线"))}`);
+      const error = new Error(`${instrumentId} 历史日线请求失败：${errorMessage(lastError ?? new Error("未返回可用历史日线"))}`, { cause: lastError });
+      error.code = "TDX_DAILY_BARS_UNAVAILABLE";
+      throw error;
+    }, signal);
   }
 
   close() {
     if (this.closed) return;
     this.closed = true;
+    this.closeController.abort();
     this.reset(new Error("TDX 行情服务已关闭"));
   }
 }

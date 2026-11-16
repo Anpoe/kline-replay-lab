@@ -417,3 +417,33 @@ test('FX short orders reserve margin across symbols, cancellation releases it an
   assert.equal(gold.account.reservedMargin, 200);
   assert.equal((await readLiveState(db)).accounts.find(a => a.id === 'fx').availableCash, 1500);
 });
+
+test('pending protection removal persists through the live command boundary without cancelling the order or releasing its margin', async t => {
+  const { db }=createD1(t);
+  const base={environment:'live',market:'FX',accountId:'fx-protection',instrumentId:'EURUSD.FX',timestamp:1};
+  const first=await applyLiveTradingCommand(db,{...base,commandId:'pending-protected',type:'create-account',observedAccountVersion:0,
+    tradingMode:'capital',initialCapital:10000,fxAccountConfig:{accountCurrency:'USD',leverage:100},
+    executionProfile:{spreadBps:0,slippageBps:0,commissionRateBps:0},referencePrice:1.1,side:'buy',qty:.1,orderId:'pending',orderType:'limit',triggerPrice:1.09,stopLoss:1.08,takeProfit:1.12});
+  const command={...base,commandId:'remove-pending-stop',type:'modify-protection',observedAccountVersion:first.accountVersion,orderId:'pending',stopLoss:null,takeProfit:1.12};
+  const changed=await applyLiveTradingCommand(db,command);
+  assert.equal(changed.portfolios[0].pendingOrders.length,1);
+  const order=changed.portfolios[0].pendingOrders[0];
+  assert.equal(order.stopLoss,undefined);assert.equal(order.takeProfit,1.12);assert.equal(order.triggerPrice,1.09);
+  assert.equal(changed.account.reservedMargin,first.account.reservedMargin);
+  assert.equal(changed.account.cashBalance,first.account.cashBalance);
+  assert.equal((await applyLiveTradingCommand(db,command)).accountVersion,changed.accountVersion,'same removal command must be idempotent');
+  const restored=(await readLiveState(db)).portfolios[0].pendingOrders[0];
+  assert.equal(restored.stopLoss,undefined);assert.equal(restored.takeProfit,1.12);
+});
+
+test('live pending price modification recalculates reservations and is idempotent without replacing the order',async t=>{
+  const {db}=createD1(t);
+  const base={environment:'live',market:'FX',accountId:'modify-fx',instrumentId:'EURUSD.FX',timestamp:1};
+  const first=await applyLiveTradingCommand(db,{...base,type:'create-account',commandId:'create-edit',observedAccountVersion:0,tradingMode:'capital',initialCapital:10000,fxAccountConfig:{accountCurrency:'USD',leverage:100},executionProfile:{spreadBps:0,slippageBps:0,commissionRateBps:0},referencePrice:1.1,side:'buy',qty:.1,orderType:'limit',orderId:'pending',triggerPrice:1.09,stopLoss:1.08,takeProfit:1.12});
+  const cmd={...base,type:'modify-order',commandId:'edit-pending',observedAccountVersion:first.accountVersion,orderId:'pending',expectedTriggerPrice:1.09,triggerPrice:1.095};
+  const result=await applyLiveTradingCommand(db,cmd),order=result.portfolios[0].pendingOrders[0];
+  assert.equal(order.id,'pending');assert.equal(order.triggerPrice,1.095);assert.equal(order.qty,.1);assert.equal(order.stopLoss,1.08);assert.equal(order.takeProfit,1.12);
+  assert.ok(Math.abs(result.account.reservedMargin-first.account.reservedMargin-.5)<.00001);assert.equal(result.account.cashBalance,first.account.cashBalance);
+  assert.equal((await applyLiveTradingCommand(db,cmd)).accountVersion,result.accountVersion);
+  assert.equal((await readLiveState(db)).portfolios[0].pendingOrders[0].triggerPrice,1.095);
+});

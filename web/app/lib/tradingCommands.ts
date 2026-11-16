@@ -1,5 +1,6 @@
 import type { ExecutionCostProfile, OrderType } from "./executionEngine.ts";
 import { normalizeFxAccountConfig, type FxAccountConfig } from "./fxTrading.ts";
+import { entryProtectionError, pendingPriceError } from "./orderPriceValidation.ts";
 
 export const TRADING_COMMAND_VERSION = "2026.09-v1";
 
@@ -15,6 +16,7 @@ export type TradingCommandType =
   | "submit-order"
   | "cancel-order"
   | "modify-protection"
+  | "modify-order"
   | "close-position"
   | "close-all";
 
@@ -47,6 +49,7 @@ export type TradingCommand = {
   qty?: number;
   orderType?: OrderType;
   triggerPrice?: number | null;
+  expectedTriggerPrice?: number | null;
   stopLoss?: number | null;
   takeProfit?: number | null;
   sizingMode?: "fixed" | "risk-percent";
@@ -123,7 +126,7 @@ export function normalizeTradingCommand(value: unknown): TradingCommand {
   const timestamp = finiteNumber(record.timestamp);
   const observedAccountVersion = finiteNumber(record.observedAccountVersion);
   if (!commandId || commandId.length > 160
-    || !["create-account", "pause-account", "resume-account", "end-account", "archive-account", "reset-account", "switch-account", "attach-portfolio", "submit-order", "cancel-order", "modify-protection", "close-position", "close-all"].includes(String(type))
+    || !["create-account", "pause-account", "resume-account", "end-account", "archive-account", "reset-account", "switch-account", "attach-portfolio", "submit-order", "cancel-order", "modify-protection", "modify-order", "close-position", "close-all"].includes(String(type))
     || (environment !== "live" && environment !== "training")
     || !accountId
     || (market !== "CN" && market !== "US" && market !== "FX" && market !== "GOLD")
@@ -194,6 +197,7 @@ export function normalizeTradingCommand(value: unknown): TradingCommand {
     ...(qty == null ? {} : { qty }),
     ...(orderType ? { orderType } : {}),
     ...(record.triggerPrice === undefined ? {} : { triggerPrice: nullableNumber(record.triggerPrice) }),
+    ...(record.expectedTriggerPrice === undefined ? {} : { expectedTriggerPrice: nullableNumber(record.expectedTriggerPrice) }),
     ...(record.stopLoss === undefined ? {} : { stopLoss: nullableNumber(record.stopLoss) }),
     ...(record.takeProfit === undefined ? {} : { takeProfit: nullableNumber(record.takeProfit) }),
     ...(record.sizingMode === "fixed" || record.sizingMode === "risk-percent"
@@ -342,22 +346,46 @@ export function cancelPendingOrderFromTradingCommand<TOrder extends { id?: unkno
   return orders.filter((order) => order.id !== command.orderId);
 }
 
+export function modifyPendingOrderFromTradingCommand<TOrder extends { id?: unknown; action?: unknown; side?: unknown; orderType?: unknown; triggerPrice?: unknown; stopLoss?: number; takeProfit?: number }>(orders: TOrder[], command: TradingCommand, reference: number, tick = 0): TOrder[] {
+  if (command.type !== "modify-order" || !command.orderId) throw new TradingCommandError("invalid_command", "改单命令缺少委托编号");
+  const order = orders.find(item => item.id === command.orderId);
+  if (!order || order.action !== "open" || (order.orderType !== "limit" && order.orderType !== "stop") || (order.side !== "buy" && order.side !== "sell")) throw new TradingCommandError("order_not_found", "挂单已成交、撤销或不支持修改，请重新读取");
+  if (command.expectedTriggerPrice !== order.triggerPrice) throw new TradingCommandError("account_version_conflict", "挂单价格已经变化，请重新打开后修改");
+  const price = Number(command.triggerPrice);
+  const error = pendingPriceError(order.side, order.orderType, price, reference) || entryProtectionError(order.side, price, order.stopLoss, order.takeProfit);
+  if (error) throw new TradingCommandError("invalid_command", error);
+  if (tick > 0 && Math.abs(price / tick - Math.round(price / tick)) > 0.00001) throw new TradingCommandError("invalid_command", "价格不符合品种的最小跳动单位");
+  return orders.map(item => item === order ? { ...item, triggerPrice: price } : item);
+}
+
 export function modifyProtectionFromTradingCommand<TPosition extends {
   id?: unknown;
   status?: unknown;
+  action?: unknown;
+  side?: unknown;
+  triggerPrice?: unknown;
   stopLoss?: unknown;
   takeProfit?: unknown;
 }>(
   positions: TPosition[],
   command: TradingCommand,
+  targetKind: "position" | "order" = "position",
 ): TPosition[] {
-  if (command.type !== "modify-protection" || !command.positionId) {
-    throw new TradingCommandError("invalid_command", "保护价命令缺少持仓编号");
+  const targetId = targetKind === "order" ? command.orderId : command.positionId;
+  if (command.type !== "modify-protection" || !targetId) {
+    throw new TradingCommandError("invalid_command", targetKind === "order" ? "保护价命令缺少委托编号" : "保护价命令缺少持仓编号");
   }
-  if (!positions.some((position) => position.id === command.positionId && position.status === "open")) {
-    throw new TradingCommandError("position_not_found", "待修改保护价的持仓不存在");
+  if (!positions.some((position) => position.id === targetId && (targetKind === "order" ? position.action === "open" : position.status === "open"))) {
+    throw new TradingCommandError(targetKind === "order" ? "order_not_found" : "position_not_found", targetKind === "order" ? "待修改保护价的委托不存在或已经成交" : "待修改保护价的持仓不存在");
   }
-  return positions.map((position) => position.id === command.positionId
+  if (targetKind === "order") {
+    const order = positions.find(position => position.id === targetId)!;
+    if ((order.side === "buy" || order.side === "sell") && Number(order.triggerPrice) > 0) {
+      const error = entryProtectionError(order.side, Number(order.triggerPrice), command.stopLoss ?? undefined, command.takeProfit ?? undefined);
+      if (error) throw new TradingCommandError("invalid_command", error);
+    }
+  }
+  return positions.map((position) => position.id === targetId
     ? { ...position, stopLoss: command.stopLoss ?? undefined, takeProfit: command.takeProfit ?? undefined }
     : position);
 }

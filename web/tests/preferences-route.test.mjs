@@ -4,6 +4,7 @@ import { DatabaseSync } from "node:sqlite";
 import test from "node:test";
 import ts from "typescript";
 import * as persistence from "../app/lib/patternPresetPersistence.ts";
+import * as reasonPersistence from "../app/lib/decisionPlan.ts";
 import { defaultPatternPresets } from "../app/lib/patternFilters.ts";
 
 const routeSource = ts.transpileModule(
@@ -35,6 +36,7 @@ function createRoute(t, initial) {
   const require = (id) => {
     if (id === "../../../db/runtime") return { getRawDb: () => db, ensureSchema: async () => {} };
     if (id === "../../lib/patternPresetPersistence") return persistence;
+    if (id === "../../lib/decisionPlan") return reasonPersistence;
     throw new Error(`Unexpected route dependency: ${id}`);
   };
   new Function("require", "exports", routeSource)(require, route);
@@ -57,6 +59,59 @@ function put(route, value) {
     body: JSON.stringify(value),
   }));
 }
+
+test('an ordinary or stale settings save cannot replace saved custom reasons or undo their deletion', async t => {
+  const initial = { ...preferences(), reasonTags: ['顺势', '高1/高2', '50%', '靠近EMA'], customReasonTags: ['高1/高2', '50%', '靠近EMA'], deletedReasonTags: ['信号K确认'] };
+  const route = createRoute(t, initial);
+  assert.equal((await put(route, { ...preferences(), reasonTags: [...reasonPersistence.defaultDecisionReasonTags], customReasonTags: [], appSettings: { defaultSpeed: 2 } })).status, 200);
+  const saved = (await (await route.GET()).json()).preferences;
+  assert.deepEqual(saved.reasonTags, initial.reasonTags);
+  assert.deepEqual(saved.deletedReasonTags, initial.deletedReasonTags);
+  assert.deepEqual(saved.customReasonTags, initial.customReasonTags);
+  assert.equal(saved.appSettings.defaultSpeed, 2);
+});
+
+test('concurrent explicit tag additions merge, while removals and re-additions require explicit intent', async t => {
+  const initial = { ...preferences(), reasonTags: ['顺势', '高1/高2'], customReasonTags: ['高1/高2'], deletedReasonTags: [] };
+  const route = createRoute(t, initial);
+  const responses = await Promise.all(['50%', '靠近EMA'].map(tag => put(route, {
+    ...initial, reasonTags: [...initial.reasonTags, tag], reasonTagChanges: { added: [tag], removed: [] },
+  })));
+  assert.ok(responses.every(response => response.status === 200));
+  let saved = (await (await route.GET()).json()).preferences;
+  assert.deepEqual(new Set(saved.reasonTags), new Set(['顺势', '高1/高2', '50%', '靠近EMA']));
+  await put(route, { ...initial, reasonTagChanges: { added: [], removed: ['高1/高2'] } });
+  await put(route, initial);
+  saved = (await (await route.GET()).json()).preferences;
+  assert.ok(!saved.reasonTags.includes('高1/高2'));
+  assert.ok(saved.deletedReasonTags.includes('高1/高2'));
+  assert.ok(saved.reasonTags.includes('50%') && saved.reasonTags.includes('靠近EMA'));
+  await put(route, { ...initial, reasonTagChanges: { added: ['高1/高2'], removed: [] } });
+  saved = (await (await route.GET()).json()).preferences;
+  assert.ok(saved.reasonTags.includes('高1/高2'));
+  assert.ok(!saved.deletedReasonTags.includes('高1/高2'));
+  assert.equal(saved.reasonTagChanges, undefined, 'write intent is not stored as preferences');
+});
+
+test('first-save migration and an explicitly empty tag list remain supported', async t => {
+  const route = createRoute(t);
+  await put(route, { ...preferences(), reasonTags: ['高1/高2', '50%'], customReasonTags: ['高1/高2', '50%'] });
+  let saved = (await (await route.GET()).json()).preferences;
+  assert.deepEqual(saved.reasonTags, ['高1/高2', '50%']);
+  await put(route, { ...preferences(), reasonTagChanges: { added: [], removed: ['高1/高2', '50%'] } });
+  await put(route, { ...preferences(), reasonTags: [...reasonPersistence.defaultDecisionReasonTags] });
+  saved = (await (await route.GET()).json()).preferences;
+  assert.deepEqual(saved.reasonTags, []);
+});
+
+test('malformed reason-tag write intent is rejected without changing saved tags', async t => {
+  const initial = { ...preferences(), reasonTags: ['靠近EMA'] };
+  const route = createRoute(t, initial);
+  for (const reasonTagChanges of [null, {}, { added: [42], removed: [] }, { added: [''], removed: [] }]) {
+    assert.equal((await put(route, { ...initial, reasonTagChanges })).status, 400);
+  }
+  assert.deepEqual((await (await route.GET()).json()).preferences.reasonTags, initial.reasonTags);
+});
 
 async function hiddenIds(route) {
   const result = await (await route.GET()).json();

@@ -39,12 +39,26 @@ const post = (route, body) => route.POST(new Request("http://localhost/api/live-
   method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body),
 }));
 
-test('watchlist reads stored CN prices without invoking external realtime quotes; trading refresh keeps its endpoint', async t => {
+test('watchlist and trading CN refreshes both read stored complete bars without requesting realtime quotes', async t => {
   const calls = [];
-  const { route } = createRoute(t, async url => { calls.push(url); return Response.json({ activeSource: 'baostock', prices: [] }); });
-  assert.equal((await post(route, { action: 'refresh', storedOnly: true, market: 'CN', instrumentIds: ['600519.SH'] })).status, 200);
-  assert.equal((await post(route, { action: 'refresh', market: 'CN', instrumentIds: ['600519.SH'] })).status, 200);
-  assert.deepEqual(calls, ['/prices/latest', '/quotes/realtime']);
+  const bar = { timestamp: Date.UTC(2026, 10, 12), open: 10, high: 12, low: 9, close: 11, volume: 1000, turnover: 11000, closed: true };
+  const entryAfter = { '600519.SH': Date.UTC(2026, 10, 11) };
+  const { route } = createRoute(t, async (url, init) => {
+    calls.push(url);
+    assert.deepEqual(JSON.parse(init.body).entryAfter, entryAfter);
+    return Response.json({ activeSource: 'tdx', prices: [{ instrumentId: '600519.SH', ...bar, previousClose: 10, entryBars: [bar] }] });
+  });
+  for (const storedOnly of [true, false]) {
+    const response = await post(route, { action: 'refresh', storedOnly, market: 'CN', instrumentIds: ['600519.SH'], entryAfter });
+    assert.equal(response.status, 200);
+    const payload = await response.json();
+    assert.equal(payload.prices[0].close, 11);
+    assert.equal(payload.prices[0].closed, true);
+    assert.equal(payload.prices[0].priceBasis, 'raw');
+    assert.ok(payload.prices[0].entryBars[0].revision);
+    assert.equal(payload.prices[0].entryBars[0].closed, true);
+  }
+  assert.deepEqual(calls, ['/prices/latest', '/prices/latest']);
 });
 
 function seed(sqlite) {

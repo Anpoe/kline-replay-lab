@@ -121,6 +121,14 @@ function sameCandle(left, right) {
   });
 }
 
+function updateDailyCoverage(instrument, timestamp, added) {
+  if (added) {
+    instrument.barCount = Number(instrument.barCount ?? 0) + 1;
+    instrument.firstTimestamp = Math.min(Number(instrument.firstTimestamp) || timestamp, timestamp);
+  }
+  if (timestamp > Number(instrument.lastTimestamp ?? 0)) instrument.lastTimestamp = timestamp;
+}
+
 export function normalizeTdxDailyQuote(instrumentId, quote, timestamp, assetType = "stock") {
   // TDX realtime quotes report volume in hands, while .day files and the
   // training chart use shares. Turnover is already in currency units.
@@ -251,6 +259,7 @@ export class TdxLocalStore {
     this.overlayDb = null;
     this.running = false;
     this.maintenanceRunning = false;
+    this.maintenanceRunPromise = null;
     this.catalogRunning = false;
     this.abortController = null;
     this.maintenanceAbortController = null;
@@ -533,11 +542,11 @@ export class TdxLocalStore {
       await this.persistMaintenanceTask();
       return this.maintenanceTask;
     }
-    queueMicrotask(() => void (
-      nativeRealtime ? this.runTdxDailyMaintenance()
+    queueMicrotask(() => {
+      this.maintenanceRunPromise = nativeRealtime ? this.runTdxDailyMaintenance()
         : tushareMaintenance ? this.runCnMaintenance(token)
-          : this.runTdxGapRepair()
-    ));
+          : this.runTdxGapRepair();
+    });
     return this.maintenanceTask;
   }
 
@@ -553,6 +562,9 @@ export class TdxLocalStore {
   }
 
   async resumeCnMaintenance(token) {
+    if (this.maintenanceRunning && this.maintenanceTask?.status === "paused") {
+      await this.maintenanceRunPromise;
+    }
     if (!this.maintenanceTask || !["paused", "failed"].includes(this.maintenanceTask.status)) {
       return this.maintenanceTask;
     }
@@ -571,11 +583,11 @@ export class TdxLocalStore {
     this.maintenanceTask.message = "维护任务已恢复。";
     await this.persistMaintenanceTask();
     await this.maintainCorporateActions();
-    queueMicrotask(() => void (
-      nativeRealtime ? this.runTdxDailyMaintenance()
+    queueMicrotask(() => {
+      this.maintenanceRunPromise = nativeRealtime ? this.runTdxDailyMaintenance()
         : nativeGapRepair ? this.runTdxGapRepair()
-          : this.runCnMaintenance(token)
-    ));
+          : this.runCnMaintenance(token);
+    });
     return this.maintenanceTask;
   }
 
@@ -643,6 +655,72 @@ export class TdxLocalStore {
     return this.runTdxRealtimeDailyMaintenance();
   }
 
+  async fetchMaintenanceDailyBars(instrumentId, options) {
+    const task = this.maintenanceTask;
+    const signal = this.maintenanceAbortController?.signal;
+    const message = task.message;
+    const rows = await this.dailyQuotesClient.fetchDailyBars(instrumentId, {
+      ...options,
+      signal,
+      onRetry: async ({ delayMs, attempt, maxAttempts }) => {
+        signal?.throwIfAborted();
+        task.message = `行情连接中断，${Math.ceil(delayMs / 1000)} 秒后自动重试 ${instrumentId}（${attempt} / ${maxAttempts}）；已完成进度保留。`;
+        await this.persistMaintenanceTask();
+      },
+    });
+    signal?.throwIfAborted();
+    if (task.message !== message) {
+      task.message = message;
+      await this.persistMaintenanceTask();
+    }
+    return rows;
+  }
+
+  async persistTdxMaintenanceManifest(manifest, source) {
+    manifest.baseDatasetVersion ??= manifest.datasetVersion;
+    manifest.datasetVersion = `${manifest.baseDatasetVersion}-${source === TDX_GAP_REPAIR_SOURCE ? "tdx-gap" : "tdx"}-${Date.now()}`;
+    manifest.updatedAt = now();
+    manifest.maintenanceSource = source;
+    await writeJsonAtomic(this.manifestFile, manifest);
+    this.manifestCache = manifest;
+  }
+
+  async reconcileMaintenanceCoverage(manifest, instruments) {
+    const rowsByInstrument = new Map();
+    for (const row of this.ensureOverlayDb().prepare(`
+      SELECT instrument_id, timestamp, imported_at FROM daily_overlay WHERE source IN (?, ?)
+    `).all(...TDX_OVERLAY_SOURCES)) {
+      const rows = rowsByInstrument.get(row.instrument_id) ?? [];
+      rows.push(row);
+      rowsByInstrument.set(row.instrument_id, rows);
+    }
+    let changed = false;
+    for (let index = 0; index < instruments.length; index += 1) {
+      const instrument = instruments[index];
+      const rows = rowsByInstrument.get(instrument.id) ?? [];
+      const unpublished = rows.some(row => !manifest.updatedAt || row.imported_at >= manifest.updatedAt);
+      if (index >= Number(this.maintenanceTask.nextInstrumentIndex ?? 0) && !unpublished) continue;
+      // Only interrupted work needs this full local reconciliation. The merged
+      // timestamps recover both appended bars and gaps inside the base file.
+      const target = path.resolve(this.root, instrument.relativePath);
+      const timestamps = new Set(target.startsWith(this.root) && await exists(target)
+        ? parseTdxDayBuffer(await readFile(target)).map(bar => bar.timestamp)
+        : []);
+      for (const row of rows) timestamps.add(Number(row.timestamp));
+      if (!timestamps.size) continue;
+      const sorted = [...timestamps].sort((left, right) => left - right);
+      if (instrument.barCount !== sorted.length || instrument.firstTimestamp !== sorted[0]
+        || instrument.lastTimestamp !== sorted.at(-1)) {
+        instrument.barCount = sorted.length;
+        instrument.firstTimestamp = sorted[0];
+        instrument.lastTimestamp = sorted.at(-1);
+        changed = true;
+      }
+      changed ||= unpublished;
+    }
+    return changed;
+  }
+
   async runTdxHistoricalDailyMaintenance() {
     if (
       this.maintenanceRunning
@@ -654,17 +732,17 @@ export class TdxLocalStore {
     this.maintenanceTask.status = "running";
     this.maintenanceTask.error = null;
     this.maintenanceAbortController = new AbortController();
+    let manifest;
+    let changed = false;
     try {
-      const manifest = await this.getManifest();
+      manifest = await this.getManifest();
       const instruments = filterCnInstruments(
         manifest?.instruments,
         this.maintenanceTask.assets ?? manifest?.assets,
       );
       const targetTimestamp = timestampFromCompactDate(this.maintenanceTask.dates?.at(-1));
       if (!Number.isFinite(targetTimestamp)) throw new Error("当前没有可用的完整交易日");
-      await this.migrateRealtimeVolumeUnits(manifest);
       const overlayDb = this.ensureOverlayDb();
-      let changed = false;
       const staleOverlays = overlayDb.prepare(`
         DELETE FROM daily_overlay
         WHERE timestamp > ? AND source IN (?, ?)
@@ -674,6 +752,8 @@ export class TdxLocalStore {
         this.maintenanceTask.purgedRows = Number(this.maintenanceTask.purgedRows ?? 0) + purgedRows;
         changed = true;
       }
+      changed = await this.reconcileMaintenanceCoverage(manifest, instruments) || changed;
+      await this.migrateRealtimeVolumeUnits(manifest);
       const existingRows = overlayDb.prepare(`
         SELECT instrument_id, timestamp, open, high, low, close, volume, turnover, is_new
         FROM daily_overlay WHERE timestamp <= ? AND source IN (?, ?)
@@ -745,7 +825,7 @@ export class TdxLocalStore {
         let reachedScanStart = false;
         for (let pageIndex = 0; pageIndex < 128; pageIndex += 1) {
           const pageCount = pageStart ? 800 : 64;
-          const page = await this.dailyQuotesClient.fetchDailyBars(instrument.id, {
+          const page = await this.fetchMaintenanceDailyBars(instrument.id, {
             assetType: instrument.assetType,
             count: pageCount,
             ...(pageStart ? { start: pageStart } : {}),
@@ -772,6 +852,9 @@ export class TdxLocalStore {
           error.name = "AbortError";
           throw error;
         }
+        const coverageBeforeWrite = { barCount: instrument.barCount, firstTimestamp: instrument.firstTimestamp, lastTimestamp: instrument.lastTimestamp };
+        const progressBeforeWrite = { ...this.maintenanceTask.progress };
+        const changedBeforeWrite = changed;
         overlayDb.exec("BEGIN IMMEDIATE");
         try {
           for (const row of rows) {
@@ -824,16 +907,16 @@ export class TdxLocalStore {
               instrument.id,
               Math.max(latestOverlayByInstrument.get(instrument.id) ?? 0, timestamp),
             );
-            if (!current) {
-              instrument.barCount = Number(instrument.barCount ?? 0) + 1;
-              instrument.firstTimestamp = Math.min(Number(instrument.firstTimestamp) || timestamp, timestamp);
-            }
-            if (timestamp > Number(instrument.lastTimestamp ?? 0)) instrument.lastTimestamp = timestamp;
+            updateDailyCoverage(instrument, timestamp, !current);
             changed = true;
           }
           overlayDb.exec("COMMIT");
         } catch (error) {
-          overlayDb.exec("ROLLBACK");
+          try { overlayDb.exec("ROLLBACK"); } finally {
+            Object.assign(instrument, coverageBeforeWrite);
+            this.maintenanceTask.progress = progressBeforeWrite;
+            changed = changedBeforeWrite;
+          }
           throw error;
         }
         this.maintenanceTask.nextInstrumentIndex = index + 1;
@@ -849,18 +932,18 @@ export class TdxLocalStore {
       }
       this.maintenanceTask.nextDateIndex = this.maintenanceTask.dates.length;
       if (changed) {
-        manifest.baseDatasetVersion ??= manifest.datasetVersion;
-        manifest.datasetVersion = `${manifest.baseDatasetVersion}-tdx-${Date.now()}`;
-        manifest.updatedAt = now();
-        manifest.maintenanceSource = TDX_REALTIME_SOURCE;
-        await writeJsonAtomic(this.manifestFile, manifest);
-        this.manifestCache = manifest;
+        await this.persistTdxMaintenanceManifest(manifest, TDX_REALTIME_SOURCE);
       }
       this.maintenanceTask.status = "completed";
       this.maintenanceTask.writeCompleted = true;
       this.maintenanceTask.message = `每日完整日线更新完成：新增 ${this.maintenanceTask.progress.insertedBars.toLocaleString()} 根，校正 ${this.maintenanceTask.progress.correctedBars.toLocaleString()} 根。`;
       await this.persistMaintenanceTask();
     } catch (error) {
+      try {
+        if (changed && manifest) await this.persistTdxMaintenanceManifest(manifest, TDX_REALTIME_SOURCE);
+      } catch (persistError) {
+        error = persistError;
+      }
       if (this.maintenanceTask?.status === "paused" || error?.name === "AbortError") {
         if (this.maintenanceTask) {
           this.maintenanceTask.status = "paused";
@@ -870,7 +953,9 @@ export class TdxLocalStore {
       } else if (this.maintenanceTask) {
         this.maintenanceTask.status = "failed";
         this.maintenanceTask.error = error instanceof Error ? error.message : String(error);
-        this.maintenanceTask.message = String(this.maintenanceTask.error).includes("未返回任何数据")
+        this.maintenanceTask.message = error?.code === "TDX_DAILY_BARS_UNAVAILABLE"
+          ? "行情连接多次重试后仍未恢复；已完成进度保留，请检查网络后继续维护。"
+          : String(this.maintenanceTask.error).includes("未返回任何数据")
           ? "通达信暂未返回历史日线，本次没有写入；请检查网络后重试。"
           : String(this.maintenanceTask.error).includes("分页")
             ? "通达信日线读取未继续前进，任务已安全停止；请检查行情连接后继续维护。"
@@ -1096,8 +1181,10 @@ export class TdxLocalStore {
     this.maintenanceTask.status = "running";
     this.maintenanceTask.error = null;
     this.maintenanceAbortController = new AbortController();
+    let manifest;
+    let changed = false;
     try {
-      const manifest = await this.getManifest();
+      manifest = await this.getManifest();
       const instruments = filterCnInstruments(
         manifest?.instruments,
         this.maintenanceTask.assets ?? manifest?.assets,
@@ -1108,9 +1195,7 @@ export class TdxLocalStore {
       if (!Number.isFinite(startTimestamp) || !Number.isFinite(endTimestamp)) {
         throw new Error("缺口修复没有有效的历史日期范围");
       }
-      await this.migrateRealtimeVolumeUnits(manifest);
       const overlayDb = this.ensureOverlayDb();
-      let changed = false;
       const staleOverlays = overlayDb.prepare(`
         DELETE FROM daily_overlay
         WHERE timestamp > ? AND source IN (?, ?)
@@ -1120,6 +1205,8 @@ export class TdxLocalStore {
         this.maintenanceTask.purgedRows = Number(this.maintenanceTask.purgedRows ?? 0) + purgedRows;
         changed = true;
       }
+      changed = await this.reconcileMaintenanceCoverage(manifest, instruments) || changed;
+      await this.migrateRealtimeVolumeUnits(manifest);
       const existingRows = overlayDb.prepare(`
         SELECT instrument_id, timestamp, open, high, low, close, volume, turnover, is_new, source
         FROM daily_overlay
@@ -1164,7 +1251,7 @@ export class TdxLocalStore {
             error.name = "AbortError";
             throw error;
           }
-          const page = await this.dailyQuotesClient.fetchDailyBars(instrument.id, {
+          const page = await this.fetchMaintenanceDailyBars(instrument.id, {
             assetType: instrument.assetType,
             count: 800,
             ...(pageStart ? { start: pageStart } : {}),
@@ -1190,6 +1277,9 @@ export class TdxLocalStore {
           error.name = "AbortError";
           throw error;
         }
+        const coverageBeforeWrite = { barCount: instrument.barCount, firstTimestamp: instrument.firstTimestamp, lastTimestamp: instrument.lastTimestamp };
+        const progressBeforeWrite = { ...this.maintenanceTask.progress };
+        const changedBeforeWrite = changed;
         overlayDb.exec("BEGIN IMMEDIATE");
         try {
           for (const [timestamp, row] of [...byTimestamp.entries()].sort((left, right) => left[0] - right[0])) {
@@ -1246,15 +1336,16 @@ export class TdxLocalStore {
               source: TDX_GAP_REPAIR_SOURCE,
               is_new: isNew,
             });
-            if (timestamp > Number(instrument.lastTimestamp ?? 0)) {
-              instrument.lastTimestamp = timestamp;
-              instrument.barCount = Number(instrument.barCount ?? 0) + 1;
-            }
+            updateDailyCoverage(instrument, timestamp, !current);
             changed = true;
           }
           overlayDb.exec("COMMIT");
         } catch (error) {
-          overlayDb.exec("ROLLBACK");
+          try { overlayDb.exec("ROLLBACK"); } finally {
+            Object.assign(instrument, coverageBeforeWrite);
+            this.maintenanceTask.progress = progressBeforeWrite;
+            changed = changedBeforeWrite;
+          }
           throw error;
         }
         this.maintenanceTask.nextInstrumentIndex = index + 1;
@@ -1268,18 +1359,18 @@ export class TdxLocalStore {
       }
       this.maintenanceTask.nextDateIndex = dates.length;
       if (changed) {
-        manifest.baseDatasetVersion ??= manifest.datasetVersion;
-        manifest.datasetVersion = `${manifest.baseDatasetVersion}-tdx-gap-${Date.now()}`;
-        manifest.updatedAt = now();
-        manifest.maintenanceSource = TDX_GAP_REPAIR_SOURCE;
-        await writeJsonAtomic(this.manifestFile, manifest);
-        this.manifestCache = manifest;
+        await this.persistTdxMaintenanceManifest(manifest, TDX_GAP_REPAIR_SOURCE);
       }
       this.maintenanceTask.status = "completed";
       this.maintenanceTask.writeCompleted = true;
       this.maintenanceTask.message = `通达信历史缺口修复完成：新增 ${this.maintenanceTask.progress.insertedBars.toLocaleString()} 根，校正 ${this.maintenanceTask.progress.correctedBars.toLocaleString()} 根，核对 ${this.maintenanceTask.progress.unchangedBars.toLocaleString()} 根。`;
       await this.persistMaintenanceTask();
     } catch (error) {
+      try {
+        if (changed && manifest) await this.persistTdxMaintenanceManifest(manifest, TDX_GAP_REPAIR_SOURCE);
+      } catch (persistError) {
+        error = persistError;
+      }
       if (this.maintenanceTask?.status === "paused" || error?.name === "AbortError") {
         if (this.maintenanceTask) {
           this.maintenanceTask.status = "paused";
@@ -1289,7 +1380,9 @@ export class TdxLocalStore {
       } else if (this.maintenanceTask) {
         this.maintenanceTask.status = "failed";
         this.maintenanceTask.error = error instanceof Error ? error.message : String(error);
-        this.maintenanceTask.message = String(this.maintenanceTask.error).includes("未返回任何数据")
+        this.maintenanceTask.message = error?.code === "TDX_DAILY_BARS_UNAVAILABLE"
+          ? "行情连接多次重试后仍未恢复；已完成进度保留，请检查网络后继续维护。"
+          : String(this.maintenanceTask.error).includes("未返回任何数据")
           ? "通达信暂未返回历史日线，本次没有写入；请检查网络后重试。"
           : "通达信历史缺口修复失败；已完成的品种和写入内容均已保留。";
         await this.persistMaintenanceTask();
@@ -2119,10 +2212,6 @@ export class TdxLocalStore {
     return latestClosedCnDate(this.nowProvider);
   }
 
-  isRealtimeUpdateEligible() {
-    return Boolean(latestClosedRealtimeDate(this.nowProvider));
-  }
-
   async getCoverage({ offset = 0, limit = 100, query = "" } = {}) {
     const manifest = await this.getManifest();
     if (!manifest) return {
@@ -2333,57 +2422,6 @@ export class TdxLocalStore {
           ...(entry ? { entryTimestamp: entry.timestamp, entryOpen: entry.open } : {}),
           ...(entryBars.length ? { entryBars } : {}),
           ...(allEntryBars.length > 64 ? { hasMoreEntryBars: true } : {}),
-        });
-      }
-    }
-    return output;
-  }
-
-  async getRealtimeQuotes(instrumentIds = [], entryAfter = {}) {
-    const manifest = await this.getManifest();
-    if (!manifest) return [];
-    const requested = new Set(
-      instrumentIds.map((value) => String(value).toUpperCase()).filter((value) => /^\d{6}\.(SH|SZ|BJ)$/.test(value)),
-    );
-    const instruments = manifest.instruments.filter((instrument) => requested.has(String(instrument.id).toUpperCase()));
-    if (!instruments.length) return [];
-    const latest = new Map(
-      (await this.getLatestCandles(instruments.map((instrument) => instrument.id), entryAfter))
-        .map((row) => [row.instrumentId, row]),
-    );
-    const currentTimestamp = currentCnDateTimestamp(this.nowProvider);
-    const dailyBarClosed = this.isRealtimeUpdateEligible();
-    const instrumentMap = new Map(instruments.map((instrument) => [instrument.id, instrument]));
-    const output = [];
-    for (let offset = 0; offset < instruments.length; offset += 80) {
-      const batch = instruments.slice(offset, offset + 80);
-      const quotes = await this.dailyQuotesClient.fetchDailyQuotes(batch.map((instrument) => instrument.id));
-      for (const quote of quotes) {
-        const instrumentId = String(quote.instrumentId ?? "").toUpperCase();
-        const instrument = instrumentMap.get(instrumentId);
-        const last = latest.get(instrumentId);
-        const price = Number(quote.price ?? quote.close);
-        if (!instrument || !last || quote.active === false || !Number.isFinite(price) || price <= 0) continue;
-        const rawVolume = quote.volume == null ? null : Number(quote.volume);
-        const entryBars = Array.isArray(last.entryBars)
-          ? last.entryBars.filter((bar) => dailyBarClosed || Number(bar.timestamp) < currentTimestamp)
-          : [];
-        output.push({
-          instrumentId,
-          timestamp: Number(last.timestamp),
-          open: Number(quote.open),
-          high: Number(quote.high ?? quote.price ?? quote.close),
-          low: Number(quote.low ?? quote.price ?? quote.close),
-          close: price,
-          volume: rawVolume == null ? null : rawVolume * volumeScaleForAsset(instrument.assetType),
-          turnover: quote.turnover == null ? null : Number(quote.turnover),
-          lastClose: Number(quote.lastClose),
-          quoteTimestamp: Date.now(),
-          realtime: true,
-          dailyBarClosed: dailyBarClosed && Number(last.timestamp) === currentTimestamp,
-          closed: dailyBarClosed && Number(last.timestamp) === currentTimestamp,
-          ...(entryBars.length ? { entryBars } : {}),
-          ...(last.hasMoreEntryBars ? { hasMoreEntryBars: true } : {}),
         });
       }
     }

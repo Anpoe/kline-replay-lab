@@ -96,7 +96,7 @@ export async function POST(request: Request) {
     );
     if (market === "CN") {
       try {
-        const response = await fetchLocalData(payload.storedOnly ? "/prices/latest" : "/quotes/realtime", {
+        const response = await fetchLocalData("/prices/latest", {
           method: "POST",
           headers: { "content-type": "application/json" },
           body: JSON.stringify({
@@ -170,7 +170,7 @@ export async function POST(request: Request) {
           : result.prices;
         return Response.json({ ...result, prices }, { status: response.status });
       } catch (error) {
-        return Response.json({ error: error instanceof Error ? error.message : "A 股实时价格同步失败" }, { status: 502 });
+        return Response.json({ error: error instanceof Error ? error.message : "A 股本地行情读取失败" }, { status: 502 });
       }
     }
     await ensureSchema();

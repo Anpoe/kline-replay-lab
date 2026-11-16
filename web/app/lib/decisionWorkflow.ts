@@ -88,11 +88,11 @@ export function ensureProtectiveDecisionRecord<T extends DecisionRecord>(records
 export function createEmptyDecisionPlan(): DecisionPlanValue {
   return { marketState: '', location: '', reasons: [], stop: '', target: '', note: '' };
 }
-export function draftAfterDecisionSaved(current: DecisionPlanValue, submitted: DecisionPlanValue, returnDraft = createEmptyDecisionPlan()): DecisionPlanValue {
+export function draftAfterDecisionSaved(current: DecisionPlanValue, submitted: DecisionPlanValue): DecisionPlanValue {
   const same = current.marketState === submitted.marketState && current.location === submitted.location
     && current.stop === submitted.stop && current.target === submitted.target && current.note === submitted.note
     && JSON.stringify(current.reasons) === JSON.stringify(submitted.reasons);
-  return same ? { ...returnDraft, reasons: [...returnDraft.reasons] } : current;
+  return same ? createEmptyDecisionPlan() : current;
 }
 export function decisionForEntry(draft: DecisionPlanValue, records: DecisionRecord[], timestamp: number): DecisionPlanValue {
   return hasDecisionPlanContent(draft) ? draft : latestEntryDecisionRecord(records, timestamp)?.decision ?? draft;

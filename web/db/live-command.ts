@@ -7,6 +7,7 @@ import {
   createCloseOrderFromTradingCommand,
   createOpenOrderFromTradingCommand,
   modifyProtectionFromTradingCommand,
+  modifyPendingOrderFromTradingCommand,
   normalizeTradingCommand,
   TradingCommandError,
   type TradingCommand,
@@ -17,9 +18,11 @@ import {
   liveAccountNameForMarket,
   liveAccountMarginTotals,
 } from "../app/lib/tradingAccount.ts";
-import { EXECUTION_ENGINE_VERSION, estimatedBuyCashRequired, executionPrice, executionPriceFromQuote, executionFee } from "../app/lib/executionEngine.ts";
-import { normalizeFxAccountConfig, requiredMargin, isMarginEconomics } from "../app/lib/fxTrading.ts";
+import { EXECUTION_ENGINE_VERSION } from "../app/lib/executionEngine.ts";
+import { normalizeFxAccountConfig, sourceQuotePrice, isMarginEconomics } from "../app/lib/fxTrading.ts";
 import { resolveMarketRules, validateOpenOrder } from "../app/lib/marketRules.ts";
+
+import { calculateOrderReservation } from "../app/lib/orderReservation.ts";
 
 type LiveState = Awaited<ReturnType<typeof readLiveState>>;
 type LiveAccount = LiveState["accounts"][number];
@@ -199,20 +202,17 @@ function makeOrder(command: TradingCommand, account: LiveAccount, portfolio: Liv
     const validation = validateOpenOrder(rules, command.side!, qty);
     if (!validation.ok) throw new TradingCommandError("invalid_command", validation.message ?? "委托数量不符合品种规则");
   }
-  const price = marginMode && command.orderType && command.orderType !== "market"
-    ? executionPriceFromQuote(command.side!, referencePrice, account.executionProfile)
-    : executionPrice(command.side!, referencePrice, account.executionProfile, economics);
-  const fee = executionFee(price, qty, account.executionProfile, economics);
-  const margin = requiredMargin(price, qty, economics);
+  const reservation = calculateOrderReservation(command.side!, command.orderType ?? "market", referencePrice, qty, account.executionProfile, economics);
+  const { requiredOrderMargin: margin, entryFee: fee } = reservation;
   if (marginMode && (margin == null || !Number.isFinite(fee))) {
     throw new TradingCommandError("invalid_command", "无法换算到账户币种，请检查报价币到账户币换算率");
   }
-  const reservedMargin = marginMode ? Number(margin) + fee : 0;
+  const reservedMargin = reservation.reservedMargin;
   if (marginMode && reservedMargin > account.availableCash + 0.000001) {
     throw new TradingCommandError("insufficient_margin", "当前账户可用保证金不足，无法提交委托");
   }
   const reservedCash = !marginMode && account.tradingMode === "capital" && command.side === "buy"
-    ? estimatedBuyCashRequired(referencePrice, qty, account.executionProfile)
+    ? reservation.reservedCash
     : 0;
   const reservedCashValue = Number.isFinite(reservedCash) ? reservedCash : 0;
   if (account.tradingMode === "capital" && reservedCashValue > liveAccountAvailableCash(account) + 0.000001) {
@@ -550,8 +550,20 @@ export async function applyLiveTradingCommand(db: D1Database, value: unknown): P
   } else if (command.type === "modify-protection") {
     nextPortfolios[targetIndex] = {
       ...target!,
-      positions: modifyProtectionFromTradingCommand(target!.positions, command),
+      ...(command.orderId
+        ? { pendingOrders: modifyProtectionFromTradingCommand(target!.pendingOrders, command, "order") }
+        : { positions: modifyProtectionFromTradingCommand(target!.positions, command) }),
     };
+  } else if (command.type === "modify-order") {
+    const current = target!.pendingOrders.find(item => item.id === command.orderId);
+    const rules = resolveMarketRules(account.market, target!.instrumentId, account.fxAccountConfig);
+    const side = current?.side === "sell" ? "sell" : "buy";
+    const reference = sourceQuotePrice(side, Number(target!.latestClose), Number(account.executionProfile.spreadBps ?? 0), rules.instrumentEconomics);
+    const changed = modifyPendingOrderFromTradingCommand(target!.pendingOrders, command, reference, rules.priceTick);
+    const order = changed.find(item => item.id === command.orderId)!;
+    const available = { ...account, availableCash: account.availableCash + Number(current?.reservedMargin ?? 0), reservedCash: Math.max(0, account.reservedCash - Number(current?.reservedCash ?? 0)) };
+    const repriced = makeOrder({ ...command, type: "submit-order", side, qty: Number(order.qty), orderType: order.orderType as "limit" | "stop", stopLoss: typeof order.stopLoss === "number" ? order.stopLoss : undefined, takeProfit: typeof order.takeProfit === "number" ? order.takeProfit : undefined }, available, target!, String(order.positionId));
+    nextPortfolios[targetIndex] = { ...target!, pendingOrders: changed.map(item => item.id === command.orderId ? { ...item, reservedCash: repriced.reservedCash, reservedMargin: repriced.reservedMargin } : item) };
   } else if (command.type === "close-position") {
     if (!command.positionId) throw new TradingCommandError("invalid_command", "平仓命令缺少持仓编号");
     const position = target!.positions.find((item) => item.id === command.positionId && item.status === "open");
