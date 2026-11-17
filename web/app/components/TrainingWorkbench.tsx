@@ -1,5 +1,7 @@
 "use client";
 
+import { acknowledgeTrainingCheckpoint, saveTrainingCheckpoint } from "../lib/trainingCheckpoint";
+
 import {
   Activity,
   BarChart3,
@@ -1799,6 +1801,7 @@ export function TrainingWorkbench() {
   const [drawingTextOpen, setDrawingTextOpen] = useState(false);
   const [drawingText, setDrawingText] = useState("");
   const [saveState, setSaveState] = useState("未保存");
+  const [trainingSaveRetryNonce, setTrainingSaveRetryNonce] = useState(0);
   // Keep the server render deterministic. Session identity and random training
   // seeds are client-owned values and are filled after hydration.
   const [sessionId, setSessionId] = useState("");
@@ -1987,6 +1990,9 @@ export function TrainingWorkbench() {
   });
   const trainingAutosaveGateRef = useRef<TrainingAutosaveGate>(resetTrainingAutosaveGate());
   const trainingAutosaveTimerRef = useRef<number | null>(null);
+  const trainingAutosavePendingSinceRef = useRef<number | null>(null);
+  const trainingSaveRetryTimerRef = useRef<number | null>(null);
+  const trainingSaveRequestRef = useRef(0);
 
   useEffect(() => {
     const timer = window.setTimeout(() => {
@@ -3638,6 +3644,12 @@ export function TrainingWorkbench() {
 
   const loadBars = useCallback(async () => {
     if (!startupReady) return;
+    trainingSaveRequestRef.current += 1;
+    trainingAutosavePendingSinceRef.current = null;
+    if (trainingSaveRetryTimerRef.current !== null) {
+      window.clearTimeout(trainingSaveRetryTimerRef.current);
+      trainingSaveRetryTimerRef.current = null;
+    }
     if (trainingAutosaveTimerRef.current !== null) {
       window.clearTimeout(trainingAutosaveTimerRef.current);
       trainingAutosaveTimerRef.current = null;
@@ -4181,6 +4193,11 @@ export function TrainingWorkbench() {
     state: TrainingState,
     successMessage: string,
   ) => {
+    const requestId = ++trainingSaveRequestRef.current;
+    if (trainingSaveRetryTimerRef.current !== null) {
+      window.clearTimeout(trainingSaveRetryTimerRef.current);
+      trainingSaveRetryTimerRef.current = null;
+    }
     const savedAt = new Date().toISOString();
     const stateJson = JSON.stringify(state);
     const cachedSessionFields = {
@@ -4190,12 +4207,13 @@ export function TrainingWorkbench() {
       stateJson,
       updatedAt: savedAt,
     };
-    settingsGateway.saveLastDraft({
+    const checkpoint = saveTrainingCheckpoint({
       id: sessionId,
       instrumentId,
       timeframe,
       state,
       updatedAt: savedAt,
+      dataSnapshotId,
     });
     // The local list only patches transport fields above; its derived PnL and
     // habit-trade summary must be rebuilt before the next history view.
@@ -4226,29 +4244,49 @@ export function TrainingWorkbench() {
       });
       return changed ? next : items;
     });
-    try {
-      await reviewGateway.saveSession({ id: sessionId, instrumentId, timeframe, dataSnapshotId, state });
+    const [localResult, savedResult] = await Promise.allSettled([
+      checkpoint,
+      reviewGateway.saveSession({ id: sessionId, instrumentId, timeframe, dataSnapshotId, state }),
+    ]);
+    if (localResult.status === "fulfilled") {
+      // Remove the size-limited browser copy only after its replacement commits.
+      try { settingsGateway.removeLastDraft(); } catch { /* The checkpoint is already durable. */ }
+      if (savedResult.status === "fulfilled") {
+        await acknowledgeTrainingCheckpoint(sessionId, savedAt).catch(() => {});
+      }
+    }
+    if (requestId !== trainingSaveRequestRef.current) return false;
+    if (savedResult.status === "fulfilled") {
       setSaveState(successMessage);
       return true;
-    } catch {
-      setSaveState("浏览器保存点已写入 · 数据库保存失败");
-      return false;
     }
+    const conflict = (savedResult.reason as { retryable?: boolean })?.retryable === false;
+    setSaveState(conflict ? "训练已在其他页面更新，请重新打开训练"
+      : localResult.status === "fulfilled" ? "已保留浏览器保存点，正在重试保存"
+        : "保存未完成，请保持页面打开并重试");
+    if (!conflict) trainingSaveRetryTimerRef.current = window.setTimeout(() => {
+      trainingSaveRetryTimerRef.current = null;
+      if (requestId === trainingSaveRequestRef.current) setTrainingSaveRetryNonce(value => value + 1);
+    }, 5_000);
+    return false;
   }, [dataSnapshotId, instrumentId, reviewGateway, sessionId, settingsGateway, timeframe]);
 
   useEffect(() => {
     if (trashPreview || !sessionId || !randomSeed || !trainingReady || !trainingComplete || !saveCompletedTrainingRef.current) return;
     saveCompletedTrainingRef.current = false;
-    trainingAutosaveGateRef.current = markTrainingAutosaveSaved(
-      trainingAutosaveGateRef.current,
-      trainingMutationSignature,
-    );
     setSaveState("训练完成 · 正在保存…");
-    void persistTrainingState(trainingState, "训练完成 · 已保存");
+    void persistTrainingState(trainingState, "训练完成 · 已保存").then(saved => {
+      if (saved) trainingAutosaveGateRef.current = markTrainingAutosaveSaved(trainingAutosaveGateRef.current, trainingMutationSignature);
+    });
   }, [persistTrainingState, randomSeed, sessionId, trainingComplete, trainingMutationSignature, trainingReady, trainingState, trashPreview]);
 
   useEffect(() => {
     if (trashPreview || liveMode || !sessionId || !randomSeed || !trainingReady) {
+      trainingAutosavePendingSinceRef.current = null;
+      if (trainingSaveRetryTimerRef.current !== null) {
+        window.clearTimeout(trainingSaveRetryTimerRef.current);
+        trainingSaveRetryTimerRef.current = null;
+      }
       if (trainingAutosaveTimerRef.current !== null) {
         window.clearTimeout(trainingAutosaveTimerRef.current);
         trainingAutosaveTimerRef.current = null;
@@ -4265,8 +4303,11 @@ export function TrainingWorkbench() {
     if (trainingAutosaveTimerRef.current !== null) window.clearTimeout(trainingAutosaveTimerRef.current);
     const signatureToSave = trainingMutationSignature;
     const stateToSave = trainingState;
+    trainingAutosavePendingSinceRef.current ??= Date.now();
+    const delay = Math.min(650, Math.max(0, 3_000 - (Date.now() - trainingAutosavePendingSinceRef.current)));
     const timer = window.setTimeout(() => {
       trainingAutosaveTimerRef.current = null;
+      trainingAutosavePendingSinceRef.current = null;
       setSaveState("自动保存中…");
       void persistTrainingState(stateToSave, "已自动保存").then((saved) => {
         if (saved) {
@@ -4276,13 +4317,18 @@ export function TrainingWorkbench() {
           );
         }
       });
-    }, 650);
+    }, delay);
     trainingAutosaveTimerRef.current = timer;
     return () => {
       window.clearTimeout(timer);
       if (trainingAutosaveTimerRef.current === timer) trainingAutosaveTimerRef.current = null;
     };
-  }, [liveMode, persistTrainingState, randomSeed, sessionId, trainingMutationSignature, trainingReady, trainingState, trashPreview]);
+  }, [liveMode, persistTrainingState, randomSeed, sessionId, trainingMutationSignature, trainingReady, trainingSaveRetryNonce, trainingState, trashPreview]);
+
+  useEffect(() => () => {
+    trainingSaveRequestRef.current += 1;
+    if (trainingSaveRetryTimerRef.current !== null) window.clearTimeout(trainingSaveRetryTimerRef.current);
+  }, []);
 
   const executeOrders = useCallback((
     orders: PendingOrder[],
@@ -4994,12 +5040,10 @@ export function TrainingWorkbench() {
     }
     if (value != null && !line.orderId && line.kind === "stop-loss") {
       const onRiskSide = position.side === "long" ? value < currentBar.close : value > currentBar.close;
-      const tightensRisk = previous == null
-        || (position.side === "long" ? value >= previous : value <= previous);
-      if (!onRiskSide || !tightensRisk) {
+      if (!onRiskSide) {
         setRuleNotice(position.side === "long"
-          ? "多头移动止损只能上移，且必须低于当前价"
-          : "空头移动止损只能下移，且必须高于当前价");
+          ? "多头止损必须低于当前价"
+          : "空头止损必须高于当前价");
         return false;
       }
     } else if (value != null && !line.orderId) {
@@ -7389,14 +7433,11 @@ export function TrainingWorkbench() {
     }
     setSaveState("保存中…");
     const savedEvent = appendEvent("session_manually_saved");
-    trainingAutosaveGateRef.current = markTrainingAutosaveSaved(
-      trainingAutosaveGateRef.current,
-      trainingMutationSignature,
-    );
-    await persistTrainingState({
+    const saved = await persistTrainingState({
       ...trainingState,
       events: [...trainingState.events, savedEvent],
     }, "已手动保存");
+    if (saved) trainingAutosaveGateRef.current = markTrainingAutosaveSaved(trainingAutosaveGateRef.current, trainingMutationSignature);
   };
 
   const resumeSession = (
@@ -7710,7 +7751,7 @@ export function TrainingWorkbench() {
         reasons: [...decision.reasons],
       };
       setDecisionSubmissions((items) => updateDecisionRecord(items, editingSubmission.id, nextDecision));
-      setSelectedDecisionId(editingSubmission.id);
+      setSelectedDecisionId("");
       appendEvent("decision_updated", {
         submissionId: editingSubmission.id,
         cursor: editingSubmission.cursor,
@@ -7755,7 +7796,7 @@ export function TrainingWorkbench() {
         ? { ...execution, decisionSubmissionId: submission.id }
         : execution));
     }
-    setSelectedDecisionId(submission.id);
+    setSelectedDecisionId("");
     appendEvent("decision_submitted", {
       submissionId: submission.id,
       cursor: targetCursor,
@@ -9875,7 +9916,7 @@ export function TrainingWorkbench() {
             <ChartIndicatorMenu settings={movingAverageSettings} onChange={setMovingAverageSettings} macdSettings={macdSettings} onMacdChange={setMacdSettings} open={indicatorMenuOpen} onOpenChange={setIndicatorMenuOpen} />
           </div>
           <div className="top-actions">
-            <span className={`save-state ${saveState.includes("已") ? "saved" : ""}`}>{saveState}</span>
+            <span className={`save-state ${/重试|未完成|其他页面/.test(saveState) ? "error" : saveState.includes("已") ? "saved" : ""}`} role="status">{saveState}</span>
             <button className="ghost-button live-scan-button" onClick={() => {
               setLiveScanError("");
               setWatchlistSource("scan");

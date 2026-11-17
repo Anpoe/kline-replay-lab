@@ -77,6 +77,30 @@ export const trainingSessions = sqliteTable(
   (table) => [index("training_sessions_deleted_idx").on(table.deletedAt, table.updatedAt)],
 );
 
+export const trainingStateChunks = sqliteTable("training_state_chunks", {
+  sessionId: text("session_id").notNull(),
+  chunkHash: text("chunk_hash").notNull(),
+  payloadJson: text("payload_json").notNull(),
+}, table => [primaryKey({ columns: [table.sessionId, table.chunkHash] })]);
+
+export const trainingSaveRevisions = sqliteTable("training_save_revisions", {
+  id: text("id").primaryKey(),
+  sessionId: text("session_id").notNull(),
+  metadataJson: text("metadata_json").notNull(),
+  baseUpdatedAt: text("base_updated_at"),
+  chunkCount: integer("chunk_count").notNull(),
+  createdAt: text("created_at").notNull(),
+}, table => [index("training_save_revisions_session_idx").on(table.sessionId, table.createdAt)]);
+
+export const trainingSaveParts = sqliteTable("training_save_parts", {
+  revisionId: text("revision_id").notNull(),
+  sequence: integer("sequence").notNull(),
+  chunkHash: text("chunk_hash").notNull(),
+}, table => [
+  primaryKey({ columns: [table.revisionId, table.sequence] }),
+  index("training_save_parts_hash_idx").on(table.chunkHash),
+]);
+
 export const dataSnapshots = sqliteTable(
   "data_snapshots",
   {

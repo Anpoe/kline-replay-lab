@@ -75,6 +75,30 @@ async function initializeSchema() {
       updated_at TEXT NOT NULL,
       deleted_at TEXT
     )`),
+    db.prepare(`CREATE TABLE IF NOT EXISTS training_state_chunks (
+      session_id TEXT NOT NULL,
+      chunk_hash TEXT NOT NULL,
+      payload_json TEXT NOT NULL,
+      PRIMARY KEY (session_id, chunk_hash)
+    )`),
+    db.prepare(`CREATE TABLE IF NOT EXISTS training_save_revisions (
+      id TEXT PRIMARY KEY,
+      session_id TEXT NOT NULL,
+      metadata_json TEXT NOT NULL,
+      base_updated_at TEXT,
+      chunk_count INTEGER NOT NULL,
+      created_at TEXT NOT NULL
+    )`),
+    db.prepare(`CREATE INDEX IF NOT EXISTS training_save_revisions_session_idx
+      ON training_save_revisions (session_id, created_at)`),
+    db.prepare(`CREATE TABLE IF NOT EXISTS training_save_parts (
+      revision_id TEXT NOT NULL,
+      sequence INTEGER NOT NULL,
+      chunk_hash TEXT NOT NULL,
+      PRIMARY KEY (revision_id, sequence)
+    )`),
+    db.prepare(`CREATE INDEX IF NOT EXISTS training_save_parts_hash_idx
+      ON training_save_parts (chunk_hash)`),
     db.prepare(`CREATE TABLE IF NOT EXISTS data_snapshots (
       id TEXT PRIMARY KEY,
       content_hash TEXT NOT NULL UNIQUE,

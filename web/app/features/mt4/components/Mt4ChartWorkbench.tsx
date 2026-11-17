@@ -101,7 +101,10 @@ export function Mt4ChartWorkbench({ trading, syncOrderPrices = true, accountKey,
     if (draft === currentValue) return;
     const next = { ...previous, draft: mt4Draft(draft) };
     delete next.editor;
-    if (store(next, true) && previous.editor) onPlanProtectionChange({ stopLoss: next.draft.stopLoss, takeProfit: next.draft.takeProfit });
+    if (store(next, true)) {
+      setSelectedDecisionId("");
+      if (previous.editor) onPlanProtectionChange({ stopLoss: next.draft.stopLoss, takeProfit: next.draft.takeProfit });
+    }
   }, [store, onPlanProtectionChange]);
   useEffect(() => { if (persistedAnalysis) finishDecisionSave(persistedAnalysis); }, [persistedAnalysis, finishDecisionSave]);
 

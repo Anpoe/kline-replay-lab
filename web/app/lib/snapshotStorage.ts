@@ -1,5 +1,6 @@
 import type { SnapshotCandle } from "./dataSnapshots";
 import type { getRawDb } from "../../db/runtime";
+import { sha256 } from "@noble/hashes/sha2.js";
 
 export const SNAPSHOT_FORMAT_VERSION = 2;
 export const SNAPSHOT_NORMALIZATION_VERSION = 1;
@@ -137,8 +138,11 @@ export function canonicalStringify(value: unknown) {
 }
 
 export async function sha256Text(value: string) {
-  const digest = await crypto.subtle.digest("SHA-256", textEncoder.encode(value));
-  return Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, "0")).join("");
+  const bytes = textEncoder.encode(value);
+  const digest = globalThis.crypto?.subtle
+    ? new Uint8Array(await crypto.subtle.digest("SHA-256", bytes))
+    : sha256(bytes);
+  return Array.from(digest, (byte) => byte.toString(16).padStart(2, "0")).join("");
 }
 
 function utcDateKey(timestamp: number) {

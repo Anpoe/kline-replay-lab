@@ -8,6 +8,10 @@ import {
   type DecisionLinkBarRelation,
 } from "../../lib/decisionLinkMigration";
 import { isSupportedTimeframe } from "../../lib/timeframeCatalog";
+import {
+  beginSessionSave, commitSessionSave, putSessionChunks, readSessionState,
+  SessionStorageError, writeSessionState, type SessionMetadata,
+} from "../../lib/sessionStorage";
 
 type SessionEventPayload = {
   id?: string;
@@ -30,7 +34,10 @@ type SessionEventRow = {
 type TrainingSessionMigrationRow = {
   id: string;
   dataSnapshotId: string | null;
-  stateJson: string;
+  stateJson: string | null;
+  instrumentId: string;
+  timeframe: string;
+  updatedAt: string;
 };
 
 function decisionLinkLookaheadMs(timeframe: string) {
@@ -58,11 +65,11 @@ function decisionLinkLookaheadMs(timeframe: string) {
 async function migrateStoredDecisionLinks(relation: DecisionLinkBarRelation, dryRun = false) {
   const db = getRawDb();
   const rows = await db
-    .prepare(`SELECT id, data_snapshot_id AS dataSnapshotId, state_json AS stateJson
+    .prepare(`SELECT id, instrument_id AS instrumentId, timeframe, data_snapshot_id AS dataSnapshotId, updated_at AS updatedAt,
+      CASE WHEN length(state_json) < 1024 THEN state_json END AS stateJson
       FROM training_sessions WHERE deleted_at IS NULL`)
     .all<TrainingSessionMigrationRow>();
   const snapshotCache = new Map<string, Awaited<ReturnType<typeof getSnapshotRow>>>();
-  const statements: D1PreparedStatement[] = [];
   const now = new Date().toISOString();
   let scanned = 0;
   let changedSessions = 0;
@@ -78,7 +85,7 @@ async function migrateStoredDecisionLinks(relation: DecisionLinkBarRelation, dry
     scanned += 1;
     let state: Record<string, unknown>;
     try {
-      const parsed = JSON.parse(row.stateJson) as unknown;
+      const parsed = JSON.parse(await readSessionState(db, row.id, row.stateJson)) as unknown;
       if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) throw new Error("invalid state");
       state = parsed as Record<string, unknown>;
     } catch {
@@ -159,24 +166,8 @@ async function migrateStoredDecisionLinks(relation: DecisionLinkBarRelation, dry
       occurredAt: now,
     };
     result.state.events = [...events, migrationEvent];
-    const stateJson = JSON.stringify(result.state);
     if (!dryRun) {
-      statements.push(
-        db.prepare(`UPDATE training_sessions SET state_json = ?, updated_at = ? WHERE id = ?`)
-          .bind(stateJson, now, row.id),
-        db.prepare(`INSERT OR IGNORE INTO session_events
-          (event_id, session_id, sequence, event_type, bar_timestamp, payload_json, occurred_at)
-          VALUES (?, ?, ?, ?, ?, ?, ?)`)
-          .bind(
-            migrationEvent.id,
-            row.id,
-            migrationEvent.sequence,
-            migrationEvent.type,
-            null,
-            JSON.stringify(migrationEvent.payload),
-            migrationEvent.occurredAt,
-          ),
-      );
+      await writeSessionState(db, row, result.state, row.updatedAt);
     }
     changedSessions += 1;
     linkedPositions += result.linkedPositionIds.length;
@@ -186,9 +177,6 @@ async function migrateStoredDecisionLinks(relation: DecisionLinkBarRelation, dry
     linkedMetricTrades += result.linkedMetricTradeCount;
   }
 
-  for (let index = 0; index < statements.length; index += 80) {
-    await db.batch(statements.slice(index, index + 80));
-  }
   return {
     scanned,
     changedSessions,
@@ -214,12 +202,16 @@ export async function GET(request: Request) {
   if (id) {
     const session = await db
       .prepare(`SELECT id, instrument_id AS instrumentId, timeframe,
-        data_snapshot_id AS dataSnapshotId, state_json AS stateJson,
+        data_snapshot_id AS dataSnapshotId,
+        CASE WHEN length(state_json) < 1024 THEN state_json END AS stateJson,
         created_at AS createdAt, updated_at AS updatedAt, deleted_at AS deletedAt
         FROM training_sessions WHERE id = ? AND ${visibilityClause}`)
       .bind(id)
-      .first();
+      .first<{ id: string; stateJson: string | null }>();
     if (!session) return Response.json({ error: "训练记录不存在" }, { status: 404 });
+    session.stateJson = await readSessionState(db, id, session.stateJson);
+    const state = JSON.parse(session.stateJson) as { events?: unknown[] };
+    if (Array.isArray(state.events)) return Response.json({ session, events: state.events });
     const events = await db
       .prepare(`SELECT event_id AS id, sequence, event_type AS type,
         bar_timestamp AS barTimestamp, payload_json AS payloadJson,
@@ -241,17 +233,24 @@ export async function GET(request: Request) {
   const includeAll = searchParams.get("all") === "1";
   const instrumentId = searchParams.get("instrument");
   const timeframe = searchParams.get("timeframe");
-  const rows = await db
-    .prepare(`SELECT id, instrument_id AS instrumentId, timeframe,
-      data_snapshot_id AS dataSnapshotId, state_json AS stateJson,
-      created_at AS createdAt, updated_at AS updatedAt, deleted_at AS deletedAt
-      FROM training_sessions WHERE ${visibilityClause}
-      ${instrumentId ? "AND instrument_id = ?" : ""}
-      ${timeframe ? "AND timeframe = ?" : ""}
-      ORDER BY created_at DESC, id DESC${includeAll ? "" : " LIMIT 20"}`)
-    .bind(...(instrumentId ? [instrumentId] : []), ...(timeframe ? [timeframe] : []))
-    .all();
-  return Response.json({ sessions: rows.results });
+  const sessions: { id: string; stateJson: string | null }[] = [];
+  for (let offset = 0; ; offset += 100) {
+    const rows = await db
+      .prepare(`SELECT id, instrument_id AS instrumentId, timeframe,
+        data_snapshot_id AS dataSnapshotId,
+        CASE WHEN length(state_json) < 1024 THEN state_json END AS stateJson,
+        created_at AS createdAt, updated_at AS updatedAt, deleted_at AS deletedAt
+        FROM training_sessions WHERE ${visibilityClause}
+        ${instrumentId ? "AND instrument_id = ?" : ""}
+        ${timeframe ? "AND timeframe = ?" : ""}
+        ORDER BY created_at DESC, id DESC LIMIT ? OFFSET ?`)
+      .bind(...(instrumentId ? [instrumentId] : []), ...(timeframe ? [timeframe] : []), includeAll ? 100 : 20, offset)
+      .all<{ id: string; stateJson: string | null }>();
+    for (const row of rows.results) row.stateJson = await readSessionState(db, row.id, row.stateJson);
+    sessions.push(...rows.results);
+    if (!includeAll || rows.results.length < 100) break;
+  }
+  return Response.json({ sessions });
 }
 
 export async function POST(request: Request) {
@@ -263,57 +262,45 @@ export async function POST(request: Request) {
     timeframe?: string;
     dataSnapshotId?: string;
     dryRun?: boolean;
+    revision?: string;
+    count?: number;
+    expectedUpdatedAt?: string;
+    reuseRevision?: string;
+    chunks?: { index: number; hash: string; text?: string }[];
     state?: { events?: SessionEventPayload[] } & Record<string, unknown>;
   };
   if (payload.action === "migrate-next-bar-decision-links" || payload.action === "migrate-same-bar-decision-links") {
     const relation = payload.action === "migrate-same-bar-decision-links" ? "same-bar" : "next-bar";
     return Response.json(await migrateStoredDecisionLinks(relation, Boolean(payload.dryRun)));
   }
-  if (!payload.id || !payload.instrumentId || !payload.timeframe || payload.state == null) {
-    return Response.json({ error: "训练记录不完整" }, { status: 400 });
+  try {
+    const db = getRawDb();
+    if (payload.action === "session-chunks" || payload.action === "commit-session") {
+      if (!payload.id || !payload.revision) throw new SessionStorageError("训练保存内容不完整");
+      if (payload.action === "session-chunks") {
+        return Response.json({ missing: await putSessionChunks(db, payload.id, payload.revision, payload.chunks ?? []) });
+      }
+      return Response.json({ id: payload.id, savedAt: await commitSessionSave(db, payload.id, payload.revision) });
+    }
+    if (!payload.id || !payload.instrumentId || !payload.timeframe) throw new SessionStorageError("训练记录不完整");
+    if (!isSupportedTimeframe(payload.timeframe)) throw new SessionStorageError(`不支持的周期：${payload.timeframe}`);
+    const metadata: SessionMetadata = {
+      id: payload.id, instrumentId: payload.instrumentId, timeframe: payload.timeframe,
+      dataSnapshotId: payload.dataSnapshotId ?? null,
+    };
+    if (payload.action === "begin-session") {
+      await beginSessionSave(db, metadata, payload.revision ?? "", payload.count ?? 0, payload.expectedUpdatedAt, payload.reuseRevision);
+      return Response.json({ id: payload.id, revision: payload.revision });
+    }
+    if (!payload.state || typeof payload.state !== "object" || Array.isArray(payload.state)) {
+      throw new SessionStorageError("训练记录不完整");
+    }
+    return Response.json({ id: payload.id, savedAt: await writeSessionState(db, metadata, payload.state, payload.expectedUpdatedAt) });
+  } catch (error) {
+    if (error instanceof SessionStorageError) return Response.json({ error: error.message }, { status: error.status });
+    console.error("Training session save failed", error);
+    return Response.json({ error: "训练保存未完成，已保留上次记录，请稍后重试" }, { status: 500 });
   }
-  if (!isSupportedTimeframe(payload.timeframe)) {
-    return Response.json({ error: `不支持的周期：${payload.timeframe}` }, { status: 400 });
-  }
-  const now = new Date().toISOString();
-  const db = getRawDb();
-  await db
-    .prepare(`INSERT INTO training_sessions
-      (id, instrument_id, timeframe, data_snapshot_id, state_json, created_at, updated_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?)
-      ON CONFLICT(id) DO UPDATE SET state_json = excluded.state_json,
-      instrument_id = excluded.instrument_id, timeframe = excluded.timeframe,
-      data_snapshot_id = excluded.data_snapshot_id,
-      updated_at = excluded.updated_at`)
-    .bind(
-      payload.id,
-      payload.instrumentId,
-      payload.timeframe,
-      payload.dataSnapshotId ?? null,
-      JSON.stringify(payload.state),
-      now,
-      now,
-    )
-    .run();
-
-  const events = (payload.state.events ?? []).filter((event) =>
-    event.id && Number.isInteger(event.sequence) && event.type && event.occurredAt);
-  for (let index = 0; index < events.length; index += 80) {
-    await db.batch(events.slice(index, index + 80).map((event) =>
-      db.prepare(`INSERT OR IGNORE INTO session_events
-        (event_id, session_id, sequence, event_type, bar_timestamp, payload_json, occurred_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?)`)
-        .bind(
-          event.id,
-          payload.id,
-          event.sequence,
-          event.type,
-          event.barTimestamp ?? null,
-          JSON.stringify(event.payload ?? {}),
-          event.occurredAt,
-        )));
-  }
-  return Response.json({ id: payload.id, savedAt: now });
 }
 
 export async function PATCH(request: Request) {
@@ -356,6 +343,10 @@ export async function DELETE(request: Request) {
     return Response.json({ id, deleted: true, movedToTrash: true, deletedAt: now });
   }
   await db.batch([
+    db.prepare(`DELETE FROM training_save_parts WHERE revision_id IN
+      (SELECT id FROM training_save_revisions WHERE session_id = ?)`).bind(id),
+    db.prepare("DELETE FROM training_save_revisions WHERE session_id = ?").bind(id),
+    db.prepare("DELETE FROM training_state_chunks WHERE session_id = ?").bind(id),
     db.prepare("DELETE FROM session_events WHERE session_id = ?").bind(id),
     db.prepare("DELETE FROM training_sessions WHERE id = ?").bind(id),
   ]);

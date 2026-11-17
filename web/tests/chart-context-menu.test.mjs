@@ -104,9 +104,10 @@ for (const mode of ['new','edit','backfill']) test(`saving a ${mode} decision cl
     hasDecisionContent:hasDecisionPlanContent,validateDecisionPlan,updateDecisionRecord,commitDecisionRecord,draftAfterDecisionSaved,createUuid:()=> 'new-plan',
     setDecision:fn=>context.decision=fn(context.decision),setDecisionSubmissions:fn=>context.decisionSubmissions=fn(context.decisionSubmissions),
     setDecisionDraftBeforeBackfill:value=>context.decisionDraftBeforeBackfill=value,setDecisionTarget:value=>context.decisionTarget=value,
-    setEditingDecisionId:value=>context.editingDecisionId=value,setSelectedDecisionId(){},setBackfillAssociation(){},setSaveState(){},appendEvent(){},revealNext(){context.advanced=true;}};
+    selectedDecisionId:'saved',setEditingDecisionId:value=>context.editingDecisionId=value,setSelectedDecisionId:value=>context.selectedDecisionId=value,setBackfillAssociation(){},setSaveState(){},appendEvent(){},revealNext(){context.advanced=true;}};
   new Function('context',`with(context){${submitCode}}`)(context).submitDecision();
   assert.deepEqual(context.decision,createEmptyDecisionPlan());
+  assert.equal(context.selectedDecisionId,'','successful save clears the linked-plan selection for the next draft');
   assert.equal(context.decisionSubmissions.find(item=>item.id===(mode==='edit'?'saved':'new-plan')).decision.note,'本次计划');
   assert.equal(Boolean(context.advanced),mode==='new');
   if(mode!=='new')assert.equal(context.decisionDraftBeforeBackfill,null);
@@ -119,12 +120,15 @@ test('MT4 clears only after the saved record is acknowledged, retaining failures
   const make=()=>{
     const editor={decisionId:'one',originalDraft:{...draft,note:'旧草稿'}};
     const context={useCallback:fn=>fn,current:{current:{draft,editor}},pendingDecisionSave:{current:{id:'one',record:JSON.stringify(record),draft,editor:JSON.stringify(editor)}},
+      selectedDecisionId:'one',setSelectedDecisionId:value=>context.selectedDecisionId=value,
       decisionValue,mt4Draft,draftAfterDecisionSaved,store:next=>{context.current.current=next;return true;},onPlanProtectionChange(){}};
     return {context,finish:new Function('context',`with(context){${finishSaveCode}}`)(context).finishDecisionSave};
   };
   const failed=make();failed.finish({decisions:[]});assert.equal(failed.context.current.current.draft,draft);
   const saved=make();saved.finish({decisions:[record]});assert.deepEqual(decisionValue(saved.context.current.current.draft),createEmptyDecisionPlan());assert.equal(saved.context.current.current.editor,undefined);
+  assert.equal(saved.context.selectedDecisionId,'');assert.equal(failed.context.selectedDecisionId,'one');
   const newer=make();newer.context.current.current.draft={...draft,note:'保存期间输入的新内容'};newer.finish({decisions:[record]});assert.equal(newer.context.current.current.draft.note,'保存期间输入的新内容');
+  assert.equal(newer.context.selectedDecisionId,'one');
 });
 
 const editCode=callbacks('../app/components/TrainingWorkbench.tsx',['editDecision','selectDecisionForEditing','cancelDecisionBackfill']);

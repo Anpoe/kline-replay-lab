@@ -17,7 +17,7 @@ test('scoped session reads filter before limiting and preserve full history, tra
   insert.run('other-stock', '002657.SZ', '1d', '', '{}', '99', '', null);
   insert.run('trash', '000831.SZ', '1d', '', '{}', '99', '', 'deleted');
   const runtime = { prepare(sql) { let args = []; return { bind(...values) { args = values; return this; }, async all() { return { results: db.prepare(sql).all(...args) }; } }; } };
-  const get = new Function('ensureSchema', 'getRawDb', `${code}; return GET;`)(async () => {}, () => runtime);
+  const get = new Function('ensureSchema', 'getRawDb', 'readSessionState', `${code}; return GET;`)(async () => {}, () => runtime, async (_db, _id, state) => state);
   const read = async query => (await (await get(new Request('http://localhost/api/sessions?' + query))).json()).sessions;
   assert.equal((await read('instrument=000831.SZ&timeframe=1d')).length, 20);
   const all = await read('all=1&instrument=000831.SZ&timeframe=1d');

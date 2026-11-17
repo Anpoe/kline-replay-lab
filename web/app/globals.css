@@ -588,6 +588,7 @@ button { color: inherit; }
 .moving-average-editor > p { margin: 0; color: var(--faint); font-size: 7px; line-height: 1.5; }
 .save-state { color: var(--faint); font-size: 11px; white-space: nowrap; }
 .save-state.saved { color: var(--accent); }
+.save-state.error { color: var(--danger); }
 .ghost-button, .primary-button {
   border-radius: 9px; padding: 9px 13px; display: inline-flex; gap: 7px; align-items: center; justify-content: center; cursor: pointer; transition: .18s ease;
 }
@@ -2611,6 +2612,8 @@ button { color: inherit; }
 .decision-chart-tags .decision-linked-tag { color: var(--warning); background: var(--warning-soft); border-color: var(--warning); }
 .decision-chart-levels strong, .decision-chart-card > p { color: var(--text); }
 .decision-chart-card-head .evidence-link { font: inherit; color: inherit; line-height: inherit; padding: 0; text-align: left; }
+.decision-chart-card .decision-chart-card-head > div { display: flex; align-items: baseline; flex-wrap: wrap; gap: 6px 10px; }
+.decision-chart-card-head .decision-created-time { padding: 0; color: var(--muted); font-size: 10px; font-weight: 400; line-height: 1.4; text-align: left; }
 .decision-history { min-width: 0; }
 .decision-history > summary { cursor: pointer; color: var(--muted); font-size: 11px; padding: 10px 0; }
 .decision-history .decision-history-list { margin-top: 8px; }
